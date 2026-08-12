@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import re
@@ -102,6 +102,7 @@ class ReworkLoopIterationRecord:
     reviewer_evaluation_status: str
     reviewer_blockers: list[str]
     loop_limit_snapshot: dict[str, Any]
+    reviewer_findings: list[dict[str, str]] = field(default_factory=list)
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +114,7 @@ class ReworkLoopIterationRecord:
             "engineer_evaluation_status": self.engineer_evaluation_status,
             "reviewer_evaluation_status": self.reviewer_evaluation_status,
             "reviewer_blockers": list(self.reviewer_blockers),
+            "reviewer_findings": [dict(item) for item in self.reviewer_findings],
             "loop_limit_snapshot": dict(self.loop_limit_snapshot),
         }
 
@@ -1188,6 +1190,7 @@ def execute_bounded_rework_loop(
                 reviewer_evaluation_status=reviewer_status,
                 reviewer_blockers=reviewer_blockers,
                 loop_limit_snapshot=dict(loop_snapshot),
+                reviewer_findings=_extract_reviewer_findings_detailed(reviewer_structured_output),
             )
         )
 
@@ -3516,6 +3519,23 @@ def _extract_reviewer_findings(reviewer_structured_output: dict[str, Any]) -> li
         if summary:
             findings.append(summary)
     return findings
+
+
+def _extract_reviewer_findings_detailed(reviewer_structured_output: dict[str, Any]) -> list[dict[str, str]]:
+    """Находки с кодом -- иначе раунды не сопоставить между собой.
+
+    `_extract_reviewer_findings` отдаёт только текст резюме, и хронология не
+    может отличить «то же замечание висит третий раунд» от «пришло новое».
+    """
+    detailed: list[dict[str, str]] = []
+    for item in list(reviewer_structured_output.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        summary = _safe_test_text(item.get("summary"))
+        if not summary:
+            continue
+        detailed.append({"code": str(item.get("code") or ""), "summary": summary})
+    return detailed
 
 
 _ORDINARY_REVIEWER_BLOCK_STATUSES = {"blocked", "needs_review", "needs_escalation"}

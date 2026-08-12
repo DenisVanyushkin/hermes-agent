@@ -6004,3 +6004,23 @@ def test_an_exhausted_repair_budget_still_reaches_the_reviewer(tmp_path: Path) -
     assert completeness["status"] == "incomplete_after_repair"
     assert completeness["undescribed_paths"] == ["feature.txt"]
     assert result.completion_allowed is True
+
+
+def test_detailed_findings_keep_the_code_for_cross_round_matching():
+    # Без кода находки нельзя сказать «снято 1 из 3»: сопоставлять раунды
+    # по вольному тексту резюме -- значит выдумывать соответствие.
+    from hermes_cli.pipeline_rework_loop import _extract_reviewer_findings_detailed
+
+    findings = _extract_reviewer_findings_detailed(
+        {
+            "findings": [
+                {"code": "undescribed_changed_file", "summary": "adapter.py без описания"},
+                {"summary": "классификация по имени класса"},
+                {"code": "ignored", "summary": "   "},
+            ]
+        }
+    )
+    assert findings == [
+        {"code": "undescribed_changed_file", "summary": "adapter.py без описания"},
+        {"code": "", "summary": "классификация по имени класса"},
+    ]
