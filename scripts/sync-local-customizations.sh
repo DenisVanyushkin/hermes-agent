@@ -151,7 +151,7 @@ integrate_personal_remote() {
   echo "Shared branch on $PERSONAL_REMOTE has $(git -C "$REPO" rev-list --count "HEAD..$remote_tip") commit(s) from another host — merging before the upstream merge..." >&2
   local integrate_log
   integrate_log="$(mktemp)"
-  if ! git -C "$REPO" merge --no-edit "$remote_tip" >"$integrate_log" 2>&1; then
+  if ! git -C "$REPO" -c rerere.enabled=false merge --no-edit "$remote_tip" >"$integrate_log" 2>&1; then
     abort_merge_if_needed
     echo "FAILED: could not merge $PERSONAL_REMOTE/$BRANCH ($remote_tip)." >&2
     echo "Another host's commits conflict with local ones; integrate manually (git merge $PERSONAL_REMOTE/$BRANCH)." >&2
@@ -524,7 +524,12 @@ if ! "$TEST_CMD" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
 fi
 
 MERGE_LOG="$(mktemp)"
-if ! git -C "$SYNC_WT" merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
+# rerere is OFF for this merge on purpose. It is enabled in this repo's config
+# and .git/rr-cache holds resolutions recorded while the sync was a rebase,
+# where "ours"/"theirs" are inverted relative to a merge — replaying them here
+# resolves conflicts backwards, and silently. The worktree shares .git with the
+# live repo, so it inherits both the setting and the recordings.
+if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
   # Не всякая неудача merge — расхождение с merge-tree. Отсутствующая
   # git-identity, нехватка места, битый индекс дают тот же ненулевой код, и
   # обвинять в них merge-tree значит отправить расследование не туда.

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -662,3 +663,138 @@ class TestApplyMergeFromScratchClone:
         assert res["status"] == "failed", proc.stderr
         assert _git(repo, "rev-parse", "HEAD") == local_head
         assert not calls.exists() or "rollback" not in calls.read_text()
+
+
+# ---------------------------------------------------------------------------
+# rerere must not resolve an upstream merge from rebase-era recordings
+# ---------------------------------------------------------------------------
+
+
+class TestMergesDisableRerere:
+    """``rerere.enabled=true`` lives in this repo's own config and
+    ``.git/rr-cache`` holds hundreds of resolutions recorded back when the sync
+    was a rebase — where "ours" and "theirs" are inverted relative to a merge.
+    Replaying those into a merge resolves conflicts backwards and silently, so
+    every merge that can conflict must opt out explicitly.
+
+    The upstream merge runs in a throwaway *worktree*, which shares ``.git``
+    with the live repo — so it inherits both the setting and the recordings.
+    (A ``clone --shared``, by contrast, gets a fresh config and an empty
+    rr-cache and is safe by construction.)
+    """
+
+    def _conflictable_merges(self, text: str) -> list[str]:
+        out = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if " merge " not in f" {stripped} ":
+                continue
+            # Not merges: these neither create a commit nor touch the worktree.
+            if any(
+                token in stripped
+                for token in (
+                    "merge-base",
+                    "merge-tree",
+                    "merge --abort",
+                    "merge --ff-only",
+                    "--no-merges",
+                )
+            ):
+                continue
+            # Prose: an echo that merely names the command for the operator.
+            if stripped.startswith("echo "):
+                continue
+            if not re.search(r"git\s+(-[cC]\s+\S+\s+)*merge\b", stripped):
+                continue
+            out.append(stripped)
+        return out
+
+    def test_sync_script_merges_opt_out_of_rerere(self):
+        text = SYNC.read_text()
+        merges = self._conflictable_merges(text)
+        assert merges, "expected to find real merge invocations in the sync script"
+        offenders = [m for m in merges if "rerere.enabled=false" not in m]
+        assert not offenders, (
+            "these merges can consult rebase-era rerere recordings and resolve "
+            f"backwards: {offenders}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The ACL self-heal must never walk outside the sandbox home
+# ---------------------------------------------------------------------------
+
+
+class TestAclHealStaysInsideHome:
+    """On 2026-07-20 the heal's parent walk planted ``u:hermes:--x`` on ``/tmp``
+    and blocked writes there for everyone. That was patched by making the heal
+    run *less often* (only when access is actually broken) — the walk itself
+    could still climb out of the sandbox home whenever it did run.
+
+    An overridden ``HERMES_SYNC_STATE_DIR`` outside ``$HOME`` is a test or dev
+    setup, never the production handoff dir; the heal declines to touch shared
+    parents there instead of relying on never being triggered.
+    """
+
+    def _sudo_stub(self, tmp_path: Path) -> tuple[Path, Path]:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        log = tmp_path / "sudo.log"
+        stub = bin_dir / "sudo"
+        stub.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{log}"\nexit 0\n')
+        stub.chmod(0o755)
+        return bin_dir, log
+
+    def _run_heal_only(self, tmp_path, state, home, scripts):
+        """Run the finalizer with no request pending: the heal runs, then it
+        exits on the missing request file without writing anything."""
+        bin_dir, log = self._sudo_stub(tmp_path)
+        state.chmod(0o500)  # not writable -> heal condition is met
+        try:
+            proc = subprocess.run(
+                ["bash", str(FINALIZE)],
+                env={
+                    **os.environ,
+                    "HOME": str(home),
+                    "HERMES_SYNC_STATE_DIR": str(state),
+                    "HERMES_SCRIPTS_DIR": str(scripts),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                },
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            state.chmod(0o700)
+        return proc, log
+
+    def test_state_dir_outside_home_is_not_walked(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        state = tmp_path / "outside" / "state"
+        state.mkdir(parents=True)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        proc, log = self._run_heal_only(tmp_path, state, home, scripts)
+
+        assert proc.returncode == 0, proc.stderr
+        calls = log.read_text() if log.exists() else ""
+        assert "setfacl" not in calls, (
+            f"the heal climbed out of the sandbox home: {calls}"
+        )
+
+    def test_state_dir_inside_home_is_still_healed(self, tmp_path):
+        home = tmp_path / "home"
+        state = home / ".hermes" / "state" / "upstream-sync"
+        state.mkdir(parents=True)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        proc, log = self._run_heal_only(tmp_path, state, home, scripts)
+
+        assert proc.returncode == 0, proc.stderr
+        calls = log.read_text() if log.exists() else ""
+        assert "setfacl" in calls, "the production handoff dir must still self-heal"
+        # ...and never above the home it belongs to.
+        assert f"{tmp_path}\n" not in calls

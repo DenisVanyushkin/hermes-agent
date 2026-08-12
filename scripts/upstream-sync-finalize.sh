@@ -34,12 +34,25 @@ LOCK="$STATE_DIR/finalize.lock"
 # touch shared parents like /tmp on an overridden STATE_DIR (2026-07-20: a
 # test run planted u:hermes:--x on /tmp, blocking all hermes writes there).
 if [ ! -w "$STATE_DIR" ] || ! ls "$STATE_DIR" >/dev/null 2>&1; then
-  d="$STATE_DIR"
-  while [ "$d" != "/" ] && [ "$d" != "$HOME" ]; do
-    sudo -n setfacl -m "u:$(id -un):--x" "$d" 2>/dev/null || true
-    d="$(dirname "$d")"
-  done
-  sudo -n chown -R "$(id -un):$(id -gn)" "$STATE_DIR" 2>/dev/null || true
+  # Only ever walk a state dir that lives under our own home. The production
+  # handoff dir always does; an overridden HERMES_SYNC_STATE_DIR pointing
+  # elsewhere is a test or dev setup, and walking THAT climbs into shared
+  # parents — on 2026-07-20 it reached /tmp and blocked writes there for every
+  # user on the box. Being triggered rarely is not the same as being safe when
+  # triggered.
+  case "$STATE_DIR/" in
+    "$HOME"/*)
+      d="$STATE_DIR"
+      while [ "$d" != "/" ] && [ "$d" != "$HOME" ]; do
+        sudo -n setfacl -m "u:$(id -un):--x" "$d" 2>/dev/null || true
+        d="$(dirname "$d")"
+      done
+      sudo -n chown -R "$(id -un):$(id -gn)" "$STATE_DIR" 2>/dev/null || true
+      ;;
+    *)
+      echo "state dir $STATE_DIR is outside $HOME — skipping the access self-heal rather than touching shared parents." >&2
+      ;;
+  esac
 fi
 
 [ -f "$REQUEST" ] || exit 0
