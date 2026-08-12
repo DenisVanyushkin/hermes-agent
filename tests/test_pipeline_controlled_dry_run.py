@@ -13,13 +13,21 @@ from hermes_cli.pipeline_controlled_dry_run import (
 )
 
 
-REPO_ROOT = Path("/home/hermes/.hermes/hermes-agent")
+# Два разных смысла, которые раньше были одной константой.
+# SPEC_ROOT -- дерево, в котором лежит сам тест: config/ и prompts/ берутся
+# отсюда, иначе прогон в git-worktree копирует боевые спеки и проверяет чужое
+# дерево вместо правок рядом с собой.
+SPEC_ROOT = Path(__file__).resolve().parents[1]
+# REPO_ROOT -- дерево, у которого есть venv. Worktree его не наследует, поэтому
+# для реальных pytest-прогонов берём локальный venv, если он есть, иначе
+# основной чекаут.
+REPO_ROOT = SPEC_ROOT if (SPEC_ROOT / "venv").exists() else Path("/home/hermes/.hermes/hermes-agent")
 
 
 def _copy_spec_tree(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
-    shutil.copytree(REPO_ROOT / "config", repo_root / "config")
-    shutil.copytree(REPO_ROOT / "prompts", repo_root / "prompts")
+    shutil.copytree(SPEC_ROOT / "config", repo_root / "config")
+    shutil.copytree(SPEC_ROOT / "prompts", repo_root / "prompts")
     return repo_root
 
 

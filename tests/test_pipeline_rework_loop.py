@@ -16,13 +16,21 @@ from hermes_cli.runtime_factory import RuntimeFactory
 from hermes_cli.subagent_runner import SubagentRunner
 
 
-REPO_ROOT = Path("/home/hermes/.hermes/hermes-agent")
+# Два разных смысла, которые раньше были одной константой.
+# SPEC_ROOT -- дерево, в котором лежит сам тест: config/ и prompts/ берутся
+# отсюда, иначе прогон в git-worktree копирует боевые спеки и проверяет чужое
+# дерево вместо правок рядом с собой.
+SPEC_ROOT = Path(__file__).resolve().parents[1]
+# REPO_ROOT -- дерево, у которого есть venv. Worktree его не наследует, поэтому
+# для реальных pytest-прогонов берём локальный venv, если он есть, иначе
+# основной чекаут.
+REPO_ROOT = SPEC_ROOT if (SPEC_ROOT / "venv").exists() else Path("/home/hermes/.hermes/hermes-agent")
 
 
 def _copy_spec_tree(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
-    shutil.copytree(REPO_ROOT / "config", repo_root / "config")
-    shutil.copytree(REPO_ROOT / "prompts", repo_root / "prompts")
+    shutil.copytree(SPEC_ROOT / "config", repo_root / "config")
+    shutil.copytree(SPEC_ROOT / "prompts", repo_root / "prompts")
     return repo_root
 
 
@@ -78,7 +86,24 @@ def _engineer_output(**overrides: object) -> dict[str, object]:
         "status": "succeeded",
         "summary": "Prepared patch.",
         "findings": [{"code": "patch", "summary": "Prepared patch"}],
-        "changes": [{"path": "hermes_cli/pipeline_rework_loop.py", "kind": "modify"}],
+        # Каждый изменённый файл обязан иметь описание, иначе проверка полноты
+        # пакета вернёт прогон инженеру на починку. Фикстуры этого файла трогают
+        # небольшой закрытый набор файлов тестового репозитория, поэтому описаны
+        # все они разом: описать неизменённый файл безвредно, полнота требует
+        # лишь чтобы изменённые входили в описанные.
+        "changes": [
+            {"path": path, "kind": "modify", "summary": f"Тестовая правка {path}."}
+            for path in (
+                "hermes_cli/pipeline_rework_loop.py",
+                "feature.txt",
+                "tracked.txt",
+                "new.txt",
+                "dirty.txt",
+                "safe.txt",
+                "tests/test_example.py",
+                "package/module.py",
+            )
+        ],
         "blockers": [],
         "artifacts": [{"artifact_id": "patch-1", "kind": "diff"}],
         "confidence": 0.91,
@@ -2157,13 +2182,13 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
             _write(git_repo, "feature.txt", "first pass\n")
             payload = _engineer_output(
                 summary="Initial implementation",
-                changes=[{"path": "feature.txt", "kind": "modify"}],
+                changes=[{"path": "feature.txt", "kind": "modify", "summary": "Правка feature.txt в тестовом сценарии."}],
             )
         else:
             _write(git_repo, "feature.txt", "first pass\nsecond pass\n")
             payload = _engineer_output(
                 summary="Addressed reviewer feedback",
-                changes=[{"path": "feature.txt", "kind": "modify"}],
+                changes=[{"path": "feature.txt", "kind": "modify", "summary": "Правка feature.txt в тестовом сценарии."}],
             )
         return {
             "output_text": "ok",
@@ -5889,13 +5914,7 @@ def test_packet_repair_context_names_the_paths_and_the_reason():
 
 
 def _loaded_specs_with_repair_budget(tmp_path: Path, budget: int):
-    # REPO_ROOT в этом файле захардкожен на живой чекаут, поэтому спеки для
-    # теста берём из дерева, в котором тест лежит: иначе воркtree проверяет
-    # чужой конфиг.
-    here = Path(__file__).resolve().parents[1]
-    repo_root = tmp_path / "repo-budget"
-    shutil.copytree(here / "config", repo_root / "config")
-    shutil.copytree(here / "prompts", repo_root / "prompts")
+    repo_root = _copy_spec_tree(tmp_path)
     spec_path = repo_root / "config" / "pipelines" / "engineering_review_pipeline.yaml"
     text = spec_path.read_text(encoding="utf-8")
     assert "max_packet_repair_retries: 2" in text
@@ -6024,3 +6043,41 @@ def test_detailed_findings_keep_the_code_for_cross_round_matching():
         {"code": "undescribed_changed_file", "summary": "adapter.py без описания"},
         {"code": "", "summary": "классификация по имени класса"},
     ]
+
+
+def test_packet_repair_is_skipped_when_engineer_output_is_invalid(tmp_path: Path) -> None:
+    # У невалидного конверта нет `changes` вообще. Просить описание у прогона,
+    # который не выдал валидный вывод, бессмысленно: для этого есть отдельный
+    # бюджет max_invalid_output_retries и путь fail-closed. Иначе починка
+    # съедала бы прогоны на заведомо недостижимом требовании.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs_with_repair_budget(tmp_path, 2)
+    repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            calls.append(runtime.subagent_id)
+            if runtime.subagent_id == "hermes_engineer_core":
+                _write(repo, "feature.txt", "real tool change\n")
+                return {"structured_output": {"not": "an envelope"}, "output_text": "ok"}
+            return {"structured_output": _reviewer_output(blockers=[]), "output_text": "ok"}
+
+    module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert calls.count("hermes_engineer_core") == 1

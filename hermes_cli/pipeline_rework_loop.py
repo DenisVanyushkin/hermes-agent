@@ -983,7 +983,13 @@ def execute_bounded_rework_loop(
         # Полнота пакета вычислима, поэтому её не отдают ревьюеру: находка
         # `undescribed_changed_file` стоила раунда из трёх, и три прогона подряд
         # умерли на ней при зелёных тестах. Свой бюджет, свой счётчик.
-        if git_result is not None and material_changes_present:
+        # Невалидный конверт не содержит `changes` вообще, и требовать от него
+        # описаний -- значит жечь прогоны на недостижимом: для этого случая есть
+        # max_invalid_output_retries и путь fail-closed.
+        engineer_output_valid = bool(
+            (current_reviewer_packet.get("safe_packet") or {}).get("engineer_output_valid")
+        )
+        if git_result is not None and material_changes_present and engineer_output_valid:
             completeness = evaluate_packet_completeness(
                 changed_files=list(git_result.changed_files or []),
                 changes=(engineer_output or {}).get("changes"),
