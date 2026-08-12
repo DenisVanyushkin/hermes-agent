@@ -5886,3 +5886,121 @@ def test_packet_repair_context_names_the_paths_and_the_reason():
     assert context["undescribed_paths"] == ["a.py", "b.py"]
     assert "a.py" in context["instruction"]
     assert "operator" in context["instruction"].lower()
+
+
+def _loaded_specs_with_repair_budget(tmp_path: Path, budget: int):
+    # REPO_ROOT в этом файле захардкожен на живой чекаут, поэтому спеки для
+    # теста берём из дерева, в котором тест лежит: иначе воркtree проверяет
+    # чужой конфиг.
+    here = Path(__file__).resolve().parents[1]
+    repo_root = tmp_path / "repo-budget"
+    shutil.copytree(here / "config", repo_root / "config")
+    shutil.copytree(here / "prompts", repo_root / "prompts")
+    spec_path = repo_root / "config" / "pipelines" / "engineering_review_pipeline.yaml"
+    text = spec_path.read_text(encoding="utf-8")
+    assert "max_packet_repair_retries: 2" in text
+    spec_path.write_text(
+        text.replace("max_packet_repair_retries: 2", f"max_packet_repair_retries: {budget}"),
+        encoding="utf-8",
+    )
+    return repo_root, load_pipeline_specs(repo_root=repo_root)
+
+
+def test_packet_repair_does_not_consume_a_review_round(tmp_path: Path) -> None:
+    # Полнота пакета вычислима, поэтому её чинят своим бюджетом. Раунд ревью,
+    # потраченный на отсутствующее описание, -- это раунд, не потраченный на код.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs_with_repair_budget(tmp_path, 2)
+    repo = _init_git_repo(tmp_path)
+    engineer_calls = {"count": 0}
+    reviewer_calls = {"count": 0}
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                engineer_calls["count"] += 1
+                described = engineer_calls["count"] > 1
+                _write(repo, "feature.txt", "real tool change\n")
+                return {
+                    "structured_output": _engineer_output(
+                        changes=[
+                            {
+                                "path": "feature.txt",
+                                "kind": "modify",
+                                **({"summary": "Добавлен файл с признаком."} if described else {}),
+                            }
+                        ]
+                    ),
+                    "output_text": "ok",
+                }
+            reviewer_calls["count"] += 1
+            return {"structured_output": _reviewer_output(blockers=[]), "output_text": "ok"}
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert engineer_calls["count"] == 2
+    assert reviewer_calls["count"] == 1
+    assert result.review_iterations_completed == 1
+    assert result.reviewer_packet["changes_completeness"]["status"] == "complete"
+    assert result.reviewer_packet["changes_completeness"]["repair_attempts"] == 1
+
+
+def test_an_exhausted_repair_budget_still_reaches_the_reviewer(tmp_path: Path) -> None:
+    # Блокировка прогона из-за отсутствующего описания -- ровно та смерть от
+    # бумажки, ради которой всё это и делается: проверенная работа выбрасывалась
+    # бы ради метаданных.
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs_with_repair_budget(tmp_path, 0)
+    repo = _init_git_repo(tmp_path)
+    reviewer_calls = {"count": 0}
+
+    class _InvocationClient:
+        def __call__(self, runtime, payload):
+            if runtime.subagent_id == "hermes_engineer_core":
+                _write(repo, "feature.txt", "real tool change\n")
+                return {
+                    "structured_output": _engineer_output(
+                        changes=[{"path": "feature.txt", "kind": "modify"}]
+                    ),
+                    "output_text": "ok",
+                }
+            reviewer_calls["count"] += 1
+            return {"structured_output": _reviewer_output(blockers=[]), "output_text": "ok"}
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=lambda *_args, **_kwargs: None),
+        user_message="Implement bounded rework loop",
+        repo_path=str(repo),
+        allow_completion_after_review=True,
+        controlled_runtime_context={
+            "invocation_client": _InvocationClient(),
+            "controlled_runner": module.ControlledRuntimeRunner(),
+            "allow_mutations": True,
+            "mutation_workspace": str(repo),
+        },
+    )
+
+    assert reviewer_calls["count"] == 1
+    completeness = result.reviewer_packet["changes_completeness"]
+    assert completeness["status"] == "incomplete_after_repair"
+    assert completeness["undescribed_paths"] == ["feature.txt"]
+    assert result.completion_allowed is True

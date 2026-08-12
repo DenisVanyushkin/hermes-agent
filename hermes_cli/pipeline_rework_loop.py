@@ -35,6 +35,7 @@ from hermes_cli.pipeline_report import (
     _runner_result_is_reportable,
     build_pipeline_execution_report,
 )
+from hermes_cli.pipeline_packet_completeness import evaluate_packet_completeness
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_reviewer_packet import MACHINE_CAPTURED_TEST_STATUSES
 from hermes_cli.pipeline_session import PipelineSession
@@ -249,6 +250,8 @@ def execute_bounded_rework_loop(
     current_ops_plan: list[dict[str, Any]] = []
     ops_render_blockers: list[str] = []
     invalid_output_retries_used = 0
+    packet_repair_retries_used = 0
+    packet_repair_history: list[dict[str, Any]] = []
     test_rework_iterations_used = 0
     peer_round_used = False
     decisive_subagent = REVIEWER_SUBAGENT_ID
@@ -974,6 +977,39 @@ def execute_bounded_rework_loop(
                 mutation_summary=current_mutation_summary,
                 test_summary=current_test_summary,
             )
+
+        # Полнота пакета вычислима, поэтому её не отдают ревьюеру: находка
+        # `undescribed_changed_file` стоила раунда из трёх, и три прогона подряд
+        # умерли на ней при зелёных тестах. Свой бюджет, свой счётчик.
+        if git_result is not None and material_changes_present:
+            completeness = evaluate_packet_completeness(
+                changed_files=list(git_result.changed_files or []),
+                changes=(engineer_output or {}).get("changes"),
+            )
+            completeness_payload = completeness.to_safe_dict()
+            completeness_payload["repair_attempts"] = packet_repair_retries_used
+            if completeness.status == "incomplete":
+                if packet_repair_retries_used < loop_policy.max_packet_repair_retries:
+                    packet_repair_retries_used += 1
+                    packet_repair_history.append(
+                        {
+                            "attempt": packet_repair_retries_used,
+                            "undescribed_paths": list(completeness.undescribed_paths),
+                        }
+                    )
+                    appended_rework_context.append(
+                        _build_packet_repair_context(
+                            undescribed_paths=list(completeness.undescribed_paths),
+                            attempt=packet_repair_retries_used,
+                        )
+                    )
+                    continue
+                # Бюджет исчерпан -- пакет всё равно уходит ревьюеру. Блокировать
+                # прогон из-за отсутствующего описания значило бы выбросить
+                # проверенную работу ради метаданных.
+                completeness_payload["status"] = "incomplete_after_repair"
+            current_reviewer_packet = dict(current_reviewer_packet)
+            current_reviewer_packet["changes_completeness"] = completeness_payload
 
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
             config=config,
