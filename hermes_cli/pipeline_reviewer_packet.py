@@ -555,6 +555,16 @@ def _clean_optional_text(value: Any, *, max_length: int = _MAX_TEXT_LENGTH) -> s
     return cleaned[: max_length - 12].rstrip() + " [truncated]"
 
 
+def sanitize_change_summary(value: Any) -> str | None:
+    """Описание файла в том виде, в каком его увидит ревьюер и оператор.
+
+    Проверка полноты пакета обязана смотреть именно на это значение: описание,
+    вычищенное фильтром, доедет до ревьюера пустым, и «инженер что-то написал»
+    не равно «оператору что-то показали».
+    """
+    return _clean_optional_text(value)
+
+
 def _clean_test_command_text(value: Any, *, max_length: int = 512) -> str | None:
     if value is None:
         return None
