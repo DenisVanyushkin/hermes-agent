@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -19,6 +20,9 @@ from pathlib import Path
 
 CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 SESSION_COOKIE = "li_at"
+
+# Имена профилей Chrome: Default и «Profile N».
+_PROFILE_NAME = re.compile(r"Profile \d+")
 
 SESSION_OK = "session_ok"
 SESSION_MISSING = "session_missing_cookie"
@@ -100,19 +104,31 @@ def _profile_candidates(user_data_dir: Path) -> tuple[list[Path], list[str]]:
         elif state == "unreadable":
             unreadable.append(directory.name)
 
-    default = user_data_dir / "Default"
-    if default.is_dir():
-        classify(default)
     try:
-        others = sorted(
-            entry
-            for entry in user_data_dir.iterdir()
-            if entry.is_dir() and entry.name != "Default"
-        )
+        names = sorted(entry.name for entry in user_data_dir.iterdir())
     except OSError:
-        others = []
-    for entry in others:
-        classify(entry)
+        names = []
+
+    # Перебираются только каталоги с именами профилей Chrome. Рядом лежат
+    # посторонние записи вроде SingletonSocket — симлинка в недоступную цель,
+    # на котором `is_dir()` кидает PermissionError. Прежний сплошной перебор
+    # обрывался на нём целиком и возвращал пустой список, из-за чего профиль
+    # с сессией не доходил до проверки, а отчёт сообщал, что нечитаемых
+    # профилей нет — не посмотрев ни одного.
+    ordered = ["Default"] + [n for n in names if _PROFILE_NAME.fullmatch(n)]
+    seen: set[str] = set()
+    for name in ordered:
+        if name in seen:
+            continue
+        seen.add(name)
+        directory = user_data_dir / name
+        try:
+            if not directory.is_dir():
+                continue
+        except OSError:
+            unreadable.append(name)
+            continue
+        classify(directory)
     return candidates, unreadable
 
 

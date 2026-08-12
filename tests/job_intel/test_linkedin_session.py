@@ -445,3 +445,47 @@ def test_profile_dir_without_read_permission_is_reported(tmp_path: Path) -> None
 
     assert "Profile 1" in resolution.unreadable
     assert resolution.reason != "session_cookie"
+
+
+def test_one_unreadable_entry_does_not_blank_the_whole_scan(tmp_path: Path) -> None:
+    """В каталоге профиля лежит SingletonSocket — симлинк, чей stat падает с
+    PermissionError. Перебор со сплошным `except OSError` обнулял на нём весь
+    список, и Profile 1 не доходил до проверки: отчёт сообщал, что нечитаемых
+    профилей нет, хотя не посмотрел ни одного."""
+    import os
+
+    if os.geteuid() == 0:
+        import pytest
+
+        pytest.skip("root читает что угодно")
+
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Default").mkdir()
+    _make_cookie_db(tmp_path / "Default" / "Cookies", [(".linkedin.com", "bcookie", future, 1)])
+    good = tmp_path / "Profile 1"
+    good.mkdir()
+    _make_cookie_db(good / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+
+    hostile = tmp_path / "SingletonSocket"
+    hostile.mkdir()
+    hostile.chmod(0o000)
+
+    try:
+        resolution = resolve_profile(tmp_path)
+    finally:
+        hostile.chmod(0o700)
+
+    assert resolution.path == good
+    assert resolution.reason == "session_cookie"
+
+
+def test_only_chrome_profile_names_are_scanned(tmp_path: Path) -> None:
+    """Посторонние записи в каталоге не профили и в список нечитаемых
+    попадать не должны — иначе он забивается шумом и перестаёт читаться."""
+    (tmp_path / "Default").mkdir()
+    (tmp_path / "BrowserMetrics").mkdir()
+    (tmp_path / "CaptchaProviders").mkdir()
+
+    resolution = resolve_profile(tmp_path)
+
+    assert resolution.unreadable == ()
