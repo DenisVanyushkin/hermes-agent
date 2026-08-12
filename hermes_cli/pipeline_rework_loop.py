@@ -2033,6 +2033,8 @@ def _blocked_loop_result(
                 blocked_reason=blocked_reason,
                 test_summary=test_summary,
                 reviewer_packet=reviewer_packet,
+                iteration_history=iteration_history,
+                appended_rework_context=appended_rework_context,
             ),
             reviewer_packet=reviewer_packet,
             git_gate=git_gate,
@@ -2117,11 +2119,90 @@ def _blocked_next_step_ru(blocked_reason: str | None, capability_hints: list | N
     return _GENERIC_NEXT_STEP_RU
 
 
+def _packet_repair_history_from_context(
+    appended_rework_context: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Починки уже лежат в контексте доработки -- отдельно их не протаскиваем."""
+    history: list[dict[str, Any]] = []
+    for item in list(appended_rework_context or []):
+        if isinstance(item, dict) and item.get("kind") == "packet_completeness_repair":
+            history.append(
+                {
+                    "attempt": item.get("attempt"),
+                    "undescribed_paths": list(item.get("undescribed_paths") or []),
+                }
+            )
+    return history
+
+
+def _plural_remarks_ru(count: int) -> str:
+    tail = count % 10
+    hundred = count % 100
+    if tail == 1 and hundred != 11:
+        return "замечание"
+    if tail in {2, 3, 4} and hundred not in {12, 13, 14}:
+        return "замечания"
+    return "замечаний"
+
+
+def render_round_chronology(
+    *,
+    iteration_history: list[Any],
+    packet_repair_history: list[dict[str, Any]],
+    rounds_exhausted: bool,
+) -> list[str]:
+    """История прогона целиком: что нашли, что сняли, что осталось.
+
+    Раньше оператор видел только последний раунд, поэтому прогон, начавшийся с
+    настоящей ошибки и доехавший до формальных остатков, выглядел как смерть
+    от бумажки.
+    """
+    if not iteration_history and not packet_repair_history:
+        return []
+
+    lines = ["━━ Как шла работа ━━"]
+    previous_keys: set[tuple[str, str]] | None = None
+    for record in iteration_history:
+        findings = list(getattr(record, "reviewer_findings", []) or [])
+        keys = {(str(item.get("code") or ""), str(item.get("summary") or "")) for item in findings}
+        index = getattr(record, "iteration_index", 0)
+        status = str(getattr(record, "reviewer_evaluation_status", "") or "")
+        if not findings and status in {"approved", "succeeded"}:
+            lines.append(f"Раунд {index} · одобрено")
+            previous_keys = keys
+            continue
+        header = (
+            f"Раунд {index} · ревьюер: доработка — "
+            f"{len(findings)} {_plural_remarks_ru(len(findings))}"
+        )
+        if previous_keys is not None:
+            cleared = len(previous_keys - keys)
+            header = f"{header} (снято {cleared})"
+        lines.append(header)
+        for item in findings:
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                lines.append(f"  • {summary}")
+        previous_keys = keys
+
+    for repair in packet_repair_history:
+        paths = ", ".join(str(item) for item in repair.get("undescribed_paths") or [])
+        lines.append(
+            f"Починка пакета ×{repair.get('attempt')} (раунд не тратится): {paths}"
+        )
+
+    if rounds_exhausted:
+        lines.append("→ раунды исчерпаны")
+    return lines
+
+
 def _blocked_final_response_text(
     *,
     blocked_reason: str | None,
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any],
+    iteration_history: list[Any] | None = None,
+    appended_rework_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
     git_gate_reasons = {
         "baseline_dirty",
@@ -2340,6 +2421,20 @@ def _blocked_final_response_text(
         lines.extend(["", "━━ Покрытие ops-каталога ━━"])
         lines.extend(hint_lines(capability_hints))
 
+    chronology = render_round_chronology(
+        iteration_history=list(iteration_history or []),
+        packet_repair_history=_packet_repair_history_from_context(appended_rework_context),
+        rounds_exhausted=blocked_reason
+        in {
+            "review_loop_limit_exceeded",
+            "rework_exhausted_after_ordinary_reviewer_findings",
+            "rework_exhausted_after_missing_test_evidence",
+        },
+    )
+    if chronology:
+        lines.append("")
+        lines.extend(chronology)
+
     lines.extend(
         ["", "━━ Дальше ━━", f"- {_blocked_next_step_ru(blocked_reason, capability_hints)}"]
     )
@@ -2432,6 +2527,8 @@ def _completion_allowed_final_response_text(
     review_iterations_completed: int = 0,
     model_escalations_used: int = 0,
     ops_block: str = "",
+    iteration_history: list[Any] | None = None,
+    appended_rework_context: list[dict[str, Any]] | None = None,
 ) -> str:
     # A run with no material repo changes is an investigation/Q&A, not a code
     # change waiting at the commit gate -- the commit-gate framing is misleading
@@ -2520,6 +2617,15 @@ def _completion_allowed_final_response_text(
         lines.append(f"Раунды доработки: {review_iterations_completed}")
     if model_escalations_used > 0:
         lines.append("Эскалация модели: да — инженер переведён на усиленную модель после упорных провалов")
+
+    chronology = render_round_chronology(
+        iteration_history=list(iteration_history or []),
+        packet_repair_history=_packet_repair_history_from_context(appended_rework_context),
+        rounds_exhausted=False,
+    )
+    if chronology:
+        lines.append("")
+        lines.extend(chronology)
 
     lines.extend(
         [
@@ -2621,12 +2727,16 @@ def _finalize_loop_result(
             review_iterations_completed=review_iterations_completed,
             model_escalations_used=model_escalations_used,
             ops_block=ops_block,
+            iteration_history=iteration_history,
+            appended_rework_context=appended_rework_context,
         )
         if gate_reached
         else _blocked_final_response_text(
             blocked_reason=blocked_reason,
             test_summary=test_summary,
             reviewer_packet=reviewer_packet,
+            iteration_history=iteration_history,
+            appended_rework_context=appended_rework_context,
         )
     )
     if gate_reached:
