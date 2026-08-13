@@ -97,6 +97,14 @@ def test_gateway_autonomous_builds_plan_before_controller_and_uses_execution_rep
     payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
     assert payload["pipeline_preflight"]["reason_code"] == "allowed"
     assert payload["pipeline_plan_mode"] == "autonomous"
+    assert payload["engineering_task"] == {
+        "resolution_status": "resolved",
+        "source_kind": "approved_plan",
+        "task_chars": 33,
+        "task_sha256_prefix": "a" * 16,
+    }
+    assert "# Plan for engineer" not in json.dumps(payload, sort_keys=True)
+    assert "let the engineer execute" not in json.dumps(payload, sort_keys=True)
     assert payload["pipeline_execution_report"] == {**executed_report, "execution_mode": "autonomous"}
     assert "observe_plan_only" not in json.dumps(payload["pipeline_execution_report"])
 

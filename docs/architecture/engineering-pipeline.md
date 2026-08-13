@@ -60,6 +60,22 @@ Invalid structured output is handled through failure policy and pipeline retries
 
 The pipeline, not the subagents, decides whether another iteration is allowed.
 
+## Engineering task continuation contract
+
+The gateway resolves an engineering task before autonomous execution and passes a typed `EngineeringTaskEnvelope` to the engineering helper. The envelope separates the immutable task from the current operator instruction and records its source, same-session identity, character count, and SHA-256 hash.
+
+- A new concrete engineering request uses the normal enriched inbound message as its task so reply and attachment context remain available.
+- A short execution continuation, such as an approval to let the engineer proceed, must resolve to one unambiguous approved plan in canonical history for the current session.
+- The primary approval signal is persisted engineering-task metadata with `status=ready_for_approval`. A narrowly scoped legacy incident marker is supported only for previously persisted plans that predate this metadata.
+- Generic `conversation_context` remains bounded auxiliary context for other flows. It is not an executable engineering task store.
+- Slack `reply_to_text` identifies the thread parent and remains transport context. It must never replace the approved task or the raw operator instruction.
+
+Approved tasks are preserved byte-for-byte and may be at most 32 KiB. The resolver and helper fail closed before provider construction when the plan is missing, ambiguous, cross-session, oversized, or fails length/hash validation. No truncation fallback is allowed.
+
+The resolved task remains the immutable `original_task` across engineer, reviewer, peer-discussion, escalation, and rework iterations. Reviewer packet hashes are computed from that full original task, not from a display-truncated summary.
+
+Observability may expose only `resolution_status`, `source_kind`, `task_chars`, and the first 16 characters of `task_sha256`. Full task text and the operator instruction must not be written to logs, reports, or metrics.
+
 ## Required limits
 
 The reference pipeline requires explicit limits:
