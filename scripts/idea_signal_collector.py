@@ -433,6 +433,11 @@ def collect_sources(
                         continue
                     title_key = normalized_title(title)
                     if f"url:{url}" in seen or f"title:{title_key}" in seen:
+                        # Durable prior-run rejections are duplicates too: omitting
+                        # them would let a source replay the same small corpus
+                        # forever without reaching the documented duplicate-rate
+                        # suspension threshold.
+                        record["duplicate_items"] += 1
                         rejections.append({"source_id": source_id, "reason": "seen_in_prior_run", "title": title})
                         continue
                     if url in batch_urls:

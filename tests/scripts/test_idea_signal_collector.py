@@ -143,6 +143,30 @@ def test_collect_rejects_url_emitted_in_a_prior_run():
     assert {row["reason"] for row in brief["rejections"]} == {"seen_in_prior_run", "stale"}
 
 
+def test_prior_run_duplicate_counts_toward_lifecycle_disqualification():
+    seen = {"url:https://example.test/fresh": NOW.isoformat()}
+    state = {
+        "source_a": {
+            "effective_status": "active",
+            "runs": 9,
+            "successful_runs": 9,
+            "items_seen": 9,
+            "valid_date_items": 9,
+            "accepted_items": 2,
+            "duplicate_items": 7,
+            "recent_results": [True],
+        }
+    }
+
+    _brief, updated, events = collector.collect_sources(
+        [active_source()], lambda _url, _timeout: RSS_FRESH, now=NOW, state=state, seen=seen
+    )
+
+    assert updated["source_a"]["duplicate_items"] == 8
+    assert updated["source_a"]["effective_status"] == "suspended"
+    assert events[-1]["event"] == "suspended"
+
+
 def test_collect_rejects_old_undated_and_duplicate_items():
     sources = [
         active_source("source_a", "health"),
