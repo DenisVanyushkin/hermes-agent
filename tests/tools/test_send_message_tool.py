@@ -864,6 +864,9 @@ class TestParseTargetRef:
 
     def test_explicit_targets_round_trip_chat_and_thread(self):
         cases = [
+            # Telegram private DM topic by name. Cron jobs persist this exact
+            # form so the live adapter can create/reuse the Bot API topic.
+            ("telegram", "79564752:Погода Алматы", "79564752", "Погода Алматы"),
             # Discord: snowflake, optional :thread, surrounding whitespace
             ("discord", "-1001234567890:17585", "-1001234567890", "17585"),
             ("discord", "1003724596514", "1003724596514", None),

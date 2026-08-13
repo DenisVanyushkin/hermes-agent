@@ -1968,6 +1968,42 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+def _resolve_named_telegram_dm_topic_id(
+    runtime_adapter: Any,
+    chat_id: Any,
+    topic_name: str,
+    loop: Any,
+    job_id: str,
+) -> Optional[str]:
+    """Resolve a named private Telegram topic for native media delivery.
+
+    Text goes through ``DeliveryRouter``, which owns topic creation and stale
+    mapping refresh. Native attachments bypass that router, so immediately
+    before sending them we read the adapter's (normally cached) mapping again.
+    This guarantees media uses the same numeric ``direct_messages_topic_id``
+    that the preceding text send resolved, including after a stale refresh.
+    """
+    ensure_dm_topic = getattr(runtime_adapter, "ensure_dm_topic", None)
+    if not callable(ensure_dm_topic):
+        return None
+    try:
+        from agent.async_utils import safe_schedule_threadsafe
+
+        future = safe_schedule_threadsafe(
+            ensure_dm_topic(str(chat_id), topic_name), loop,
+        )
+        if future is None:
+            return None
+        topic_id = future.result(timeout=10)
+    except Exception:
+        logger.warning(
+            "Job '%s': failed to resolve named Telegram DM topic %r for media",
+            job_id, topic_name, exc_info=True,
+        )
+        return None
+    return str(topic_id) if topic_id else None
+
+
 def _deliver_result(
     job: dict, content: str, adapters=None, loop=None, wrap: Optional[bool] = None
 ) -> Optional[str]:
@@ -2291,6 +2327,16 @@ def _deliver_result(
                 and looks_like_telegram_private_chat_id(str(chat_id))
                 and _looks_like_int(str(thread_id))
             )
+            named_telegram_private_topic_name = (
+                str(thread_id)
+                if (
+                    platform == Platform.TELEGRAM
+                    and thread_id is not None
+                    and looks_like_telegram_private_chat_id(str(chat_id))
+                    and not _looks_like_int(str(thread_id))
+                )
+                else None
+            )
             route_via_dm_topic = is_ambiguous_telegram_topic and _is_channel_dm_topic(
                 runtime_adapter, chat_id, loop, job["id"],
             )
@@ -2305,6 +2351,15 @@ def _deliver_result(
                 # Media metadata mirrors the text routing so attachments land in
                 # the same DM topic instead of the General lane (#22773).
                 media_metadata = {"direct_messages_topic_id": str(thread_id)}
+            elif named_telegram_private_topic_name:
+                # Preserve the human-readable topic name solely on the target.
+                # DeliveryRouter recognizes this shape, creates/reuses the Bot
+                # API Direct-Messages topic, and owns stale-mapping refresh.
+                # A bare thread_id/message_thread_id metadata key would suppress
+                # that branch and Telegram would route the message to General.
+                route_thread_id = named_telegram_private_topic_name
+                route_metadata = {"job_id": job["id"]}
+                media_metadata = None
             else:
                 # Forum-style topic (private chat / supergroup) or non-topic
                 # target: route via message_thread_id (#52060).  Put thread_id in
@@ -2479,6 +2534,26 @@ def _deliver_result(
                 # lost.
                 if adapter_ok and not timed_out and media_files:
                     routed_media_metadata = dict(media_metadata or {})
+                    media_route_ready = True
+                    if named_telegram_private_topic_name:
+                        resolved_topic_id = _resolve_named_telegram_dm_topic_id(
+                            runtime_adapter,
+                            chat_id,
+                            named_telegram_private_topic_name,
+                            loop,
+                            job["id"],
+                        )
+                        if resolved_topic_id:
+                            routed_media_metadata["direct_messages_topic_id"] = resolved_topic_id
+                        else:
+                            media_route_ready = False
+                            msg = (
+                                f"media not delivered to {platform_name}:{chat_id}: "
+                                f"named Telegram DM topic {named_telegram_private_topic_name!r} "
+                                "could not be resolved"
+                            )
+                            logger.warning("Job '%s': %s", job["id"], msg)
+                            delivery_errors.append(msg)
                     if transport is not None and transport.is_relay:
                         routed_media_metadata["_relay_logical_platform"] = platform.value
                         logical_home = config.get_home_channel(platform)
@@ -2487,15 +2562,16 @@ def _deliver_result(
                                 routed_media_metadata["user_id"] = logical_home.user_id
                             if logical_home.scope_id:
                                 routed_media_metadata["scope_id"] = logical_home.scope_id
-                    _send_media_via_adapter(
-                        runtime_adapter,
-                        chat_id,
-                        media_files,
-                        routed_media_metadata or None,
-                        loop,
-                        job,
-                        platform=platform,
-                    )
+                    if media_route_ready:
+                        _send_media_via_adapter(
+                            runtime_adapter,
+                            chat_id,
+                            media_files,
+                            routed_media_metadata or None,
+                            loop,
+                            job,
+                            platform=platform,
+                        )
                 elif timed_out and media_files:
                     msg = (
                         f"{len(media_files)} media attachment(s) not delivered to "

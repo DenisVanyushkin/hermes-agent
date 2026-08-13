@@ -167,6 +167,15 @@ class TestResolveDeliveryTarget:
             "thread_id": "17",
         }
 
+    def test_named_telegram_private_topic_target_preserves_name(self):
+        job = {"deliver": "telegram:79564752:Погода Алматы"}
+
+        assert _resolve_delivery_target(job) == {
+            "platform": "telegram",
+            "chat_id": "79564752",
+            "thread_id": "Погода Алматы",
+        }
+
 
     def test_human_friendly_label_resolved_via_channel_directory(self):
         """deliver: 'whatsapp:Alice (dm)' resolves to the real JID."""
@@ -522,6 +531,95 @@ class TestDeliverResultWrapping:
         adapter.send_voice.assert_called_once()
         voice_call = adapter.send_voice.call_args
         assert voice_call[1]["audio_path"] == str(media_path)
+
+    def test_named_telegram_topic_routes_text_and_media_via_direct_topic(
+        self, tmp_path, monkeypatch
+    ):
+        """Cron resolves a named private topic through the live adapter.
+
+        The topic name must reach DeliveryRouter without a bare ``thread_id``
+        metadata override; attachments then reuse the resolved numeric Bot API
+        ``direct_messages_topic_id`` instead of falling back to General.
+        """
+        from concurrent.futures import Future
+
+        from gateway.config import GatewayConfig, Platform, PlatformConfig
+
+        media_path = self._safe_media_path(tmp_path, monkeypatch, "digest.txt")
+
+        class TopicAdapter:
+            def __init__(self):
+                self.ensure_calls = []
+                self.text_calls = []
+                self.document_calls = []
+
+            async def ensure_dm_topic(self, chat_id, topic_name, force_create=False):
+                self.ensure_calls.append((chat_id, topic_name, force_create))
+                return "38049"
+
+            async def send(self, chat_id, content, metadata=None):
+                self.text_calls.append((chat_id, content, dict(metadata or {})))
+                return {"success": True}
+
+            async def send_document(self, chat_id, file_path, metadata=None):
+                self.document_calls.append((chat_id, file_path, dict(metadata or {})))
+                return {"success": True}
+
+        adapter = TopicAdapter()
+        config = GatewayConfig(
+            platforms={Platform.TELEGRAM: PlatformConfig(enabled=True)},
+        )
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        def fake_run_coro(coro, _loop):
+            import asyncio as _asyncio
+
+            future = Future()
+            try:
+                future.set_result(_asyncio.run(coro))
+            except BaseException as exc:  # noqa: BLE001
+                future.set_exception(exc)
+            return future
+
+        with (
+            patch("gateway.config.load_gateway_config", return_value=config),
+            patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
+            patch("asyncio.run_coroutine_threadsafe", side_effect=fake_run_coro),
+        ):
+            result = _deliver_result(
+                {
+                    "id": "named-topic-cron",
+                    "deliver": "telegram:79564752:Погода Алматы",
+                },
+                f"forecast\nMEDIA:{media_path}",
+                adapters={Platform.TELEGRAM: adapter},
+                loop=loop,
+            )
+
+        assert result is None
+        assert adapter.text_calls == [
+            (
+                "79564752",
+                "forecast",
+                {
+                    "job_id": "named-topic-cron",
+                    "direct_messages_topic_id": "38049",
+                    "telegram_dm_topic_created_for_send": True,
+                },
+            )
+        ]
+        assert adapter.document_calls == [
+            (
+                "79564752",
+                str(media_path),
+                {"direct_messages_topic_id": "38049"},
+            )
+        ]
+        assert adapter.ensure_calls == [
+            ("79564752", "Погода Алматы", False),
+            ("79564752", "Погода Алматы", False),
+        ]
 
 
 class TestDeliverResultErrorReturns:
