@@ -48,6 +48,11 @@ def test_execution_continuation_accepts_structured_russian_forms(instruction):
         "пусть инженер не выполняет план",
         "проверь, почему инженер выполнит старый план",
         "инженер выполняет план",
+        "пусть инженер выполнит план, если его потом утвердят",
+        "пусть инженер выполнит план, но не сейчас",
+        "инженер, начинай расследование нового инцидента",
+        "передай инженеру вопрос о плане",
+        "передай план инженеру, но не на исполнение",
     ],
 )
 def test_execution_continuation_rejects_questions_conditions_and_negation(
@@ -71,6 +76,32 @@ def test_future_tense_continuation_resolves_canonical_plan():
     assert envelope.resolution_status == "resolved"
     assert envelope.source_kind == "approved_plan"
     assert envelope.task_text == plan
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "пусть инженер выполнит план, если его потом утвердят",
+        "пусть инженер выполнит план, но не сейчас",
+        "инженер, начинай расследование нового инцидента",
+        "передай инженеру вопрос о плане",
+        "передай план инженеру, но не на исполнение",
+    ],
+)
+def test_non_execution_phrases_do_not_select_canonical_plan(instruction):
+    plan = _long_plan()
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction=instruction,
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan, "id": 93308},
+        ],
+        session_id="session-adversarial",
+        history_session_id="session-adversarial",
+    )
+
+    assert envelope.source_kind != "approved_plan"
+    assert envelope.task_text != plan
 
 
 def test_short_execution_continuation_resolves_latest_complete_engineering_plan():
@@ -549,6 +580,7 @@ def test_legacy_transfer_of_version_to_archive_is_not_handoff_ready():
 def test_gateway_builds_task_from_raw_operator_text_not_slack_parent_quote():
     run = importlib.import_module("gateway.run")
     plan = _long_plan()
+    instruction = "пусть инженер выполнит план"
     decision = RouterDecision(
         pipeline_session_id="pipeline-1",
         router_subagent_id="router",
@@ -562,10 +594,10 @@ def test_gateway_builds_task_from_raw_operator_text_not_slack_parent_quote():
 
     context = run._resolve_gateway_engineering_task_context(
         router_decision=decision,
-        operator_text="ок, пусть инженер исполняет",
+        operator_text=instruction,
         enriched_message=(
             '[Replying to: "Cronjob Response ... Следующие шаги: Создай"]\n\n'
-            "ок, пусть инженер исполняет"
+            + instruction
         ),
         history=[
             {"role": "user", "content": "пиши план для инженера"},
@@ -575,7 +607,9 @@ def test_gateway_builds_task_from_raw_operator_text_not_slack_parent_quote():
     )
 
     assert context["task_text"] == plan
-    assert context["operator_instruction"] == "ок, пусть инженер исполняет"
+    assert context["operator_instruction"] == instruction
+    assert context["source_message_id"] == "93308"
+    assert context["task_sha256"] == hashlib.sha256(plan.encode("utf-8")).hexdigest()
     assert "Cronjob Response" not in context["task_text"]
 
 

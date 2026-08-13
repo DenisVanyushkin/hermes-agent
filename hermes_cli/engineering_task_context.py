@@ -27,49 +27,75 @@ _EXECUTION_ACTION = (
     r"дела(?:ет|й|ть)|"
     r"берет(?:ся)?|возьм(?:ет(?:ся)?|ись|итесь)|"
     r"приступ(?:ает|ит|ай|ить)|"
-    r"нач(?:ина(?:ет|й|ть)|нет|ать)|"
-    r"запуск(?:ает|ай|ать)|запуст(?:ит|и|ить)|"
-    r"execute|proceed|start"
+    r"execute|proceed"
     r")"
 )
 _IMPERATIVE_EXECUTION_ACTION = (
     r"(?:"
     r"(?:ис|вы)полн(?:яй(?:те)?|и(?:те)?)|"
     r"делай(?:те)?|берись|беритесь|возьмись|возьмитесь|"
-    r"приступай(?:те)?|начинай(?:те)?|"
-    r"запускай(?:те)?|запусти(?:те)?|"
-    r"execute|proceed|start"
+    r"приступай(?:те)?|execute|proceed"
     r")"
 )
-_TRANSFER_OBJECT = r"(?:это|этот|эту|данный|план|задачу|реализацию|исполнение)"
+_EXECUTION_TARGET = (
+    r"(?:"
+    r"план(?:а|у|ом|е)?|задач(?:а|у|и|е|ей)|"
+    r"реализаци(?:я|ю|и|ей)|"
+    r"исполнени(?:е|ю|я|и|ем)|выполнени(?:е|ю|я|и|ем)"
+    r")"
+)
+_EXECUTION_COMPLEMENT = (
+    rf"(?:\s+(?:это|(?:(?:к|за|над|по)\s+)?{_EXECUTION_TARGET}"
+    r"(?:\s+(?:плана|задачи))?|(?:with\s+)?(?:the\s+)?plan))?"
+)
+_TRANSFER_OBJECT = (
+    r"(?:это|этот\s+план|эту\s+задачу|данный\s+план|"
+    r"план|задачу|реализацию|исполнение)"
+)
+_TRANSFER_PURPOSE = r"(?:\s+на\s+(?:исполнение|реализацию))?"
+_CONSTRAINT_ITEM = (
+    r"(?:"
+    r"не\s+(?:деплой|деплоить|коммит(?:ить)?|пуш(?:ить)?|мерж(?:ить)?)|"
+    r"без\s+(?:деплоя|коммита|пуша|мержа)|"
+    r"do\s+not\s+(?:deploy|commit|push|merge)|"
+    r"without\s+(?:deployment|commit|push|merge)"
+    r")"
+)
+_ALLOWED_CONSTRAINTS = (
+    rf"(?:\s*,?\s*(?:но\s+)?{_CONSTRAINT_ITEM}"
+    rf"(?:\s+и\s+{_CONSTRAINT_ITEM})*)?"
+)
+_CONTINUATION_END = _ALLOWED_CONSTRAINTS + r"\s*[!.]?\s*$"
 
 _CONTINUATION_PATTERNS = (
     re.compile(
         _ACKNOWLEDGEMENT_PREFIX
-        + rf"(?:пусть|пускай)\s+{_ENGINEER_ACTOR}\s+{_EXECUTION_ACTION}\b",
+        + rf"(?:пусть|пускай)\s+{_ENGINEER_ACTOR}\s+{_EXECUTION_ACTION}\b"
+        + _EXECUTION_COMPLEMENT
+        + _CONTINUATION_END,
         re.IGNORECASE,
     ),
     re.compile(
         _ACKNOWLEDGEMENT_PREFIX
-        + rf"{_ENGINEER_ACTOR}\s+(?:пусть|пускай)\s+{_EXECUTION_ACTION}\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        _ACKNOWLEDGEMENT_PREFIX
-        + rf"(?:передай|отдай)\s+(?:(?:{_TRANSFER_OBJECT})\s+){{0,2}}"
-        + r"инженеру\b",
+        + rf"(?:передай|отдай)\s+{_TRANSFER_OBJECT}\s+инженеру\b"
+        + _TRANSFER_PURPOSE
+        + _CONTINUATION_END,
         re.IGNORECASE,
     ),
     re.compile(
         _ACKNOWLEDGEMENT_PREFIX
         + r"(?:передай|отдай)\s+инженеру\b"
-        + rf"(?:\s+{_TRANSFER_OBJECT})?",
+        + rf"(?:\s+{_TRANSFER_OBJECT})?"
+        + _TRANSFER_PURPOSE
+        + _CONTINUATION_END,
         re.IGNORECASE,
     ),
     re.compile(
         _ACKNOWLEDGEMENT_PREFIX
         + rf"{_ENGINEER_ACTOR}\s*[,,:-]?\s*"
-        + rf"{_IMPERATIVE_EXECUTION_ACTION}\b",
+        + rf"{_IMPERATIVE_EXECUTION_ACTION}\b"
+        + _EXECUTION_COMPLEMENT
+        + _CONTINUATION_END,
         re.IGNORECASE,
     ),
 )
@@ -175,7 +201,7 @@ def is_engineering_execution_continuation(text: str) -> bool:
     normalized = " ".join(str(text or "").casefold().replace("ё", "е").split())
     if "?" in normalized:
         return False
-    return any(pattern.search(normalized) for pattern in _CONTINUATION_PATTERNS)
+    return any(pattern.fullmatch(normalized) for pattern in _CONTINUATION_PATTERNS)
 
 
 def is_concrete_engineering_request(text: str) -> bool:

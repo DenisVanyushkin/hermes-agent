@@ -27,11 +27,11 @@
 - Consumes: `is_engineering_execution_continuation(text: str) -> bool`
 - Produces: the same public function and `resolve_engineering_task_context(...)` behavior, with broader safe Russian wording support.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
-Add table-driven positive cases including `пусть инженер выполнит план`, future and imperative execution forms, start/proceed forms, and plan-transfer forms. Add negative cases for questions, conditionals, negation, and informational statements.
+Add table-driven positive cases including `пусть инженер выполнит план`, future and imperative execution forms, proceed forms, and plan-transfer forms. Add negative cases for questions, conditionals, trailing negation, unrelated action targets, and informational statements.
 
-- [ ] **Step 2: Run tests to verify RED**
+- [x] **Step 2: Run tests to verify RED**
 
 Run:
 
@@ -41,11 +41,11 @@ Run:
 
 Expected: the new positive cases fail because the current regex accepts only a narrow list of exact word forms; existing tests and negative cases remain green.
 
-- [ ] **Step 3: Implement minimal structured grammar**
+- [x] **Step 3: Implement minimal structured grammar**
 
-Define reusable regex fragments for optional acknowledgement, engineer actor, execution actions, and transfer actions. Keep every continuation pattern anchored at the start and require an explicit affirmative construction.
+Define reusable regex fragments for optional acknowledgement, engineer actor, execution actions, execution-compatible objects, narrowly allowed mutation constraints, and transfer actions. Match the complete normalized instruction and require an explicit affirmative construction.
 
-- [ ] **Step 4: Run focused and adjacent tests**
+- [x] **Step 4: Run focused and adjacent tests**
 
 Run:
 
@@ -53,8 +53,8 @@ Run:
 /home/hermes/.hermes/hermes-agent/venv/bin/python -m pytest -q tests/gateway/test_engineering_task_continuation.py tests/gateway/test_orchestrator_observe.py tests/test_pipeline_execution_controller.py tests/test_pipeline_one_step_execution.py
 ```
 
-Expected: all tests pass.
+Expected: the focused resolver/gateway suite passes. Any adjacent baseline failures must reproduce unchanged on the unmodified live HEAD; do not repair unrelated model/provider or disabled one-step expectations in this change.
 
-- [ ] **Step 5: Run static checks and commit**
+- [x] **Step 5: Run static checks and commit**
 
 Run Ruff on both changed Python files and `git diff --check`, inspect the exact diff, then commit only the plan, resolver, and regression tests with a Conventional Commit message.
