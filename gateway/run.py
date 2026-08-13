@@ -1507,8 +1507,8 @@ def _pipeline_conversation_context(history):
     Lets a bare follow-up like "оцени вакансию" (replying under a job alert)
     reach the recruiter pipeline together with the alert text and URL.
     """
-    parts = []
-    for msg in (history or [])[-8:]:
+    dialogue = []
+    for msg in history or []:
         role = str(msg.get("role") or "")
         if role not in {"user", "assistant"}:
             continue
@@ -1519,13 +1519,17 @@ def _pipeline_conversation_context(history):
             )
         text = str(content or "").strip()
         if text:
-            if len(text) > _PIPELINE_CONTEXT_MESSAGE_CHARS:
-                dropped = len(text) - _PIPELINE_CONTEXT_MESSAGE_CHARS
-                text = (
-                    text[:_PIPELINE_CONTEXT_MESSAGE_CHARS]
-                    + f"\n[... truncated {dropped} characters of this message]"
-                )
-            parts.append(f"{role}: {text}")
+            dialogue.append((role, text))
+
+    parts = []
+    for role, text in dialogue[-8:]:
+        if len(text) > _PIPELINE_CONTEXT_MESSAGE_CHARS:
+            dropped = len(text) - _PIPELINE_CONTEXT_MESSAGE_CHARS
+            text = (
+                text[:_PIPELINE_CONTEXT_MESSAGE_CHARS]
+                + f"\n[... truncated {dropped} characters of this message]"
+            )
+        parts.append(f"{role}: {text}")
     joined = "\n".join(parts).strip()
     if not joined:
         return None
