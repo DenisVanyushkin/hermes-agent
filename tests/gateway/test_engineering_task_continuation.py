@@ -425,6 +425,31 @@ def test_typed_ready_marker_does_not_require_legacy_phrase():
     assert envelope.task_text == plan
 
 
+def test_explicit_do_not_execute_text_overrides_typed_ready_marker():
+    module = _module()
+    history = [
+        {"role": "user", "content": "подготовь план для инженера"},
+        {
+            "role": "assistant",
+            "content": (
+                "# План для инженера\n"
+                "План не согласован; выполнять пока рано."
+            ),
+            "_engineering_task": {"status": "ready_for_approval"},
+        },
+    ]
+
+    envelope = module.resolve_engineering_task_context(
+        operator_instruction="пусть инженер исполняет",
+        history=history,
+        session_id="session-14a",
+        history_session_id="session-14a",
+    )
+
+    assert envelope.resolution_status == "missing_approved_plan"
+    assert envelope.task_text is None
+
+
 def test_explicit_continuation_approves_untyped_plan_without_legacy_phrase():
     module = _module()
     plan = "# План для инженера\nточная новая задача\nГотов к исполнению."

@@ -42,14 +42,10 @@ _ENGINEERING_PLAN_HEADING_RE = re.compile(
     r"(?:для\s+)?(?:инженер\w*|engineering)\b",
     re.IGNORECASE | re.MULTILINE,
 )
-_PLAN_HANDOFF_READY_RE = re.compile(
-    r"\bесли\s+подтвержда\w*\s*[—–-]\s*передам\s+именно\s+"
-    r"эту\s+версию,\s+а\s+не\s+предыдущ\w+\s+картонн\w+\s+скелет\w*",
-    re.IGNORECASE,
-)
 _PLAN_EXPLICITLY_NOT_READY_RE = re.compile(
-    r"(?:не\s+утвержд[её]н|не\s+готов|черновик|выполнять\s+нельзя|"
-    r"не\s+(?:исполнять|выполнять)|not\s+(?:approved|ready)|do\s+not\s+execute)",
+    r"(?:не\s+(?:утвержд[её]н|согласован|одобрен|готов)|черновик|"
+    r"выполнять\s+(?:нельзя|пока\s+рано)|не\s+(?:исполнять|выполнять|запускать)|"
+    r"not\s+(?:approved|ready(?:\s+for\s+execution)?)|do\s+not\s+execute)",
     re.IGNORECASE,
 )
 _DIRECT_REQUEST_RE = re.compile(
@@ -182,17 +178,18 @@ def _plan_candidates(
             continue
         requested_plan = bool(_PLAN_REQUEST_RE.search(last_user_text))
         task_metadata = message.get("_engineering_task")
-        typed_ready = bool(
-            isinstance(task_metadata, Mapping)
-            and task_metadata.get("status") == "ready_for_approval"
+        typed_status = (
+            str(task_metadata.get("status") or "").strip().lower()
+            if isinstance(task_metadata, Mapping)
+            else ""
+        )
+        explicit_not_ready = bool(
+            typed_status in {"not_ready", "blocked", "draft"}
+            or _PLAN_EXPLICITLY_NOT_READY_RE.search(text)
         )
         response_looks_like_plan = bool(
             _ENGINEERING_PLAN_HEADING_RE.search(text)
-            and (
-                typed_ready
-                or _PLAN_HANDOFF_READY_RE.search(text)
-                or not _PLAN_EXPLICITLY_NOT_READY_RE.search(text)
-            )
+            and not explicit_not_ready
         )
         if requested_plan and response_looks_like_plan:
             candidates.append((message, text, user_turn))
