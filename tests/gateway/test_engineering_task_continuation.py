@@ -53,6 +53,9 @@ def test_execution_continuation_accepts_structured_russian_forms(instruction):
         "инженер, начинай расследование нового инцидента",
         "передай инженеру вопрос о плане",
         "передай план инженеру, но не на исполнение",
+        "передай инженеру",
+        "передай план инженеру",
+        "отдай это инженеру",
     ],
 )
 def test_execution_continuation_rejects_questions_conditions_and_negation(
@@ -86,6 +89,9 @@ def test_future_tense_continuation_resolves_canonical_plan():
         "инженер, начинай расследование нового инцидента",
         "передай инженеру вопрос о плане",
         "передай план инженеру, но не на исполнение",
+        "передай инженеру",
+        "передай план инженеру",
+        "отдай это инженеру",
     ],
 )
 def test_non_execution_phrases_do_not_select_canonical_plan(instruction):
