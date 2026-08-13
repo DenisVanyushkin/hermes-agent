@@ -425,6 +425,26 @@ def test_typed_ready_marker_does_not_require_legacy_phrase():
     assert envelope.task_text == plan
 
 
+def test_explicit_continuation_approves_untyped_plan_without_legacy_phrase():
+    module = _module()
+    plan = "# План для инженера\nточная новая задача\nГотов к исполнению."
+    history = [
+        {"role": "user", "content": "подготовь план для инженера"},
+        {"role": "assistant", "content": plan},
+    ]
+
+    envelope = module.resolve_engineering_task_context(
+        operator_instruction="пусть инженер исполняет, но не деплой",
+        history=history,
+        session_id="session-14b",
+        history_session_id="session-14b",
+    )
+
+    assert envelope.resolution_status == "resolved"
+    assert envelope.task_text == plan
+    assert envelope.operator_instruction == "пусть инженер исполняет, но не деплой"
+
+
 def test_legacy_transfer_of_version_to_archive_is_not_handoff_ready():
     module = _module()
     history = [
@@ -538,6 +558,7 @@ def test_engineering_helper_uses_resolved_task_instead_of_confirmation(monkeypat
 
     assert result == {"status": "executed"}
     assert captured["user_message"] == plan
+    assert captured["operator_instruction"] == "ок, пусть инженер исполняет"
     assert "ок, пусть инженер исполняет" not in captured["user_message"]
 
 

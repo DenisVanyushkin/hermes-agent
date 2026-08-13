@@ -192,6 +192,7 @@ def execute_bounded_rework_loop(
     runtime_factory: Any,
     runner: SubagentRunner,
     user_message: str,
+    operator_instruction: str | None = None,
     repo_path: str | None = None,
     test_summary: Any = None,
     allow_completion_after_review: bool = False,
@@ -273,6 +274,7 @@ def execute_bounded_rework_loop(
         }
         engineer_message = _compose_engineer_message(
             original_task=user_message,
+            operator_instruction=operator_instruction,
             appended_rework_context=appended_rework_context,
             prior_changes_diff=_working_tree_diff(repo_path) if appended_rework_context else None,
         )
@@ -500,6 +502,7 @@ def execute_bounded_rework_loop(
                     accumulated_subagent_runs=accumulated_subagent_runs,
                     current_snapshot=current_snapshot,
                     original_task=user_message,
+                    operator_instruction=operator_instruction,
                     active_reviewer_blockers=active_reviewer_blockers,
                     trigger="reviewer_maintains_blocker_after_max_peer_round",
                     reason="reviewer maintained blocker after allowed peer disagreement round",
@@ -646,6 +649,7 @@ def execute_bounded_rework_loop(
                 )
             reviewer_message = _compose_peer_reviewer_message(
                 original_task=user_message,
+                operator_instruction=operator_instruction,
                 peer_message=peer_message,
             )
             # The peer round can approve and finalize without ever reaching the main
@@ -825,6 +829,7 @@ def execute_bounded_rework_loop(
                 accumulated_subagent_runs=accumulated_subagent_runs,
                 current_snapshot=current_snapshot,
                 original_task=user_message,
+                operator_instruction=operator_instruction,
                 active_reviewer_blockers=reviewer_blockers,
                 trigger="reviewer_maintains_blocker_after_peer_round",
                 reason="reviewer maintained blocker after allowed peer disagreement round",
@@ -1049,6 +1054,7 @@ def execute_bounded_rework_loop(
 
         reviewer_message = _compose_reviewer_message(
             original_task=user_message,
+            operator_instruction=operator_instruction,
             engineer_message=engineer_message,
             appended_rework_context=appended_rework_context,
         )
@@ -1717,6 +1723,7 @@ def _execute_model_escalation_if_allowed(
     accumulated_subagent_runs: list[dict[str, Any]],
     current_snapshot: Any,
     original_task: str,
+    operator_instruction: str | None,
     active_reviewer_blockers: list[str],
     trigger: str,
     reason: str,
@@ -1740,6 +1747,7 @@ def _execute_model_escalation_if_allowed(
         runtime_context=runtime_context,
         current_snapshot=current_snapshot,
         original_task=original_task,
+        operator_instruction=operator_instruction,
         active_reviewer_blockers=active_reviewer_blockers,
         trigger=trigger,
         reason=reason,
@@ -1780,6 +1788,7 @@ def _run_escalated_reviewer(
     runtime_context: ControlledRuntimeContext,
     current_snapshot: Any,
     original_task: str,
+    operator_instruction: str | None,
     active_reviewer_blockers: list[str],
     trigger: str,
     reason: str,
@@ -1808,7 +1817,10 @@ def _run_escalated_reviewer(
         real_provider_client_factory=runtime_context.real_provider_client_factory,
     )
     escalation_message = _compose_escalation_message(
-        original_task=original_task, reviewer_blockers=active_reviewer_blockers, reason=reason
+        original_task=original_task,
+        operator_instruction=operator_instruction,
+        reviewer_blockers=active_reviewer_blockers,
+        reason=reason,
     )
     if ops_review_block:
         escalation_message = "\n\n".join([escalation_message, ops_review_block])
@@ -3771,10 +3783,28 @@ def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000, since_re
     return text
 
 
-def _compose_engineer_message(*, original_task: str, appended_rework_context: list[dict[str, Any]], prior_changes_diff: str | None = None) -> str:
-    if not appended_rework_context:
-        return original_task
+def _operator_instruction_block(operator_instruction: str | None) -> str | None:
+    if not isinstance(operator_instruction, str) or not operator_instruction.strip():
+        return None
+    return (
+        "Current operator instruction (context only; it does not replace the "
+        "approved task):\n" + operator_instruction
+    )
+
+
+def _compose_engineer_message(
+    *,
+    original_task: str,
+    appended_rework_context: list[dict[str, Any]],
+    prior_changes_diff: str | None = None,
+    operator_instruction: str | None = None,
+) -> str:
     parts = [original_task]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    if not appended_rework_context:
+        return "\n\n".join(parts)
     if prior_changes_diff:
         parts.append(
             "Your prior uncommitted changes (already applied on disk — build on "
@@ -3788,24 +3818,36 @@ def _compose_engineer_message(*, original_task: str, appended_rework_context: li
 def _compose_reviewer_message(
     *,
     original_task: str,
+    operator_instruction: str | None = None,
     engineer_message: str,
     appended_rework_context: list[dict[str, Any]],
 ) -> str:
-    parts = [original_task, "Engineer candidate follows.", engineer_message]
+    parts = [original_task]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    parts.extend(["Engineer candidate follows.", engineer_message])
     if appended_rework_context:
         parts.extend(_serialize_rework_context(item) for item in appended_rework_context)
     return "\n\n".join(parts)
 
 
-def _compose_peer_reviewer_message(*, original_task: str, peer_message: dict[str, Any]) -> str:
+def _compose_peer_reviewer_message(
+    *,
+    original_task: str,
+    peer_message: dict[str, Any],
+    operator_instruction: str | None = None,
+) -> str:
     summary = _mapping_value((peer_message.get("content") or {}), "summary") or "Engineer submitted a disagreement summary."
     arguments = list((peer_message.get("content") or {}).get("arguments") or [])
     evidence = list((peer_message.get("content") or {}).get("evidence") or [])
     parts = [
         original_task,
-        "Peer discussion follow-up.",
-        f"Summary: {summary}",
     ]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    parts.extend(["Peer discussion follow-up.", f"Summary: {summary}"])
     if arguments:
         parts.append("Arguments: " + "; ".join(str(item) for item in arguments))
     if evidence:
@@ -3813,15 +3855,25 @@ def _compose_peer_reviewer_message(*, original_task: str, peer_message: dict[str
     return "\n\n".join(parts)
 
 
-def _compose_escalation_message(*, original_task: str, reviewer_blockers: list[str], reason: str) -> str:
-    return "\n\n".join(
+def _compose_escalation_message(
+    *,
+    original_task: str,
+    reviewer_blockers: list[str],
+    reason: str,
+    operator_instruction: str | None = None,
+) -> str:
+    parts = [original_task]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    parts.extend(
         [
-            original_task,
             "Escalated reviewer arbitration requested.",
             f"Escalation reason: {reason}",
             "Reviewer blockers: " + "; ".join(reviewer_blockers or ["none"]),
         ]
     )
+    return "\n\n".join(parts)
 
 
 def _safe_execution_report_payload(execution_report: Any) -> dict[str, Any] | None:

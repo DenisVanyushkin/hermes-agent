@@ -119,6 +119,7 @@ def execute_engineering_review_helper(
     )
 
     resolved_user_message = user_message
+    resolved_operator_instruction: str | None = None
     if engineering_task_context is not None:
         envelope, task_context_error = validate_engineering_task_context(
             engineering_task_context
@@ -131,6 +132,7 @@ def execute_engineering_review_helper(
             return _blocked_helper_payload("engineering_task_session_mismatch")
         if envelope.source_kind == "approved_plan":
             resolved_user_message = envelope.task_text or ""
+            resolved_operator_instruction = envelope.operator_instruction
     elif is_engineering_execution_continuation(user_message):
         return _blocked_helper_payload("engineering_task_context_missing")
 
@@ -149,6 +151,7 @@ def execute_engineering_review_helper(
             runtime_factory=runtime_factory,
             runner=runner,
             user_message=resolved_user_message,
+            operator_instruction=resolved_operator_instruction,
             repo_path=repo_path,
             test_summary=test_summary,
             allow_completion_after_review=allow_completion_after_review,

@@ -47,6 +47,11 @@ _PLAN_HANDOFF_READY_RE = re.compile(
     r"эту\s+версию,\s+а\s+не\s+предыдущ\w+\s+картонн\w+\s+скелет\w*",
     re.IGNORECASE,
 )
+_PLAN_EXPLICITLY_NOT_READY_RE = re.compile(
+    r"(?:не\s+утвержд[её]н|не\s+готов|черновик|выполнять\s+нельзя|"
+    r"не\s+(?:исполнять|выполнять)|not\s+(?:approved|ready)|do\s+not\s+execute)",
+    re.IGNORECASE,
+)
 _DIRECT_REQUEST_RE = re.compile(
     r"^\s*(?:(?:ок|да|давай|можешь|нужно|надо|please|can\s+you)\s*[,,:-]?\s*)?"
     r"(?:исправ(?:ь|ить)|почин(?:и|ить)|реализ(?:уй|овать)|добав(?:ь|ить)|"
@@ -183,7 +188,11 @@ def _plan_candidates(
         )
         response_looks_like_plan = bool(
             _ENGINEERING_PLAN_HEADING_RE.search(text)
-            and (typed_ready or _PLAN_HANDOFF_READY_RE.search(text))
+            and (
+                typed_ready
+                or _PLAN_HANDOFF_READY_RE.search(text)
+                or not _PLAN_EXPLICITLY_NOT_READY_RE.search(text)
+            )
         )
         if requested_plan and response_looks_like_plan:
             candidates.append((message, text, user_turn))

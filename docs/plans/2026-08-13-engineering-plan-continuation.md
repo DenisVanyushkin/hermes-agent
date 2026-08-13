@@ -108,6 +108,8 @@
 - [x] Run `venv/bin/python -m pytest -q tests/test_pipeline_rework_loop.py -k 'task or context or rework or reviewer'`.
 
 ### Task 6: Verify acceptance criteria and compatibility
+- [x] ➕ Support future untyped plan responses when the current continuation explicitly approves execution, while rejecting explicit not-ready/do-not-execute plans.
+- [x] ➕ Carry the current operator instruction into engineer, reviewer, peer, and escalation prompts as labelled context without changing the immutable task hash.
 - [x] Re-run the incident fixture end-to-end with a fake executor and assert the engineer receives the complete source-registry/lifecycle/collector plan rather than the cron parent excerpt.
 - [x] Verify direct engineering requests, Slack non-thread messages, Telegram execution requests, recruiter continuation, and default conversation routing retain existing behavior.
 - [x] Verify missing/ambiguous approved tasks fail before provider invocation with an actionable response asking for the concrete plan, not a generic model-generated blocker.

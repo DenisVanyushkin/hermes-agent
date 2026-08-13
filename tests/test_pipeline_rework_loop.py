@@ -2248,6 +2248,7 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
         runtime_factory=RuntimeFactory(repo_root=repo_root),
         runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
         user_message=original_task,
+        operator_instruction="исполняй план, но не коммить и не деплой",
         repo_path=str(git_repo),
         allow_completion_after_review=True,
         controlled_runtime_context={
@@ -2275,6 +2276,16 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
     assert '"reviewer_blockers": [' in engineer_messages[1]
     assert all("POST_4000_SENTINEL" in message for message in engineer_messages)
     assert all("POST_4000_SENTINEL" in message for message in reviewer_messages)
+    assert all(
+        "Current operator instruction (context only; it does not replace the approved task):\n"
+        "исполняй план, но не коммить и не деплой" in message
+        for message in engineer_messages
+    )
+    assert all(
+        "Current operator instruction (context only; it does not replace the approved task):\n"
+        "исполняй план, но не коммить и не деплой" in message
+        for message in reviewer_messages
+    )
     task_hashes = {
         packet["task_summary_hash"]
         for packet in reviewer_packets
