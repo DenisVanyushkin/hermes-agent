@@ -66,6 +66,7 @@ The gateway resolves an engineering task before autonomous execution and passes 
 
 - A new concrete engineering request uses the normal enriched inbound message as its task so reply and attachment context remain available.
 - A short execution continuation, such as an approval to let the engineer proceed, must resolve to one unambiguous approved plan in canonical history for the current session.
+- Pipeline routing and execution authorization are separate decisions: an LLM router may select the engineering pipeline, but it cannot authorize reuse of a prior plan. Continuation authorization uses anchored deterministic actor/action grammar and fails closed for questions, conditionals, and negated execution instructions.
 - For typed history, `not_ready`, `blocked`, and `draft` metadata are authoritative rejection states. For existing and newly generated untyped history, an explicit current continuation may approve the latest plan-shaped assistant response to a plan request unless that response contains explicit not-ready or do-not-execute language. A contradictory ready marker never overrides an execution prohibition in the plan text.
 - Generic `conversation_context` remains bounded auxiliary context for other flows. It is not an executable engineering task store.
 - Slack `reply_to_text` identifies the thread parent and remains transport context. It must never replace the approved task or the raw operator instruction.

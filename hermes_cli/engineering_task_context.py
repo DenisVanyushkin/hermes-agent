@@ -17,22 +17,59 @@ from typing import Any, Iterable, Mapping
 SCHEMA_VERSION = "engineering_task_envelope.v1"
 MAX_APPROVED_TASK_CHARS = 32 * 1024
 
+_ACKNOWLEDGEMENT_PREFIX = (
+    r"^\s*(?:(?:ок|окей|да|давай|хорошо|угу)\s*[,,:-]?\s*)?"
+)
+_ENGINEER_ACTOR = r"(?:инженер|engineering)"
+_EXECUTION_ACTION = (
+    r"(?:"
+    r"(?:ис|вы)полн(?:я(?:ет|й|ть)|ит|ить|и)|"
+    r"дела(?:ет|й|ть)|"
+    r"берет(?:ся)?|возьм(?:ет(?:ся)?|ись|итесь)|"
+    r"приступ(?:ает|ит|ай|ить)|"
+    r"нач(?:ина(?:ет|й|ть)|нет|ать)|"
+    r"запуск(?:ает|ай|ать)|запуст(?:ит|и|ить)|"
+    r"execute|proceed|start"
+    r")"
+)
+_IMPERATIVE_EXECUTION_ACTION = (
+    r"(?:"
+    r"(?:ис|вы)полн(?:яй(?:те)?|и(?:те)?)|"
+    r"делай(?:те)?|берись|беритесь|возьмись|возьмитесь|"
+    r"приступай(?:те)?|начинай(?:те)?|"
+    r"запускай(?:те)?|запусти(?:те)?|"
+    r"execute|proceed|start"
+    r")"
+)
+_TRANSFER_OBJECT = r"(?:это|этот|эту|данный|план|задачу|реализацию|исполнение)"
+
 _CONTINUATION_PATTERNS = (
     re.compile(
-        r"^\s*(?:(?:ок|да|давай)\s*[,,:-]?\s*)?"
-        r"(?:пусть|пускай)\s+инженер\s+"
-        r"(?:исполняет|выполняет|делает|бер[её]т)",
+        _ACKNOWLEDGEMENT_PREFIX
+        + rf"(?:пусть|пускай)\s+{_ENGINEER_ACTOR}\s+{_EXECUTION_ACTION}\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:(?:ок|да|давай)\s*[,,:-]?\s*)?"
-        r"(?:передай|отдай)\s+(?:это\s+)?инженеру\b",
+        _ACKNOWLEDGEMENT_PREFIX
+        + rf"{_ENGINEER_ACTOR}\s+(?:пусть|пускай)\s+{_EXECUTION_ACTION}\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:(?:ок|да|давай)\s*[,,:-]?\s*)?"
-        r"(?:инженер|engineering)\s*[,,:-]?\s*"
-        r"(?:исполняй|выполняй|execute|proceed)\b",
+        _ACKNOWLEDGEMENT_PREFIX
+        + rf"(?:передай|отдай)\s+(?:(?:{_TRANSFER_OBJECT})\s+){{0,2}}"
+        + r"инженеру\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _ACKNOWLEDGEMENT_PREFIX
+        + r"(?:передай|отдай)\s+инженеру\b"
+        + rf"(?:\s+{_TRANSFER_OBJECT})?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _ACKNOWLEDGEMENT_PREFIX
+        + rf"{_ENGINEER_ACTOR}\s*[,,:-]?\s*"
+        + rf"{_IMPERATIVE_EXECUTION_ACTION}\b",
         re.IGNORECASE,
     ),
 )
@@ -135,7 +172,9 @@ def _sha256(text: str) -> str:
 
 
 def is_engineering_execution_continuation(text: str) -> bool:
-    normalized = " ".join(str(text or "").split())
+    normalized = " ".join(str(text or "").casefold().replace("ё", "е").split())
+    if "?" in normalized:
+        return False
     return any(pattern.search(normalized) for pattern in _CONTINUATION_PATTERNS)
 
 

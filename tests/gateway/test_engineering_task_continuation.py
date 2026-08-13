@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 
+import pytest
+
 from hermes_cli.pipeline_router import RouterDecision
 
 
@@ -19,6 +21,56 @@ def _long_plan() -> str:
     plan = prefix + ("И" * (13_089 - len(prefix) - len(suffix))) + suffix
     assert len(plan) == 13_089
     return plan
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "пусть инженер выполнит план",
+        "пускай инженер исполнит задачу",
+        "давай, пусть инженер приступит к выполнению плана",
+        "ок: пусть инженер возьмется за реализацию",
+        "инженер, приступай к реализации плана",
+        "передай план инженеру на исполнение",
+        "отдай инженеру задачу на реализацию",
+    ],
+)
+def test_execution_continuation_accepts_structured_russian_forms(instruction):
+    assert _module().is_engineering_execution_continuation(instruction)
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "инженер выполнит план?",
+        "пусть инженер выполнит план?",
+        "если инженер выполнит план, сообщи мне",
+        "пусть инженер не выполняет план",
+        "проверь, почему инженер выполнит старый план",
+        "инженер выполняет план",
+    ],
+)
+def test_execution_continuation_rejects_questions_conditions_and_negation(
+    instruction,
+):
+    assert not _module().is_engineering_execution_continuation(instruction)
+
+
+def test_future_tense_continuation_resolves_canonical_plan():
+    plan = _long_plan()
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="пусть инженер выполнит план",
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan, "id": 93308},
+        ],
+        session_id="session-future-tense",
+        history_session_id="session-future-tense",
+    )
+
+    assert envelope.resolution_status == "resolved"
+    assert envelope.source_kind == "approved_plan"
+    assert envelope.task_text == plan
 
 
 def test_short_execution_continuation_resolves_latest_complete_engineering_plan():
