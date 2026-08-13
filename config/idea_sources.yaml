@@ -1,0 +1,157 @@
+# Bounded registry for scripts/idea_signal_collector.py.
+#
+# This file is intentionally reviewed configuration, not crawler input. New
+# sources enter as `candidate`, are technically verified in `probation`, and
+# only then are promoted to `active`; see docs/idea-sources.md.
+version: 1
+min_usable_signals: 3
+sources:
+  - id: arxiv_qbio_nc
+    title: arXiv Quantitative Biology — Neurons and Cognition
+    basket: health_habits_energy
+    channel: atom
+    feed_url: https://export.arxiv.org/api/query?search_query=cat:q-bio.NC&start=0&max_results=20&sortBy=submittedDate&sortOrder=descending
+    discovery_url: https://arxiv.org/list/q-bio.NC/recent
+    authority: research
+    trust_tier: A
+    status: probation
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Primary research/preprints only; downstream must preserve the preprint limitation.
+
+  - id: ftc_consumer_protection
+    title: FTC Consumer Protection Press Releases
+    basket: finance_purchases_risk
+    channel: rss
+    feed_url: https://www.ftc.gov/feeds/press-release-consumer-protection.xml
+    discovery_url: https://www.ftc.gov/stay-connected/rss
+    authority: official
+    trust_tier: A
+    status: candidate
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Endpoint currently returns HTTP 403 to the bounded collector; validate a normal fetch before moving to probation.
+
+  - id: arxiv_cs_hc
+    title: arXiv Human-Computer Interaction
+    basket: learning_work_practices
+    channel: atom
+    feed_url: https://export.arxiv.org/api/query?search_query=cat:cs.HC&start=0&max_results=20&sortBy=submittedDate&sortOrder=descending
+    discovery_url: https://arxiv.org/list/cs.HC/recent
+    authority: research
+    trust_tier: A
+    status: probation
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Preprints are inputs for cautious experiments, never settled advice.
+
+  - id: cpsc_recalls
+    title: U.S. Consumer Product Safety Commission Recalls
+    basket: home_travel_organization
+    channel: rss
+    feed_url: https://www.cpsc.gov/Newsroom/CPSC-RSS-Feed/Recalls-RSS
+    discovery_url: https://www.cpsc.gov/Newsroom/CPSC-RSS-Feed
+    authority: official
+    trust_tier: A
+    status: probation
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Emit only recalls with a concrete consumer-relevance angle.
+
+  - id: hermes_agent_releases
+    title: Hermes Agent releases
+    basket: programming_automation_hermes
+    channel: github_releases
+    feed_url: https://api.github.com/repos/NousResearch/hermes-agent/releases?per_page=10
+    discovery_url: https://github.com/NousResearch/hermes-agent/releases
+    authority: official
+    trust_tier: A
+    status: probation
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Canonical source for Hermes version/release claims.
+
+  - id: mdn_blog
+    title: MDN Blog
+    basket: programming_automation_hermes
+    channel: rss
+    feed_url: https://developer.mozilla.org/en-US/blog/rss.xml
+    discovery_url: https://developer.mozilla.org/en-US/blog/
+    authority: official
+    trust_tier: A
+    status: probation
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Web-platform and developer-workflow signals.
+
+  - id: python_insider
+    title: Python Insider
+    basket: programming_automation_hermes
+    channel: rss
+    feed_url: https://blog.python.org/rss.xml
+    discovery_url: https://blog.python.org/
+    authority: official
+    trust_tier: A
+    status: probation
+    max_items_per_run: 2
+    timeout_seconds: 10
+    retry_count: 1
+    requires_published_date: true
+    notes: Official Python core-team announcements.
+
+  - id: apa_psycport
+    title: APA PsycPORT
+    basket: relationships_leisure_quality_of_life
+    discovery_url: https://www.apa.org/rss
+    authority: research
+    trust_tier: B
+    status: candidate
+    notes: APA publishes a PsycPORT RSS link, but direct fetches currently encounter bot protection in this runtime; verify a stable endpoint before probation.
+
+  - id: nih_research_matters
+    title: NIH Research Matters
+    basket: health_habits_energy
+    discovery_url: https://www.nih.gov/news-events/nih-research-matters
+    authority: official
+    trust_tier: A
+    status: candidate
+    notes: Official NIH page advertises RSS, but the discovered feed returned an anti-bot response from this runtime; do not activate until a stable official endpoint is validated.
+
+  - id: sec_investor_alerts
+    title: SEC Investor Alerts and Bulletins
+    basket: finance_purchases_risk
+    discovery_url: https://www.sec.gov/rss/investor/alerts
+    authority: official
+    trust_tier: A
+    status: candidate
+    notes: Official feed exists but currently returns HTTP 403 to the bounded collector; do not bypass access controls or activate before normal fetch succeeds.
+
+  - id: cdc_travel_health
+    title: CDC Travelers' Health RSS
+    basket: home_travel_organization
+    discovery_url: https://wwwnc.cdc.gov/travel/page/rss
+    authority: official
+    trust_tier: A
+    status: candidate
+    notes: The locator page is reachable; a concrete dated feed endpoint must be validated before probation.
+
+  - id: state_travel
+    title: Travel.State.gov RSS
+    basket: home_travel_organization
+    discovery_url: https://travel.state.gov/content/travel/en/rss.html
+    authority: official
+    trust_tier: A
+    status: candidate
+    notes: Source discovery is intentionally pending because the page was not fetchable during initial verification.
