@@ -104,6 +104,22 @@ def test_inline_code_continuation_resolves_canonical_plan():
 @pytest.mark.parametrize(
     "instruction",
     [
+        "`пусть инженер исполняет план",
+        "пусть инженер исполняет план`",
+        "```пусть инженер исполняет план```",
+        "``пусть инженер исполняет план``",
+        "`пусть инженер `исполняет` план`",
+        "`пусть инженер исполняет план, если его потом утвердят`",
+        "`пусть инженер исполняет план` после согласования",
+    ],
+)
+def test_malformed_or_conditional_inline_code_does_not_authorize_plan(instruction):
+    assert not _module().is_engineering_execution_continuation(instruction)
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
         "пусть инженер выполнит план, если его потом утвердят",
         "пусть инженер выполнит план, но не сейчас",
         "инженер, начинай расследование нового инцидента",
