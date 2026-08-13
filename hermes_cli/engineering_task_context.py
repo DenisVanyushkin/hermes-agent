@@ -197,8 +197,20 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def is_engineering_execution_continuation(text: str) -> bool:
+def _normalize_continuation_text(text: str) -> str:
     normalized = " ".join(str(text or "").casefold().replace("ё", "е").split())
+    if (
+        len(normalized) >= 2
+        and normalized.startswith("`")
+        and normalized.endswith("`")
+        and normalized.count("`") == 2
+    ):
+        return normalized[1:-1].strip()
+    return normalized
+
+
+def is_engineering_execution_continuation(text: str) -> bool:
+    normalized = _normalize_continuation_text(text)
     if "?" in normalized:
         return False
     return any(pattern.fullmatch(normalized) for pattern in _CONTINUATION_PATTERNS)

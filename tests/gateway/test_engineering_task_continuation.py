@@ -81,6 +81,26 @@ def test_future_tense_continuation_resolves_canonical_plan():
     assert envelope.task_text == plan
 
 
+def test_inline_code_continuation_resolves_canonical_plan():
+    plan = _long_plan()
+    instruction = "`пусть инженер исполняет план`"
+
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction=instruction,
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan, "id": 93308},
+        ],
+        session_id="session-inline-code",
+        history_session_id="session-inline-code",
+    )
+
+    assert envelope.resolution_status == "resolved"
+    assert envelope.source_kind == "approved_plan"
+    assert envelope.task_text == plan
+    assert envelope.operator_instruction == instruction
+
+
 @pytest.mark.parametrize(
     "instruction",
     [
