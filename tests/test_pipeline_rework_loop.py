@@ -320,6 +320,54 @@ def test_engineer_fail_closed_reason_keeps_invalid_engineer_output_for_malformed
     assert module._engineer_fail_closed_reason(snapshot) == "invalid_engineer_output"
 
 
+@pytest.mark.parametrize(
+    ("evaluation_status", "overrides"),
+    [
+        (
+            "blocked",
+            {
+                "status": "succeeded",
+                "blockers": ["manual intervention required"],
+                "requires_review": True,
+                "next_action": "review",
+            },
+        ),
+        (
+            "needs_escalation",
+            {
+                "status": "succeeded",
+                "requires_review": False,
+                "next_action": "escalate",
+            },
+        ),
+    ],
+)
+def test_no_material_changes_does_not_override_blocked_or_escalated_engineer_result(
+    evaluation_status: str,
+    overrides: dict[str, object],
+) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    snapshot = SimpleNamespace(
+        planned_steps=[
+            SimpleNamespace(
+                runner_result={
+                    "status": "succeeded",
+                    "structured_output": _engineer_output(
+                        validation_status="valid",
+                        **overrides,
+                    ),
+                },
+                evaluation_result={"status": evaluation_status},
+            )
+        ]
+    )
+
+    assert module._engineer_fail_closed_reason(
+        snapshot,
+        no_material_changes_confirmed=True,
+    ) == "engineer_reported_blocked"
+
+
 def test_blocked_final_response_text_handles_missing_structured_output() -> None:
     module = importlib.import_module("hermes_cli.pipeline_rework_loop")
 
@@ -2863,6 +2911,45 @@ def test_git_gate_no_material_changes_can_skip_reviewer_and_allow_completion(tmp
     assert result.completion_allowed is True
     assert result.candidate_complete is True
     assert result.user_action_required is False
+    assert result.blocked_reason is None
+
+
+def test_git_gate_no_material_changes_overrides_engineer_review_request(tmp_path: Path) -> None:
+    module = importlib.import_module("hermes_cli.pipeline_rework_loop")
+    repo_root, loaded_specs = _loaded_specs(tmp_path)
+    git_repo = _init_git_repo(tmp_path)
+    calls: list[str] = []
+
+    def _executor(request, _runtime_plan):
+        calls.append(request.subagent_id)
+        return {
+            "output_text": "ok",
+            "completion_reason": "completed",
+            "execution_status": "completed",
+            "raw_metadata": {
+                "structured_output": _engineer_output(
+                    status="succeeded",
+                    requires_review=True,
+                    next_action="review",
+                )
+            },
+        }
+
+    result = module.execute_bounded_rework_loop(
+        config=_config(),
+        session=_session(),
+        loaded_specs=loaded_specs,
+        runtime_factory=RuntimeFactory(repo_root=repo_root),
+        runner=SubagentRunner(executor=_executor),
+        user_message="Inspect the repository without changing it",
+        repo_path=str(git_repo),
+    )
+
+    assert calls == ["hermes_engineer_core"]
+    assert result.git_gate["material_change_status"] == "no_material_changes"
+    assert result.reviewer_packet["packet_status"] == "review_not_required"
+    assert result.completion_allowed is True
+    assert result.candidate_complete is True
     assert result.blocked_reason is None
 
 

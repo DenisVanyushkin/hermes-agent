@@ -425,6 +425,10 @@ def execute_bounded_rework_loop(
         engineer_fail_closed_reason = _engineer_fail_closed_reason(
             current_snapshot,
             material_changes_present=material_changes_present,
+            no_material_changes_confirmed=bool(
+                git_result is not None
+                and git_result.status == "no_material_changes"
+            ),
         )
         if engineer_fail_closed_reason is not None:
             # git-primary: a material diff already returned None above, so we only
@@ -4325,7 +4329,12 @@ def _is_retryable_test_reason(reason: str | None) -> bool:
     return reason in _RETRYABLE_TEST_REASONS
 
 
-def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_present: bool = False) -> str | None:
+def _engineer_fail_closed_reason(
+    state_snapshot: Any,
+    *,
+    material_changes_present: bool = False,
+    no_material_changes_confirmed: bool = False,
+) -> str | None:
     planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
     if not planned_steps:
         return "engineer_result_missing"
@@ -4355,6 +4364,21 @@ def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_presen
         return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
         if material_changes_present:
+            return None
+        if (
+            no_material_changes_confirmed
+            and evaluation_status == "needs_review"
+            and structured_output.get("validation_status") == "valid"
+            and structured_output.get("status") == "succeeded"
+            and structured_output.get("requires_review") is True
+            and structured_output.get("next_action") == "review"
+        ):
+            # The engineer may conservatively request review even after a
+            # read-only inspection. Once the host-side git gate has proved that
+            # HEAD and the working tree are unchanged, there is no candidate
+            # delta for a reviewer to inspect. Treat the successful result as a
+            # completed read-only run; genuine blocked/failed envelopes and
+            # runs without a conclusive git snapshot still fail closed.
             return None
         # A schema-valid envelope that self-reports it cannot proceed (blocked /
         # needs_review / needs_escalation) is not the same failure as a malformed
