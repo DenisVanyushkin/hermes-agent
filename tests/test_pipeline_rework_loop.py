@@ -2172,6 +2172,7 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
     repo_root, loaded_specs = _loaded_specs(tmp_path)
     git_repo = _init_git_repo(tmp_path)
     engineer_messages: list[str] = []
+    reviewer_messages: list[str] = []
     reviewer_packets: list[dict[str, object]] = []
     first_request = {"seen": False}
 
@@ -2198,6 +2199,7 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
         }
 
     def _reviewer_executor(request, _runtime_plan):
+        reviewer_messages.append(request.input_messages[0]["content"])
         reviewer_packets.append(dict(request.metadata["reviewer_packet"]["safe_packet"]))
         if len(reviewer_packets) == 1:
             return {
@@ -2221,6 +2223,11 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
             "raw_metadata": {"structured_output": _reviewer_output(blockers=[])},
         }
 
+    original_task = (
+        "# Задача для инженера\n"
+        + ("И" * 12_800)
+        + "\nPOST_4000_SENTINEL: процедура дисквалификации обязательна"
+    )
     result = module.execute_bounded_rework_loop(
         config={
             "pipelines": {
@@ -2240,7 +2247,7 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
         loaded_specs=loaded_specs,
         runtime_factory=RuntimeFactory(repo_root=repo_root),
         runner=SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
-        user_message="Implement bounded rework loop",
+        user_message=original_task,
         repo_path=str(git_repo),
         allow_completion_after_review=True,
         controlled_runtime_context={
@@ -2252,6 +2259,7 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
     )
 
     assert len(engineer_messages) == 2
+    assert len(reviewer_messages) == 2
     assert len(reviewer_packets) == 2
     assert result.completion_allowed is True
     assert result.reviewer_packet["safe_packet"]["git"]["changed_files"] == ["feature.txt"]
@@ -2265,6 +2273,14 @@ def test_rework_context_and_reviewer_packet_rebuild_are_structured_and_cumulativ
     assert result.appended_rework_context[0]["reviewer_packet_summary"]["changed_files"] == ["feature.txt"]
     assert '"reviewer_verdict": "blocked"' in engineer_messages[1]
     assert '"reviewer_blockers": [' in engineer_messages[1]
+    assert all("POST_4000_SENTINEL" in message for message in engineer_messages)
+    assert all("POST_4000_SENTINEL" in message for message in reviewer_messages)
+    task_hashes = {
+        packet["task_summary_hash"]
+        for packet in reviewer_packets
+    }
+    assert task_hashes == {module._stable_text_hash(original_task)}
+    assert module._stable_text_hash("ок, пусть инженер исполняет") not in task_hashes
 
 
 

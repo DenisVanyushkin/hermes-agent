@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import importlib
 
+from hermes_cli.pipeline_router import RouterDecision
+
 
 def _module():
     return importlib.import_module("hermes_cli.engineering_task_context")
@@ -445,3 +447,239 @@ def test_legacy_transfer_of_version_to_archive_is_not_handoff_ready():
 
     assert envelope.resolution_status == "missing_approved_plan"
     assert envelope.task_text is None
+
+
+def test_gateway_builds_task_from_raw_operator_text_not_slack_parent_quote():
+    run = importlib.import_module("gateway.run")
+    plan = _long_plan()
+    decision = RouterDecision(
+        pipeline_session_id="pipeline-1",
+        router_subagent_id="router",
+        status="selected",
+        selected_pipeline_id="engineering_review_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.98,
+        reasoning_summary="engineering continuation",
+        fallback_safe=False,
+    )
+
+    context = run._resolve_gateway_engineering_task_context(
+        router_decision=decision,
+        operator_text="ок, пусть инженер исполняет",
+        enriched_message=(
+            '[Replying to: "Cronjob Response ... Следующие шаги: Создай"]\n\n'
+            "ок, пусть инженер исполняет"
+        ),
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan, "id": 93308},
+        ],
+        session_id="session-live",
+    )
+
+    assert context["task_text"] == plan
+    assert context["operator_instruction"] == "ок, пусть инженер исполняет"
+    assert "Cronjob Response" not in context["task_text"]
+
+
+def test_gateway_does_not_build_engineering_context_for_other_pipeline():
+    run = importlib.import_module("gateway.run")
+    decision = RouterDecision(
+        pipeline_session_id="pipeline-2",
+        router_subagent_id="router",
+        status="selected",
+        selected_pipeline_id="recruiter_decision_support_pipeline",
+        fallback_pipeline_id="default_conversation_pipeline",
+        confidence=0.98,
+        reasoning_summary="recruiter request",
+        fallback_safe=False,
+    )
+
+    context = run._resolve_gateway_engineering_task_context(
+        router_decision=decision,
+        operator_text="оцени вакансию",
+        enriched_message="оцени вакансию",
+        history=[],
+        session_id="session-recruiter",
+    )
+
+    assert context is None
+
+
+def test_engineering_helper_uses_resolved_task_instead_of_confirmation(monkeypatch):
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    plan = _long_plan()
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="ок, пусть инженер исполняет",
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan},
+        ],
+        session_id="session-helper",
+        history_session_id="session-helper",
+    )
+    captured = {}
+
+    def _loop(**kwargs):
+        captured.update(kwargs)
+        return {"status": "executed"}
+
+    monkeypatch.setattr(helpers, "execute_bounded_rework_loop", _loop)
+
+    result = helpers.execute_engineering_review_helper(
+        config={"pipelines": {"execution": {"mode": "disabled"}}},
+        session=type("Session", (), {"session_id": "session-helper"})(),
+        loaded_specs=object(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message="ок, пусть инженер исполняет",
+        engineering_task_context=envelope.to_dict(),
+    )
+
+    assert result == {"status": "executed"}
+    assert captured["user_message"] == plan
+    assert "ок, пусть инженер исполняет" not in captured["user_message"]
+
+
+def test_engineering_helper_preserves_enriched_message_for_direct_request(monkeypatch):
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    raw_request = "Исправь parser.py"
+    enriched_request = (
+        '[Replying to: "предыдущая ошибка parser"]\n\n'
+        "[The user sent a document attachment: trace.log]\n\n"
+        + raw_request
+    )
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction=raw_request,
+        history=[],
+        session_id="session-direct",
+        history_session_id="session-direct",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        helpers,
+        "execute_bounded_rework_loop",
+        lambda **kwargs: captured.update(kwargs) or {"status": "executed"},
+    )
+
+    helpers.execute_engineering_review_helper(
+        config={"pipelines": {"execution": {"mode": "disabled"}}},
+        session=type("Session", (), {"session_id": "session-direct"})(),
+        loaded_specs=object(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message=enriched_request,
+        engineering_task_context=envelope.to_dict(),
+    )
+
+    assert captured["user_message"] == enriched_request
+
+
+def test_engineering_helper_blocks_unresolved_context_before_loop(monkeypatch):
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    called = {"value": False}
+
+    def _loop(**_kwargs):
+        called["value"] = True
+        raise AssertionError("loop must not run")
+
+    monkeypatch.setattr(helpers, "execute_bounded_rework_loop", _loop)
+
+    result = helpers.execute_engineering_review_helper(
+        config={"pipelines": {"execution": {"mode": "disabled"}}},
+        session=object(),
+        loaded_specs=object(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message="пусть инженер исполняет",
+        engineering_task_context={
+            "schema_version": "engineering_task_envelope.v1",
+            "resolution_status": "missing_approved_plan",
+            "source_kind": "approved_plan",
+            "task_text": None,
+            "operator_instruction": "пусть инженер исполняет",
+            "source_session_id": "session-helper",
+            "source_message_id": None,
+            "task_sha256": None,
+            "task_chars": 0,
+        },
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "engineering_task_missing_approved_plan"
+    assert called["value"] is False
+
+
+def test_engineering_helper_blocks_tampered_task_hash(monkeypatch):
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    monkeypatch.setattr(
+        helpers,
+        "execute_bounded_rework_loop",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("loop must not run")),
+    )
+
+    result = helpers.execute_engineering_review_helper(
+        config={"pipelines": {"execution": {"mode": "disabled"}}},
+        session=object(),
+        loaded_specs=object(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message="пусть инженер исполняет",
+        engineering_task_context={
+            "schema_version": "engineering_task_envelope.v1",
+            "resolution_status": "resolved",
+            "source_kind": "approved_plan",
+            "task_text": "# План для инженера\nподменён",
+            "operator_instruction": "пусть инженер исполняет",
+            "source_session_id": "session-helper",
+            "source_message_id": "42",
+            "task_sha256": "0" * 64,
+            "task_chars": 30,
+        },
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "engineering_task_context_invalid"
+
+
+def test_engineering_helper_blocks_envelope_from_another_session(monkeypatch):
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    plan = _long_plan()
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="пусть инженер исполняет",
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan},
+        ],
+        session_id="session-A",
+        history_session_id="session-A",
+    )
+    monkeypatch.setattr(
+        helpers,
+        "execute_bounded_rework_loop",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("loop must not run")),
+    )
+
+    result = helpers.execute_engineering_review_helper(
+        config={"pipelines": {"execution": {"mode": "disabled"}}},
+        session=type("Session", (), {"session_id": "session-B"})(),
+        loaded_specs=object(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message="пусть инженер исполняет",
+        engineering_task_context=envelope.to_dict(),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "engineering_task_session_mismatch"
+
+
+def test_queued_raw_operator_text_survives_slack_enrichment():
+    run = importlib.import_module("gateway.run")
+    raw = "ок, пусть инженер исполняет"
+    enriched = '[Replying to: "Cronjob Response"]\n\n' + raw
+
+    assert run._operator_reply_text(enriched, raw) == raw
+    assert _module().is_engineering_execution_continuation(
+        run._operator_reply_text(enriched, raw)
+    )

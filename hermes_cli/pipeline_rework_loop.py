@@ -377,7 +377,8 @@ def execute_bounded_rework_loop(
                     test_summary=current_test_summary,
                     engineer_evaluation_status=_step_evaluation_status(current_snapshot.planned_steps[0]),
                     tracked_diff=_working_tree_diff(repo_path, max_chars=40000, since_ref="HEAD"),
-                )
+                ),
+                original_task_hash=_stable_text_hash(user_message),
             )
         material_changes_present = bool(git_result.material_changes_present) if git_result is not None else False
         test_blocked_reason = current_test_summary.get("blocked_reason")
@@ -3580,12 +3581,18 @@ def _absent_reviewer_packet() -> dict[str, Any]:
     }
 
 
-def _reviewer_packet_metadata(*, packet: Any) -> dict[str, Any]:
+def _reviewer_packet_metadata(
+    *,
+    packet: Any,
+    original_task_hash: str | None = None,
+) -> dict[str, Any]:
     safe_packet = packet.to_safe_dict()
     task_summary = safe_packet.get("task_summary")
     if task_summary:
         safe_packet["task_summary"] = "[redacted]"
-        safe_packet["task_summary_hash"] = _stable_text_hash(str(task_summary))
+        safe_packet["task_summary_hash"] = (
+            original_task_hash or _stable_text_hash(str(task_summary))
+        )
     return {
         "present": True,
         "packet_status": safe_packet.get("packet_status"),

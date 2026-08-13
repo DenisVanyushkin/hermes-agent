@@ -51,6 +51,7 @@ def observe_gateway_turn(
     selected_model: str | None = None,
     logger: logging.Logger | None = None,
     conversation_context: str | None = None,
+    engineering_task_context: dict[str, Any] | None = None,
     db: SessionDB | None = None,
 ) -> OrchestratorObserveReport | None:
     del selected_provider, selected_model
@@ -147,6 +148,10 @@ def observe_gateway_turn(
         )
         if conversation_context:
             helper_execution_context["conversation_context"] = conversation_context
+        if engineering_task_context is not None:
+            helper_execution_context["engineering_task_context"] = dict(
+                engineering_task_context
+            )
         allow_test_execution = True
         allow_registered_helper_selection = True
     pipeline_execution_controller = evaluate_pipeline_execution_controller(

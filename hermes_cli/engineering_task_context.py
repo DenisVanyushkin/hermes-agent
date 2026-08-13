@@ -78,6 +78,57 @@ class EngineeringTaskEnvelope:
         return asdict(self)
 
 
+def validate_engineering_task_context(
+    value: Mapping[str, Any] | EngineeringTaskEnvelope | None,
+) -> tuple[EngineeringTaskEnvelope | None, str | None]:
+    """Validate an envelope crossing the gateway/helper trust boundary."""
+
+    if isinstance(value, EngineeringTaskEnvelope):
+        envelope = value
+    elif isinstance(value, Mapping):
+        try:
+            envelope = EngineeringTaskEnvelope(
+                schema_version=str(value.get("schema_version") or ""),
+                resolution_status=str(value.get("resolution_status") or ""),
+                source_kind=str(value.get("source_kind") or ""),
+                task_text=(
+                    str(value["task_text"])
+                    if value.get("task_text") is not None
+                    else None
+                ),
+                operator_instruction=str(value.get("operator_instruction") or ""),
+                source_session_id=str(value.get("source_session_id") or ""),
+                source_message_id=(
+                    str(value["source_message_id"])
+                    if value.get("source_message_id") is not None
+                    else None
+                ),
+                task_sha256=(
+                    str(value["task_sha256"])
+                    if value.get("task_sha256") is not None
+                    else None
+                ),
+                task_chars=int(value.get("task_chars") or 0),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None, "engineering_task_context_invalid"
+    else:
+        return None, "engineering_task_context_invalid"
+
+    if envelope.schema_version != SCHEMA_VERSION:
+        return None, "engineering_task_context_invalid"
+    if envelope.resolution_status != "resolved":
+        return None, f"engineering_task_{envelope.resolution_status or 'context_invalid'}"
+    if envelope.source_kind not in {"direct_request", "approved_plan"}:
+        return None, "engineering_task_context_invalid"
+    task_text = envelope.task_text
+    if not task_text or len(task_text) > MAX_APPROVED_TASK_CHARS:
+        return None, "engineering_task_context_invalid"
+    if envelope.task_chars != len(task_text) or envelope.task_sha256 != _sha256(task_text):
+        return None, "engineering_task_context_invalid"
+    return envelope, None
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

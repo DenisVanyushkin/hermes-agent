@@ -1541,6 +1541,35 @@ def _pipeline_conversation_context(history):
     return joined
 
 
+def _resolve_gateway_engineering_task_context(
+    *,
+    router_decision: Any,
+    operator_text: str,
+    enriched_message: str,
+    history: List[Dict[str, Any]],
+    session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Build an engineering task envelope only for the selected pipeline."""
+
+    if (
+        getattr(router_decision, "status", None) != "selected"
+        or getattr(router_decision, "selected_pipeline_id", None)
+        != "engineering_review_pipeline"
+    ):
+        return None
+
+    from hermes_cli.engineering_task_context import resolve_engineering_task_context
+
+    envelope = resolve_engineering_task_context(
+        operator_instruction=operator_text,
+        enriched_message=enriched_message,
+        history=history,
+        session_id=session_id,
+        history_session_id=session_id,
+    )
+    return envelope.to_dict()
+
+
 def _uses_telegram_observed_group_context(channel_prompt: Optional[str]) -> bool:
     """Return True for Telegram group turns that may include observed chatter.
 
@@ -26727,6 +26756,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         # Гейты ниже разбирают текст оператора, а не склейку для модели.
         _operator_text = _operator_reply_text(message, raw_message)
+        _engineering_task_context = _resolve_gateway_engineering_task_context(
+            router_decision=router_decision,
+            operator_text=_operator_text,
+            enriched_message=message,
+            history=history,
+            session_id=session_id,
+        )
 
         # Upstream-sync operator decisions must reach the upstream-sync skill
         # (Mode B), not the pipeline orchestrator below - which runs observe-only
@@ -26868,6 +26904,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         config=user_config,
                         user_message=message,
                         conversation_context=_pipeline_conversation_context(history),
+                        engineering_task_context=_engineering_task_context,
                         session_id=session_id,
                         session_key=session_key,
                         platform=platform_key,
@@ -28568,6 +28605,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    raw_message=(
+                        getattr(pending_event, "text", None)
+                        if pending_event is not None
+                        else pending
+                    ),
                     message_type=next_message_type,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
