@@ -43,6 +43,27 @@ def test_reactivate_returns_suspended_source_to_probation_and_resets_only_trial_
     assert event["reason"] == "endpoint repaired"
 
 
+def test_reactivate_refuses_candidate_not_promoted_in_reviewed_registry(tmp_path):
+    registry = tmp_path / "sources.yaml"
+    registry.write_text(
+        "sources:\n  - id: future_source\n    title: Future\n    status: candidate\n",
+        encoding="utf-8",
+    )
+    state_dir = tmp_path / "state"
+    health.main([
+        "--registry", str(registry), "--state-dir", str(state_dir), "suspend", "future_source",
+        "--reason", "technical endpoint unavailable",
+    ])
+
+    with pytest.raises(SystemExit) as exc_info:
+        health.main([
+            "--registry", str(registry), "--state-dir", str(state_dir), "reactivate", "future_source",
+            "--reason", "endpoint repaired",
+        ])
+
+    assert exc_info.value.code == 2
+
+
 def test_transition_requires_nonempty_reason_and_known_source():
     with pytest.raises(ValueError, match="reason"):
         health.apply_transition({"apa": {}}, "apa", "suspend", "", now=NOW)

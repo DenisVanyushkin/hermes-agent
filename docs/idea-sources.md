@@ -107,6 +107,10 @@ python3 scripts/idea_source_health.py --state-dir "$HERMES_HOME/state" reactivat
 
 `suspend` не удаляет историю. `reactivate` всегда начинает новый probation
 цикл и требует причину — нельзя одной кнопкой вернуть источник в `active`.
+Исключение: источник, который в reviewed registry всё ещё `candidate`, нельзя
+продвинуть через последовательность `suspend` → `reactivate`; сначала нужно
+проверить endpoint/parser и отдельным reviewed change перевести его в
+`probation`.
 
 ## Локальная проверка
 

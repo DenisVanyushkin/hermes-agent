@@ -61,8 +61,13 @@ def load_registry_source_states(registry_path: Path) -> dict[str, dict]:
         if not isinstance(source, dict) or not str(source.get("id") or "").strip():
             continue
         source_id = str(source["id"])
+        reviewed_status = str(source.get("status") or "candidate")
         seeded[source_id] = {
-            "effective_status": str(source.get("status") or "candidate"),
+            # Registry admission is authoritative.  Keeping it in runtime state
+            # prevents a manual suspend/reactivate toggle from promoting a
+            # reviewed candidate to probation behind code review's back.
+            "reviewed_status": reviewed_status,
+            "effective_status": reviewed_status,
             "runs": 0,
             "successful_runs": 0,
             "items_seen": 0,
@@ -72,6 +77,20 @@ def load_registry_source_states(registry_path: Path) -> dict[str, dict]:
             "recent_results": [],
         }
     return seeded
+
+
+def merge_registry_and_runtime_state(registry_state: dict, runtime_state: dict) -> dict:
+    """Hydrate persisted health records with authoritative registry admission."""
+    merged = {source_id: dict(record) for source_id, record in registry_state.items()}
+    for source_id, saved_record in runtime_state.items():
+        if source_id not in merged or not isinstance(saved_record, dict):
+            merged[source_id] = saved_record
+            continue
+        record = merged[source_id]
+        record.update(saved_record)
+        # Do not trust stale/tampered runtime state to rewrite reviewed status.
+        record["reviewed_status"] = registry_state[source_id]["reviewed_status"]
+    return merged
 
 
 def apply_transition(
@@ -100,6 +119,9 @@ def apply_transition(
     else:
         if previous_status != "suspended":
             raise ValueError("only suspended sources can be reactivated")
+        if record.get("reviewed_status") == "candidate":
+            raise ValueError("candidate source must be reviewed into probation before reactivation")
+        reviewed_status = record.get("reviewed_status")
         # Reactivation starts a fresh probation evaluation. Historical
         # transitions remain in idea_source_events.jsonl; counters are trial
         # metrics rather than the permanent source-history ledger.
@@ -113,6 +135,8 @@ def apply_transition(
             "duplicate_items": 0,
             "recent_results": [],
         }
+        if reviewed_status is not None:
+            record["reviewed_status"] = str(reviewed_status)
         updated[source_id] = record
         event_name = "reactivated"
     event = {
@@ -146,8 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         transition.add_argument("source_id")
         transition.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
-    state = load_registry_source_states(args.registry)
-    state.update(load_state(args.state_dir))
+    registry_state = load_registry_source_states(args.registry)
+    state = merge_registry_and_runtime_state(registry_state, load_state(args.state_dir))
     if args.command == "status":
         print(json.dumps(state, ensure_ascii=False, indent=2))
         return 0
