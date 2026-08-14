@@ -130,7 +130,7 @@ def execute_engineering_review_helper(
             )
         if envelope.source_session_id != str(getattr(session, "session_id", "") or ""):
             return _blocked_helper_payload("engineering_task_session_mismatch")
-        if envelope.source_kind == "approved_plan":
+        if envelope.source_kind in {"approved_plan", "external_reference"}:
             resolved_user_message = envelope.task_text or ""
             resolved_operator_instruction = envelope.operator_instruction
     elif is_engineering_execution_continuation(user_message):

@@ -972,6 +972,10 @@ class SlackAdapter(BasePlatformAdapter):
         # Multi-workspace support
         self._team_clients: Dict[str, Any] = {}  # team_id → WebClient
         self._team_bot_user_ids: Dict[str, str] = {}  # team_id → bot_user_id
+        # Slack workspace domain (the slug in <domain>.slack.com) → team_id.
+        # Authenticated auth.test data owns this mapping; permalink text never
+        # chooses a client directly.
+        self._workspace_team_ids: Dict[str, str] = {}
         # channel_id → team_id. Grows with every channel AND every DM the bot
         # sees (DM channel IDs are per-user), so it must be bounded on busy
         # multi-workspace installs. Eviction is safe: entries are re-learned
@@ -1224,6 +1228,12 @@ class SlackAdapter(BasePlatformAdapter):
             self._channel_team.pop(channel_id, None)
         self._trim_oldest_dict_entries(self._channel_team, self._CHANNEL_TEAM_MAX)
         self._trim_oldest_dict_entries(self._channel_teams, self._CHANNEL_TEAM_MAX)
+
+    def resolve_workspace_team_id(self, workspace_domain: str) -> str:
+        """Resolve a permalink workspace slug to an authenticated team id."""
+
+        domain = str(workspace_domain or "").strip().casefold()
+        return self._workspace_team_ids.get(domain, "")
 
     def _start_socket_mode_handler(self) -> None:
         """Start the Slack Socket Mode background task."""
@@ -1945,6 +1955,7 @@ class SlackAdapter(BasePlatformAdapter):
             self._bot_user_id = None
             self._team_clients = {}
             self._team_bot_user_ids = {}
+            self._workspace_team_ids = {}
             self._bot_display_name = None
             self._team_bot_names = {}
 
@@ -1969,10 +1980,20 @@ class SlackAdapter(BasePlatformAdapter):
                 bot_user_id = auth_response.get("user_id", "")
                 bot_name = auth_response.get("user", "unknown")
                 team_name = auth_response.get("team", "unknown")
+                workspace_url = str(auth_response.get("url") or "").strip()
 
                 self._team_clients[team_id] = client
                 self._team_bot_user_ids[team_id] = bot_user_id
                 self._team_bot_names[team_id] = bot_name
+                if workspace_url:
+                    from urllib.parse import urlparse
+
+                    hostname = (urlparse(workspace_url).hostname or "").casefold()
+                    suffix = ".slack.com"
+                    if hostname.endswith(suffix):
+                        workspace_domain = hostname[: -len(suffix)]
+                        if workspace_domain:
+                            self._workspace_team_ids[workspace_domain] = team_id
 
                 # First token always wins as the primary bot user id; we
                 # cleared ``_bot_user_id`` above so this picks up the current

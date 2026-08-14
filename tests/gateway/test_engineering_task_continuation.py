@@ -131,7 +131,7 @@ def test_slack_referenced_engineering_task_requires_context_acquisition(instruct
     assert envelope.operator_instruction == instruction
     assert (
         envelope.source_message_id
-        == "slack:C0B55FPG5B7:1786449672.479599"
+        == "slack:vanyushkinhomelab:C0B55FPG5B7:1786449672.479599"
     )
 
 
@@ -152,8 +152,37 @@ def test_slack_reply_permalink_uses_thread_root_for_context_acquisition():
     assert envelope.resolution_status == "external_context_required"
     assert (
         envelope.source_message_id
-        == "slack:C0B55FPG5B7:1786449672.479599"
+        == "slack:vanyushkinhomelab:C0B55FPG5B7:1786449672.479599"
     )
+
+
+def test_external_reference_context_promotes_to_immutable_task_envelope():
+    module = _module()
+    instruction = (
+        "реализуй план из "
+        "https://vanyushkinhomelab.slack.com/archives/C0B55FPG5B7/"
+        "p1786449672479599"
+    )
+    unresolved = module.resolve_engineering_task_context(
+        operator_instruction=instruction,
+        history=[],
+        session_id="session-external-promotion",
+        history_session_id="session-external-promotion",
+    )
+
+    promoted = module.promote_external_engineering_task_context(
+        unresolved,
+        reference_context="[Thread context]\nPLAN SENTINEL\n[End of thread context]",
+    )
+
+    assert promoted.resolution_status == "resolved"
+    assert promoted.source_kind == "external_reference"
+    assert promoted.source_message_id == unresolved.source_message_id
+    assert instruction in promoted.task_text
+    assert "PLAN SENTINEL" in promoted.task_text
+    validated, error = module.validate_engineering_task_context(promoted)
+    assert error is None
+    assert validated == promoted
 
 
 @pytest.mark.parametrize(
@@ -768,6 +797,47 @@ def test_engineering_helper_uses_resolved_task_instead_of_confirmation(monkeypat
     assert captured["user_message"] == plan
     assert captured["operator_instruction"] == "ок, пусть инженер исполняет"
     assert "ок, пусть инженер исполняет" not in captured["user_message"]
+
+
+def test_engineering_helper_executes_sealed_external_reference_task(monkeypatch):
+    helpers = importlib.import_module("hermes_cli.pipeline_execution_helpers")
+    module = _module()
+    instruction = (
+        "реализуй план из "
+        "https://vanyushkinhomelab.slack.com/archives/C0B55FPG5B7/"
+        "p1786449672479599"
+    )
+    unresolved = module.resolve_engineering_task_context(
+        operator_instruction=instruction,
+        history=[],
+        session_id="session-external-helper",
+        history_session_id="session-external-helper",
+    )
+    envelope = module.promote_external_engineering_task_context(
+        unresolved,
+        reference_context="[Thread context]\nEXTERNAL PLAN SENTINEL",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        helpers,
+        "execute_bounded_rework_loop",
+        lambda **kwargs: captured.update(kwargs) or {"status": "executed"},
+    )
+
+    result = helpers.execute_engineering_review_helper(
+        config={"pipelines": {"execution": {"mode": "disabled"}}},
+        session=type("Session", (), {"session_id": "session-external-helper"})(),
+        loaded_specs=object(),
+        runtime_factory=object(),
+        runner=object(),
+        user_message=instruction,
+        engineering_task_context=envelope.to_dict(),
+    )
+
+    assert result == {"status": "executed"}
+    assert captured["user_message"] == envelope.task_text
+    assert "EXTERNAL PLAN SENTINEL" in captured["user_message"]
+    assert captured["operator_instruction"] == instruction
 
 
 def test_engineering_helper_preserves_enriched_message_for_direct_request(monkeypatch):

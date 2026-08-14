@@ -345,6 +345,7 @@ class TestAppMentionHandler:
                 "user": "testbot",
                 "team_id": "T_FAKE",
                 "team": "FakeTeam",
+                "url": "https://fake-team.slack.com/",
             }
         )
 
@@ -368,6 +369,8 @@ class TestAppMentionHandler:
         assert "app_home_opened" in registered_events
         assert "app_context_changed" in registered_events
         assert "reaction_added" in registered_events
+        assert adapter.resolve_workspace_team_id("fake-team") == "T_FAKE"
+        assert adapter.resolve_workspace_team_id("another-team") == ""
         assert "reaction_removed" in registered_events
         assert "assistant_thread_started" in registered_events
         assert "assistant_thread_context_changed" in registered_events
@@ -4558,4 +4561,3 @@ class TestSlackUserAgent:
         """Module constant matches the HermesAgent/<version> convention used
         elsewhere in the codebase for platform-partner attribution."""
         assert _slack_mod._HERMES_SLACK_USER_AGENT_PREFIX.startswith("HermesAgent/")
-
