@@ -104,6 +104,61 @@ def test_inline_code_continuation_resolves_canonical_plan():
 @pytest.mark.parametrize(
     "instruction",
     [
+        (
+            "в дискуссии "
+            "https://vanyushkinhomelab.slack.com/archives/C0B55FPG5B7/"
+            "p1786449672479599 есть план реализации сервиса получения информации "
+            "для генерации идей. Найди его и пусть инженер реализует этот план"
+        ),
+        (
+            "реализуй план из "
+            "https://vanyushkinhomelab.slack.com/archives/C0B55FPG5B7/"
+            "p1786449672479599"
+        ),
+    ],
+)
+def test_slack_referenced_engineering_task_requires_context_acquisition(instruction):
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction=instruction,
+        history=[],
+        session_id="session-cross-thread-plan",
+        history_session_id="session-cross-thread-plan",
+    )
+
+    assert envelope.resolution_status == "external_context_required"
+    assert envelope.source_kind == "external_reference"
+    assert envelope.task_text is None
+    assert envelope.operator_instruction == instruction
+    assert (
+        envelope.source_message_id
+        == "slack:C0B55FPG5B7:1786449672.479599"
+    )
+
+
+def test_slack_reply_permalink_uses_thread_root_for_context_acquisition():
+    instruction = (
+        "реализуй план из "
+        "https://vanyushkinhomelab.slack.com/archives/C0B55FPG5B7/"
+        "p1786685188838539?thread_ts=1786449672.479599&cid=C0B55FPG5B7"
+    )
+
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction=instruction,
+        history=[],
+        session_id="session-cross-thread-reply",
+        history_session_id="session-cross-thread-reply",
+    )
+
+    assert envelope.resolution_status == "external_context_required"
+    assert (
+        envelope.source_message_id
+        == "slack:C0B55FPG5B7:1786449672.479599"
+    )
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
         "`пусть инженер исполняет план",
         "пусть инженер исполняет план`",
         "```пусть инженер исполняет план```",

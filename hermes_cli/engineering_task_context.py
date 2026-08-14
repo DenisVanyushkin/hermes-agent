@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import re
 from typing import Any, Iterable, Mapping
+from urllib.parse import parse_qs
 
 
 SCHEMA_VERSION = "engineering_task_envelope.v1"
@@ -118,6 +119,11 @@ _DIRECT_REQUEST_RE = re.compile(
     r"разбер(?:ись|аться)|обнов(?:и|ить)|перепиш(?:и|ать)|созд(?:ай|ать)|"
     r"сдел(?:ай|ать)|запуст(?:и|ить)|выполн(?:и|ить)|"
     r"implement|fix|debug|investigate|update|create|run)\b",
+    re.IGNORECASE,
+)
+_SLACK_PERMALINK_RE = re.compile(
+    r"https?://[a-z0-9-]+\.slack\.com/archives/([a-z0-9]+)/p(\d{16})"
+    r"(?P<query>\?[^\s<>\"']*)?",
     re.IGNORECASE,
 )
 
@@ -289,6 +295,28 @@ def resolve_engineering_task_context(
 
     del enriched_message
     instruction = str(operator_instruction or "")
+    slack_reference = _SLACK_PERMALINK_RE.search(instruction)
+    if slack_reference:
+        channel_id = slack_reference.group(1)
+        compact_ts = slack_reference.group(2)
+        query = parse_qs((slack_reference.group("query") or "").lstrip("?"))
+        referenced_thread_ts = (query.get("thread_ts") or [""])[0]
+        thread_ts = (
+            referenced_thread_ts
+            if re.fullmatch(r"\d{10}\.\d{6}", referenced_thread_ts)
+            else f"{compact_ts[:10]}.{compact_ts[10:]}"
+        )
+        return EngineeringTaskEnvelope(
+            schema_version=SCHEMA_VERSION,
+            resolution_status="external_context_required",
+            source_kind="external_reference",
+            task_text=None,
+            operator_instruction=instruction,
+            source_session_id=str(session_id or ""),
+            source_message_id=f"slack:{channel_id.upper()}:{thread_ts}",
+            task_sha256=None,
+            task_chars=0,
+        )
     if not is_engineering_execution_continuation(instruction):
         if not is_concrete_engineering_request(instruction):
             return EngineeringTaskEnvelope(
