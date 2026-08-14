@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -87,13 +88,26 @@ def test_validate_registry_rejects_active_source_that_allows_undated_items():
 def test_candidate_state_enters_probation_when_registry_is_promoted():
     source = active_source()
     source["status"] = "probation"
-    state = {"source_a": {"effective_status": "candidate", "runs": 0}}
+    state = {
+        "source_a": {
+            "effective_status": "candidate",
+            "reviewed_status": "candidate",
+            "runs": 8,
+            "successful_runs": 8,
+            "items_seen": 16,
+            "valid_date_items": 16,
+            "accepted_items": 8,
+            "duplicate_items": 7,
+            "recent_results": [True] * 8,
+        }
+    }
 
     brief, state, _events = collector.collect_sources(
-        [source], lambda _url, _timeout: RSS_FRESH, now=NOW, state={}, seen={}
+        [source], lambda _url, _timeout: RSS_FRESH, now=NOW, state=state, seen={}
     )
     assert brief["signals"] == []
     assert state["source_a"]["effective_status"] == "probation"
+    assert state["source_a"]["runs"] == 1
     assert state["source_a"]["accepted_items"] == 1
 
     second, second_state, _events = collector.collect_sources(
@@ -165,6 +179,33 @@ def test_prior_run_duplicate_counts_toward_lifecycle_disqualification():
     assert updated["source_a"]["duplicate_items"] == 8
     assert updated["source_a"]["effective_status"] == "suspended"
     assert events[-1]["event"] == "suspended"
+
+
+def test_probation_duplicates_do_not_poison_durable_duplicate_ratio_or_suspend():
+    source = active_source()
+    source["status"] = "probation"
+    seen = {"url:https://example.test/fresh": NOW.isoformat()}
+    state = {
+        "source_a": {
+            "effective_status": "probation",
+            "reviewed_status": "probation",
+            "runs": 4,
+            "successful_runs": 4,
+            "items_seen": 9,
+            "valid_date_items": 9,
+            "accepted_items": 2,
+            "duplicate_items": 0,
+            "recent_results": [True] * 4,
+        }
+    }
+
+    _brief, updated, events = collector.collect_sources(
+        [source], lambda _url, _timeout: RSS_FRESH, now=NOW, state=state, seen=seen
+    )
+
+    assert updated["source_a"]["effective_status"] == "probation"
+    assert updated["source_a"]["duplicate_items"] == 0
+    assert not events
 
 
 def test_collect_rejects_old_undated_and_duplicate_items():
@@ -240,7 +281,7 @@ def test_collect_rejects_future_dated_items():
     assert {row["reason"] for row in brief["rejections"]} == {"future_dated", "stale"}
 
 
-def test_collect_reports_degraded_when_sources_partly_fail_without_signals():
+def test_collect_reports_no_signals_when_sources_partly_fail_without_usable_signals():
     good = active_source("good", "health_habits_energy")
     broken = active_source("broken", "finance_purchases_risk")
 
@@ -251,7 +292,7 @@ def test_collect_reports_degraded_when_sources_partly_fail_without_signals():
 
     brief, _state, _events = collector.collect_sources([good, broken], fetch, now=NOW, state={})
 
-    assert brief["run_status"] == "degraded"
+    assert brief["run_status"] == "no_signals"
     assert brief["signals"] == []
     assert brief["source_failures"] == [{"source_id": "broken", "reason": "fetch_failed: TimeoutError"}]
 
@@ -400,11 +441,115 @@ def test_load_usable_brief_refuses_future_dated_brief(tmp_path):
     assert collector.load_usable_brief(tmp_path, now=NOW) is None
 
 
-def test_load_usable_brief_keeps_current_ok_or_degraded_brief(tmp_path):
-    brief = {"run_id": "new", "run_status": "degraded", "signals": [], "collected_at": NOW.isoformat()}
+def test_load_usable_brief_keeps_current_ok_or_degraded_brief_with_signal(tmp_path):
+    brief = {
+        "run_id": "new", "run_status": "degraded",
+        "signals": [{"title": "usable", "url": "https://example.test/usable"}],
+        "collected_at": NOW.isoformat(),
+    }
     (tmp_path / "idea_signal_brief.json").write_text(json.dumps(brief), encoding="utf-8")
 
     assert collector.load_usable_brief(tmp_path, now=NOW) == brief
+
+
+def test_load_usable_brief_refuses_empty_degraded_handoff(tmp_path):
+    brief = {"run_id": "empty", "run_status": "degraded", "signals": [], "collected_at": NOW.isoformat()}
+    (tmp_path / "idea_signal_brief.json").write_text(json.dumps(brief), encoding="utf-8")
+
+    assert collector.load_usable_brief(tmp_path, now=NOW) is None
+
+
+def test_fetch_url_rejects_response_larger_than_byte_ceiling_while_streaming(monkeypatch):
+    class ChunkedResponse:
+        def __init__(self):
+            self.chunks = [b"a" * 3, b"b" * 3]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _size=-1):
+            return self.chunks.pop(0) if self.chunks else b""
+
+    class Opener:
+        def open(self, _request, timeout):
+            assert timeout == 7
+            return ChunkedResponse()
+
+    monkeypatch.setattr(collector, "MAX_RESPONSE_BYTES", 5)
+    monkeypatch.setattr(collector, "build_opener", lambda _handler: Opener())
+    monkeypatch.setattr(collector.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+
+    with pytest.raises(ValueError, match="response exceeds"):
+        collector.fetch_url("https://example.test/feed.xml", 7)
+
+
+@pytest.mark.parametrize("target", [
+    "http://example.test/feed.xml",
+    "https://127.0.0.1/feed.xml",
+    "https://10.0.0.8/feed.xml",
+    "https://169.254.2.3/feed.xml",
+    "https://[::1]/feed.xml",
+])
+def test_redirect_destinations_must_remain_public_https(target, monkeypatch):
+    monkeypatch.setattr(collector.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    handler = collector.ValidatedRedirectHandler()
+
+    with pytest.raises(ValueError, match="unsafe redirect destination"):
+        handler.redirect_request(collector.Request("https://example.test/feed.xml"), None, 302, "Found", {}, target)
+
+
+def test_collector_lock_preserves_manual_suspension_written_while_collection_is_pending(tmp_path, monkeypatch):
+    health_path = Path(__file__).resolve().parents[2] / "scripts" / "idea_source_health.py"
+    health_spec = importlib.util.spec_from_file_location("idea_source_health_for_lock_test", health_path)
+    health = importlib.util.module_from_spec(health_spec)
+    assert health_spec and health_spec.loader
+    health_spec.loader.exec_module(health)
+
+    registry = tmp_path / "sources.yaml"
+    registry.write_text("""sources:
+  - id: source_a
+    title: source_a
+    basket: health
+    channel: rss
+    feed_url: https://source_a.test/feed.xml
+    status: active
+    requires_published_date: true
+""", encoding="utf-8")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "idea_source_health.json").write_text(json.dumps({"source_a": {"effective_status": "active"}}), encoding="utf-8")
+    collector_loaded = threading.Event()
+    allow_collector_persist = threading.Event()
+    health_finished = threading.Event()
+
+    def delayed_collect(_sources, *, state, seen, **_kwargs):
+        collector_loaded.set()
+        assert allow_collector_persist.wait(timeout=2)
+        return {"run_id": "race", "run_status": "no_signals", "signals": [], "emitted_seen": seen}, state, []
+
+    monkeypatch.setattr(collector, "collect_sources", delayed_collect)
+    collector_thread = threading.Thread(target=collector.run, args=(registry, state_dir))
+    collector_thread.start()
+    assert collector_loaded.wait(timeout=2)
+
+    def suspend():
+        health.main(["--registry", str(registry), "--state-dir", str(state_dir), "suspend", "source_a", "--reason", "operator action"])
+        health_finished.set()
+
+    health_thread = threading.Thread(target=suspend)
+    health_thread.start()
+    assert not health_finished.wait(timeout=0.1)
+    allow_collector_persist.set()
+    collector_thread.join(timeout=2)
+    health_thread.join(timeout=2)
+
+    assert not collector_thread.is_alive()
+    assert not health_thread.is_alive()
+    persisted = json.loads((state_dir / "idea_source_health.json").read_text(encoding="utf-8"))
+    assert persisted["source_a"]["effective_status"] == "suspended"
 
 
 def test_checked_in_registry_is_valid():

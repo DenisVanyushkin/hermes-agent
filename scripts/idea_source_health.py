@@ -15,6 +15,11 @@ from pathlib import Path
 
 import yaml
 
+try:
+    from idea_signal_state import state_lock
+except ModuleNotFoundError:  # Imported as scripts.idea_source_health in tests.
+    from scripts.idea_signal_state import state_lock
+
 
 ALLOWED_MANUAL_ACTIONS = frozenset({"suspend", "reactivate"})
 
@@ -85,6 +90,10 @@ def merge_registry_and_runtime_state(registry_state: dict, runtime_state: dict) 
     for source_id, saved_record in runtime_state.items():
         if source_id not in merged or not isinstance(saved_record, dict):
             merged[source_id] = saved_record
+            continue
+        if saved_record.get("reviewed_status") != registry_state[source_id]["reviewed_status"]:
+            # A reviewed admission change (including active -> candidate)
+            # invalidates old trial counters and effective admission.
             continue
         record = merged[source_id]
         record.update(saved_record)
@@ -170,18 +179,19 @@ def main(argv: list[str] | None = None) -> int:
         transition.add_argument("source_id")
         transition.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
-    registry_state = load_registry_source_states(args.registry)
-    state = merge_registry_and_runtime_state(registry_state, load_state(args.state_dir))
-    if args.command == "status":
-        print(json.dumps(state, ensure_ascii=False, indent=2))
+    with state_lock(args.state_dir):
+        registry_state = load_registry_source_states(args.registry)
+        state = merge_registry_and_runtime_state(registry_state, load_state(args.state_dir))
+        if args.command == "status":
+            print(json.dumps(state, ensure_ascii=False, indent=2))
+            return 0
+        try:
+            updated, event = apply_transition(state, args.source_id, args.command, args.reason)
+        except ValueError as exc:
+            parser.error(str(exc))
+        persist_transition(args.state_dir, updated, event)
+        print(json.dumps(event, ensure_ascii=False, indent=2))
         return 0
-    try:
-        updated, event = apply_transition(state, args.source_id, args.command, args.reason)
-    except ValueError as exc:
-        parser.error(str(exc))
-    persist_transition(args.state_dir, updated, event)
-    print(json.dumps(event, ensure_ascii=False, indent=2))
-    return 0
 
 
 if __name__ == "__main__":

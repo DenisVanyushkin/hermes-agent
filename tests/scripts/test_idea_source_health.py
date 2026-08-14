@@ -64,6 +64,39 @@ def test_reactivate_refuses_candidate_not_promoted_in_reviewed_registry(tmp_path
     assert exc_info.value.code == 2
 
 
+def test_reviewed_candidate_demotion_resets_stale_active_admission():
+    registry_state = {
+        "apa": {
+            "reviewed_status": "candidate",
+            "effective_status": "candidate",
+            "runs": 0,
+            "successful_runs": 0,
+            "items_seen": 0,
+            "valid_date_items": 0,
+            "accepted_items": 0,
+            "duplicate_items": 0,
+            "recent_results": [],
+        }
+    }
+    runtime_state = {
+        "apa": {
+            "reviewed_status": "active",
+            "effective_status": "active",
+            "runs": 17,
+            "successful_runs": 17,
+            "items_seen": 34,
+            "valid_date_items": 34,
+            "accepted_items": 20,
+            "duplicate_items": 4,
+            "recent_results": [True] * 10,
+        }
+    }
+
+    merged = health.merge_registry_and_runtime_state(registry_state, runtime_state)
+
+    assert merged["apa"] == registry_state["apa"]
+
+
 def test_transition_requires_nonempty_reason_and_known_source():
     with pytest.raises(ValueError, match="reason"):
         health.apply_transition({"apa": {}}, "apa", "suspend", "", now=NOW)

@@ -13,16 +13,18 @@ never configures or changes a cron job itself.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Iterable
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 # ``defusedxml`` is only installed with the optional WeCom extra in some
 # Hermes environments. Reject DTD/entity declarations before using stdlib XML
@@ -30,6 +32,11 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import yaml
+
+try:
+    from idea_signal_state import state_lock
+except ModuleNotFoundError:  # Imported as scripts.idea_signal_collector in tests.
+    from scripts.idea_signal_state import state_lock
 
 ALLOWED_STATUSES = frozenset({"candidate", "probation", "active", "degraded", "suspended", "retired"})
 ELIGIBLE_STATUSES = frozenset({"probation", "active", "degraded"})
@@ -39,6 +46,8 @@ MAX_ITEMS_PER_SOURCE = 2
 MAX_ITEMS_PER_BASKET = 2
 MAX_SIGNALS_PER_RUN = 10
 FRESHNESS_DAYS = 7
+MAX_RESPONSE_BYTES = 1_000_000
+RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 REQUIRED_BASKETS = frozenset({
     "health_habits_energy",
     "finance_purchases_risk",
@@ -256,15 +265,81 @@ def request_headers(url: str) -> dict[str, str]:
     }
 
 
+def _is_public_address(address: str) -> bool:
+    parsed = ipaddress.ip_address(address)
+    return not any((
+        parsed.is_loopback,
+        parsed.is_private,
+        parsed.is_link_local,
+        parsed.is_unspecified,
+        parsed.is_multicast,
+        parsed.is_reserved,
+    ))
+
+
+def validate_fetch_url(url: str) -> None:
+    """Fail closed unless HTTPS resolves only to public, routable addresses."""
+    parts = urlsplit(url)
+    hostname = parts.hostname
+    if parts.scheme.casefold() != "https" or not hostname or parts.username or parts.password:
+        raise ValueError("unsafe redirect destination")
+    if hostname.casefold() == "localhost" or hostname.casefold().endswith(".localhost"):
+        raise ValueError("unsafe redirect destination")
+    try:
+        literal_address = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_address = None
+    if literal_address is not None and not _is_public_address(str(literal_address)):
+        raise ValueError("unsafe redirect destination")
+    try:
+        addresses = socket.getaddrinfo(hostname, parts.port or 443, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("unsafe redirect destination") from exc
+    if not addresses:
+        raise ValueError("unsafe redirect destination")
+    for _family, _kind, _proto, _canonname, address in addresses:
+        if not _is_public_address(address[0]):
+            raise ValueError("unsafe redirect destination")
+
+
+class ValidatedRedirectHandler(HTTPRedirectHandler):
+    """Replace urllib's unchecked redirect handler with a validated one."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        destination = urljoin(req.full_url, newurl)
+        validate_fetch_url(destination)
+        return super().redirect_request(req, fp, code, msg, headers, destination)
+
+
+def _read_response_limited(response) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = response.read(min(RESPONSE_READ_CHUNK_BYTES, MAX_RESPONSE_BYTES - total + 1))
+        if not chunk:
+            return b"".join(chunks)
+        if not isinstance(chunk, bytes):
+            raise ValueError("response body must be bytes")
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise ValueError("response exceeds byte ceiling")
+        chunks.append(chunk)
+
+
 def fetch_url(url: str, timeout: int) -> str:
+    validate_fetch_url(url)
     request = Request(url, headers=request_headers(url))
-    with urlopen(request, timeout=timeout) as response:  # noqa: S310 -- registry is reviewed, HTTPS-only
-        return response.read().decode("utf-8", errors="replace")
+    opener = build_opener(ValidatedRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:  # noqa: S310 -- validated HTTPS-only target
+        return _read_response_limited(response).decode("utf-8", errors="replace")
 
 
 def _source_state(state: dict, source: dict) -> dict:
     source_id = source["id"]
     record = dict(state.get(source_id) or {})
+    # States persisted before reviewed_status existed retain their current
+    # admission; only an explicit reviewed lifecycle change resets a trial.
+    record.setdefault("reviewed_status", source["status"])
     record.setdefault("effective_status", source["status"])
     record.setdefault("runs", 0)
     record.setdefault("successful_runs", 0)
@@ -276,6 +351,20 @@ def _source_state(state: dict, source: dict) -> dict:
     return record
 
 
+def _fresh_source_state(reviewed_status: str) -> dict:
+    return {
+        "reviewed_status": reviewed_status,
+        "effective_status": reviewed_status,
+        "runs": 0,
+        "successful_runs": 0,
+        "items_seen": 0,
+        "valid_date_items": 0,
+        "accepted_items": 0,
+        "duplicate_items": 0,
+        "recent_results": [],
+    }
+
+
 def next_source_status(record: dict) -> str:
     """Apply documented promotion, degradation, and suspension thresholds."""
     current = str(record.get("effective_status") or "probation")
@@ -283,14 +372,15 @@ def next_source_status(record: dict) -> str:
     items_seen = int(record.get("items_seen") or 0)
     valid_dates = int(record.get("valid_date_items") or 0)
     duplicates = int(record.get("duplicate_items") or 0)
-    if len(recent) >= 3 and recent[-3:] == [False, False, False]:
-        return "suspended"
-    if len(recent[-7:]) >= 7 and recent[-7:].count(False) >= 5:
-        return "suspended"
-    if items_seen >= 10 and valid_dates / items_seen < 0.90:
-        return "suspended"
-    if items_seen >= 10 and duplicates / items_seen > 0.70:
-        return "suspended"
+    if current != "probation":
+        if len(recent) >= 3 and recent[-3:] == [False, False, False]:
+            return "suspended"
+        if len(recent[-7:]) >= 7 and recent[-7:].count(False) >= 5:
+            return "suspended"
+        if items_seen >= 10 and valid_dates / items_seen < 0.90:
+            return "suspended"
+        if items_seen >= 10 and duplicates / items_seen > 0.70:
+            return "suspended"
     if current == "active" and recent and recent[-1] is False:
         return "degraded"
     if current == "degraded" and len(recent) >= 3 and recent[-3:] == [True, True, True]:
@@ -330,8 +420,6 @@ def _brief_status(
         return "ok"
     if signals:
         return "degraded"
-    if failures and completed_sources:
-        return "degraded"
     if skipped_sources and not failures and not completed_sources:
         return "no_signals"
     return "no_signals" if completed_sources else "failed"
@@ -367,12 +455,14 @@ def collect_sources(
 
     for source in sources[:MAX_SOURCES_PER_RUN]:
         source_id = source["id"]
-        record = _source_state(state, source)
         configured_status = source["status"]
+        record = _source_state(state, source)
+        if record.get("reviewed_status") != configured_status:
+            # A reviewed lifecycle change restarts admission. In particular,
+            # candidate demotion must erase stale active/probation evidence so
+            # a later probation promotion is a genuinely new trial.
+            record = _fresh_source_state(configured_status)
         effective_status = record["effective_status"]
-        if configured_status in {"probation", "active", "degraded"} and effective_status == "candidate":
-            effective_status = configured_status
-            record["effective_status"] = effective_status
         # collection. A source in probation may be promoted by the audited
         # health state without rewriting the registry on every successful run.
         if configured_status in {"candidate", "suspended", "retired"} or effective_status in {"suspended", "retired"}:
@@ -437,15 +527,18 @@ def collect_sources(
                         # them would let a source replay the same small corpus
                         # forever without reaching the documented duplicate-rate
                         # suspension threshold.
-                        record["duplicate_items"] += 1
+                        if record["effective_status"] != "probation":
+                            record["duplicate_items"] += 1
                         rejections.append({"source_id": source_id, "reason": "seen_in_prior_run", "title": title})
                         continue
                     if url in batch_urls:
-                        record["duplicate_items"] += 1
+                        if record["effective_status"] != "probation":
+                            record["duplicate_items"] += 1
                         rejections.append({"source_id": source_id, "reason": "duplicate_url", "title": title})
                         continue
                     if title_key in batch_titles:
-                        record["duplicate_items"] += 1
+                        if record["effective_status"] != "probation":
+                            record["duplicate_items"] += 1
                         rejections.append({"source_id": source_id, "reason": "duplicate_title", "title": title})
                         continue
                     batch_urls.add(url)
@@ -563,6 +656,13 @@ def load_usable_brief(
         return None
     if not isinstance(brief.get("run_id"), str) or not isinstance(brief.get("signals"), list):
         return None
+    if not any(
+        isinstance(signal, dict)
+        and str(signal.get("title") or "").strip()
+        and str(signal.get("url") or "").startswith("https://")
+        for signal in brief["signals"]
+    ):
+        return None
     collected_at = parse_published_at(brief.get("collected_at"))
     current = now or utc_now()
     if collected_at is None or collected_at > current + timedelta(minutes=5) or current - collected_at > max_age:
@@ -596,20 +696,21 @@ def persist_run(
 
 
 def run(registry_path: Path, state_dir: Path, *, dry_run: bool = False) -> dict:
-    registry, sources = load_registry(registry_path)
-    prior_seen = load_seen(state_dir)
-    brief, state, events = collect_sources(
-        sources,
-        now=utc_now(),
-        state=load_state(state_dir),
-        seen=prior_seen,
-        min_usable_signals=max(1, int(registry.get("min_usable_signals") or 1)),
-    )
-    if not dry_run:
-        persist_run(state_dir, brief, state, events, seen=brief.pop("emitted_seen"))
-    else:
-        brief.pop("emitted_seen", None)
-    return brief
+    with state_lock(state_dir):
+        registry, sources = load_registry(registry_path)
+        prior_seen = load_seen(state_dir)
+        brief, state, events = collect_sources(
+            sources,
+            now=utc_now(),
+            state=load_state(state_dir),
+            seen=prior_seen,
+            min_usable_signals=max(1, int(registry.get("min_usable_signals") or 1)),
+        )
+        if not dry_run:
+            persist_run(state_dir, brief, state, events, seen=brief.pop("emitted_seen"))
+        else:
+            brief.pop("emitted_seen", None)
+        return brief
 
 
 def main(argv: list[str] | None = None) -> int:
