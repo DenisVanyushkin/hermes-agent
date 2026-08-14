@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import types
 
 import pytest
@@ -124,3 +125,36 @@ async def test_a_turn_without_a_raw_text_still_runs():
     )
 
     assert captured["raw_message"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multiplex_profiles", [False, True])
+async def test_run_agent_preserves_internal_event_identity(
+    monkeypatch, multiplex_profiles
+):
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = types.SimpleNamespace(multiplex_profiles=multiplex_profiles)
+    captured: dict = {}
+
+    async def _inner(message, context_prompt, history, source, session_id, **kwargs):
+        captured["internal_event"] = kwargs.get("internal_event", "absent")
+        return {"final_response": "ok"}
+
+    runner._run_agent_inner = _inner
+    if multiplex_profiles:
+        runner._resolve_profile_home_for_source = lambda _source: "/tmp/profile"
+        monkeypatch.setattr(
+            "gateway.run._profile_runtime_scope",
+            lambda _profile_home: contextlib.nullcontext(),
+        )
+
+    await runner._run_agent(
+        message="[ASYNC DELEGATION BATCH COMPLETE — deleg_test]",
+        context_prompt="",
+        history=[],
+        source=_source(),
+        session_id="sess-internal",
+        internal_event=True,
+    )
+
+    assert captured["internal_event"] is True

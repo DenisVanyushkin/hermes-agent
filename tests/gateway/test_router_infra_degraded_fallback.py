@@ -280,6 +280,50 @@ def test_missing_failure_reason_keeps_fail_closed_template(monkeypatch):
     assert "final_verdict: safe_default_fallback_used" in result["final_response"]
 
 
+def test_internal_delegation_completion_bypasses_specialized_pipeline(monkeypatch):
+    _CapturingAgent.last_init = None
+    _CapturingAgent.run_calls = 0
+    _patch_gateway(monkeypatch, router_reason=CONTRACT_REASON, agent_cls=_CapturingAgent)
+
+    def _unexpected_pipeline_call(**_kwargs):
+        raise AssertionError("internal completion entered the operator pipeline")
+
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+    monkeypatch.setattr(
+        pipeline_observe,
+        "observe_pipeline_router_decision",
+        _unexpected_pipeline_call,
+    )
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    monkeypatch.setattr(orchestrator, "observe_gateway_turn", _unexpected_pipeline_call)
+
+    runner = _make_runner()
+    source = SessionSource(
+        platform=Platform.LOCAL,
+        chat_id="cli",
+        chat_name="CLI",
+        chat_type="dm",
+        user_id="user-1",
+    )
+    result = asyncio.run(
+        runner._run_agent(
+            message=(
+                "[ASYNC DELEGATION BATCH COMPLETE — deleg_test]\n"
+                "Changed /workspace/feature/example.py and committed the fix."
+            ),
+            context_prompt="",
+            history=[],
+            source=source,
+            session_id="session-internal-completion",
+            session_key="agent:main:local:dm",
+            internal_event=True,
+        )
+    )
+
+    assert _CapturingAgent.run_calls == 1
+    assert result["final_response"] == "ok-from-agent"
+
+
 # ---------------------------------------------------------------------------
 # Unit: notice helper
 # ---------------------------------------------------------------------------

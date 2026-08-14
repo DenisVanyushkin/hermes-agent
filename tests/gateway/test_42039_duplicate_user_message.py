@@ -123,6 +123,32 @@ def _assert_user_call_has_skip_db(calls, expected_skip_db: bool):
         )
 
 
+@pytest.mark.asyncio
+async def test_internal_message_identity_reaches_agent_runner(monkeypatch, tmp_path):
+    runner = _bootstrap(monkeypatch, tmp_path)
+    runner._run_agent = AsyncMock(
+        return_value={
+            "failed": True,
+            "final_response": None,
+            "error": "test stop",
+            "messages": [],
+            "history_offset": 0,
+            "last_prompt_tokens": 0,
+        }
+    )
+    event = _event()
+    event.internal = True
+
+    await runner._handle_message_with_agent(
+        event,
+        _source(),
+        "agent:main:telegram:group:-1001:12345",
+        1,
+    )
+
+    assert runner._run_agent.await_args.kwargs["internal_event"] is True
+
+
 # ── Test 1: agent_failed_early path uses skip_db=True ─────────────────
 
 
@@ -189,5 +215,4 @@ async def test_not_new_messages_skip_db_when_agent_has_session_db(
 
 
 # ── Test 4: normal path (new_messages found) uses skip_db=True ────────
-
 

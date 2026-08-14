@@ -18842,6 +18842,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
                 raw_message=event.text,
                 message_type=event.message_type,
+                internal_event=bool(getattr(event, "internal", False)),
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
 
@@ -26538,6 +26539,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         persist_user_timestamp: Optional[float] = None,
         raw_message: Optional[str] = None,
         message_type: Optional[str] = None,
+        internal_event: bool = False,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -26558,6 +26560,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
                 raw_message=raw_message,
                 message_type=message_type,
+                internal_event=internal_event,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -26571,6 +26574,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 persist_user_timestamp=persist_user_timestamp,
                 raw_message=raw_message,
                 message_type=message_type,
+                internal_event=internal_event,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -26714,6 +26718,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         persist_user_timestamp: Optional[float] = None,
         raw_message: Optional[str] = None,
         message_type: Optional[str] = None,
+        internal_event: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -26729,7 +26734,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
-        _pipeline_platform_ok = _pipeline_platform_allowed(user_config, platform_key)
+        _pipeline_platform_ok = (
+            _pipeline_platform_allowed(user_config, platform_key)
+            and not internal_event
+        )
         router_decision = None
 
         if _pipeline_platform_ok:
@@ -26751,6 +26759,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception:
                 logger.warning("pipeline observe hook import/invocation failed", exc_info=True)
+        elif internal_event:
+            logger.info(
+                "pipeline router skipped for internal event: platform=%s",
+                platform_key,
+            )
         else:
             logger.info("pipeline router skipped for platform=%s (not in pipelines.allowed_platforms)", platform_key)
 
@@ -28611,6 +28624,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         else pending
                     ),
                     message_type=next_message_type,
+                    internal_event=bool(
+                        getattr(pending_event, "internal", False)
+                    ),
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:

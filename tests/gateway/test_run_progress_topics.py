@@ -982,6 +982,7 @@ async def _run_with_agent(
     *,
     session_id,
     pending_text=None,
+    pending_internal=False,
     config_data=None,
     platform=Platform.TELEGRAM,
     chat_id="-1001",
@@ -1024,6 +1025,7 @@ async def _run_with_agent(
             message_type=MessageType.TEXT,
             source=source,
             message_id="queued-1",
+            internal=pending_internal,
         )
 
     result = await runner._run_agent(
@@ -1210,6 +1212,40 @@ async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monke
     assert result["final_response"] == "final response 2"
     assert "I'll inspect the repo first." in sent_texts
     assert "final response 1" in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_queued_internal_completion_bypasses_pipeline_router(monkeypatch, tmp_path):
+    QueuedCommentaryAgent.calls = 0
+    routed_messages = []
+    pipeline_observe = importlib.import_module("hermes_cli.pipeline_observe")
+
+    def _capture_router_input(**kwargs):
+        routed_messages.append(kwargs["user_message"])
+        return None
+
+    monkeypatch.setattr(
+        pipeline_observe,
+        "observe_pipeline_router_decision",
+        _capture_router_input,
+    )
+
+    _adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        QueuedCommentaryAgent,
+        session_id="sess-queued-internal-completion",
+        pending_text=(
+            "[ASYNC DELEGATION BATCH COMPLETE — deleg_test]\n"
+            "Changed /workspace/feature/example.py and committed the fix."
+        ),
+        pending_internal=True,
+        config_data={"pipelines": {"enabled": False}},
+    )
+
+    assert QueuedCommentaryAgent.calls == 2
+    assert result["final_response"] == "final response 2"
+    assert routed_messages == ["hello"]
 
 
 @pytest.mark.asyncio
