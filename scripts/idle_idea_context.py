@@ -94,7 +94,8 @@ def external_signal_context(
     collected_at = collected_at.astimezone(timezone.utc)
     if collected_at > current.astimezone(timezone.utc) + timedelta(minutes=5) or current - collected_at > timedelta(hours=30):
         return ""
-    if not isinstance(brief.get("run_id"), str) or not isinstance(brief.get("signals"), list):
+    run_id = brief.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip() or not isinstance(brief.get("signals"), list):
         return ""
 
     # Treat all collector content as untrusted data. Keep only the compact
@@ -103,6 +104,10 @@ def external_signal_context(
     safe_signals = []
     for signal in brief["signals"][:10]:
         if not isinstance(signal, dict):
+            continue
+        title = str(signal.get("title") or "").strip()
+        url = str(signal.get("url") or "")
+        if not title or not url.startswith("https://"):
             continue
         safe_signals.append({
             key: str(signal.get(key) or "")[:800]

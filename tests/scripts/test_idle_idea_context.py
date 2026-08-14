@@ -60,3 +60,27 @@ def test_external_signal_context_refuses_empty_degraded_brief(tmp_path):
     (tmp_path / "idea_signal_brief.json").write_text(json.dumps(brief), encoding="utf-8")
 
     assert context.external_signal_context(tmp_path, now=NOW) == ""
+
+
+def test_external_signal_context_refuses_empty_run_id(tmp_path):
+    brief = {
+        "run_id": "",
+        "run_status": "ok",
+        "collected_at": NOW.isoformat(),
+        "signals": [{"title": "Recall", "url": "https://example.test/recall"}],
+    }
+    (tmp_path / "idea_signal_brief.json").write_text(json.dumps(brief), encoding="utf-8")
+
+    assert context.external_signal_context(tmp_path, now=NOW) == ""
+
+
+def test_external_signal_context_refuses_malformed_signal_dict(tmp_path):
+    brief = {
+        "run_id": "malformed-signal",
+        "run_status": "degraded",
+        "collected_at": NOW.isoformat(),
+        "signals": [{}],
+    }
+    (tmp_path / "idea_signal_brief.json").write_text(json.dumps(brief), encoding="utf-8")
+
+    assert context.external_signal_context(tmp_path, now=NOW) == ""
