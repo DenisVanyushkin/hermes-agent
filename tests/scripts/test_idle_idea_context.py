@@ -48,3 +48,15 @@ def test_external_signal_context_refuses_failed_or_stale_brief(tmp_path):
     stale = dict(failed, run_id="stale-run", run_status="ok", collected_at="2026-08-10T00:00:00+00:00")
     (tmp_path / "idea_signal_brief.json").write_text(json.dumps(stale), encoding="utf-8")
     assert context.external_signal_context(tmp_path, now=NOW) == ""
+
+
+def test_external_signal_context_refuses_empty_degraded_brief(tmp_path):
+    brief = {
+        "run_id": "empty-degraded",
+        "run_status": "degraded",
+        "collected_at": NOW.isoformat(),
+        "signals": [],
+    }
+    (tmp_path / "idea_signal_brief.json").write_text(json.dumps(brief), encoding="utf-8")
+
+    assert context.external_signal_context(tmp_path, now=NOW) == ""

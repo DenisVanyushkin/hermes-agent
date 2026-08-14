@@ -13,18 +13,21 @@ never configures or changes a cron job itself.
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
+import queue
 import re
 import socket
+import ssl
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 # ``defusedxml`` is only installed with the optional WeCom extra in some
 # Hermes environments. Reject DTD/entity declarations before using stdlib XML
@@ -48,6 +51,12 @@ MAX_SIGNALS_PER_RUN = 10
 FRESHNESS_DAYS = 7
 MAX_RESPONSE_BYTES = 1_000_000
 RESPONSE_READ_CHUNK_BYTES = 64 * 1024
+MAX_REDIRECTS = 3
+MAX_RESOLVED_ADDRESSES = 8
+MAX_CONNECTION_ATTEMPTS = 2
+DNS_RESOLUTION_TIMEOUT_SECONDS = 3.0
+MAX_CONCURRENT_DNS_RESOLUTIONS = 4
+_DNS_RESOLUTION_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_DNS_RESOLUTIONS)
 REQUIRED_BASKETS = frozenset({
     "health_habits_energy",
     "finance_purchases_risk",
@@ -277,8 +286,32 @@ def _is_public_address(address: str) -> bool:
     ))
 
 
-def validate_fetch_url(url: str) -> None:
-    """Fail closed unless HTTPS resolves only to public, routable addresses."""
+def _bounded_getaddrinfo(hostname: str, port: int) -> list[tuple]:
+    """Resolve in a capped worker so a stalled resolver cannot block a run."""
+    if not _DNS_RESOLUTION_SLOTS.acquire(blocking=False):
+        raise ValueError("DNS resolution capacity exhausted")
+    result: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            result.put((True, socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)))
+        except OSError as exc:
+            result.put((False, exc))
+        finally:
+            _DNS_RESOLUTION_SLOTS.release()
+
+    threading.Thread(target=resolve, daemon=True).start()
+    try:
+        succeeded, payload = result.get(timeout=DNS_RESOLUTION_TIMEOUT_SECONDS)
+    except queue.Empty as exc:
+        raise ValueError("DNS resolution timed out") from exc
+    if not succeeded:
+        raise ValueError("unsafe redirect destination") from payload
+    return payload  # type: ignore[return-value]
+
+
+def resolve_https_target(url: str) -> tuple[str, str, int, str, tuple[str, ...]]:
+    """Resolve a safe HTTPS URL once and return only pinned public addresses."""
     parts = urlsplit(url)
     hostname = parts.hostname
     if parts.scheme.casefold() != "https" or not hostname or parts.username or parts.password:
@@ -292,23 +325,75 @@ def validate_fetch_url(url: str) -> None:
     if literal_address is not None and not _is_public_address(str(literal_address)):
         raise ValueError("unsafe redirect destination")
     try:
-        addresses = socket.getaddrinfo(hostname, parts.port or 443, type=socket.SOCK_STREAM)
-    except OSError as exc:
+        port = parts.port or 443
+    except ValueError as exc:
         raise ValueError("unsafe redirect destination") from exc
-    if not addresses:
+    addresses = _bounded_getaddrinfo(hostname, port)
+    if not addresses or len(addresses) > MAX_RESOLVED_ADDRESSES:
+        if len(addresses) > MAX_RESOLVED_ADDRESSES:
+            raise ValueError("too many resolved addresses")
         raise ValueError("unsafe redirect destination")
-    for _family, _kind, _proto, _canonname, address in addresses:
-        if not _is_public_address(address[0]):
+    pinned_addresses = tuple(dict.fromkeys(str(address[0]) for _family, _kind, _proto, _canonname, address in addresses))
+    if not pinned_addresses or len(pinned_addresses) > MAX_RESOLVED_ADDRESSES:
+        raise ValueError("too many resolved addresses")
+    for address in pinned_addresses:
+        if not _is_public_address(address):
             raise ValueError("unsafe redirect destination")
+    request_target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    return url, hostname, port, request_target, pinned_addresses
 
 
-class ValidatedRedirectHandler(HTTPRedirectHandler):
-    """Replace urllib's unchecked redirect handler with a validated one."""
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that dials one vetted IP but verifies its hostname."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        destination = urljoin(req.full_url, newurl)
-        validate_fetch_url(destination)
-        return super().redirect_request(req, fp, code, msg, headers, destination)
+    def __init__(self, hostname: str, port: int, address: str, timeout: int):
+        super().__init__(hostname, port=port, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._pinned_address, self.port), self.timeout, self.source_address,
+        )
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def _redirect_location(response) -> str | None:
+    if hasattr(response, "getheader"):
+        return response.getheader("Location")
+    return response.headers.get("Location") if response.headers else None
+
+
+def _fetch_pinned_target(target: tuple[str, str, int, str, tuple[str, ...]], timeout: int) -> tuple[int, str | None, bytes | None]:
+    url, hostname, port, request_target, addresses = target
+    last_error: Exception | None = None
+    for address in addresses[:MAX_CONNECTION_ATTEMPTS]:
+        connection = _PinnedHTTPSConnection(hostname, port, address, timeout)
+        try:
+            connection.request("GET", request_target, headers=request_headers(url))
+            response = connection.getresponse()
+            if response.status in {301, 302, 303, 307, 308}:
+                return response.status, _redirect_location(response), None
+            if not 200 <= response.status < 300:
+                raise ValueError(f"unexpected HTTP status: {response.status}")
+            return response.status, None, _read_response_limited(response)
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+        finally:
+            connection.close()
+    raise ValueError("pinned HTTPS connection failed") from last_error
+
+
+def fetch_url(url: str, timeout: int) -> str:
+    current_url = url
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        target = resolve_https_target(current_url)
+        _status, location, body = _fetch_pinned_target(target, timeout)
+        if body is not None:
+            return body.decode("utf-8", errors="replace")
+        if not location or redirect_count == MAX_REDIRECTS:
+            raise ValueError("unsafe redirect destination")
+        current_url = urljoin(current_url, location)
+    raise ValueError("unsafe redirect destination")
 
 
 def _read_response_limited(response) -> bytes:
@@ -326,12 +411,6 @@ def _read_response_limited(response) -> bytes:
         chunks.append(chunk)
 
 
-def fetch_url(url: str, timeout: int) -> str:
-    validate_fetch_url(url)
-    request = Request(url, headers=request_headers(url))
-    opener = build_opener(ValidatedRedirectHandler())
-    with opener.open(request, timeout=timeout) as response:  # noqa: S310 -- validated HTTPS-only target
-        return _read_response_limited(response).decode("utf-8", errors="replace")
 
 
 def _source_state(state: dict, source: dict) -> dict:
@@ -372,15 +451,14 @@ def next_source_status(record: dict) -> str:
     items_seen = int(record.get("items_seen") or 0)
     valid_dates = int(record.get("valid_date_items") or 0)
     duplicates = int(record.get("duplicate_items") or 0)
-    if current != "probation":
-        if len(recent) >= 3 and recent[-3:] == [False, False, False]:
-            return "suspended"
-        if len(recent[-7:]) >= 7 and recent[-7:].count(False) >= 5:
-            return "suspended"
-        if items_seen >= 10 and valid_dates / items_seen < 0.90:
-            return "suspended"
-        if items_seen >= 10 and duplicates / items_seen > 0.70:
-            return "suspended"
+    if len(recent) >= 3 and recent[-3:] == [False, False, False]:
+        return "suspended"
+    if len(recent[-7:]) >= 7 and recent[-7:].count(False) >= 5:
+        return "suspended"
+    if items_seen >= 10 and valid_dates / items_seen < 0.90:
+        return "suspended"
+    if current != "probation" and items_seen >= 10 and duplicates / items_seen > 0.70:
+        return "suspended"
     if current == "active" and recent and recent[-1] is False:
         return "degraded"
     if current == "degraded" and len(recent) >= 3 and recent[-3:] == [True, True, True]:
@@ -696,6 +774,17 @@ def persist_run(
 
 
 def run(registry_path: Path, state_dir: Path, *, dry_run: bool = False) -> dict:
+    if dry_run:
+        registry, sources = load_registry(registry_path)
+        brief, _state, _events = collect_sources(
+            sources,
+            now=utc_now(),
+            state=load_state(state_dir),
+            seen=load_seen(state_dir),
+            min_usable_signals=max(1, int(registry.get("min_usable_signals") or 1)),
+        )
+        brief.pop("emitted_seen", None)
+        return brief
     with state_lock(state_dir):
         registry, sources = load_registry(registry_path)
         prior_seen = load_seen(state_dir)
@@ -706,10 +795,7 @@ def run(registry_path: Path, state_dir: Path, *, dry_run: bool = False) -> dict:
             seen=prior_seen,
             min_usable_signals=max(1, int(registry.get("min_usable_signals") or 1)),
         )
-        if not dry_run:
-            persist_run(state_dir, brief, state, events, seen=brief.pop("emitted_seen"))
-        else:
-            brief.pop("emitted_seen", None)
+        persist_run(state_dir, brief, state, events, seen=brief.pop("emitted_seen"))
         return brief
 
 

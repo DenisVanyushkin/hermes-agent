@@ -108,6 +108,8 @@ def external_signal_context(
             key: str(signal.get(key) or "")[:800]
             for key in ("source_id", "source_status", "basket", "title", "url", "published_at", "source_type", "trust_tier", "fact", "practical_angle")
         })
+    if not safe_signals:
+        return ""
     compact = {
         "run_id": brief["run_id"],
         "status": brief["run_status"],

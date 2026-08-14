@@ -375,6 +375,19 @@ def test_source_lifecycle_promotes_probation_and_suspends_three_failures():
     assert collector.next_source_status(broken) == "suspended"
 
 
+def test_probation_still_suspends_for_failures_or_missing_dates_but_not_duplicates():
+    assert collector.next_source_status({
+        "effective_status": "probation", "recent_results": [False, False, False],
+    }) == "suspended"
+    assert collector.next_source_status({
+        "effective_status": "probation", "items_seen": 10, "valid_date_items": 0,
+    }) == "suspended"
+    assert collector.next_source_status({
+        "effective_status": "probation", "items_seen": 10, "valid_date_items": 10,
+        "duplicate_items": 8,
+    }) == "probation"
+
+
 def test_source_lifecycle_degrades_after_a_transient_failure_and_recovers_after_three_successes():
     assert collector.next_source_status({"effective_status": "active", "recent_results": [True, False]}) == "degraded"
     assert collector.next_source_status({"effective_status": "degraded", "recent_results": [False, True, True, True]}) == "active"
@@ -463,6 +476,8 @@ def test_fetch_url_rejects_response_larger_than_byte_ceiling_while_streaming(mon
     class ChunkedResponse:
         def __init__(self):
             self.chunks = [b"a" * 3, b"b" * 3]
+            self.status = 200
+            self.headers = {}
 
         def __enter__(self):
             return self
@@ -473,14 +488,23 @@ def test_fetch_url_rejects_response_larger_than_byte_ceiling_while_streaming(mon
         def read(self, _size=-1):
             return self.chunks.pop(0) if self.chunks else b""
 
-    class Opener:
-        def open(self, _request, timeout):
-            assert timeout == 7
+    class PinnedConnection:
+        def __init__(self, hostname, port, address, timeout):
+            assert (hostname, port, address, timeout) == ("example.test", 443, "8.8.8.8", 7)
+
+        def request(self, method, target, headers):
+            assert (method, target) == ("GET", "/feed.xml")
+            assert headers["User-Agent"] == collector.USER_AGENT
+
+        def getresponse(self):
             return ChunkedResponse()
 
+        def close(self):
+            pass
+
     monkeypatch.setattr(collector, "MAX_RESPONSE_BYTES", 5)
-    monkeypatch.setattr(collector, "build_opener", lambda _handler: Opener())
     monkeypatch.setattr(collector.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    monkeypatch.setattr(collector, "_PinnedHTTPSConnection", PinnedConnection, raising=False)
 
     with pytest.raises(ValueError, match="response exceeds"):
         collector.fetch_url("https://example.test/feed.xml", 7)
@@ -495,10 +519,81 @@ def test_fetch_url_rejects_response_larger_than_byte_ceiling_while_streaming(mon
 ])
 def test_redirect_destinations_must_remain_public_https(target, monkeypatch):
     monkeypatch.setattr(collector.socket, "getaddrinfo", lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
-    handler = collector.ValidatedRedirectHandler()
 
     with pytest.raises(ValueError, match="unsafe redirect destination"):
-        handler.redirect_request(collector.Request("https://example.test/feed.xml"), None, 302, "Found", {}, target)
+        collector.resolve_https_target(target)
+
+
+def test_fetch_url_pins_validated_addresses_across_redirects(monkeypatch):
+    resolutions = {
+        "origin.test": "8.8.8.8",
+        "redirect.test": "1.1.1.1",
+    }
+    connections = []
+
+    class Response:
+        def __init__(self, status, headers=None, body=b""):
+            self.status = status
+            self.headers = headers or {}
+            self.body = body
+
+        def read(self, _size=-1):
+            body, self.body = self.body, b""
+            return body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class PinnedConnection:
+        def __init__(self, hostname, port, address, timeout):
+            connections.append((hostname, port, address, timeout))
+            self.hostname = hostname
+
+        def request(self, _method, _target, headers):
+            assert headers["User-Agent"] == collector.USER_AGENT
+
+        def getresponse(self):
+            if self.hostname == "origin.test":
+                return Response(302, {"Location": "https://redirect.test/final"})
+            return Response(200, body=b"pinned")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(collector.socket, "getaddrinfo", lambda host, *_args, **_kwargs: [(None, None, None, None, (resolutions[host], 443))])
+    monkeypatch.setattr(collector, "_PinnedHTTPSConnection", PinnedConnection, raising=False)
+
+    assert collector.fetch_url("https://origin.test/start", 4) == "pinned"
+    assert connections == [
+        ("origin.test", 443, "8.8.8.8", 4),
+        ("redirect.test", 443, "1.1.1.1", 4),
+    ]
+
+
+def test_fetch_url_rejects_unbounded_dns_results(monkeypatch):
+    addresses = [(None, None, None, None, (f"8.8.8.{index}", 443)) for index in range(1, 10)]
+    monkeypatch.setattr(collector.socket, "getaddrinfo", lambda *_args, **_kwargs: addresses)
+
+    with pytest.raises(ValueError, match="too many resolved addresses"):
+        collector.fetch_url("https://example.test/feed.xml", 3)
+
+
+def test_dry_run_does_not_create_state_or_lock_artifacts(tmp_path, monkeypatch):
+    registry = tmp_path / "sources.yaml"
+    registry.write_text("sources: []\n", encoding="utf-8")
+    state_dir = tmp_path / "never-created"
+
+    monkeypatch.setattr(
+        collector,
+        "collect_sources",
+        lambda *_args, **_kwargs: ({"run_id": "dry", "run_status": "no_signals", "signals": [], "emitted_seen": {}}, {}, []),
+    )
+
+    assert collector.run(registry, state_dir, dry_run=True)["run_id"] == "dry"
+    assert not state_dir.exists()
 
 
 def test_collector_lock_preserves_manual_suspension_written_while_collection_is_pending(tmp_path, monkeypatch):
