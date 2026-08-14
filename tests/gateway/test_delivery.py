@@ -246,7 +246,7 @@ async def test_named_telegram_private_topic_is_created_before_delivery(tmp_path,
             "chat_id": "722341991",
             "content": "hello",
             "metadata": {
-                "direct_messages_topic_id": "38049",
+                "thread_id": "38049",
                 "telegram_dm_topic_created_for_send": True,
             },
         }
@@ -287,12 +287,12 @@ async def test_explicit_telegram_private_thread_uses_reply_fallback_with_anchor(
         "Bad Request: direct messages topic not found",
     ],
 )
-async def test_named_private_topic_refresh_preserves_direct_topic_routing(
+async def test_named_private_topic_refresh_preserves_forum_topic_routing(
     tmp_path,
     monkeypatch,
     stale_error,
 ):
-    """A stale named DM topic is recreated and retried using the DM topic field."""
+    """A stale named private forum topic is recreated and retried by thread id."""
     monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
     adapter = StaleTopicAdapter(stale_error=stale_error)
     router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
@@ -307,11 +307,11 @@ async def test_named_private_topic_refresh_preserves_direct_topic_routing(
     ]
     assert [call["metadata"] for call in adapter.calls] == [
         {
-            "direct_messages_topic_id": "32343",
+            "thread_id": "32343",
             "telegram_dm_topic_created_for_send": True,
         },
         {
-            "direct_messages_topic_id": "38064",
+            "thread_id": "38064",
             "telegram_dm_topic_created_for_send": True,
         },
     ]

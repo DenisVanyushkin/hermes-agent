@@ -1980,7 +1980,7 @@ def _resolve_named_telegram_dm_topic_id(
     Text goes through ``DeliveryRouter``, which owns topic creation and stale
     mapping refresh. Native attachments bypass that router, so immediately
     before sending them we read the adapter's (normally cached) mapping again.
-    This guarantees media uses the same numeric ``direct_messages_topic_id``
+    This guarantees media uses the same numeric forum ``message_thread_id``
     that the preceding text send resolved, including after a stale refresh.
     """
     ensure_dm_topic = getattr(runtime_adapter, "ensure_dm_topic", None)
@@ -2354,7 +2354,7 @@ def _deliver_result(
             elif named_telegram_private_topic_name:
                 # Preserve the human-readable topic name solely on the target.
                 # DeliveryRouter recognizes this shape, creates/reuses the Bot
-                # API Direct-Messages topic, and owns stale-mapping refresh.
+                # API private forum topic, and owns stale-mapping refresh.
                 # A bare thread_id/message_thread_id metadata key would suppress
                 # that branch and Telegram would route the message to General.
                 route_thread_id = named_telegram_private_topic_name
@@ -2544,7 +2544,7 @@ def _deliver_result(
                             job["id"],
                         )
                         if resolved_topic_id:
-                            routed_media_metadata["direct_messages_topic_id"] = resolved_topic_id
+                            routed_media_metadata["thread_id"] = resolved_topic_id
                         else:
                             media_route_ready = False
                             msg = (

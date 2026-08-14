@@ -532,14 +532,14 @@ class TestDeliverResultWrapping:
         voice_call = adapter.send_voice.call_args
         assert voice_call[1]["audio_path"] == str(media_path)
 
-    def test_named_telegram_topic_routes_text_and_media_via_direct_topic(
+    def test_named_telegram_topic_routes_text_and_media_via_forum_thread(
         self, tmp_path, monkeypatch
     ):
         """Cron resolves a named private topic through the live adapter.
 
         The topic name must reach DeliveryRouter without a bare ``thread_id``
         metadata override; attachments then reuse the resolved numeric Bot API
-        ``direct_messages_topic_id`` instead of falling back to General.
+        ``message_thread_id`` instead of falling back to General.
         """
         from concurrent.futures import Future
 
@@ -604,7 +604,7 @@ class TestDeliverResultWrapping:
                 "forecast",
                 {
                     "job_id": "named-topic-cron",
-                    "direct_messages_topic_id": "38049",
+                    "thread_id": "38049",
                     "telegram_dm_topic_created_for_send": True,
                 },
             )
@@ -613,7 +613,7 @@ class TestDeliverResultWrapping:
             (
                 "79564752",
                 str(media_path),
-                {"direct_messages_topic_id": "38049"},
+                {"thread_id": "38049"},
             )
         ]
         assert adapter.ensure_calls == [

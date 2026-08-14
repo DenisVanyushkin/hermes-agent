@@ -586,11 +586,11 @@ class DeliveryRouter:
                         f"Failed to create Telegram private DM topic '{target_thread_id}'"
                     )
                 target_thread_id = str(created_thread_id)
-                # Telegram direct-message topics require the Bot API's
-                # direct_messages_topic_id parameter.  message_thread_id is
-                # accepted for a private chat but routes the message to its
-                # General topic instead of the named DM topic.
-                send_metadata["direct_messages_topic_id"] = target_thread_id
+                # ``createForumTopic`` creates a forum topic in a private chat.
+                # Bot API ``message_thread_id`` is the routing field for that
+                # topic.  ``direct_messages_topic_id`` is reserved for the
+                # separate channel Direct-Messages surface.
+                send_metadata["thread_id"] = target_thread_id
                 send_metadata["telegram_dm_topic_created_for_send"] = True
             elif (
                 target.platform == Platform.TELEGRAM
@@ -602,7 +602,7 @@ class DeliveryRouter:
                 # Legacy private topic/thread ids that were not created by this
                 # send path may still need a reply anchor to stay visible in the
                 # requested lane. Named targets are created above and routed via
-                # the Bot API's direct_messages_topic_id field.
+                # the Bot API's message_thread_id field.
                 reply_anchor = send_metadata.get("telegram_reply_to_message_id")
                 if reply_anchor is None:
                     raise RuntimeError(
@@ -639,8 +639,8 @@ class DeliveryRouter:
                     raise RuntimeError(
                         f"Failed to refresh Telegram private DM topic '{named_telegram_private_topic_name}'"
                     )
-                send_metadata.pop("thread_id", None)
-                send_metadata["direct_messages_topic_id"] = str(refreshed_thread_id)
+                send_metadata["thread_id"] = str(refreshed_thread_id)
+                send_metadata.pop("direct_messages_topic_id", None)
                 send_metadata["telegram_dm_topic_created_for_send"] = True
                 result = await transport.send(
                     target.platform,
@@ -651,7 +651,6 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
 
 
 
