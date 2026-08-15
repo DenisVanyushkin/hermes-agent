@@ -322,6 +322,89 @@ class TestMergeBothHunkResolver:
         assert (world["state"] / "scratch" / "f.txt").read_text() == "base\nlocal tail\nupstream tail\n"
 
 
+class TestAutoPolicy:
+    """--auto-policy: a conflict nobody decided about is decided by the policy
+    when it is a plain path (merge-both, recorded into pending.json as a new
+    feature) and still asked when it is a security path."""
+
+    def _new_conflict_after_the_gate(self, world, path):
+        live = world["live"]
+        _git(live, "checkout", "-q", "up")
+        (live / path).write_text("upstream side\n")
+        _git(live, "add", "-A")
+        _git(live, "commit", "-qm", f"upstream touches {path}")
+        world["upstream_head"] = _git(live, "rev-parse", "HEAD")
+        _git(live, "checkout", "-q", "local/customizations")
+        (live / path).write_text("local side\n")
+        _git(live, "add", "-A")
+        _git(live, "commit", "-qm", f"local touches {path}")
+
+    def test_plain_new_conflict_is_decided_by_policy_and_recorded(self, world):
+        self._new_conflict_after_the_gate(world, "keep.txt")
+        _pending(world, decision="keep-local", local_head=world["local_head"])
+
+        out = _out(_run("prepare", world["state"], world["live"], "--auto-policy"))
+        assert out["status"] == "ready", out
+        assert out["new_conflicts"] == []
+        assert "keep.txt" in out["conflicts"]
+        pending = json.loads((world["state"] / "pending.json").read_text())
+        added = [f for f in pending["features"] if f["files"] == ["keep.txt"]]
+        assert len(added) == 1
+        assert added[0]["decision"] == "merge-both" and added[0]["source"] == "policy"
+        assert added[0]["id"] == "F2"
+        # merge-both on a real conflict → left with markers for the resolver
+        assert [m["path"] for m in out["needs_manual"]] == ["keep.txt"]
+
+    def test_security_new_conflict_is_still_asked(self, world):
+        self._new_conflict_after_the_gate(world, "tools_approval.py")
+        _pending(world, decision="keep-local", local_head=world["local_head"])
+
+        proc = _run("prepare", world["state"], world["live"], "--auto-policy")
+        out = _out(proc)
+        assert proc.returncode == 4
+        assert out["status"] == "new_conflicts"
+        assert out["new_conflicts"] == ["tools_approval.py"]
+        pending = json.loads((world["state"] / "pending.json").read_text())
+        asked = [f for f in pending["features"] if f["files"] == ["tools_approval.py"]]
+        assert asked and asked[0]["status"] == "awaiting_decision" and asked[0]["decision"] is None
+        assert pending["status"] == "awaiting_decision"
+
+    def test_without_the_flag_behaviour_is_unchanged(self, world):
+        self._new_conflict_after_the_gate(world, "keep.txt")
+        _pending(world, decision="keep-local", local_head=world["local_head"])
+        proc = _run("prepare", world["state"], world["live"])
+        assert proc.returncode == 4
+        assert _out(proc)["new_conflicts"] == ["keep.txt"]
+
+
+class TestCommit:
+    def test_commit_makes_the_merge_without_writing_a_request(self, world):
+        _pending(world, decision="keep-local")
+        _run("prepare", world["state"], world["live"])
+        proc = _run("commit", world["state"], world["live"])
+        out = _out(proc)
+        assert proc.returncode == 0, proc.stderr
+        assert out["status"] == "committed"
+        parents = _git(world["state"] / "scratch", "rev-list", "--parents", "-n1", out["merge_sha"]).split()[1:]
+        assert parents == [world["local_head"], world["upstream_head"]]
+        assert not (world["state"] / "finalize-request.json").exists()
+        prep = json.loads((world["state"] / "apply-prepare.json").read_text())
+        assert prep["merge_sha"] == out["merge_sha"]
+
+    def test_commit_refuses_unresolved_like_handoff(self, world):
+        _pending(world, decision="merge-both")
+        _run("prepare", world["state"], world["live"])
+        proc = _run("commit", world["state"], world["live"])
+        assert proc.returncode == 6
+
+    def test_commit_is_idempotent(self, world):
+        _pending(world, decision="keep-local")
+        _run("prepare", world["state"], world["live"])
+        first = _out(_run("commit", world["state"], world["live"]))["merge_sha"]
+        second = _out(_run("commit", world["state"], world["live"]))["merge_sha"]
+        assert first == second
+
+
 class TestEndToEndWithTheHostFinalizer:
     """prepare -> (manual resolution) -> handoff -> the real finalizer, with the
     finalizer's downstream scripts stubbed. Proves the two halves agree on the

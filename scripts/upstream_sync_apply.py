@@ -40,6 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from upstream_sync_gate import parse_merge_tree  # noqa: E402
+from upstream_sync_policy import decide_paths, number_features  # noqa: E402
 
 SCHEMA = "upstream-sync-apply/v1"
 VALID_DECISIONS = ("keep-local", "take-upstream", "merge-both")
@@ -112,6 +113,43 @@ def decisions_by_file(pending: dict) -> tuple[dict, list]:
         for path in feature.get("files", []):
             by_file[path] = decision
     return by_file, missing
+
+
+def apply_policy_to_new_conflicts(state: Path, pending: dict, new_paths: list,
+                                  subjects_by_path: dict) -> tuple:
+    """Decide undecided conflict paths by policy and record them in pending.json.
+
+    Returns (by_file_additions, still_asking). Plain paths become decided
+    features (source policy); security paths become awaiting features — those
+    are returned as still_asking and the pending status flips to
+    awaiting_decision, so the operator gets asked about exactly them.
+    """
+    memory_path = state / "decision-memory.json"
+    try:
+        memory = json.loads(memory_path.read_text(encoding="utf-8")) if memory_path.exists() else {}
+    except ValueError:
+        memory = {}
+    decided = decide_paths(new_paths, memory, subjects_by_path)
+    start = len(pending.get("features", [])) + 1
+    numbered = number_features(decided, start=start)
+    additions: dict = {}
+    asking: list = []
+    for feat in numbered:
+        pending.setdefault("features", []).append(feat)
+        if feat.get("decision"):
+            for path in feat["files"]:
+                additions[path] = feat["decision"]
+        else:
+            asking.extend(feat["files"])
+    if asking:
+        pending["status"] = "awaiting_decision"
+    _write_json(state / "pending.json", pending)
+    return additions, sorted(asking)
+
+
+def local_subjects_for(repo: Path, base: str, head: str, path: str) -> list:
+    proc = git(repo, "log", "--format=%s", f"{base}..{head}", "--", path, check=False)
+    return [l.strip() for l in proc.stdout.splitlines() if l.strip()] if proc.returncode == 0 else []
 
 
 def conflict_paths(repo: Path, ours: str, theirs: str) -> list:
@@ -276,9 +314,16 @@ def cmd_prepare(args) -> int:
         "scratch": str(scratch), "conflicts": conflicts,
         "new_conflicts": sorted(set(conflicts) - set(by_file)),
         "no_longer_conflicting": sorted(set(by_file) - set(conflicts)),
-        "auto_resolved": [], "needs_manual": [],
+        "auto_resolved": [], "needs_manual": [], "policy_decided": [],
         "handed_off_at": None, "merge_sha": None,
     }
+    if summary["new_conflicts"] and args.auto_policy:
+        merge_base = git(scratch, "merge-base", "HEAD", upstream_head).stdout.strip()
+        subjects = {p: local_subjects_for(scratch, merge_base, "HEAD", p) for p in summary["new_conflicts"]}
+        additions, asking = apply_policy_to_new_conflicts(state, pending, summary["new_conflicts"], subjects)
+        by_file.update(additions)
+        summary["policy_decided"] = sorted(additions)
+        summary["new_conflicts"] = asking
     if summary["new_conflicts"]:
         summary["status"] = "new_conflicts"
         _write_json(state / "apply-prepare.json", summary)
@@ -296,6 +341,14 @@ def cmd_prepare(args) -> int:
               "reason": f"merge failed without conflicts: {merge.stderr.strip()}"})
         return EXIT_GIT_FAILED
     undecided = sorted(set(stages) - set(by_file))
+    if undecided and args.auto_policy:
+        merge_base = git(scratch, "merge-base", "HEAD", upstream_head).stdout.strip()
+        subjects = {p: local_subjects_for(scratch, merge_base, "HEAD", p) for p in undecided}
+        additions, asking = apply_policy_to_new_conflicts(state, pending, undecided, subjects)
+        by_file.update(additions)
+        summary.setdefault("policy_decided", [])
+        summary["policy_decided"] = sorted(set(summary["policy_decided"]) | set(additions))
+        undecided = asking
     if undecided:  # merge-tree and merge disagreed; never resolve what nobody decided
         summary["status"] = "new_conflicts"
         summary["new_conflicts"] = undecided
@@ -336,25 +389,20 @@ def cmd_prepare(args) -> int:
 
 # --------------------------------------------------------------------------- handoff
 
-def cmd_handoff(args) -> int:
+def _commit_merge(args) -> tuple:
+    """Shared by commit and handoff: refuse unresolved/moved, commit, verify parents.
+
+    Returns (exit_code, payload). On success payload has merge_sha and the
+    prepare record has been updated; nothing about a finalize request here.
+    """
     state, live = Path(args.state), Path(args.live)
     scratch = state / args.scratch
     prep_path = state / "apply-prepare.json"
     if not prep_path.exists():
-        emit({"status": "error", "reason": "apply-prepare.json missing — run prepare first"})
-        return EXIT_USAGE
+        return EXIT_USAGE, {"status": "error", "reason": "apply-prepare.json missing — run prepare first"}
     prep = json.loads(prep_path.read_text(encoding="utf-8"))
     if prep.get("status") != "ready":
-        emit({"status": "error", "reason": f"prepare ended with {prep.get('status')!r}, not ready"})
-        return EXIT_USAGE
-    # Same guard prepare has. Two agents answering the same gate handed off the
-    # same merge twice on 2026-08-15; the second request was processed after the
-    # first had already landed it and reported the apply as failed.
-    for name in ("finalize-request.json", "finalize-request.processing.json"):
-        if (state / name).exists():
-            emit({"status": "error",
-                  "reason": f"{name} exists — a finalize is already in flight; wait for its result"})
-            return EXIT_USAGE
+        return EXIT_USAGE, {"status": "error", "reason": f"prepare ended with {prep.get('status')!r}, not ready"}
 
     stages = unmerged_stages(scratch)
     marked = [
@@ -363,36 +411,62 @@ def cmd_handoff(args) -> int:
         and has_conflict_markers((scratch / p).read_text(encoding="utf-8", errors="surrogateescape"))
     ]
     if stages or marked:
-        emit({"status": "unresolved", "unmerged": sorted(stages), "with_markers": marked})
-        return EXIT_UNRESOLVED
+        return EXIT_UNRESOLVED, {"status": "unresolved", "unmerged": sorted(stages), "with_markers": marked}
 
     # Check the race before committing anything: the host refuses a merge whose
     # first parent is not its current HEAD, so there is nothing to gain from
-    # committing one — the agent has to redo prepare either way.
+    # committing one — prepare has to be redone either way.
     live_head = git(live, "rev-parse", "HEAD").stdout.strip()
     if live_head != prep["local_base"]:
-        emit({"status": "live_moved", "local_base": prep["local_base"], "live_head": live_head,
-              "hint": "the live branch moved since prepare; run prepare again and redo the resolution"})
-        return EXIT_LIVE_MOVED
+        return EXIT_LIVE_MOVED, {"status": "live_moved", "local_base": prep["local_base"], "live_head": live_head,
+                                 "hint": "the live branch moved since prepare; run prepare again and redo the resolution"}
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
     if merge_head_file.exists():
         if merge_head_file.read_text().strip() != prep["upstream_head"]:
-            emit({"status": "error",
-                  "reason": "the clone is mid-merge of something other than the gated upstream "
-                            "point — run prepare again"})
-            return EXIT_GIT_FAILED
+            return EXIT_GIT_FAILED, {"status": "error",
+                                     "reason": "the clone is mid-merge of something other than the gated upstream "
+                                               "point — run prepare again"}
         git(scratch, *MERGE_IDENTITY, "commit", "-q", "--no-edit")
-    # else: nothing conflicted and `git merge` committed on the spot in prepare;
-    # the parent check below proves it is the right merge either way.
+    # else: nothing conflicted and `git merge` committed on the spot in prepare,
+    # or commit already ran; the parent check below proves it is the right
+    # merge either way (which is what makes commit idempotent).
     merge_sha = git(scratch, "rev-parse", "HEAD").stdout.strip()
     parents = git(scratch, "rev-list", "--parents", "-n1", merge_sha).stdout.split()[1:]
     if parents != [prep["local_base"], prep["upstream_head"]]:
-        emit({"status": "error",
-              "reason": f"merge parents {parents} are not (local_base, upstream_head) — "
-                        "run prepare again"})
-        return EXIT_GIT_FAILED
+        return EXIT_GIT_FAILED, {"status": "error",
+                                 "reason": f"merge parents {parents} are not (local_base, upstream_head) — "
+                                           "run prepare again"}
+    prep["merge_sha"] = merge_sha
+    _write_json(prep_path, prep)
+    return EXIT_OK, {"status": "committed", "merge_sha": merge_sha, "prep": prep}
 
+
+def cmd_commit(args) -> int:
+    """Commit the resolved merge in the clone; no finalize request. The host
+    finalizer's apply-decisions calls this and lands the result itself."""
+    code, payload = _commit_merge(args)
+    payload.pop("prep", None)
+    emit(payload)
+    return code
+
+
+def cmd_handoff(args) -> int:
+    state = Path(args.state)
+    # Same guard prepare has. Two agents answering the same gate handed off the
+    # same merge twice on 2026-08-15; the second request was processed after the
+    # first had already landed it and reported the apply as failed.
+    for name in ("finalize-request.json", "finalize-request.processing.json"):
+        if (state / name).exists():
+            emit({"status": "error",
+                  "reason": f"{name} exists — a finalize is already in flight; wait for its result"})
+            return EXIT_USAGE
+    code, payload = _commit_merge(args)
+    if code != EXIT_OK:
+        emit(payload)
+        return code
+    prep = payload["prep"]
+    merge_sha = payload["merge_sha"]
     requested_at = _now()
     _write_json(state / "finalize-request.json", {
         "action": "apply-merge",
@@ -402,8 +476,7 @@ def cmd_handoff(args) -> int:
         "requested_at": requested_at,
     })
     prep["handed_off_at"] = requested_at
-    prep["merge_sha"] = merge_sha
-    _write_json(prep_path, prep)
+    _write_json(state / "apply-prepare.json", prep)
     emit({"status": "handed_off", "merge_sha": merge_sha, "requested_at": requested_at})
     return EXIT_OK
 
@@ -448,7 +521,11 @@ def main(argv=None) -> int:
                         help="clone directory name under --state")
     parser = argparse.ArgumentParser(description="upstream-sync Mode B mechanics")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("prepare", parents=[common]).set_defaults(func=cmd_prepare)
+    p_prep = sub.add_parser("prepare", parents=[common])
+    p_prep.add_argument("--auto-policy", action="store_true",
+                        help="decide undecided plain paths by policy (merge-both); security paths still ask")
+    p_prep.set_defaults(func=cmd_prepare)
+    sub.add_parser("commit", parents=[common]).set_defaults(func=cmd_commit)
     sub.add_parser("handoff", parents=[common]).set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
     p_wait.add_argument("--after", default="",
