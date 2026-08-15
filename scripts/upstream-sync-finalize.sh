@@ -92,9 +92,19 @@ write_result() {
   # (2026-07-16: a pre-report error line was cut off, leaving a causeless
   # rollback). One file, overwritten per run.
   cp -f "$DETAIL_LOG" "$STATE_DIR/finalize-detail.log" 2>/dev/null || true
-  python3 - "$RESULT" "$ACTION" "$1" "$2" "$BACKUP_REF" "$FAILED_STAGE" <<'PY'
+  # The detail reaches python as a FILE, never as an argv element. Linux caps a
+  # single argument at 128 KiB and two full fork-test runs sail past that, so
+  # this exec died with "Argument list too long" *after* a merge had landed,
+  # been pushed and smoke-tested — no result written, the decision left
+  # unarchived and the memory unrecorded (2026-08-15). The value only ever
+  # existed to be truncated to its tail, which python still does below.
+  detail_file="$(mktemp)"
+  printf '%s' "$2" >"$detail_file"
+  python3 - "$RESULT" "$ACTION" "$1" "$detail_file" "$BACKUP_REF" "$FAILED_STAGE" <<'PY'
 import json, sys, datetime
-path, action, status, detail, backup, stage = sys.argv[1:7]
+path, action, status, detail_path, backup, stage = sys.argv[1:7]
+with open(detail_path, encoding="utf-8", errors="replace") as fh:
+    detail = fh.read()
 json.dump({
     "action": action, "status": status, "detail": detail[-4000:],
     "detail_log": "finalize-detail.log",
@@ -103,6 +113,7 @@ json.dump({
     "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }, open(path, "w"), ensure_ascii=False, indent=1)
 PY
+  rm -f "$detail_file"
   rm -f "$PROCESSING"
   notify_slack "$1"
   # On a successful apply (rebase/finalize), clear the consumed decision so a
@@ -339,6 +350,17 @@ case "$ACTION" in
     SCRATCH="$STATE_DIR/$SCRATCH_NAME"
     if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
       write_result failed "apply-merge needs both merge_sha and upstream_sha; repo untouched, no rollback."
+      exit 0
+    fi
+    # A merge that is already the branch tip is a duplicate hand-off, not a
+    # mismatch: reporting it as a parent mismatch overwrote the real outcome of
+    # the run that had just landed it, telling the operator the apply had failed
+    # while it was live (2026-08-15). This has to come BEFORE any work on the
+    # clone, because a successful apply deletes the clone — so the duplicate
+    # would otherwise die on an unfetchable scratch repo, i.e. for the wrong
+    # reason entirely.
+    if [ "$MERGE_SHA" = "$(git -C "$REPO" rev-parse HEAD 2>>"$DETAIL_LOG")" ]; then
+      write_result ok "already applied — $MERGE_SHA is the branch tip; nothing to do (duplicate request)."
       exit 0
     fi
     if [ ! -d "$SCRATCH/.git" ]; then

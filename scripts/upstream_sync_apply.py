@@ -347,6 +347,14 @@ def cmd_handoff(args) -> int:
     if prep.get("status") != "ready":
         emit({"status": "error", "reason": f"prepare ended with {prep.get('status')!r}, not ready"})
         return EXIT_USAGE
+    # Same guard prepare has. Two agents answering the same gate handed off the
+    # same merge twice on 2026-08-15; the second request was processed after the
+    # first had already landed it and reported the apply as failed.
+    for name in ("finalize-request.json", "finalize-request.processing.json"):
+        if (state / name).exists():
+            emit({"status": "error",
+                  "reason": f"{name} exists — a finalize is already in flight; wait for its result"})
+            return EXIT_USAGE
 
     stages = unmerged_stages(scratch)
     marked = [

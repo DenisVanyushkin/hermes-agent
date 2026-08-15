@@ -852,6 +852,94 @@ class TestHostRecordsDecisionsIntoMemory:
         assert not (state / "decision-memory.json").exists()
 
 
+class TestHugeDetailLogStillProducesAResult:
+    """The detail was passed to python as an argv element, and Linux caps a
+    single argument at 128 KiB. Two full fork-test runs blow past that, so the
+    apply died with "Argument list too long" AFTER the merge had landed, been
+    pushed and smoke-tested — leaving the decision unarchived, the memory
+    unrecorded, and no result for anyone polling (2026-08-15). The truncation
+    to 4000 chars already happened inside python, i.e. the oversized value only
+    ever existed to be thrown away.
+    """
+
+    def test_a_result_is_written_when_the_log_exceeds_the_argv_limit(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        # 300 KiB of output from the publish step — well past MAX_ARG_STRLEN.
+        (scripts / "sync-local-customizations.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "sync-local-customizations.sh $@" >> "{calls}"\n'
+            "python3 -c \"print('x' * 300000)\"\n"
+            "exit 0\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr
+        assert len(res["detail"]) <= 4000
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        # The whole log is still on disk next to the result.
+        assert (state / "finalize-detail.log").stat().st_size > 200000
+
+    def test_the_decision_is_still_consumed_when_the_log_is_huge(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "upstream-sync-smoketest.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "upstream-sync-smoketest.sh $@" >> "{calls}"\n'
+            "python3 -c \"print('y' * 300000)\"\n"
+            "exit 0\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        assert not (state / "pending.json").exists()
+        assert len(list(state.glob("pending.json.applied-*"))) == 1
+        memory = json.loads((state / "decision-memory.json").read_text())
+        assert memory["entries"][0]["decision"] == "merge-both"
+
+
+class TestAnAlreadyAppliedMergeIsNotAFailure:
+    """A second request for a merge that is already the branch tip means a
+    duplicate hand-off, not a mismatch. Reporting it as a parent-mismatch
+    failure overwrote the real outcome of the run that had just landed it
+    (2026-08-15) — the operator was told the apply failed while it was live.
+    """
+
+    def test_a_duplicate_request_reports_already_applied_without_touching_anything(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        # First apply: lands normally.
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        _run_finalize(repo, state, scripts)
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        calls.unlink()
+
+        # The duplicate, arriving after the fact.
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr
+        assert "already applied" in res["detail"].lower()
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        # No second publish, no second gateway restart, no rollback.
+        assert not calls.exists() or calls.read_text().strip() == "", calls.read_text()
+
+
 # ---------------------------------------------------------------------------
 # rerere must not resolve an upstream merge from rebase-era recordings
 # ---------------------------------------------------------------------------
