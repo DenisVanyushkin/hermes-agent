@@ -188,6 +188,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Browser-native acquisition used only by the isolated Product Search probe.
+# Keep this out of the default Hermes runtime and pin it to the host browser
+# desktop version used by the LinkedIn and HeadHunter CDP sessions.
+product-search-browser = ["playwright==1.61.0"]
 # Native Anthropic provider — only needed when provider=anthropic (not via
 # OpenRouter or other aggregators).
 anthropic = ["anthropic==0.87.0"]  # CVE-2026-34450, CVE-2026-34452

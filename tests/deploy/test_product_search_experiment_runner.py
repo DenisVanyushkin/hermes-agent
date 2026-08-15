@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import tomllib
 
 import yaml
 
@@ -259,6 +260,16 @@ def test_exporter_skips_project_build_and_pins_copied_python() -> None:
     assert "--no-editable" not in exporter
     assert "PYTHONDONTWRITEBYTECODE=1" in exporter
     assert "immutable runtime contains Python bytecode" in exporter
+
+
+def test_exporter_installs_pinned_product_search_browser_runtime() -> None:
+    exporter = EXPORTER.read_text(encoding="utf-8")
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "--extra product-search-browser" in exporter
+    assert project["project"]["optional-dependencies"]["product-search-browser"] == [
+        "playwright==1.61.0"
+    ]
 
 
 def test_wrapper_preflight_uses_pinned_python_outside_checkout(tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ copied_python="$(find "$destination/python-runtime/cpython/bin" -maxdepth 1 -typ
 uv venv "$destination/python-runtime/venv" --python "$copied_python"
 UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
   --project "$destination/runtime" --frozen --no-install-project --no-dev \
+  --extra product-search-browser \
   --python "$destination/python-runtime/venv/bin/python"
 uv pip freeze --python "$destination/python-runtime/venv/bin/python" \
   >"$destination/python-runtime/installed-distributions.txt"
