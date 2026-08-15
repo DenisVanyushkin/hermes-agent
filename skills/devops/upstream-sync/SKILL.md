@@ -1,13 +1,26 @@
 ---
 name: upstream-sync
 description: Safely update local/customizations from upstream NousResearch/hermes-agent - merge conflict-free updates automatically, or negotiate per-feature conflict resolution with the operator over Slack.
-version: 0.5.0
+version: 0.6.0
 metadata:
   hermes:
     tags: [devops, git, maintenance]
 ---
 
 # Upstream Sync
+
+> **Status since 2026-08-15: legacy / manual-recovery only.** The scheduled
+> sync no longer runs an agent: the cron job is in script mode and runs
+> `scripts/upstream_sync_cron.py` on the host, and an operator decision reply
+> is recorded by the gateway and applied by the host finalizer
+> (`action: apply-decisions` — clone, mechanical + per-hunk model resolution,
+> fork-test gate, publish, report in the Slack thread). Nothing below is
+> executed automatically any more. Keep this skill for the rare case where a
+> human asks an agent to inspect a preserved clone under
+> `/root/.hermes/state/upstream-sync/scratch` after a failed apply: read the
+> report in the thread, resolve the listed files there, `git add` them, and
+> tell the operator to re-request the apply (`apply-decisions`) — do NOT
+> hand-write finalize requests or commit merges yourself.
 
 You maintain the fork of hermes-agent (branch `local/customizations`, personal
 remote `origin` = DenisVanyushkin/hermes-agent, upstream =
