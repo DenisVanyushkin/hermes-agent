@@ -75,7 +75,78 @@ def has_pending_upstream_decision(state_dir: Path | str) -> bool:
         return False
     return data.get("status") == "awaiting_decision"
 
+import datetime as _dt
 import os
+
+_CANON = {"merge both": "merge-both", "keep local": "keep-local", "take upstream": "take-upstream"}
+
+
+def _canon(option: str) -> str:
+    key = re.sub(r"[\s_-]+", " ", (option or "").strip().lower())
+    return _CANON.get(key, key.replace(" ", "-"))
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def record_operator_decisions(state_dir: Path | str, decisions: dict, source: dict) -> dict:
+    """Write the operator's answers into pending.json; request apply-decisions
+    once every feature has one.
+
+    The host owns the apply now (no one-shot agent): this only records and
+    hands over. ``decisions`` maps the F-number to an option in any accepted
+    spelling; ``source`` carries the Slack thread so the host can report there.
+
+    Returns {"applied": [ids], "still_awaiting": [ids], "unknown": [numbers],
+             "requested": bool, "reason": str|None}.
+    """
+    state = Path(state_dir)
+    pending_path = state / "pending.json"
+    pending = json.loads(pending_path.read_text(encoding="utf-8"))
+    features = pending.get("features", [])
+    by_number = {}
+    for f in features:
+        m = re.fullmatch(r"F(\d+)", str(f.get("id") or ""))
+        if m:
+            by_number[int(m.group(1))] = f
+    applied, unknown = [], []
+    for num, option in sorted(decisions.items()):
+        feat = by_number.get(int(num))
+        if feat is None:
+            unknown.append(int(num))
+            continue
+        feat["decision"] = _canon(option)
+        feat["status"] = "decided"
+        feat["source"] = "operator"
+        applied.append(feat["id"])
+    still = [f["id"] for f in features if not f.get("decision")]
+    if source.get("chat_id"):
+        pending["slack_channel"] = source.get("chat_id")
+    if source.get("thread_id"):
+        pending["slack_thread_ts"] = source.get("thread_id")
+    pending["status"] = "awaiting_decision" if still else "auto_apply"
+    pending["decided_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    _write_json_atomic(pending_path, pending)
+
+    requested, reason = False, None
+    if not still:
+        if any((state / n).exists() for n in ("finalize-request.json", "finalize-request.processing.json")):
+            reason = "a finalize is already in flight; the decision is recorded and will be picked up"
+        else:
+            _write_json_atomic(state / "finalize-request.json", {
+                "action": "apply-decisions",
+                "requested_at": pending["decided_at"],
+                "origin": {"platform": _normalize_platform(source.get("platform")),
+                           "chat_id": source.get("chat_id"), "thread_id": source.get("thread_id"),
+                           "user_id": source.get("user_id")},
+            })
+            requested = True
+    return {"applied": applied, "still_awaiting": still, "unknown": unknown,
+            "requested": requested, "reason": reason}
+
 
 _SANDBOX_STATE_SUFFIX = "sandboxes/docker/default/home/.hermes/state/upstream-sync"
 

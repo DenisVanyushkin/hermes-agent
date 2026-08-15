@@ -27668,26 +27668,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     @staticmethod
     def _build_upstream_sync_decision_ack(message, source):
-        """Queue a one-shot upstream-sync Mode B apply for an operator decision reply.
+        """Record an operator decision reply and hand the apply to the host.
 
-        Returns an ack string when ``message`` is a recognized decision reply and a
-        decision is pending; otherwise ``None`` so the normal path proceeds. The
-        one-shot cron job carries the upstream-sync skill and an engineer role pin,
-        so it runs Mode B in the cron pool (bypassing the observe-only orchestrator)
-        and delivers the result back to the origin thread.
+        Returns an ack string when ``message`` is a recognized decision reply and
+        a decision is pending; otherwise ``None`` so the normal path proceeds.
+        Nothing is spawned here any more: the answers go into pending.json and,
+        once every feature has one, a finalize request with action
+        ``apply-decisions`` — the host finalizer builds and lands the merge and
+        reports back in the same Slack thread. (Until 2026-08-15 this queued a
+        sandboxed one-shot agent for the apply; the agent held the state and
+        died with the gateway restart, which is how results and memory got lost.)
         """
         try:
             from hermes_cli.upstream_sync_reply import (
                 parse_upstream_sync_decision_reply,
                 has_pending_upstream_decision,
-                build_upstream_sync_decision_job_spec,
+                record_operator_decisions,
                 default_upstream_sync_state_dir,
             )
 
             decisions = parse_upstream_sync_decision_reply(message)
             if not decisions:
                 return None
-            if not has_pending_upstream_decision(default_upstream_sync_state_dir()):
+            state_dir = default_upstream_sync_state_dir()
+            if not has_pending_upstream_decision(state_dir):
                 return None
 
             source_dict = {
@@ -27696,46 +27700,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "thread_id": str(getattr(source, "thread_id", "") or "") or None,
                 "user_id": str(getattr(source, "user_id", "") or "") or None,
             }
-            spec = build_upstream_sync_decision_job_spec(message, source_dict, decisions)
-
-            from cron.jobs import create_job
-
-            create_job(**spec)
-
-            # Spawn a detached host-side progress reporter that posts rebase
-            # milestones + heartbeat into the operator's reply thread. Best
-            # effort: never let reporter issues block the ack.
-            try:
-                import sys as _sys
-                import subprocess as _sp
-                from pathlib import Path as _Path
-                from hermes_cli.upstream_sync_reply import build_progress_reporter_argv
-
-                _repo = str(_Path(__file__).resolve().parent.parent)
-                _hermes_bin = str(_Path(_sys.executable).parent / "hermes")
-                _script = str(_Path(_repo) / "scripts" / "upstream-sync-progress-reporter.py")
-                _argv = build_progress_reporter_argv(
-                    spec["origin"], repo=_repo, hermes_bin=_hermes_bin, script_path=_script,
-                )
-                if _argv:
-                    _sp.Popen(
-                        [_sys.executable, *_argv],
-                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, stdin=_sp.DEVNULL,
-                        start_new_session=True, close_fds=True,
-                    )
-            except Exception:
-                logger.warning("upstream-sync progress reporter spawn failed", exc_info=True)
+            outcome = record_operator_decisions(state_dir, decisions, source_dict)
         except Exception:
             logger.warning("upstream-sync decision intercept failed", exc_info=True)
             return None
 
         decision_line = ", ".join(f"{fid}: {opt}" for fid, opt in sorted(decisions.items()))
-        return (
-            "✅ Recorded your upstream-sync decisions (" + decision_line + ").\n\n"
-            "Queued the apply step (Mode B): it will create a backup ref, rebase onto "
-            "upstream, run the smoketest, restart the gateway, and roll back on failure. "
-            "I will report the result in this thread shortly."
-        )
+        lines = ["✅ Recorded your upstream-sync decisions (" + decision_line + ")."]
+        if outcome.get("unknown"):
+            lines.append("Ignored unknown feature number(s): " + ", ".join(str(n) for n in outcome["unknown"]) + ".")
+        if outcome.get("still_awaiting"):
+            lines.append("Still waiting for: " + ", ".join(outcome["still_awaiting"])
+                         + ". The apply starts once every feature has an answer.")
+        elif outcome.get("requested"):
+            lines.append("The host is applying now: merge in a clone, model-resolved hunks, fork tests, "
+                         "backup ref, fast-forward, publish, smoketest. The result lands in this thread.")
+        else:
+            lines.append("An apply is already in flight; your decision is recorded and will be picked up.")
+        return "\n".join(lines)
 
     @staticmethod
     def _build_baseline_doctor_ack(message, source):
@@ -28818,7 +28800,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _us_ack = self._build_upstream_sync_decision_ack(_operator_text, source)
         if _us_ack is not None:
             logger.info(
-                "upstream-sync decision intercept: queued Mode B one-shot: session=%s platform=%s",
+                "upstream-sync decision intercept: recorded decisions, host apply requested: session=%s platform=%s",
                 session_id,
                 platform_key,
             )
