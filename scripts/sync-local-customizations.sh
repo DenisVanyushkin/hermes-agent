@@ -22,6 +22,22 @@ if [ "$(id -u)" -ne 0 ] && \
 fi
 unset _default_repo
 
+# --post-update-only <before-head>: the branch was already moved by the caller
+# (the finalizer fast-forwarding an operator-approved merge). Do only what
+# follows a landed update — parse check, runtime script sync, push, gateway
+# restart, report. No fetch, no merge: bringing in newer upstream commits is
+# the next scheduled sync's job, and doing it here gated the push and the
+# restart of an already-landed merge on an unrelated conflict set (2026-08-15).
+POST_UPDATE_ONLY_FROM=""
+if [ "${1:-}" = "--post-update-only" ]; then
+  if [ -z "${2:-}" ]; then
+    echo "FAILED: --post-update-only needs the pre-update HEAD as its argument." >&2
+    exit 2
+  fi
+  POST_UPDATE_ONLY_FROM="$2"
+  shift 2
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
   REPO="${PWD}"
@@ -404,6 +420,66 @@ $files
 EOF_FILES
   return "$failed"
 }
+
+# Everything that follows a landed update. Shared by the normal path (after the
+# upstream merge) and by --post-update-only (after a merge the finalizer
+# fast-forwarded itself).
+finish_update() {
+  local before="$1" after
+  after="$(git -C "$REPO" rev-parse --short HEAD)"
+  if [ "$after" = "$before" ]; then
+    push_personal_branch
+    report_noop "$before"
+    return 0
+  fi
+
+  if ! verify_tree_compiles; then
+    report_post_update "$before" "$after" "no" "no"
+    # Repeat the failure reason AFTER the report: downstream consumers
+    # (upstream-sync finalizer, cron delivery) keep only the tail of the
+    # output, so a reason printed before the report gets truncated away and
+    # the failure looks causeless (2026-07-16 finalize incident).
+    echo "FAILED: post-merge syntax check failed — not syncing scripts, not pushing, not restarting (see SYNTAX ERROR lines above)." >&2
+    return 1
+  fi
+
+  local sync_helper="$REPO/scripts/sync-runtime-scripts.sh"
+  if [ -x "$sync_helper" ]; then
+    "$sync_helper" >/dev/null
+  else
+    echo "Updated repo, but could not find runtime script sync helper: $sync_helper" >&2
+    return 1
+  fi
+
+  push_personal_branch
+
+  local hermes_bin restart_output
+  hermes_bin="$(resolve_hermes_bin || true)"
+  if [ -z "$hermes_bin" ]; then
+    echo "Updated repo and pushed changes, but could not find hermes executable to restart gateway; skipping restart." >&2
+    echo "Repo: $REPO" >&2
+    echo "Branch: $BRANCH" >&2
+    echo "Before: $before" >&2
+    echo "After: $after" >&2
+    report_post_update "$before" "$after" "no"
+    return 0
+  fi
+
+  restart_output="$($hermes_bin gateway restart 2>&1)" || {
+    echo "Updated repo and pushed changes, but gateway restart failed; continuing." >&2
+    echo "Repo: $REPO" >&2
+    echo "Branch: $BRANCH" >&2
+    echo "Before: $before" >&2
+    echo "After: $after" >&2
+    echo "Restart output:" >&2
+    printf '%s\n' "$restart_output" >&2
+    report_post_update "$before" "$after" "no"
+    return 0
+  }
+
+  report_post_update "$before" "$after"
+}
+
 # end-verify-helpers
 
 # Serialize all automated git writers on a repo-level lock: git's own
@@ -434,6 +510,15 @@ fi
 if ! git -C "$REPO" rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
   echo "Local branch not found: $BRANCH" >&2
   exit 1
+fi
+
+if [ -n "$POST_UPDATE_ONLY_FROM" ]; then
+  if ! BEFORE_HEAD="$(git -C "$REPO" rev-parse --short "$POST_UPDATE_ONLY_FROM" 2>/dev/null)"; then
+    echo "FAILED: --post-update-only was given an unknown commit: $POST_UPDATE_ONLY_FROM" >&2
+    exit 2
+  fi
+  finish_update "$BEFORE_HEAD" || exit 1
+  exit 0
 fi
 
 if ! git -C "$REPO" remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
@@ -589,54 +674,4 @@ if ! git -C "$REPO" merge --ff-only "$MERGED_HEAD" >/dev/null 2>&1; then
   exit 1
 fi
 
-AFTER_HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
-if [ "$AFTER_HEAD" = "$BEFORE_HEAD" ]; then
-  push_personal_branch
-  report_noop "$BEFORE_HEAD"
-  exit 0
-fi
-
-if ! verify_tree_compiles; then
-  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no" "no"
-  # Repeat the failure reason AFTER the report: downstream consumers
-  # (upstream-sync finalizer, cron delivery) keep only the tail of the
-  # output, so a reason printed before the report gets truncated away
-  # and the failure looks causeless (2026-07-16 finalize incident).
-  echo "FAILED: post-merge syntax check failed — not syncing scripts, not pushing, not restarting (see SYNTAX ERROR lines above)." >&2
-  exit 1
-fi
-
-SYNC_HELPER="$REPO/scripts/sync-runtime-scripts.sh"
-if [ -x "$SYNC_HELPER" ]; then
-  "$SYNC_HELPER" >/dev/null
-else
-  echo "Updated repo, but could not find runtime script sync helper: $SYNC_HELPER" >&2
-  exit 1
-fi
-
-push_personal_branch
-
-HERMES_BIN="$(resolve_hermes_bin || true)"
-if [ -z "$HERMES_BIN" ]; then
-  echo "Updated repo and pushed changes, but could not find hermes executable to restart gateway; skipping restart." >&2
-  echo "Repo: $REPO" >&2
-  echo "Branch: $BRANCH" >&2
-  echo "Before: $BEFORE_HEAD" >&2
-  echo "After: $AFTER_HEAD" >&2
-  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no"
-  exit 0
-fi
-
-RESTART_OUTPUT="$($HERMES_BIN gateway restart 2>&1)" || {
-  echo "Updated repo and pushed changes, but gateway restart failed; continuing." >&2
-  echo "Repo: $REPO" >&2
-  echo "Branch: $BRANCH" >&2
-  echo "Before: $BEFORE_HEAD" >&2
-  echo "After: $AFTER_HEAD" >&2
-  echo "Restart output:" >&2
-  printf '%s\n' "$RESTART_OUTPUT" >&2
-  report_post_update "$BEFORE_HEAD" "$AFTER_HEAD" "no"
-  exit 0
-}
-
-report_post_update "$BEFORE_HEAD" "$AFTER_HEAD"
+finish_update "$BEFORE_HEAD" || exit 1

@@ -99,10 +99,18 @@ def _stub_hermes_bin(world) -> Path:
     return script
 
 
-def _run_sync(world, extra_env=None) -> subprocess.CompletedProcess:
+def _run_sync(world, extra_env=None, argv=()) -> subprocess.CompletedProcess:
+    # HOME is redirected at a scratch dir on purpose. The script probes
+    # "$HOME/.hermes/hermes-agent" for root-owned files and re-execs itself
+    # under sudo when it finds any — so a single root-owned file in the real
+    # live checkout (a stray `sudo git status` leaves one behind) turns every
+    # test in this file red for a reason that has nothing to do with the test.
+    home = world["fork"].parent / "fake-home"
+    home.mkdir(exist_ok=True)
     env = dict(os.environ)
     env.update(
         {
+            "HOME": str(home),
             "HERMES_BIN": str(_stub_hermes_bin(world)),
             "HERMES_LOCAL_BRANCH": "local/customizations",
             "HERMES_UPSTREAM_REMOTE": "origin",
@@ -117,7 +125,7 @@ def _run_sync(world, extra_env=None) -> subprocess.CompletedProcess:
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["bash", str(SYNC)],
+        ["bash", str(SYNC), *argv],
         cwd=world["fork"],
         env=env,
         capture_output=True,
@@ -281,3 +289,42 @@ def test_another_hosts_commits_are_merged_in(world):
     assert (fork / "from_other_host.py").exists(), "коммит другого хоста потерян"
     assert (fork / "agent" / "new_module.py").exists()
     assert (fork / "local_feature.py").exists()
+
+
+def test_post_update_only_publishes_a_landed_update_without_touching_upstream(world):
+    """The finalizer fast-forwards an operator-approved merge itself, then
+    needs only what follows a landed update: syntax check, runtime scripts,
+    push, gateway restart, report. Bringing in newer upstream commits is the
+    next scheduled sync's job — doing it here gated the push and the restart
+    of an already-landed merge on an unrelated conflict set (2026-08-15).
+    """
+    fork = world["fork"]
+    before = _git(fork, "rev-parse", "HEAD")
+    (fork / "landed.py").write_text("LANDED = True\n")
+    _git(fork, "add", "-A")
+    _git(fork, "commit", "-qm", "landed by the finalizer")
+    after = _git(fork, "rev-parse", "HEAD")
+    # Upstream moved meanwhile; this mode must not even look at it.
+    _add_upstream_commit(world, "agent/core.py", "VALUE = 2\n", "upstream moved on")
+    _git(world["seed"], "push", "-q", "origin", "main")
+
+    # A token makes the script actually push (without one it skips the push by
+    # design); the personal remote is a local bare repo, so no auth happens.
+    proc = _run_sync(world, extra_env={"GITHUB_TOKEN": "dummy"},
+                     argv=["--post-update-only", before])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _git(fork, "rev-parse", "HEAD") == after            # no upstream merge
+    assert _git(world["personal"], "rev-parse", "local/customizations") == after
+    assert "gateway restarted: yes" in proc.stdout
+    # The report prints short SHAs.
+    assert f"Before: {before[:7]}" in proc.stdout and f"After: {after[:7]}" in proc.stdout
+    assert "landed.py" in proc.stdout                          # report lists what landed
+
+
+def test_post_update_only_without_a_before_head_refuses(world):
+    """The mode reports what landed between two points; without the first one
+    there is nothing to report and nothing to verify."""
+    proc = _run_sync(world, argv=["--post-update-only"])
+    assert proc.returncode != 0
+    assert "post-update-only" in proc.stderr
