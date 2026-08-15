@@ -272,11 +272,15 @@ def has_conflict_markers(text: str) -> bool:
 def cmd_prepare(args) -> int:
     state, live = Path(args.state), Path(args.live)
     scratch = state / args.scratch
-    for name in ("finalize-request.json", "finalize-request.processing.json"):
-        if (state / name).exists():
-            emit({"status": "error",
-                  "reason": f"{name} exists — a finalize is in flight; wait for it first"})
-            return EXIT_USAGE
+    # The finalizer itself calls prepare from inside apply-decisions, i.e. while
+    # its own request is the one in flight — it passes --in-flight-ok. Anyone
+    # else racing a running finalize is refused.
+    if not getattr(args, "in_flight_ok", False):
+        for name in ("finalize-request.json", "finalize-request.processing.json"):
+            if (state / name).exists():
+                emit({"status": "error",
+                      "reason": f"{name} exists — a finalize is in flight; wait for it first"})
+                return EXIT_USAGE
     pending = load_pending(state)
     upstream_head = pending["upstream_head"]
     by_file, missing = decisions_by_file(pending)
@@ -589,6 +593,8 @@ def main(argv=None) -> int:
     p_prep = sub.add_parser("prepare", parents=[common])
     p_prep.add_argument("--auto-policy", action="store_true",
                         help="decide undecided plain paths by policy (merge-both); security paths still ask")
+    p_prep.add_argument("--in-flight-ok", action="store_true",
+                        help="do not refuse when a finalize request is in flight (the finalizer's own call)")
     p_prep.set_defaults(func=cmd_prepare)
     sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
     sub.add_parser("commit", parents=[common]).set_defaults(func=cmd_commit)

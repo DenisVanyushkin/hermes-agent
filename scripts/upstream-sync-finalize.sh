@@ -14,6 +14,10 @@ set -euo pipefail
 #  - finalize: agent already merged in the sandbox — push+restart via the
 #              sync script (no-op merge), smoketest; rollback on fail
 #  - rollback: explicit rollback to backup_ref
+#  - apply-merge: land a merge an external party built in <state>/<scratch_repo>
+#  - apply-decisions: build AND land the merge for a decided pending.json —
+#              clone, mechanical + model resolution, commit, gate, publish.
+#              No sandbox, no agent: the host owns the whole state machine.
 # Result written to finalize-result.json in the same dir.
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -75,7 +79,7 @@ ACTION="$(json_field action)"
 # который ещё не обновился до нового контракта. Оба означают одно:
 # применить обновление.
 is_apply_action() {
-  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ] || [ "$ACTION" = apply-merge ]
+  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ] || [ "$ACTION" = apply-merge ] || [ "$ACTION" = apply-decisions ]
 }
 UPSTREAM_SHA="$(json_field upstream_sha)"
 BACKUP_REF="$(json_field backup_ref)"
@@ -87,6 +91,9 @@ BACKUP_REF="$(json_field backup_ref)"
 FAILED_STAGE=""
 
 write_result() {
+  # Statuses: ok | failed | awaiting_decision (apply-decisions stopped to ask
+  # the operator about a new security-path conflict — not a failure, the gate
+  # stays armed and pending.json carries the question).
   # Keep the complete log next to the result: the JSON detail is truncated
   # to its tail, which has already hidden the actual failure cause once
   # (2026-07-16: a pre-report error line was cut off, leaving a causeless
@@ -135,8 +142,54 @@ PY
       fi
     fi
   fi
+  # After the archive: the thread report reads pending.json or its archive.
+  report_to_thread "$1"
 }
 
+# The operator-facing summary, threaded under the conflict report when
+# pending.json (or its archive) knows the thread. Composed by the Slack helper
+# from apply-prepare.json + finalize-result.json; best effort — a failed post
+# never changes the outcome. notify_slack keeps its one-liner as the fallback
+# channel message.
+report_to_thread() {
+  local status="$1" py helper
+  helper="$SCRIPTS_DIR/upstream_sync_slack.py"
+  [ -f "$helper" ] || helper="$REPO/scripts/upstream_sync_slack.py"
+  [ -f "$helper" ] || return 0
+  py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  "$py" - "$helper" "$STATE_DIR" "$RESULT" "$status" "$ACTION" "$SCRATCH_FOR_REPORT" >>"$DETAIL_LOG" 2>&1 <<'PY' || echo "warning: thread report not posted (see above)" >>"$DETAIL_LOG"
+import glob, importlib.util, json, os, sys
+helper, state, result_path, status, action, scratch = sys.argv[1:7]
+spec = importlib.util.spec_from_file_location("upstream_sync_slack", helper)
+slack = importlib.util.module_from_spec(spec); spec.loader.exec_module(slack)
+def load(p):
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return {}
+pending = load(os.path.join(state, "pending.json"))
+if not pending:
+    archived = sorted(glob.glob(os.path.join(state, "pending.json.applied-*")))
+    pending = load(archived[-1]) if archived else {}
+channel = pending.get("slack_channel") or os.environ.get("HERMES_SYNC_SLACK_CHANNEL") or ""
+thread = pending.get("slack_thread_ts") or None
+if not channel:
+    sys.exit(0)
+prep = load(os.path.join(state, "apply-prepare.json"))
+result = load(result_path)
+if status == "ok" and action in ("apply-decisions", "apply-merge"):
+    text = slack.applied_text(prep, result)
+elif status == "awaiting_decision":
+    text = slack.report_text(pending)
+elif status == "failed" and action in ("apply-decisions", "apply-merge"):
+    text = slack.failed_text(prep, result, scratch=scratch)
+else:
+    sys.exit(0)
+slack.post(channel, text, thread_ts=thread)
+PY
+}
+SCRATCH_FOR_REPORT=""
 # Recording the operator's decisions used to be the LAST step of Mode B, run by
 # the agent — but its session dies with the gateway restart the smoketest
 # triggers, so on 2026-08-12 the record never ran and the memory had to be
@@ -305,53 +358,13 @@ run_post_update_pipeline() {
   write_result ok "$(cat "$DETAIL_LOG")"
 }
 
-case "$ACTION" in
-  sync|rebase)
-    if [ -z "$BACKUP_REF" ]; then
-      BACKUP_REF="backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)"
-      REPO="${HERMES_REPO:-$HOME/.hermes/hermes-agent}"
-      run_logged git -C "$REPO" branch "$BACKUP_REF" HEAD || true
-      run_logged git -C "$REPO" tag "$BACKUP_REF" HEAD || true
-    fi
-    run_apply_pipeline
-    ;;
-  finalize)
-    # finalize means "the sandbox agent already rebased the repo". Verify that
-    # claim before running push/restart: on 2026-07-20 the agent requested
-    # finalize after its own rebase had ABORTED, and the pipeline replayed
-    # hundreds of commits into conflicts, then rolled back and restarted the
-    # gateway for nothing. Fail fast and leave the repo untouched instead.
-    if [ -n "$UPSTREAM_SHA" ] && \
-       ! git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_SHA" HEAD 2>>"$DETAIL_LOG"; then
-      echo "HEAD $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?') is not a descendant of upstream_sha $UPSTREAM_SHA" >>"$DETAIL_LOG"
-      write_result failed "finalize requested but the repo is not rebased onto upstream_sha — refusing to run; repo untouched, no rollback. $(cat "$DETAIL_LOG")"
-      exit 0
-    fi
-    run_apply_pipeline
-    ;;
-  apply-merge)
-    # The live checkout is bind-mounted :ro into sandboxes, so the Mode B agent
-    # cannot create a backup ref or commit a merge in it (2026-08-12: an apply
-    # died on exactly that, having been told to do both). It merges in a
-    # writable `git clone --shared` under the state dir instead and hands us the
-    # SHA. Trust is re-derived HERE from the commit own parents rather than
-    # taken on the agent word: a merge that is not parented exactly on our
-    # current HEAD and on the operator-approved upstream point is refused.
-    MERGE_SHA="$(json_field merge_sha)"
-    SCRATCH_NAME="$(json_field scratch_repo)"
-    # A bare directory name resolved from OUR state dir — never a path carried
-    # in the request, so there is no traversal to validate away.
-    case "$SCRATCH_NAME" in
-      "" | . | .. | */*)
-        write_result failed "invalid scratch_repo [$SCRATCH_NAME] — must be a bare directory name under the state dir; repo untouched, no rollback."
-        exit 0
-        ;;
-    esac
-    SCRATCH="$STATE_DIR/$SCRATCH_NAME"
-    if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
-      write_result failed "apply-merge needs both merge_sha and upstream_sha; repo untouched, no rollback."
-      exit 0
-    fi
+# Land a merge commit that sits in $SCRATCH: fetch it, prove it is parented on
+# our HEAD and the gated upstream point, run the fork tests, back up, fast-
+# forward, publish, smoke-test. Shared by apply-merge (a merge someone else
+# built) and apply-decisions (a merge we built ourselves). Uses MERGE_SHA,
+# UPSTREAM_SHA, SCRATCH, SCRATCH_NAME, BACKUP_REF from the caller. Every early
+# return follows a write_result, so exiting there is terminal by design.
+land_merge() {
     # A merge that is already the branch tip is a duplicate hand-off, not a
     # mismatch: reporting it as a parent mismatch overwrote the real outcome of
     # the run that had just landed it, telling the operator the apply had failed
@@ -424,6 +437,137 @@ case "$ACTION" in
     if [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['status'])" "$RESULT" 2>/dev/null)" = ok ]; then
       rm -rf "$SCRATCH"
     fi
+}
+
+# apply-decisions — the host-owned path. pending.json carries every decision
+# (policy / memory / operator); nothing runs in a sandbox and no agent holds
+# state. Each step writes its outcome to the state dir, so a failed run leaves
+# a precise report and a preserved clone rather than a half-applied branch,
+# and a re-request after a manual fix resumes instead of starting over.
+apply_decisions() {
+  local py apply prep_status
+  py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  apply="$SCRIPTS_DIR/upstream_sync_apply.py"
+  [ -f "$apply" ] || apply="$REPO/scripts/upstream_sync_apply.py"
+  SCRATCH_NAME="scratch"
+  SCRATCH="$STATE_DIR/$SCRATCH_NAME"
+  SCRATCH_FOR_REPORT="$SCRATCH"
+  if [ ! -f "$STATE_DIR/pending.json" ]; then
+    write_result failed "apply-decisions: no pending.json — nothing decided to apply; repo untouched."
+    exit 0
+  fi
+  UPSTREAM_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"upstream_head\") or \"\")" "$STATE_DIR/pending.json" 2>/dev/null || true)"
+  if [ -z "$UPSTREAM_SHA" ]; then
+    write_result failed "apply-decisions: pending.json has no upstream_head; repo untouched."
+    exit 0
+  fi
+
+  # Resume: a preserved clone with no conflict markers left is someone's hand
+  # work — take it as is. Otherwise (re)build it.
+  prep_status="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"status\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if [ -d "$SCRATCH/.git" ] && [ "$prep_status" = ready ] && \
+     [ -z "$(git -C "$SCRATCH" ls-files -u 2>/dev/null)" ] && \
+     [ "$(git -C "$SCRATCH" rev-parse HEAD 2>/dev/null)" = "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" -o -n "$(git -C "$SCRATCH" rev-parse -q --verify MERGE_HEAD 2>/dev/null)" ]; then
+    echo "apply-decisions: resuming from the preserved clone (no unmerged paths)" >>"$DETAIL_LOG"
+  else
+    rm -rf "$SCRATCH"
+    set +e
+    "$py" "$apply" prepare --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok >>"$DETAIL_LOG" 2>&1
+    rc=$?
+    set -e
+    case "$rc" in
+      0) ;;
+      4)
+        # A new security-path conflict: the policy does not decide those. Ask
+        # (report_to_thread posts the question) and keep everything armed.
+        write_result awaiting_decision "apply-decisions: a new conflict on a security-sensitive path needs the operator's decision; nothing applied. $(cat "$DETAIL_LOG")"
+        exit 0
+        ;;
+      *)
+        FAILED_STAGE=prepare
+        write_result failed "apply-decisions: prepare failed (rc=$rc); repo untouched. $(cat "$DETAIL_LOG")"
+        exit 0
+        ;;
+    esac
+    set +e
+    "$py" "$apply" resolve-llm --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      FAILED_STAGE=resolve
+      write_result failed "apply-decisions: the model could not resolve every hunk; the clone is preserved at $SCRATCH with markers in place, decision kept armed. $(cat "$DETAIL_LOG")"
+      exit 0
+    fi
+  fi
+  set +e
+  "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    FAILED_STAGE=commit
+    write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"
+    exit 0
+  fi
+  MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"merge_sha\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if [ -z "$MERGE_SHA" ]; then
+    write_result failed "apply-decisions: commit reported no merge_sha; clone preserved."
+    exit 0
+  fi
+  land_merge
+}
+
+case "$ACTION" in
+  sync|rebase)
+    if [ -z "$BACKUP_REF" ]; then
+      BACKUP_REF="backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)"
+      REPO="${HERMES_REPO:-$HOME/.hermes/hermes-agent}"
+      run_logged git -C "$REPO" branch "$BACKUP_REF" HEAD || true
+      run_logged git -C "$REPO" tag "$BACKUP_REF" HEAD || true
+    fi
+    run_apply_pipeline
+    ;;
+  finalize)
+    # finalize means "the sandbox agent already rebased the repo". Verify that
+    # claim before running push/restart: on 2026-07-20 the agent requested
+    # finalize after its own rebase had ABORTED, and the pipeline replayed
+    # hundreds of commits into conflicts, then rolled back and restarted the
+    # gateway for nothing. Fail fast and leave the repo untouched instead.
+    if [ -n "$UPSTREAM_SHA" ] && \
+       ! git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_SHA" HEAD 2>>"$DETAIL_LOG"; then
+      echo "HEAD $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?') is not a descendant of upstream_sha $UPSTREAM_SHA" >>"$DETAIL_LOG"
+      write_result failed "finalize requested but the repo is not rebased onto upstream_sha — refusing to run; repo untouched, no rollback. $(cat "$DETAIL_LOG")"
+      exit 0
+    fi
+    run_apply_pipeline
+    ;;
+  apply-merge)
+    # The live checkout is bind-mounted :ro into sandboxes, so the Mode B agent
+    # cannot create a backup ref or commit a merge in it (2026-08-12: an apply
+    # died on exactly that, having been told to do both). It merges in a
+    # writable `git clone --shared` under the state dir instead and hands us the
+    # SHA. Trust is re-derived HERE from the commit own parents rather than
+    # taken on the agent word: a merge that is not parented exactly on our
+    # current HEAD and on the operator-approved upstream point is refused.
+    MERGE_SHA="$(json_field merge_sha)"
+    SCRATCH_NAME="$(json_field scratch_repo)"
+    # A bare directory name resolved from OUR state dir — never a path carried
+    # in the request, so there is no traversal to validate away.
+    case "$SCRATCH_NAME" in
+      "" | . | .. | */*)
+        write_result failed "invalid scratch_repo [$SCRATCH_NAME] — must be a bare directory name under the state dir; repo untouched, no rollback."
+        exit 0
+        ;;
+    esac
+    SCRATCH="$STATE_DIR/$SCRATCH_NAME"
+    if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
+      write_result failed "apply-merge needs both merge_sha and upstream_sha; repo untouched, no rollback."
+      exit 0
+    fi
+    land_merge
+    ;;
+  apply-decisions)
+    apply_decisions
     ;;
   rollback)
     if [ -z "$BACKUP_REF" ]; then

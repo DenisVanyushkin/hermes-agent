@@ -21,6 +21,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -77,7 +78,8 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
         "echo '1 failed, 5 passed in 2.00s'\n"
     )
     tests_stub.chmod(0o755)
-    for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py"):
+    for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py", "upstream_sync_policy.py",
+                   "upstream_sync_apply.py", "upstream_sync_llm.py", "upstream_sync_slack.py"):
         (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
     return scripts, calls
 
@@ -91,6 +93,11 @@ def _run_finalize(repo, state, scripts, extra_env=None, path_prepend=None):
             "HERMES_REPO": str(repo),
             # Keep the ACL self-heal inert in the test sandbox.
             "SUDO_ASKPASS": "/bin/false",
+            # apply-decisions runs the python helpers with this interpreter and
+            # must never reach a model or Slack from a test.
+            "HERMES_PYTHON": sys.executable,
+            "HERMES_SYNC_RESOLVER_CMD": env.get("HERMES_SYNC_RESOLVER_CMD", "false"),
+            "HERMES_SYNC_SLACK_CMD": env.get("HERMES_SYNC_SLACK_CMD", "true"),
         }
     )
     if extra_env:
@@ -938,6 +945,162 @@ class TestAnAlreadyAppliedMergeIsNotAFailure:
         assert _git(repo, "rev-parse", "HEAD") == merge_sha
         # No second publish, no second gateway restart, no rollback.
         assert not calls.exists() or calls.read_text().strip() == "", calls.read_text()
+
+
+def _decisions_request(state: Path):
+    (state / "finalize-request.json").write_text(json.dumps({"action": "apply-decisions"}))
+
+
+def _slack_recorder(tmp_path: Path) -> tuple[Path, Path]:
+    """A HERMES_SYNC_SLACK_CMD that appends every payload to a log and prints a ts."""
+    log = tmp_path / "slack.jsonl"
+    cmd = tmp_path / "slack.sh"
+    cmd.write_text(f'#!/usr/bin/env bash\ncat >> "{log}"; echo >> "{log}"\necho 1786.100\n')
+    cmd.chmod(0o755)
+    return cmd, log
+
+
+def _resolver(tmp_path: Path, body: str) -> str:
+    r = tmp_path / "resolver.py"
+    r.write_text(body)
+    return f"{sys.executable} {r}"
+
+
+class TestApplyDecisions:
+    """The host applies a decided pending.json end to end: clone, mechanical +
+    model resolution, commit, gate, land, publish, archive, memory, and a
+    summary in the Slack thread the report lives in. No sandbox, no agent."""
+
+    def _pending(self, state, world, decision="merge-both", files=("f.txt",), thread="1786.001"):
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1", "status": "auto_apply",
+            "local_head": world[1], "upstream_head": world[2],
+            "slack_channel": "C0TEST", "slack_thread_ts": thread,
+            "features": [{"id": "F1", "status": "decided", "source": "policy", "decision": decision,
+                          "files": list(files), "local_subjects": ["tip"]}],
+        }))
+
+    def _conflicting_repo(self, tmp_path):
+        repo = _make_repo(tmp_path)                       # f.txt = "two" at tip, "one" at base
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "f.txt").write_text("three\n")           # both sides changed line 1 → conflict
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        return repo, local_head, upstream_head
+
+    def test_decided_pending_is_applied_end_to_end_and_reported_in_thread(self, tmp_path, state):
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        scripts, calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\nh=json.load(sys.stdin)\nsys.stdout.write('two\\nthree\\n')\n")
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert res["action"] == "apply-decisions"
+        head = _git(repo, "rev-parse", "HEAD")
+        parents = _git(repo, "rev-list", "--parents", "-n1", head).split()[1:]
+        assert parents == [local_head, upstream_head]
+        assert (repo / "f.txt").read_text() == "two\nthree\n"
+        assert res["backup_ref"] and _git(repo, "rev-parse", res["backup_ref"]) == local_head
+        logged = calls.read_text()
+        assert f"sync-local-customizations.sh --post-update-only {local_head}" in logged
+        assert "upstream-sync-smoketest.sh" in logged
+        # decision consumed + memory recorded
+        assert not (state / "pending.json").exists()
+        assert list(state.glob("pending.json.applied-*"))
+        assert json.loads((state / "decision-memory.json").read_text())["entries"]
+        # the summary went to the report's thread
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and posts[-1]["channel"] == "C0TEST" and posts[-1]["thread_ts"] == "1786.001"
+        assert "applied" in posts[-1]["text"].lower()
+        assert "f.txt" in posts[-1]["text"]
+        # the clone is gone on success
+        assert not (state / "scratch").exists()
+
+    def test_unresolvable_hunk_fails_at_resolve_keeps_clone_and_reports(self, tmp_path, state):
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        scripts, calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        leaky = _resolver(tmp_path, "import sys\nsys.stdout.write('<<<<<<< leaked\\n')\n")
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": leaky, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "resolve"
+        assert _git(repo, "rev-parse", "HEAD") == local_head          # untouched
+        assert (state / "pending.json").exists()                      # still armed
+        assert (state / "scratch" / "f.txt").exists()                 # clone preserved
+        assert "<<<<<<< " in (state / "scratch" / "f.txt").read_text()
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and "f.txt" in posts[-1]["text"] and "scratch" in posts[-1]["text"]
+        assert posts[-1]["thread_ts"] == "1786.001"
+
+    def test_new_security_conflict_asks_instead_of_applying(self, tmp_path, state):
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        # after the gate: both sides touch a security-named file → policy asks
+        _git(repo, "checkout", "-q", "up")
+        (repo / "auth_gate.py").write_text("upstream\n")
+        _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "upstream auth")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        (repo / "auth_gate.py").write_text("local\n")
+        _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "local auth")
+        world = (repo, _git(repo, "rev-parse", "HEAD"), upstream_head)
+        self._pending(state, world, decision="keep-local")
+        scripts, calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={"HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "awaiting_decision", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == world[1]
+        pending = json.loads((state / "pending.json").read_text())
+        assert pending["status"] == "awaiting_decision"
+        asked = [f for f in pending["features"] if f["files"] == ["auth_gate.py"]]
+        assert asked and asked[0]["decision"] is None
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and "auth_gate.py" in posts[-1]["text"] and posts[-1]["thread_ts"] == "1786.001"
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_resume_after_a_manual_fix_skips_prepare(self, tmp_path, state):
+        """A human fixed the preserved clone by hand and re-requests: prepare must
+        not wipe their work — the clone is taken as is when it holds no markers."""
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        scripts, calls = _stub_scripts(tmp_path)
+        leaky = _resolver(tmp_path, "import sys\nsys.stdout.write('<<<<<<< leaked\\n')\n")
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env={"HERMES_SYNC_RESOLVER_CMD": leaky})
+        assert _result(state)["failed_stage"] == "resolve"
+        # the human resolves in the preserved clone
+        (state / "scratch" / "f.txt").write_text("by hand\n")
+        _git(state / "scratch", "add", "f.txt")
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={"HERMES_SYNC_RESOLVER_CMD": leaky})
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert (repo / "f.txt").read_text() == "by hand\n"
 
 
 # ---------------------------------------------------------------------------
