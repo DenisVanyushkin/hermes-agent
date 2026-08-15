@@ -263,6 +263,65 @@ class TestWait:
         assert _out(proc)["status"] == "timeout"
 
 
+def _block(ours: str, base: str, theirs: str) -> str:
+    return (f"<<<<<<< HEAD\n{ours}||||||| merged common ancestors\n{base}"
+            f"=======\n{theirs}>>>>>>> upstream\n")
+
+
+class TestMergeBothHunkResolver:
+    def test_both_added_distinct_lines_are_concatenated_ours_first(self):
+        text = "a\n" + _block("import local\n", "", "import upstream\n") + "z\n"
+        new, resolved, remaining = resolve_merge_both_text(text)
+        assert (new, resolved, remaining) == ("a\nimport local\nimport upstream\nz\n", 1, 0)
+
+    def test_both_added_with_a_shared_line_is_left_for_a_human(self):
+        text = _block("import a\nimport b\n", "", "import a\nimport c\n")
+        new, resolved, remaining = resolve_merge_both_text(text)
+        assert new == text and (resolved, remaining) == (0, 1)
+
+    def test_only_upstream_changed_takes_theirs(self):
+        text = _block("x = 1\n", "x = 1\n", "x = 2\n")
+        assert resolve_merge_both_text(text) == ("x = 2\n", 1, 0)
+
+    def test_only_local_changed_takes_ours(self):
+        text = _block("x = 3\n", "x = 1\n", "x = 1\n")
+        assert resolve_merge_both_text(text) == ("x = 3\n", 1, 0)
+
+    def test_real_three_way_edit_is_left(self):
+        text = _block("x = 3\n", "x = 1\n", "x = 2\n")
+        assert resolve_merge_both_text(text) == (text, 0, 1)
+
+    def test_non_zdiff3_block_is_left_untouched(self):
+        text = "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> up\n"
+        assert resolve_merge_both_text(text) == (text, 0, 1)
+
+    def test_mixed_file_resolves_only_the_mechanical_hunk(self):
+        good = _block("import local\n", "", "import upstream\n")
+        bad = _block("x = 3\n", "x = 1\n", "x = 2\n")
+        text = "head\n" + good + "mid\n" + bad + "tail\n"
+        new, resolved, remaining = resolve_merge_both_text(text)
+        assert (resolved, remaining) == (1, 1)
+        assert new == "head\nimport local\nimport upstream\nmid\n" + bad + "tail\n"
+
+    def test_prepare_auto_closes_a_file_whose_hunks_are_all_mechanical(self, world):
+        live = world["live"]
+        # Rebuild the conflict as "both appended distinct lines to f.txt".
+        _git(live, "checkout", "-q", "local/customizations")
+        (live / "f.txt").write_text("base\nlocal tail\n")
+        _git(live, "commit", "-qam", "local appends")
+        _git(live, "checkout", "-q", "up")
+        (live / "f.txt").write_text("base\nupstream tail\n")
+        _git(live, "commit", "-qam", "upstream appends")
+        world["upstream_head"] = _git(live, "rev-parse", "HEAD")
+        _git(live, "checkout", "-q", "local/customizations")
+        _pending(world, decision="merge-both")
+
+        out = _out(_run("prepare", world["state"], world["live"]))
+        assert out["status"] == "ready", out
+        assert out["auto_resolved"] == ["f.txt"] and out["needs_manual"] == []
+        assert (world["state"] / "scratch" / "f.txt").read_text() == "base\nlocal tail\nupstream tail\n"
+
+
 class TestEndToEndWithTheHostFinalizer:
     """prepare -> (manual resolution) -> handoff -> the real finalizer, with the
     finalizer's downstream scripts stubbed. Proves the two halves agree on the

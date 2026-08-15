@@ -148,13 +148,76 @@ def count_conflict_blocks(text: str) -> int:
     return sum(1 for line in text.splitlines() if line.startswith(CONFLICT_START))
 
 
+def _mechanical_resolution(ours: list, base: list, theirs: list):
+    """The resolution for one zdiff3 block, or None when a human must decide.
+
+    These are the three shapes that closed 53 of 98 hunks by hand during the
+    2026-08-09 merge; everything else was a judgement call then too.
+    """
+    if any(l.startswith((CONFLICT_START, CONFLICT_BASE, CONFLICT_END))
+           for l in ours + base + theirs):
+        return None                                  # nested markers: hands off
+    if not base and ours and theirs:
+        ours_lines = {l.strip() for l in ours if l.strip()}
+        theirs_lines = {l.strip() for l in theirs if l.strip()}
+        if ours_lines & theirs_lines:
+            return None                              # both added overlapping content
+        return ours + theirs                         # both added distinct content here
+    if ours == base:
+        return theirs                                # only upstream changed
+    if theirs == base:
+        return ours                                  # only local changed
+    return None
+
+
 def resolve_merge_both_text(text: str) -> tuple:
     """Return (new_text, resolved_hunks, remaining_hunks).
 
-    Placeholder until the zdiff3 hunk resolver lands: nothing is rewritten and
-    every hunk is reported as remaining.
+    Rewrites only the zdiff3 blocks whose resolution is mechanical (see
+    _mechanical_resolution); everything else keeps its markers for the agent.
+    A block without a ``|||||||`` base section is not zdiff3 and is left alone.
     """
-    return text, 0, count_conflict_blocks(text)
+    lines = text.splitlines(keepends=True)
+    out: list = []
+    resolved = remaining = 0
+    i = 0
+    while i < len(lines):
+        if not lines[i].startswith(CONFLICT_START):
+            out.append(lines[i])
+            i += 1
+            continue
+        ours: list = []
+        base = None
+        theirs: list = []
+        section = "ours"
+        j = i + 1
+        closed = False
+        while j < len(lines):
+            line = lines[j]
+            if section == "ours" and line.startswith(CONFLICT_BASE):
+                base, section = [], "base"
+            elif section in ("ours", "base") and line.rstrip("\r\n") == CONFLICT_SEP:
+                section = "theirs"
+            elif section == "theirs" and line.startswith(CONFLICT_END):
+                closed = True
+                break
+            else:
+                target = ours if section == "ours" else (base if section == "base" else theirs)
+                target.append(line)
+            j += 1
+        if not closed:
+            out.extend(lines[i:])
+            remaining += 1
+            break
+        resolution = _mechanical_resolution(ours, base, theirs) if base is not None else None
+        if resolution is None:
+            out.extend(lines[i:j + 1])
+            remaining += 1
+        else:
+            out.extend(resolution)
+            resolved += 1
+        i = j + 1
+    return "".join(out), resolved, remaining
 
 
 def has_conflict_markers(text: str) -> bool:
