@@ -52,7 +52,13 @@ def _make_repo(tmp_path: Path) -> Path:
 
 
 def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
-    """Fake SCRIPTS_DIR whose scripts record invocations instead of acting."""
+    """Fake SCRIPTS_DIR whose scripts record invocations instead of acting.
+
+    ``run-fork-tests.sh`` prints one fixed pytest-like log, so the baseline and
+    post-merge runs compare equal and the apply-merge test gate passes unless a
+    test overrides the stub. The two Python helpers are the real ones: the gate
+    and the decision memory are pure functions worth exercising for real.
+    """
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     calls = tmp_path / "calls.log"
@@ -64,6 +70,15 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
         p = scripts / name
         p.write_text(f'#!/usr/bin/env bash\necho "{name} $@" >> "{calls}"\nexit 0\n')
         p.chmod(0o755)
+    tests_stub = scripts / "run-fork-tests.sh"
+    tests_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+        "echo '1 failed, 5 passed in 2.00s'\n"
+    )
+    tests_stub.chmod(0o755)
+    for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py"):
+        (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
     return scripts, calls
 
 
@@ -581,9 +596,10 @@ class TestApplyMergeFromScratchClone:
         # ...the host made the backup ref itself (the agent cannot), ...
         assert res["backup_ref"]
         assert _git(repo, "rev-parse", res["backup_ref"]) == local_head
-        # ...and the usual push/smoketest pipeline ran afterwards.
+        # ...and the post-update tail ran (scripts, push, restart) — not the
+        # full sync, which would gate the push on the newer upstream tip.
         logged = calls.read_text()
-        assert "sync-local-customizations.sh" in logged
+        assert f"sync-local-customizations.sh --post-update-only {local_head}" in logged
         assert "upstream-sync-smoketest.sh" in logged
 
     def test_merge_not_parented_on_live_head_is_refused(self, tmp_path, state):
@@ -718,6 +734,122 @@ class TestScratchCloneIsAdoptedBeforeReading:
         assert _result(state)["status"] == "ok", proc.stderr
         logged = sudo_log.read_text() if sudo_log.exists() else ""
         assert "chown -R" in logged and str(state / "scratch") in logged, logged
+
+
+class TestApplyMergeIsGatedOnForkTests:
+    """A plausible-looking resolution of a merge-both conflict can still be
+    wrong, and the smoketest only proves the tree imports. The agent's merge is
+    run through the fork's own tests before it becomes the live branch, exactly
+    as the automatic merge is in the sync script.
+    """
+
+    def _breaking_tests_stub(self, scripts: Path) -> None:
+        # Reports one extra failure whenever the checked-out tree is the merge
+        # (it contains g.txt, which only the upstream side adds).
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            'if [ -f "$1/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
+            "echo '2 failed, 4 passed in 2.00s'\n"
+        )
+
+    def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_tests_stub(scripts)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert "test_broken_by_merge" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head          # not landed
+        assert (state / "pending.json").exists()                      # decision kept
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+        assert not calls.exists() or "rollback" not in calls.read_text()
+        # The temporary test-gate worktree was removed.
+        assert len(_git(repo, "worktree", "list").splitlines()) == 1
+
+    def test_pre_existing_failures_do_not_block(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)   # same known failure before and after
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+
+    def test_an_unreadable_test_run_refuses_to_land(self, tmp_path, state):
+        """No summary line means the run was killed, not clean — the gate must
+        not read that as "no new failures" (the sync script draws the same
+        distinction via exit code 2)."""
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\necho 'collecting ...'\nexit 137\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+
+class TestHostRecordsDecisionsIntoMemory:
+    """Recording the operator's decisions used to be the agent's last step, but
+    its session dies with the gateway restart the smoketest triggers — on
+    2026-08-12 the memory had to be rebuilt by hand. The host holds the archived
+    pending file and outlives the restart, so the host records.
+    """
+
+    def test_successful_apply_records_the_decision(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip", "base"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        memory = json.loads((state / "decision-memory.json").read_text())
+        assert len(memory["entries"]) == 1
+        entry = memory["entries"][0]
+        assert entry["decision"] == "merge-both"
+        assert entry["files"] == ["g.txt"]
+        assert entry["apply_count"] == 1
+
+    def test_failed_apply_leaves_memory_alone(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        stale_base = _git(repo, "rev-parse", "HEAD~1")
+        merge_sha = _scratch_merge(repo, state, stale_base, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "failed"
+        assert not (state / "decision-memory.json").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -6,4 +6,4 @@ Type=oneshot
 User=hermes
 Environment=HOME=/home/hermes
 ExecStart=/usr/bin/bash /home/hermes/.hermes/scripts/upstream-sync-finalize.sh
-TimeoutStartSec=900
+TimeoutStartSec=2400

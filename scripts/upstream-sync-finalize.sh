@@ -115,11 +115,35 @@ PY
     # was lost and had to be rebuilt by hand). Renaming still disarms it: only
     # a file named exactly pending.json is treated as outstanding.
     if [ -f "$STATE_DIR/pending.json" ]; then
-      mv -f "$STATE_DIR/pending.json" \
-        "$STATE_DIR/pending.json.applied-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || \
+      archived="$STATE_DIR/pending.json.applied-$(date +%Y%m%d-%H%M%S)"
+      if mv -f "$STATE_DIR/pending.json" "$archived" 2>/dev/null; then
+        record_decisions_from "$archived"
+        cp -f "$DETAIL_LOG" "$STATE_DIR/finalize-detail.log" 2>/dev/null || true
+      else
         rm -f "$STATE_DIR/pending.json"
+      fi
     fi
   fi
+}
+
+# Recording the operator's decisions used to be the LAST step of Mode B, run by
+# the agent — but its session dies with the gateway restart the smoketest
+# triggers, so on 2026-08-12 the record never ran and the memory had to be
+# rebuilt by hand. We hold the archived file and outlive the restart: record
+# here, best-effort (a memory that failed to update is worth a warning, not a
+# rollback of a merge that is already live).
+record_decisions_from() {
+  local archived="$1" helper
+  helper="$SCRIPTS_DIR/upstream_sync_decisions.py"
+  [ -f "$helper" ] || helper="$REPO/scripts/upstream_sync_decisions.py"
+  if [ ! -f "$helper" ]; then
+    echo "warning: upstream_sync_decisions.py not found; decision memory not updated" >>"$DETAIL_LOG"
+    return 0
+  fi
+  python3 "$helper" record --pending "$archived" \
+      --memory "$STATE_DIR/decision-memory.json" \
+      --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$DETAIL_LOG" 2>&1 || \
+    echo "warning: decision memory not updated (see above)" >>"$DETAIL_LOG"
 }
 
 notify_slack() {
@@ -189,6 +213,85 @@ adopt_scratch_clone() {
   if [ -f "$alternates" ]; then
     printf '%s\n' "$REPO/.git/objects" >"$alternates"
   fi
+}
+
+# Gate the agent's merge on the fork's own tests before it becomes the live
+# branch — the same before/after comparison the sync script applies to an
+# automatic merge. Baseline is our HEAD, post is the merge; only NEW failures
+# block, and an unreadable run (killed, no summary line) blocks too.
+merge_passes_fork_tests() {
+  local before="$1" after="$2"
+  local test_cmd="${HERMES_SYNC_TEST_CMD:-$SCRIPTS_DIR/run-fork-tests.sh}"
+  [ -x "$test_cmd" ] || test_cmd="$REPO/scripts/run-fork-tests.sh"
+  local gate="$SCRIPTS_DIR/upstream_sync_gate.py"
+  [ -f "$gate" ] || gate="$REPO/scripts/upstream_sync_gate.py"
+  local py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  local wt baseline post rc new_failures
+  wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
+  baseline="$(mktemp)"
+  post="$(mktemp)"
+  if ! git -C "$REPO" worktree add --detach "$wt" "$before" >>"$DETAIL_LOG" 2>&1; then
+    rm -rf "$wt" "$baseline" "$post"
+    echo "could not create a worktree for the test gate" >>"$DETAIL_LOG"
+    return 1
+  fi
+  "$test_cmd" "$wt" >"$baseline" 2>&1 || true
+  if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt" "$baseline" "$post"
+    echo "could not check out the merge in the test-gate worktree" >>"$DETAIL_LOG"
+    return 1
+  fi
+  "$test_cmd" "$wt" >"$post" 2>&1 || true
+  git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  rm -rf "$wt"
+  # set +e, not `|| true`: rc 2 (could not compare) must stay distinct from
+  # "no new failures" — the same idiom the sync script uses for this gate.
+  set +e
+  new_failures="$("$py" "$gate" new-failures --baseline "$baseline" --post "$post")"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 2 ]; then
+    {
+      echo "could not compare the two test runs; refusing to land the merge."
+      echo "baseline tail:"; tail -n 5 "$baseline"
+      echo "post-merge tail:"; tail -n 5 "$post"
+    } >>"$DETAIL_LOG"
+    rm -f "$baseline" "$post"
+    return 1
+  fi
+  rm -f "$baseline" "$post"
+  if [ -n "$new_failures" ]; then
+    {
+      echo "the merge introduces test failures:"
+      printf '%s\n' "$new_failures" | sed 's/^/  /'
+    } >>"$DETAIL_LOG"
+    return 1
+  fi
+  return 0
+}
+
+# What follows a merge we fast-forwarded ourselves: the sync script's
+# post-update tail (parse check, runtime scripts, push, restart), then the
+# smoketest. Not the full sync — that re-fetches upstream and takes its
+# conflict branch whenever the newer tip conflicts, which exits successfully
+# without pushing and without syncing the runtime scripts (2026-08-15).
+run_post_update_pipeline() {
+  local before="$1"
+  if ! run_logged bash "$SCRIPTS_DIR/sync-local-customizations.sh" --post-update-only "$before"; then
+    FAILED_STAGE=post-update
+    do_rollback
+    write_result failed "post-update stage (scripts sync / push / restart) failed after the merge was fast-forwarded — rolled back. $(cat "$DETAIL_LOG")"
+    return
+  fi
+  if ! run_logged bash "$SCRIPTS_DIR/upstream-sync-smoketest.sh" "$UPSTREAM_SHA"; then
+    FAILED_STAGE=smoketest
+    do_rollback
+    write_result failed "smoketest stage failed after the merge was fast-forwarded — rolled back. $(cat "$DETAIL_LOG")"
+    return
+  fi
+  write_result ok "$(cat "$DETAIL_LOG")"
 }
 
 case "$ACTION" in
@@ -274,6 +377,11 @@ case "$ACTION" in
       write_result failed "merge_sha parent mismatch: parents ($MERGE_PARENTS) are not (HEAD $HEAD_SHA, approved upstream $UPSTREAM_FULL) — refusing; repo untouched, no rollback."
       exit 0
     fi
+    if ! merge_passes_fork_tests "$HEAD_SHA" "$MERGE_SHA"; then
+      FAILED_STAGE=test-gate
+      write_result failed "the agent merge does not pass the fork's tests — not landed; repo untouched, no rollback, decision kept for a rework. $(cat "$DETAIL_LOG")"
+      exit 0
+    fi
     # Invariant 1 (back up before touching the branch) is the host job now:
     # the agent has no write access to make a backup ref.
     if [ -z "$BACKUP_REF" ]; then
@@ -288,7 +396,7 @@ case "$ACTION" in
       write_result failed "fast-forward to the agent merge failed — repo untouched, no rollback. $(cat "$DETAIL_LOG")"
       exit 0
     fi
-    run_apply_pipeline
+    run_post_update_pipeline "$HEAD_SHA"
     # The clone is a full working copy; keep it only when it may still be
     # needed for diagnosis.
     if [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['status'])" "$RESULT" 2>/dev/null)" = ok ]; then
