@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -67,7 +68,7 @@ def _http_post(url: str, payload: dict, token: str) -> dict:
 
 def _cmd_post(cmd: str, payload: dict) -> str:
     proc = subprocess.run(
-        cmd, shell=True, input=json.dumps(payload, ensure_ascii=False),
+        shlex.split(cmd), input=json.dumps(payload, ensure_ascii=False),
         capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     if proc.returncode != 0:

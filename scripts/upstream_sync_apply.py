@@ -481,6 +481,71 @@ def cmd_handoff(args) -> int:
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------- resolve-llm
+
+def cmd_resolve_llm(args) -> int:
+    """Run the per-hunk model resolver over needs_manual; stage what it closes.
+
+    Whole-file semantics: a file with any failed hunk keeps ALL its markers and
+    is reported under ``unresolved`` with the reason. Exit 0 when nothing is
+    left, 6 (unresolved) otherwise — the caller decides whether that is fatal.
+    """
+    from upstream_sync_llm import resolve_file
+
+    state = Path(args.state)
+    scratch = state / args.scratch
+    prep_path = state / "apply-prepare.json"
+    if not prep_path.exists():
+        emit({"status": "error", "reason": "apply-prepare.json missing — run prepare first"})
+        return EXIT_USAGE
+    prep = json.loads(prep_path.read_text(encoding="utf-8"))
+    if prep.get("status") != "ready":
+        emit({"status": "error", "reason": f"prepare ended with {prep.get('status')!r}, not ready"})
+        return EXIT_USAGE
+    pending = load_pending(state) if (state / "pending.json").exists() else {}
+    by_file, _ = decisions_by_file(pending)
+    subjects: dict = {}
+    for feat in pending.get("features", []):
+        for path in feat.get("files", []):
+            subjects[path] = feat.get("local_subjects") or []
+
+    llm_resolved: list = list(prep.get("llm_resolved") or [])
+    unresolved: list = []
+    still_manual: list = []
+    for item in prep.get("needs_manual") or []:
+        path = item["path"] if isinstance(item, dict) else item
+        file_path = scratch / path
+        if not file_path.exists():
+            unresolved.append({"path": path, "reason": "delete/modify conflict — a human call"})
+            still_manual.append(item)
+            continue
+        report = resolve_file(
+            file_path, rel_path=path, decision=by_file.get(path, "merge-both"),
+            local_subjects=subjects.get(path), upstream_head=prep.get("upstream_head", ""),
+        )
+        if report.get("written"):
+            git(scratch, "add", "--", path)
+            llm_resolved.append(path)
+        elif report["resolved"] == 0 and report["failed"] == 0:
+            # No blocks left in the file (someone resolved it by hand) — stage it.
+            git(scratch, "add", "--", path)
+            llm_resolved.append(path)
+        else:
+            unresolved.append({"path": path, "reason": "; ".join(report["errors"])[:400],
+                               "resolved_hunks": report["resolved"], "failed_hunks": report["failed"]})
+            still_manual.append(item)
+
+    prep["llm_resolved"] = sorted(set(llm_resolved))
+    prep["unresolved"] = unresolved
+    prep["needs_manual"] = still_manual
+    prep["resolved_at"] = _now()
+    _write_json(prep_path, prep)
+    payload = {"status": "resolved" if not unresolved else "unresolved",
+               "llm_resolved": prep["llm_resolved"], "unresolved": unresolved}
+    emit(payload)
+    return EXIT_OK if not unresolved else EXIT_UNRESOLVED
+
+
 # --------------------------------------------------------------------------- wait
 
 def cmd_wait(args) -> int:
@@ -525,6 +590,7 @@ def main(argv=None) -> int:
     p_prep.add_argument("--auto-policy", action="store_true",
                         help="decide undecided plain paths by policy (merge-both); security paths still ask")
     p_prep.set_defaults(func=cmd_prepare)
+    sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
     sub.add_parser("commit", parents=[common]).set_defaults(func=cmd_commit)
     sub.add_parser("handoff", parents=[common]).set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
