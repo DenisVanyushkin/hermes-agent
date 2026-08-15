@@ -173,6 +173,24 @@ run_apply_pipeline() {
   write_result ok "$(cat "$DETAIL_LOG")"
 }
 
+# The scratch clone is made INSIDE the sandbox: its files arrive root-owned
+# (git then refuses it for us as "dubious ownership") and its
+# objects/info/alternates names the sandbox mount /workspace/live-hermes,
+# which does not exist here — on 2026-08-15 either would have killed the fetch
+# below. Make the clone ours and point it at our object store before reading
+# it. Idempotent: the sandbox re-clones on every attempt and never needs this
+# copy again, and objects are content-addressed, so swapping the alternate
+# cannot change what a SHA means.
+adopt_scratch_clone() {
+  local scratch="$1"
+  sudo -n chown -R "$(id -un):$(id -gn)" "$scratch" >>"$DETAIL_LOG" 2>&1 || \
+    echo "warning: could not chown $scratch — git may refuse it as dubious" >>"$DETAIL_LOG"
+  local alternates="$scratch/.git/objects/info/alternates"
+  if [ -f "$alternates" ]; then
+    printf '%s\n' "$REPO/.git/objects" >"$alternates"
+  fi
+}
+
 case "$ACTION" in
   sync|rebase)
     if [ -z "$BACKUP_REF" ]; then
@@ -220,6 +238,11 @@ case "$ACTION" in
       write_result failed "apply-merge needs both merge_sha and upstream_sha; repo untouched, no rollback."
       exit 0
     fi
+    if [ ! -d "$SCRATCH/.git" ]; then
+      write_result failed "scratch_repo [$SCRATCH_NAME] is not a git repository under the state dir — repo untouched, no rollback."
+      exit 0
+    fi
+    adopt_scratch_clone "$SCRATCH"
     # Fetch the scratch clone HEAD, then insist it is the commit we were
     # promised — a mismatch means the clone moved between the agent writing
     # the request and this running.

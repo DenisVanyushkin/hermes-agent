@@ -665,6 +665,61 @@ class TestApplyMergeFromScratchClone:
         assert not calls.exists() or "rollback" not in calls.read_text()
 
 
+class TestScratchCloneIsAdoptedBeforeReading:
+    """The scratch clone is made INSIDE the sandbox: root-owned, and its
+    ``objects/info/alternates`` names the sandbox mount
+    ``/workspace/live-hermes``, which does not exist on the host. On
+    2026-08-15 both would have killed the fetch (``dubious ownership``,
+    ``unable to normalize alternate object path``). The finalizer must make
+    the clone its own before reading it: chown via sudo, and point the
+    alternates at its own object store.
+    """
+
+    def test_alternates_naming_the_sandbox_mount_are_repointed(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        alternates = state / "scratch" / ".git" / "objects" / "info" / "alternates"
+        # What the sandbox leaves behind: a path that only exists in the container.
+        alternates.write_text("/workspace/live-hermes/.git/objects\n")
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        # A --shared clone owns only the merge commit; every parent, tree and
+        # blob is borrowed through that alternate. Serving the fetch at all is
+        # therefore proof the path was repointed at a store that exists here —
+        # a stronger check than reading the file back, which is impossible
+        # anyway: the finalizer deletes the clone once the apply succeeds.
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert (repo / "g.txt").read_text() == "upstream\n"   # borrowed blob arrived
+        detail = (state / "finalize-detail.log").read_text()
+        assert "unable to normalize alternate object path" not in detail, detail
+
+    def test_clone_ownership_is_normalized_with_sudo(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        # A sudo shim: records the request, performs nothing (the test user
+        # already owns the clone, so nothing needs to change for the fetch).
+        shim = tmp_path / "shim"
+        shim.mkdir()
+        sudo_log = tmp_path / "sudo.log"
+        (shim / "sudo").write_text(
+            f'#!/usr/bin/env bash\necho "$@" >> "{sudo_log}"\nexit 0\n'
+        )
+        (shim / "sudo").chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts, path_prepend=str(shim))
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        logged = sudo_log.read_text() if sudo_log.exists() else ""
+        assert "chown -R" in logged and str(state / "scratch") in logged, logged
+
+
 # ---------------------------------------------------------------------------
 # rerere must not resolve an upstream merge from rebase-era recordings
 # ---------------------------------------------------------------------------
