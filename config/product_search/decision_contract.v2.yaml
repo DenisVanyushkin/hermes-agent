@@ -64,6 +64,7 @@ warning_claims:
 qualified_questions:
   - question_code: clarify_work_format
     dimension: feasibility
+    unknown_claim_code: work_format_unknown
     question: Is the role remote or office-based?
     action_kind: feasibility
     material: true
@@ -71,6 +72,7 @@ qualified_questions:
     realistically_resolvable: true
   - question_code: clarify_reporting_line
     dimension: evidence_confidence
+    unknown_claim_code: reporting_line_unknown
     question: What is the role's reporting line?
     action_kind: research
     material: true
@@ -83,6 +85,27 @@ urgency_claims:
   recruiter_deadline: recruiter_deadline_explicit
   limited_intake: limited_intake_explicit
   confirmed_rapidly_closing_shortlist: rapidly_closing_shortlist_confirmed
+
+core_policy_requirements:
+  feasibility:
+    - feasible_work_arrangement_explicit
+  mandate_fit:
+    - material_business_ownership_explicit
+  company_fit:
+    - useful_company_context_explicit
+  transferability:
+    - transferable_strengths_supported
+  career_value:
+    - career_scope_improves_explicit
+  evidence_confidence:
+    - evidence_complete_explicit
+exploration_claim_axes:
+  exploration_business_model_hypothesis_unknown: business_model
+  exploration_company_type_hypothesis_unknown: company_type
+  exploration_geography_hypothesis_unknown: geography
+  exploration_industry_hypothesis_unknown: industry
+  exploration_role_family_hypothesis_unknown: role_family
+  exploration_work_format_hypothesis_unknown: work_format
 
 monetization_exception_claims:
   - material_revenue_authority_explicit
