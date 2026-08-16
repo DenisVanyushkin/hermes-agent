@@ -81,6 +81,66 @@ def test_future_tense_continuation_resolves_canonical_plan():
     assert envelope.task_text == plan
 
 
+def test_bare_execution_authorization_resolves_only_against_canonical_plan():
+    plan = _long_plan()
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="выполняй",
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan, "id": 93308},
+        ],
+        session_id="session-bare-authorization",
+        history_session_id="session-bare-authorization",
+    )
+
+    assert envelope.resolution_status == "resolved"
+    assert envelope.source_kind == "approved_plan"
+    assert envelope.task_text == plan
+    assert envelope.operator_instruction == "выполняй"
+
+
+def test_bare_execution_authorization_without_plan_fails_closed():
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="выполняй",
+        history=[
+            {"role": "user", "content": "что с диагностикой?"},
+            {"role": "assistant", "content": "Сейчас только проверяю состояние."},
+        ],
+        session_id="session-bare-without-plan",
+        history_session_id="session-bare-without-plan",
+    )
+
+    assert envelope.resolution_status == "missing_approved_plan"
+    assert envelope.source_kind == "approved_plan"
+    assert envelope.task_text is None
+
+
+def test_pre_router_resolved_plan_forces_engineering_pipeline():
+    run = importlib.import_module("gateway.run")
+    observe = importlib.import_module("hermes_cli.pipeline_observe")
+    plan = _long_plan()
+    context = run._resolve_gateway_engineering_task_context(
+        router_decision=None,
+        operator_text="выполняй",
+        enriched_message="выполняй",
+        history=[
+            {"role": "user", "content": "пиши план для инженера"},
+            {"role": "assistant", "content": plan, "id": 93308},
+        ],
+        session_id="session-pre-router",
+    )
+
+    decision = observe.route_resolved_engineering_task_context(
+        context=context,
+        pipeline_session_id="pipeline-pre-router",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == "engineering_review_pipeline"
+    assert decision.fallback_pipeline_id == "default_conversation_pipeline"
+    assert decision.routing_confidence_source == "typed_task_context"
+
+
 def test_inline_code_continuation_resolves_canonical_plan():
     plan = _long_plan()
     instruction = "`пусть инженер исполняет план`"

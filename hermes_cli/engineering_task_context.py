@@ -100,6 +100,7 @@ _CONTINUATION_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+_BARE_EXECUTION_AUTHORIZATIONS = frozenset({"выполняй"})
 _PLAN_REQUEST_RE = re.compile(r"\bплан\w*\b", re.IGNORECASE)
 _ENGINEERING_PLAN_HEADING_RE = re.compile(
     r"^[ \t]{0,3}#{0,3}[ \t]*(?:план|задача)\s+"
@@ -271,6 +272,17 @@ def is_engineering_execution_continuation(text: str) -> bool:
     return any(pattern.fullmatch(normalized) for pattern in _CONTINUATION_PATTERNS)
 
 
+def is_bare_engineering_execution_authorization(text: str) -> bool:
+    """Recognize the exact short approval that needs a bound plan.
+
+    The bare word is not an engineering task by itself.  It is only eligible
+    for resolution when canonical same-session history supplies one approved
+    plan; callers must keep unresolved results fail-closed.
+    """
+
+    return _normalize_continuation_text(text) in _BARE_EXECUTION_AUTHORIZATIONS
+
+
 def is_concrete_engineering_request(text: str) -> bool:
     return bool(_DIRECT_REQUEST_RE.search(str(text or "")))
 
@@ -369,7 +381,8 @@ def resolve_engineering_task_context(
             task_sha256=None,
             task_chars=0,
         )
-    if not is_engineering_execution_continuation(instruction):
+    is_bare_authorization = is_bare_engineering_execution_authorization(instruction)
+    if not is_engineering_execution_continuation(instruction) and not is_bare_authorization:
         if not is_concrete_engineering_request(instruction):
             return EngineeringTaskEnvelope(
                 schema_version=SCHEMA_VERSION,
