@@ -40,6 +40,9 @@ GATE_A_MANIFEST_SHA256 = (
 GATE_A_RUN_ID = "gate-a-20260816T141344Z"
 SUMMARY_PATH = REPO_ROOT / "docs/evidence/product-search-gate-b/benchmark-summary.json"
 OWNER_DECISION_PATH = REPO_ROOT / "docs/evidence/product-search-gate-b/owner-decision.md"
+UNAVAILABLE_RESULT_STATUSES = frozenset(
+    {"not_selected", "not_run", "not_computable"}
+)
 
 
 def _sha256(path: Path) -> str:
@@ -48,6 +51,65 @@ def _sha256(path: Path) -> str:
 
 def _load_summary() -> dict:
     return json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
+
+
+def _assert_exact_gate_a_run_identity(
+    evidence_rows: list[dict], probe_run_ids: list[str]
+) -> None:
+    evidence_run_ids = {str(row["run_id"]) for row in evidence_rows}
+    assert evidence_run_ids == {GATE_A_RUN_ID}, (
+        f"probe_evidence contains unexpected run IDs: {sorted(evidence_run_ids)}"
+    )
+    assert probe_run_ids == [GATE_A_RUN_ID], (
+        f"probe_runs must contain exactly the pinned run: {probe_run_ids}"
+    )
+
+
+def _contains_null(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_null(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_null(item) for item in value)
+    return False
+
+
+def _assert_no_ambiguous_zero(
+    value: object,
+    *,
+    path: str = "$",
+    unavailable_ancestor: bool = False,
+) -> None:
+    if isinstance(value, dict):
+        status = value.get("status")
+        if status in UNAVAILABLE_RESULT_STATUSES:
+            unavailable_ancestor = True
+            assert isinstance(value.get("reason"), str) and value["reason"].strip(), (
+                f"{path} requires a nonempty machine-readable reason"
+            )
+            assert _contains_null(value), f"{path} requires null unavailable results"
+        elif status == "observed":
+            unavailable_ancestor = False
+        for key, item in value.items():
+            _assert_no_ambiguous_zero(
+                item,
+                path=f"{path}.{key}",
+                unavailable_ancestor=unavailable_ancestor,
+            )
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _assert_no_ambiguous_zero(
+                item,
+                path=f"{path}[{index}]",
+                unavailable_ancestor=unavailable_ancestor,
+            )
+        return
+    if unavailable_ancestor and not isinstance(value, bool):
+        assert not isinstance(value, (int, float)) or value != 0, (
+            f"{path} contains an ambiguous numeric zero in unavailable results"
+        )
 
 
 def _canonical_gate_a_rows() -> tuple[list[dict], list[dict]]:
@@ -65,7 +127,12 @@ def _canonical_gate_a_rows() -> tuple[list[dict], list[dict]]:
             "FROM probe_evidence ORDER BY raw_content_sha256"
         )
     ]
+    probe_run_ids = [
+        str(row[0])
+        for row in connection.execute("SELECT run_id FROM probe_runs ORDER BY run_id")
+    ]
     connection.close()
+    _assert_exact_gate_a_run_identity(evidence_rows, probe_run_ids)
 
     canonical: dict[str, dict] = {}
     for evidence in evidence_rows:
@@ -118,9 +185,14 @@ def test_gate_b_imports_the_exact_approved_gate_a_package_read_only() -> None:
     assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     assert connection.execute("SELECT COUNT(*) FROM probe_evidence").fetchone() == (2414,)
     assert connection.execute(
-        "SELECT COUNT(DISTINCT run_id) FROM probe_evidence WHERE run_id = ?",
-        (GATE_A_RUN_ID,),
+        "SELECT COUNT(DISTINCT run_id) FROM probe_evidence"
     ).fetchone() == (1,)
+    assert connection.execute(
+        "SELECT MIN(run_id), MAX(run_id) FROM probe_evidence"
+    ).fetchone() == (GATE_A_RUN_ID, GATE_A_RUN_ID)
+    assert connection.execute(
+        "SELECT COUNT(*), MIN(run_id), MAX(run_id) FROM probe_runs"
+    ).fetchone() == (1, GATE_A_RUN_ID, GATE_A_RUN_ID)
     assert connection.execute(
         "SELECT COUNT(*) FROM probe_evidence "
         "WHERE redaction_class != 'vacancy_public_evidence'"
@@ -131,6 +203,22 @@ def test_gate_b_imports_the_exact_approved_gate_a_package_read_only() -> None:
         for path in (manifest_path, database_path)
     }
     assert after == before
+
+
+def test_gate_a_import_rejects_a_mixed_run_evidence_set() -> None:
+    """Break caught: extra probe rows from another run enter the denominator."""
+    mixed_rows = [
+        {"run_id": GATE_A_RUN_ID},
+        {"run_id": "gate-a-unexpected-run"},
+    ]
+    with pytest.raises(AssertionError, match="unexpected run IDs"):
+        _assert_exact_gate_a_run_identity(mixed_rows, [GATE_A_RUN_ID])
+
+    with pytest.raises(AssertionError, match="exactly the pinned run"):
+        _assert_exact_gate_a_run_identity(
+            [{"run_id": GATE_A_RUN_ID}],
+            [GATE_A_RUN_ID, "gate-a-unexpected-run"],
+        )
 
 
 def test_gate_b_fails_closed_when_task10_has_no_governed_record_adapter(
@@ -170,10 +258,11 @@ def test_blocked_gate_b_package_preserves_denominators_and_no_fake_results() -> 
     }
     assert summary["corpus"]["status"] == "not_selected"
     assert summary["corpus"]["selection_denominator"] == 1314
-    assert summary["corpus"]["selected_count"] == 0
+    assert summary["corpus"]["selected_count"] is None
     assert summary["stage_4"] == {
         "status": "not_run",
-        "input_denominator": 0,
+        "reason": "governed_task10_record_mode_missing",
+        "input_denominator": None,
         "hard_gate_eligible": None,
         "fail_closed": None,
     }
@@ -181,63 +270,86 @@ def test_blocked_gate_b_package_preserves_denominators_and_no_fake_results() -> 
     for result in summary["dimensions"].values():
         assert result == {
             "status": "not_run",
-            "evaluated": 0,
-            "positive": 0,
-            "mixed": 0,
-            "negative": 0,
-            "unknown": 0,
+            "reason": "governed_task10_record_mode_missing",
+            "evaluated": None,
+            "outcomes": None,
         }
     assert summary["verdicts"] == {
-        "Priority": 0,
-        "Investigate": 0,
-        "Save": 0,
-        "Reject": 0,
+        "status": "not_run",
+        "reason": "decision_v2_not_run",
+        "counts": None,
     }
-    assert summary["unresolved_questions"] == {"vacancies": 0, "questions": 0}
-    assert summary["delivery"] == {"daily_eligible": 0, "urgent_eligible": 0}
+    assert summary["unresolved_questions"] == {
+        "status": "not_computable",
+        "reason": "evidence_synthesis_not_run",
+        "vacancies": None,
+        "questions": None,
+    }
+    assert summary["delivery"] == {
+        "status": "not_computable",
+        "reason": "decision_v2_not_run",
+        "daily_eligible": None,
+        "urgent_eligible": None,
+    }
 
 
 def test_blocked_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects() -> None:
     """Break caught: absent calls or audits are hidden, or a side effect is tolerated."""
     summary = _load_summary()
     assert summary["provider"] == {
-        "record_mode": "blocked_before_call",
-        "calls_attempted": 0,
-        "calls_succeeded": 0,
-        "calls_failed": 0,
-        "failures_by_reason": {},
-        "cost_usd": "0.000000",
-        "latency_ms": {"total": 0, "p50": None, "p95": None, "max": None},
+        "status": "blocked_before_call",
+        "reason": "governed_task10_record_mode_missing",
+        "operational_counters": {
+            "status": "observed",
+            "reason": "blocked_before_any_provider_attempt",
+            "calls_attempted": 0,
+            "calls_succeeded": 0,
+            "calls_failed": 0,
+        },
+        "results": {
+            "status": "not_computable",
+            "reason": "no_provider_attempts",
+            "failures_by_reason": None,
+            "cost_usd": None,
+            "latency_ms": None,
+        },
     }
     assert summary["offline_replay"] == {
         "status": "not_run",
-        "recordings": 0,
-        "byte_stable_matches": 0,
-        "mismatches": 0,
-        "network_enabled": False,
+        "reason": "no_task10_recordings",
+        "recordings": None,
+        "byte_stable_matches": None,
+        "mismatches": None,
+        "network_enabled": None,
     }
     assert summary["decision_trace"] == {
         "status": "not_run",
-        "traces": 0,
-        "replays": 0,
-        "exact_matches": 0,
-        "mismatches": 0,
-        "invariant_violations": 0,
+        "reason": "decision_v2_not_run",
+        "traces": None,
+        "replays": None,
+        "exact_matches": None,
+        "mismatches": None,
+        "invariant_violations": None,
     }
     assert summary["human_audit"] == {
         "status": "not_run",
-        "high_risk_invariants_reviewed": 0,
-        "random_sample_reviewed": 0,
-        "factual_errors": 0,
-        "policy_errors": 0,
-        "interpretation_disagreements": 0,
+        "reason": "no_decision_v2_results",
+        "high_risk_invariants_reviewed": None,
+        "random_sample_reviewed": None,
+        "factual_errors": None,
+        "policy_errors": None,
+        "interpretation_disagreements": None,
     }
     assert summary["legacy_counterfactual"] == {
         "status": "not_run",
+        "reason": "canonical_benchmark_not_run",
+        "result": None,
         "authority": False,
         "automatic_truth": False,
     }
     assert summary["side_effects"] == {
+        "status": "observed",
+        "reason": "benchmark_stopped_before_provider_or_runtime_execution",
         "production_database_writes": 0,
         "product_store_writes": 0,
         "slack_calls": 0,
@@ -246,6 +358,35 @@ def test_blocked_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects
         "cache_writes": 0,
         "protected_source_writes": 0,
     }
+
+
+def test_unrun_result_sections_recursively_reject_ambiguous_numeric_zeros() -> None:
+    """Break caught: an unavailable result is serialized as an observed zero."""
+    summary = _load_summary()
+    for section in (
+        "corpus",
+        "stage_4",
+        "dimensions",
+        "verdicts",
+        "unresolved_questions",
+        "delivery",
+        "provider",
+        "offline_replay",
+        "decision_trace",
+        "human_audit",
+        "legacy_counterfactual",
+        "side_effects",
+    ):
+        _assert_no_ambiguous_zero(summary[section], path=f"$.{section}")
+
+    ambiguous = {
+        "status": "not_run",
+        "reason": "fixture_was_not_executed",
+        "counts": {"Priority": 0},
+        "result": None,
+    }
+    with pytest.raises(AssertionError, match="ambiguous numeric zero"):
+        _assert_no_ambiguous_zero(ambiguous, path="$.mutation")
 
 
 def test_owner_decision_stays_pending_and_task13_remains_blocked() -> None:

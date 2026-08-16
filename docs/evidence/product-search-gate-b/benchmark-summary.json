@@ -27,8 +27,9 @@
   },
   "corpus": {
     "status": "not_selected",
+    "reason": "governed_task10_record_mode_missing",
     "selection_denominator": 1314,
-    "selected_count": 0,
+    "selected_count": null,
     "selection_algorithm": "After a governed Task 10 record adapter exists, reconstruct corrected canonical vacancies from immutable Gate A hashes, retain only minimum-evidence records, assign deterministic source/lane/role-pattern/company/open-market/hard-block/unknown sampling strata without creating canonical Core or Exploration labels, sort each stratum by sha256(run_id + NUL + source_family + NUL + source_id + NUL + raw_content_sha256), then take the pinned per-stratum quota.",
     "immutable_source_ids_preserved": true,
     "immutable_content_hashes_preserved": true,
@@ -38,113 +39,114 @@
   },
   "stage_4": {
     "status": "not_run",
-    "input_denominator": 0,
+    "reason": "governed_task10_record_mode_missing",
+    "input_denominator": null,
     "hard_gate_eligible": null,
     "fail_closed": null
   },
   "dimensions": {
     "feasibility": {
       "status": "not_run",
-      "evaluated": 0,
-      "positive": 0,
-      "mixed": 0,
-      "negative": 0,
-      "unknown": 0
+      "reason": "governed_task10_record_mode_missing",
+      "evaluated": null,
+      "outcomes": null
     },
     "mandate_fit": {
       "status": "not_run",
-      "evaluated": 0,
-      "positive": 0,
-      "mixed": 0,
-      "negative": 0,
-      "unknown": 0
+      "reason": "governed_task10_record_mode_missing",
+      "evaluated": null,
+      "outcomes": null
     },
     "company_fit": {
       "status": "not_run",
-      "evaluated": 0,
-      "positive": 0,
-      "mixed": 0,
-      "negative": 0,
-      "unknown": 0
+      "reason": "governed_task10_record_mode_missing",
+      "evaluated": null,
+      "outcomes": null
     },
     "transferability": {
       "status": "not_run",
-      "evaluated": 0,
-      "positive": 0,
-      "mixed": 0,
-      "negative": 0,
-      "unknown": 0
+      "reason": "governed_task10_record_mode_missing",
+      "evaluated": null,
+      "outcomes": null
     },
     "career_value": {
       "status": "not_run",
-      "evaluated": 0,
-      "positive": 0,
-      "mixed": 0,
-      "negative": 0,
-      "unknown": 0
+      "reason": "governed_task10_record_mode_missing",
+      "evaluated": null,
+      "outcomes": null
     },
     "evidence_confidence": {
       "status": "not_run",
-      "evaluated": 0,
-      "positive": 0,
-      "mixed": 0,
-      "negative": 0,
-      "unknown": 0
+      "reason": "governed_task10_record_mode_missing",
+      "evaluated": null,
+      "outcomes": null
     }
   },
   "verdicts": {
-    "Priority": 0,
-    "Investigate": 0,
-    "Save": 0,
-    "Reject": 0
+    "status": "not_run",
+    "reason": "decision_v2_not_run",
+    "counts": null
   },
   "unresolved_questions": {
-    "vacancies": 0,
-    "questions": 0
+    "status": "not_computable",
+    "reason": "evidence_synthesis_not_run",
+    "vacancies": null,
+    "questions": null
   },
   "delivery": {
-    "daily_eligible": 0,
-    "urgent_eligible": 0
+    "status": "not_computable",
+    "reason": "decision_v2_not_run",
+    "daily_eligible": null,
+    "urgent_eligible": null
   },
   "provider": {
-    "record_mode": "blocked_before_call",
-    "calls_attempted": 0,
-    "calls_succeeded": 0,
-    "calls_failed": 0,
-    "failures_by_reason": {},
-    "cost_usd": "0.000000",
-    "latency_ms": {
-      "total": 0,
-      "p50": null,
-      "p95": null,
-      "max": null
+    "status": "blocked_before_call",
+    "reason": "governed_task10_record_mode_missing",
+    "operational_counters": {
+      "status": "observed",
+      "reason": "blocked_before_any_provider_attempt",
+      "calls_attempted": 0,
+      "calls_succeeded": 0,
+      "calls_failed": 0
+    },
+    "results": {
+      "status": "not_computable",
+      "reason": "no_provider_attempts",
+      "failures_by_reason": null,
+      "cost_usd": null,
+      "latency_ms": null
     }
   },
   "offline_replay": {
     "status": "not_run",
-    "recordings": 0,
-    "byte_stable_matches": 0,
-    "mismatches": 0,
-    "network_enabled": false
+    "reason": "no_task10_recordings",
+    "recordings": null,
+    "byte_stable_matches": null,
+    "mismatches": null,
+    "network_enabled": null
   },
   "decision_trace": {
     "status": "not_run",
-    "traces": 0,
-    "replays": 0,
-    "exact_matches": 0,
-    "mismatches": 0,
-    "invariant_violations": 0
+    "reason": "decision_v2_not_run",
+    "traces": null,
+    "replays": null,
+    "exact_matches": null,
+    "mismatches": null,
+    "invariant_violations": null
   },
   "human_audit": {
     "status": "not_run",
-    "high_risk_invariants_reviewed": 0,
-    "random_sample_reviewed": 0,
-    "factual_errors": 0,
-    "policy_errors": 0,
-    "interpretation_disagreements": 0
+    "reason": "no_decision_v2_results",
+    "high_risk_invariants_reviewed": null,
+    "random_sample_reviewed": null,
+    "factual_errors": null,
+    "policy_errors": null,
+    "interpretation_disagreements": null
   },
   "legacy_counterfactual": {
     "status": "not_run",
+    "reason": "canonical_benchmark_not_run",
+    "result": null,
     "authority": false,
     "automatic_truth": false
   },
@@ -158,6 +160,8 @@
     "provider_output_schema_sha256": "4efb390cda26c5cff7689518463e02d15847597baf3e28741591fd6b3c893a46"
   },
   "side_effects": {
+    "status": "observed",
+    "reason": "benchmark_stopped_before_provider_or_runtime_execution",
     "production_database_writes": 0,
     "product_store_writes": 0,
     "slack_calls": 0,

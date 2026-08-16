@@ -28,16 +28,18 @@ The test opens SQLite using `mode=ro&immutable=1`, verifies all 2,414 content-ad
 
 The acceptance test was written before this package. Its first run was `3 failed, 2 passed`; the three expected failures were missing `benchmark-summary.json`. The real Gate A import and the governed record-mode rejection already passed in that RED run.
 
-The completed package records every unavailable metric explicitly instead of substituting zeros as observed outcomes:
+The completed package records every unavailable metric with a machine-readable `status`, nonempty `reason`, and `null` result instead of substituting zeros as observed outcomes:
 
-- corpus selection: `not_selected`, 0 selected from the 1,314 minimum-evidence denominator;
-- stage 4: `not_run`, denominator 0, outcome `null`;
-- six dimensions: present individually, each `not_run` with zero evaluated;
+- corpus selection: `not_selected`; the selected count is `null`, while 1,314 remains the observed minimum-evidence input denominator;
+- stage 4: `not_run`; denominator and outcomes are `null`;
+- six dimensions: present individually, each `not_run` with evaluated/outcome results `null`;
 - verdicts, unresolved questions, daily eligibility, and urgent eligibility: no evaluated results;
-- provider: blocked before calls, $0 cost, 0 ms measured call latency, no failures because no attempt occurred;
+- provider: three observed operational call counters are zero because the blocker was reached before any attempt; failure classification, cost, and latency are `not_computable` and `null`;
 - offline replay and Decision v2 trace replay: `not_run`;
 - human high-risk/random audit: `not_run`, with factual errors, policy errors, and interpretation disagreements kept as separate fields;
 - legacy counterfactual: `not_run`, non-authoritative.
+
+The same rule applies recursively: an unrun/not-computable section cannot contain a numeric zero. Numeric zeros remain only in sections explicitly marked `observed`, namely provider call counters and forbidden side-effect counters.
 
 ## Corpus boundary
 
