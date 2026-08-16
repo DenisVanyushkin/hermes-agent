@@ -108,6 +108,81 @@ def test_probe_writes_content_addressed_evidence_and_deduplicates_canonical_urls
         assert evidence.redaction_class == "vacancy_public_evidence"
 
 
+def test_probe_deduplicates_linkedin_and_headhunter_tracking_urls(tmp_path: Path) -> None:
+    records = {
+        "linkedin": (
+            {
+                "source_id": "linkedin-1",
+                "url": (
+                    "https://www.linkedin.com/jobs/view/4450161759/"
+                    "?eBP=FIRST&refId=one&trackingId=one&trk=search"
+                ),
+                "title": "Head of Product",
+                "company": "Acme",
+                "description": "Own product strategy",
+            },
+            {
+                "source_id": "linkedin-2",
+                "url": (
+                    "https://www.linkedin.com/jobs/view/4450161759/"
+                    "?eBP=SECOND&refId=two&trackingId=two&trk=search"
+                ),
+                "title": "Head of Product",
+                "company": "Acme",
+                "description": "Own product strategy",
+            },
+        ),
+        "headhunter": (
+            {
+                "source_id": "hh-1",
+                "url": (
+                    "https://hh.ru/vacancy/135365534"
+                    "?query=Chief+Product+Officer&amp;hhtmFrom=vacancy_search_list"
+                ),
+                "title": "Chief Product Officer",
+                "company": "Acme",
+                "description": "Own product strategy",
+            },
+            {
+                "source_id": "hh-2",
+                "url": (
+                    "https://hh.ru/vacancy/135365534"
+                    "?query=Head+of+Product&amp;hhtmFrom=vacancy_search_list"
+                ),
+                "title": "Chief Product Officer",
+                "company": "Acme",
+                "description": "Own product strategy",
+            },
+        ),
+    }
+    queries = tuple(
+        {
+            "query_id": f"q-{family}",
+            "cell_id": "kazakhstan",
+            "source_family": family,
+            "query": "product leader",
+        }
+        for family in records
+    )
+    sources = {family: (lambda _query, rows=rows: rows) for family, rows in records.items()}
+    isolation = {
+        family: SourceIsolation(mode="exclusive_lock", path=tmp_path / f"{family}.lock")
+        for family in records
+    }
+
+    result = run_probe(
+        run_id="run-tracking-urls",
+        queries=queries,
+        sources=sources,
+        output_dir=tmp_path / "probe",
+        isolation=isolation,
+    )
+
+    assert result.stage_counts["raw_observed"] == 4
+    assert result.stage_counts["canonical_current"] == 2
+    assert result.duplicates == 2
+
+
 def test_probe_names_auth_antibot_rate_limit_and_unresolved_evidence(tmp_path: Path) -> None:
     attempts = 0
 

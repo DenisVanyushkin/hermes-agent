@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+from html import unescape
 import json
 import os
 from pathlib import Path
@@ -234,13 +235,33 @@ def _record_source_state(states: dict[str, str], family: str, state: str) -> Non
 
 
 def _canonical_url(raw: str) -> str:
-    split = urlsplit(raw.strip())
-    filtered = [
-        (key, value)
-        for key, value in parse_qsl(split.query, keep_blank_values=True)
-        if not key.casefold().startswith("utm_")
-    ]
-    return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), split.path.rstrip("/"), urlencode(filtered), ""))
+    split = urlsplit(unescape(raw.strip()))
+    hostname = (split.hostname or "").casefold()
+    path = split.path.rstrip("/")
+    is_linkedin_job = (
+        hostname == "linkedin.com" or hostname.endswith(".linkedin.com")
+    ) and path.startswith("/jobs/view/")
+    is_headhunter_vacancy = (
+        hostname == "hh.ru" or hostname.endswith(".hh.ru")
+    ) and path.startswith("/vacancy/")
+    filtered = (
+        []
+        if is_linkedin_job or is_headhunter_vacancy
+        else [
+            (key, value)
+            for key, value in parse_qsl(split.query, keep_blank_values=True)
+            if not key.casefold().startswith("utm_")
+        ]
+    )
+    return urlunsplit(
+        (
+            split.scheme.casefold(),
+            split.netloc.casefold(),
+            path,
+            urlencode(filtered),
+            "",
+        )
+    )
 
 
 def _as_mapping(record: Any) -> dict[str, Any]:
