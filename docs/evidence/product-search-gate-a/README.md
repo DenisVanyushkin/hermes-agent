@@ -70,4 +70,6 @@ The run exposed 15 raw new-company names among title-signal records, with a lowe
 
 The owner recorded the superseding Gate A decision as `proceed` with the exact approval: `Одобряю Gate A: proceed`.
 
+The authoritative machine-readable closure state and explicit Task 8 authorization are recorded in [`gate-closure.json`](gate-closure.json), which supersedes the pending decision package without modifying immutable run evidence.
+
 Gate A is closed and Task 8 is authorized to begin. This authorization does not activate Product Search: its runtime remains dormant, and legacy Job Intel remains masked. Carry the following known gaps into later work without reopening acquisition viability: cross-source identity reconciliation, DuckDuckGo quality, SmartRecruiters detail enrichment, empty configured tenants, and query-plan latency.

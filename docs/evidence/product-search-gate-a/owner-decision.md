@@ -62,13 +62,8 @@ The audit also records non-blocking downstream gaps: cross-source identity recon
 
 Recommended superseding owner decision: `proceed`.
 
-## Recorded superseding owner decision (2026-08-16)
+## Superseding owner-decision pointer (2026-08-16)
 
-- Exact owner approval: `Одобряю Gate A: proceed`
-- Decision: `proceed`
-- Gate A state: closed
-- Continuation permission: Task 8 is authorized to begin.
-- Product Search runtime: remains dormant.
-- Legacy Job Intel state: remains masked.
+The exact owner approval is `Одобряю Gate A: proceed`.
 
-This approval closes Gate A only. It does not enable Product Search runtime, restore legacy Job Intel, modify the immutable raw evidence package, or authorize any production delivery.
+[`gate-closure.json`](gate-closure.json) is the authoritative machine-readable superseding record. It names the decision, Gate A closure, Task 8 authorization, and dormant/masked hold states while preserving the immutable pending decision package and run evidence unchanged.
