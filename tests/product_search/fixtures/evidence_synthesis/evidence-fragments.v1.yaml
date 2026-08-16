@@ -1,0 +1,146 @@
+schema_version: 1.0.0
+fragments:
+  - fragment_id: vacancy:remote-format
+    artifact_ref: &vacancy_ref
+      artifact_id: vacancy-evidence:redacted-001
+      version: 1.0.0
+      sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    source_kind: vacancy
+    source_locator: vacancy:work-format
+    permitted_dimensions: [feasibility]
+    text: Role is remote in Kazakhstan.
+    text_sha256: af521201704f81b2f2c9ff7f99ba1412c0f9c502a17d1cbba0a86ec72ac317cb
+    allowed_claims:
+      - claim_code: remote_kazakhstan_explicit
+        dimension: feasibility
+        status: explicit
+        statement: Role is remote in Kazakhstan.
+  - fragment_id: vacancy:office-format
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:office-format
+    permitted_dimensions: [feasibility]
+    text: This position requires local office presence.
+    text_sha256: 463fbdb1852fbc3383d2403c8a08f4d6f6cd4223f8e44dca919cfe74b3d21886
+    allowed_claims:
+      - claim_code: office_presence_explicit
+        dimension: feasibility
+        status: explicit
+        statement: This position requires local office presence.
+  - fragment_id: vacancy:mandate-pnl
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:responsibility:pnl
+    permitted_dimensions: [mandate_fit]
+    text: Own the product and commercial P&L.
+    text_sha256: 3f755cf39c88596190573758abe9f6008befea0ad5c8efe79550a635f00825e9
+    allowed_claims:
+      - claim_code: role_pnl_ownership_explicit
+        dimension: mandate_fit
+        status: explicit
+        statement: Own the product and commercial P&L.
+  - fragment_id: vacancy:title-platform
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:title
+    permitted_dimensions: [mandate_fit]
+    text: VP Platform Engineering
+    text_sha256: 148c473c7cb86d7d21886631e27d342b7479ec8fddc8b5d47b6b5603e6e05d6d
+    allowed_claims:
+      - claim_code: platform_title_observed
+        dimension: mandate_fit
+        status: explicit
+        statement: VP Platform Engineering
+  - fragment_id: company:operating-model-need
+    artifact_ref:
+      artifact_id: company-evidence:northstar-commerce:2026-08-10
+      version: 1.0.0
+      sha256: 340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a
+    source_kind: company
+    source_locator: evidence:northstar:need:1
+    permitted_dimensions: [company_fit]
+    text: Multi-market expansion supports a bounded inference of operating-model need.
+    text_sha256: 565c7ff377cb6ff3b86fea44387386c2bb3bea8813fa46874556f231759ab969
+    allowed_claims:
+      - claim_code: operating_model_need_inferred
+        dimension: company_fit
+        status: inferred
+        statement: Multi-market expansion supports a bounded inference of operating-model need.
+  - fragment_id: candidate:pnl-ownership
+    artifact_ref:
+      artifact_id: career-profile-v2
+      version: 2.0.0
+      sha256: 19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651
+    source_kind: candidate_profile
+    source_locator: pnl_and_business_ownership
+    permitted_dimensions: [transferability]
+    text: Explicit P&L and business-unit responsibility.
+    text_sha256: d1f8372eafbd4083df4d25d1320634cc0cb0691cf33b8920f0bd04bdfe66648e
+    allowed_claims:
+      - claim_code: candidate_pnl_transferable
+        dimension: transferability
+        status: inferred
+        statement: Explicit P&L and business-unit responsibility.
+  - fragment_id: vacancy:new-business-line
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:responsibility:new-business
+    permitted_dimensions: [career_value]
+    text: Build a new digital business line.
+    text_sha256: 033fef770f43ed9b088c9f58f67bf1c8e25258da9299a45b86eaefea650c55b6
+    allowed_claims:
+      - claim_code: new_business_builder_inferred
+        dimension: career_value
+        status: inferred
+        statement: Build a new digital business line.
+  - fragment_id: unknown:reporting-line
+    artifact_ref:
+      artifact_id: evidence-snapshot:redacted-001
+      version: 1.0.0
+      sha256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    source_kind: assessment_unknown
+    source_locator: reporting_line_not_stated
+    permitted_dimensions: [evidence_confidence]
+    text: Reporting line is not stated.
+    text_sha256: 7f1f65ca00b981b8184144adaaef56d1cdfb729fa80001c0f8894e6645aaec9a
+    allowed_claims:
+      - claim_code: reporting_line_unknown
+        dimension: evidence_confidence
+        status: unknown
+        statement: Reporting line is not stated.
+  - fragment_id: vacancy:hq-new-york
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:company-hq
+    permitted_dimensions: [company_fit]
+    text: Company headquarters are in New York.
+    text_sha256: 640e30e07c57828ca90169498610e0cd4cbe7f944d622828123ea21c626d5fd4
+    allowed_claims:
+      - claim_code: hq_new_york_observed
+        dimension: company_fit
+        status: explicit
+        statement: Company headquarters are in New York.
+  - fragment_id: vacancy:b2b-market
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:business-model
+    permitted_dimensions: [company_fit]
+    text: The product serves business customers.
+    text_sha256: 2215caf783bd7838cad1d06c5b5a5e837f184fa4e208a05b968d657ff4c6b8ff
+    allowed_claims:
+      - claim_code: b2b_model_observed
+        dimension: company_fit
+        status: explicit
+        statement: The product serves business customers.
+  - fragment_id: vacancy:crypto-product
+    artifact_ref: *vacancy_ref
+    source_kind: vacancy
+    source_locator: vacancy:industry
+    permitted_dimensions: [company_fit]
+    text: Employer operates a crypto product.
+    text_sha256: d22fecc9a15af3c3add10b80422d0f1f522b04dbf74a0cfae4a2aa88cc35433c
+    allowed_claims:
+      - claim_code: crypto_product_observed
+        dimension: company_fit
+        status: explicit
+        statement: Employer operates a crypto product.

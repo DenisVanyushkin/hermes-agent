@@ -1,0 +1,46 @@
+schema_version: 1.0.0
+product_authority_id: PS-SOT-2026-08-10-v1
+provider_runtime: semantic-contract-recording
+prompt_version: product-search-evidence-synthesis-1.0.0
+output_schema_version: 1.0.0
+dimensions:
+  - feasibility
+  - mandate_fit
+  - company_fit
+  - transferability
+  - career_value
+  - evidence_confidence
+claim_statuses:
+  - explicit
+  - inferred
+  - unknown
+max_claims_per_dimension: 4
+max_conflicts: 6
+max_questions_total: 6
+max_questions_per_dimension: 2
+conflict_codes:
+  - input_evidence_conflict
+question_templates:
+  feasibility:
+    - question_code: clarify_work_format
+      question: Is the role remote or office-based?
+  mandate_fit: []
+  company_fit: []
+  transferability: []
+  career_value: []
+  evidence_confidence:
+    - question_code: clarify_reporting_line
+      question: What is the role's reporting line?
+forbidden_fields:
+  - hard_gate
+  - hard_gate_outcome
+  - system_verdict
+  - selection_mode
+  - company_transition
+  - company_action
+  - urgency
+  - selection
+  - delivery_instruction
+  - crm
+  - user_decision
+  - stage_4
