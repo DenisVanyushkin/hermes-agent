@@ -107,6 +107,16 @@ exploration_claim_axes:
   exploration_role_family_hypothesis_unknown: role_family
   exploration_work_format_hypothesis_unknown: work_format
 
+information_value_rules:
+  industry_transferability_test:
+    claim_code: transferable_strengths_supported
+    dimension: transferability
+    axes:
+      - industry
+
+# No production multi-axis exception is owner-approved.
+multi_axis_exceptions: []
+
 monetization_exception_claims:
   - material_revenue_authority_explicit
   - strategic_leverage_explicit

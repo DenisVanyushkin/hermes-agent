@@ -139,7 +139,7 @@ def _synthesis(
     )
 
 
-def _authority_inputs(**overrides: str) -> DecisionAuthorityInputsV2:
+def _authority_inputs(**overrides: object) -> DecisionAuthorityInputsV2:
     values = {
         "assessment_references": AssessmentReferences.model_validate(
             {
@@ -182,6 +182,12 @@ def _authority_inputs(**overrides: str) -> DecisionAuthorityInputsV2:
                 "company_evidence_bundle_sha256",
                 "340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a",
             ),
+        ),
+        "company_thesis_input_ref": overrides.get(
+            "company_thesis_input_ref", _company_thesis_ref()
+        ),
+        "multi_axis_exception_refs": overrides.get(
+            "multi_axis_exception_refs", ()
         ),
     }
     return DecisionAuthorityInputsV2.model_validate(values)
@@ -263,7 +269,9 @@ def test_authority_leaking_caller_flags_are_absent_from_v2_inputs() -> None:
     assert "axes" not in SelectionEvidenceV2.model_fields
     assert "evidence_sufficient" not in CompanyActionRequestV2.model_fields
     assert "fit_thesis" not in CompanyActionRequestV2.model_fields
-    assert "current_status" not in CompanyActionRequestV2.model_fields
+    assert "snapshot" not in CompanyActionRequestV2.model_fields
+    assert "evidence_bundle" in CompanyActionRequestV2.model_fields
+    assert "thesis_input" in CompanyActionRequestV2.model_fields
 
 
 @lru_cache
@@ -278,6 +286,23 @@ def _company_models():
     return bundle, thesis
 
 
+def _company_thesis_ref() -> ImmutableArtifactRef:
+    _, thesis = _company_models()
+    thesis_hash = hashlib.sha256(
+        json.dumps(
+            thesis.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return ImmutableArtifactRef(
+        artifact_id=thesis.thesis_id,
+        version=thesis.schema_version,
+        sha256=thesis_hash,
+    )
+
+
 def _company_snapshot(
     current: WatchlistStatus | None,
     review: ReviewState | None,
@@ -289,6 +314,28 @@ def _company_snapshot(
         current_status=current,
         review_state=review,
         snapshot_id=f"snapshot:{current.value if current else 'absent'}:{review.value if review else 'none'}",
+    )
+
+
+def _company_request(
+    action: CompanyAction,
+    current: WatchlistStatus | None,
+    review: ReviewState | None,
+    *,
+    evidence_bundle=None,
+    thesis_input=None,
+) -> CompanyActionRequestV2:
+    bundle, thesis = _company_models()
+    return CompanyActionRequestV2(
+        action=action,
+        evidence_bundle=evidence_bundle or bundle,
+        thesis_input=thesis_input or thesis,
+        current_status=current,
+        review_state=review,
+        snapshot_id=(
+            f"snapshot:{current.value if current else 'absent'}:"
+            f"{review.value if review else 'none'}"
+        ),
     )
 
 
@@ -574,22 +621,29 @@ def test_investigate_question_binds_one_specific_unknown_fact(case: str) -> None
 
 def test_save_daily_slot_requires_qualified_exploration_information_value() -> None:
     """Mutation caught: ordinary Save or unqualified exploration consumes a daily slot."""
+    information_value_claim = _claim(
+        EvidenceDimension.TRANSFERABILITY,
+        "transferable_strengths_supported",
+        pointer="evidence:transferability-bridge",
+    )
     weak_claims = tuple(
         claim
         for claim in _strong_claims()
         if claim.claim_code
-        != "evidence_complete_explicit"
+        not in {"evidence_complete_explicit", "transferable_strengths_supported"}
     ) + (
         _claim(
             EvidenceDimension.EVIDENCE_CONFIDENCE,
             "exploration_industry_hypothesis_unknown",
             status=EvidenceClaimStatus.UNKNOWN,
         ),
+        information_value_claim,
     )
     exploration = SelectionEvidenceV2(
         hypothesis_id="hypothesis:industry-adjacency",
         hypothesis_claim_ids=("claim:exploration_industry_hypothesis_unknown",),
-        information_value="Tests transferability into an adjacent scaled industry.",
+        information_value_code="industry_transferability_test",
+        information_value_claim_id=information_value_claim.claim_id,
         daily_slot_available=True,
     )
     assessment = _run(
@@ -606,6 +660,152 @@ def test_save_daily_slot_requires_qualified_exploration_information_value() -> N
     assert no_selection.status is DecisionRunStatus.ASSESSED
     assert no_selection.assessment.selection_mode is SelectionMode.CORE
     assert no_selection.assessment.daily_digest_eligible is False
+
+    no_value = SelectionEvidenceV2(
+        hypothesis_id="hypothesis:industry-adjacency",
+        hypothesis_claim_ids=("claim:exploration_industry_hypothesis_unknown",),
+        daily_slot_available=True,
+    )
+    no_value_assessment = _run(
+        synthesis=_synthesis(claims=weak_claims), selection=no_value
+    ).assessment
+    assert no_value_assessment.selection_mode is SelectionMode.EXPLORATION
+    assert no_value_assessment.daily_digest_eligible is False
+
+
+def test_inferred_information_value_cannot_authorize_save_delivery() -> None:
+    """Mutation caught: inferred value evidence is treated as explicit authority."""
+    hypothesis = _claim(
+        EvidenceDimension.EVIDENCE_CONFIDENCE,
+        "exploration_industry_hypothesis_unknown",
+        status=EvidenceClaimStatus.UNKNOWN,
+    )
+    inferred_value = _claim(
+        EvidenceDimension.TRANSFERABILITY,
+        "transferable_strengths_supported",
+        status=EvidenceClaimStatus.INFERRED,
+    )
+    selection = SelectionEvidenceV2(
+        hypothesis_id="hypothesis:industry-adjacency",
+        hypothesis_claim_ids=(hypothesis.claim_id,),
+        information_value_code="industry_transferability_test",
+        information_value_claim_id=inferred_value.claim_id,
+        daily_slot_available=True,
+    )
+    result = _run(
+        synthesis=_synthesis(
+            claims=tuple(
+                claim
+                for claim in _strong_claims()
+                if claim.claim_code
+                not in {"evidence_complete_explicit", "transferable_strengths_supported"}
+            )
+            + (hypothesis, inferred_value)
+        ),
+        selection=selection,
+    )
+    assert result.status is DecisionRunStatus.FAIL_CLOSED
+    assert result.failure_reason == "selection_evidence_invalid"
+
+
+def test_free_text_forged_or_rehashed_information_value_has_no_delivery_authority() -> None:
+    """Mutation caught: caller text/code substitutes for policy-bound evidence."""
+    with pytest.raises(ValidationError):
+        SelectionEvidenceV2.model_validate(
+            {
+                "hypothesis_id": "hypothesis:industry-adjacency",
+                "hypothesis_claim_ids": [
+                    "claim:exploration_industry_hypothesis_unknown"
+                ],
+                "information_value": "Caller says this is useful.",
+                "daily_slot_available": True,
+            }
+        )
+    hypothesis = _claim(
+        EvidenceDimension.EVIDENCE_CONFIDENCE,
+        "exploration_industry_hypothesis_unknown",
+        status=EvidenceClaimStatus.UNKNOWN,
+    )
+    forged = _claim(
+        EvidenceDimension.TRANSFERABILITY,
+        "caller_rehashed_information_value_explicit",
+    )
+    selection = SelectionEvidenceV2(
+        hypothesis_id="hypothesis:industry-adjacency",
+        hypothesis_claim_ids=(hypothesis.claim_id,),
+        information_value_code="industry_transferability_test",
+        information_value_claim_id=forged.claim_id,
+        daily_slot_available=True,
+    )
+    result = _run(
+        synthesis=_synthesis(
+            claims=tuple(
+                claim
+                for claim in _strong_claims()
+                if claim.claim_code != "evidence_complete_explicit"
+            )
+            + (hypothesis, forged)
+        ),
+        selection=selection,
+    )
+    assert result.status is DecisionRunStatus.FAIL_CLOSED
+    assert result.failure_reason == "selection_evidence_invalid"
+
+
+def test_information_value_requires_cited_synthesis_claim_and_is_traced() -> None:
+    """Mutation caught: missing citations or untraced value evidence can deliver Save."""
+    with pytest.raises(ValidationError):
+        EvidenceClaimV1(
+            claim_id="claim:missing-citation",
+            dimension=EvidenceDimension.TRANSFERABILITY,
+            status=EvidenceClaimStatus.EXPLICIT,
+            claim_code="transferable_strengths_supported",
+            statement="Material transferability bridge.",
+            citations=(),
+        )
+    hypothesis = _claim(
+        EvidenceDimension.EVIDENCE_CONFIDENCE,
+        "exploration_industry_hypothesis_unknown",
+        status=EvidenceClaimStatus.UNKNOWN,
+    )
+    value_claim = _claim(
+        EvidenceDimension.TRANSFERABILITY,
+        "transferable_strengths_supported",
+        pointer="evidence:transferability-bridge",
+    )
+    selection = SelectionEvidenceV2(
+        hypothesis_id="hypothesis:industry-adjacency",
+        hypothesis_claim_ids=(hypothesis.claim_id,),
+        information_value_code="industry_transferability_test",
+        information_value_claim_id=value_claim.claim_id,
+        daily_slot_available=True,
+    )
+    claims = tuple(
+        claim
+        for claim in _strong_claims()
+        if claim.claim_code
+        not in {"evidence_complete_explicit", "transferable_strengths_supported"}
+    ) + (hypothesis, value_claim)
+    assessment = _run(
+        synthesis=_synthesis(claims=claims), selection=selection
+    ).assessment
+    traced = assessment.trace.selection
+    assert traced.information_value_code == "industry_transferability_test"
+    assert traced.information_value_claim_id == value_claim.claim_id
+    assert traced.information_value_citations == (
+        "evidence:transferability-bridge",
+    )
+    changed_claim = value_claim.model_copy(
+        update={"citations": ("evidence:changed-transferability-bridge",)}
+    )
+    changed = _run(
+        synthesis=_synthesis(
+            claims=tuple(item for item in claims if item.claim_id != value_claim.claim_id)
+            + (changed_claim,)
+        ),
+        selection=selection,
+    ).assessment
+    assert changed.trace.canonical_sha256 != assessment.trace.canonical_sha256
 
 
 def test_reject_never_delivers_as_an_opportunity() -> None:
@@ -627,7 +827,8 @@ def test_exploration_requires_named_axis_and_multi_axis_exception() -> None:
     with pytest.raises(ValidationError, match="hypothesis"):
         SelectionEvidenceV2(
             hypothesis_claim_ids=("claim:exploration_industry_hypothesis_unknown",),
-            information_value="Useful.",
+            information_value_code="industry_transferability_test",
+            information_value_claim_id="claim:value",
             daily_slot_available=True,
         )
     multi_claims = tuple(
@@ -653,45 +854,39 @@ def test_exploration_requires_named_axis_and_multi_axis_exception() -> None:
             "claim:exploration_industry_hypothesis_unknown",
             "claim:exploration_geography_hypothesis_unknown",
         ),
-        information_value="Tests a named cross-axis thesis.",
+        information_value_code="industry_transferability_test",
+        information_value_claim_id="claim:transferable_strengths_supported",
         daily_slot_available=True,
     )
     result = _run(synthesis=_synthesis(claims=multi_claims), selection=no_exception)
     assert result.status is DecisionRunStatus.FAIL_CLOSED
     assert result.failure_reason == "selection_evidence_invalid"
 
-    with pytest.raises(ValidationError, match="canonical"):
-        SelectionEvidenceV2(
-            hypothesis_id="hypothesis:two-axis",
-            hypothesis_claim_ids=("claim:exploration_industry_hypothesis_unknown",),
-            information_value="   ",
-            daily_slot_available=True,
-        )
-
-    allowed = SelectionEvidenceV2(
+    forged_ref = ImmutableArtifactRef(
+        artifact_id="owner-exception:2026-08-16",
+        version="1.0.0",
+        sha256="9" * 64,
+    )
+    forged = SelectionEvidenceV2(
         hypothesis_id="hypothesis:two-axis",
         hypothesis_claim_ids=(
             "claim:exploration_industry_hypothesis_unknown",
             "claim:exploration_geography_hypothesis_unknown",
         ),
-        multi_axis_exception=MultiAxisExceptionV2(
-            exception_id="owner-exception:2026-08-16",
-            axes=(ExplorationAxis.GEOGRAPHY, ExplorationAxis.INDUSTRY),
-            authority_ref=ImmutableArtifactRef(
-                artifact_id="owner-exception:2026-08-16",
-                version="1.0.0",
-                sha256="9" * 64,
-            ),
-        ),
-        information_value="Tests a named cross-axis thesis.",
+        multi_axis_exception_id="owner-exception:2026-08-16",
+        information_value_code="industry_transferability_test",
+        information_value_claim_id="claim:transferable_strengths_supported",
         daily_slot_available=True,
     )
-    assessment = _run(
-        synthesis=_synthesis(claims=multi_claims), selection=allowed
-    ).assessment
-    assert assessment.selection_mode is SelectionMode.EXPLORATION
-    assert assessment.exploration_axes == ("geography", "industry")
-    assert assessment.single_reaction_updates_hypothesis is False
+    result = _run(
+        synthesis=_synthesis(claims=multi_claims),
+        selection=forged,
+        authority_inputs=_authority_inputs(
+            multi_axis_exception_refs=(forged_ref,)
+        ),
+    )
+    assert result.status is DecisionRunStatus.FAIL_CLOSED
+    assert result.failure_reason == "selection_evidence_invalid"
 
 
 def test_core_qualified_role_cannot_be_relabelled_exploration() -> None:
@@ -704,12 +899,15 @@ def test_core_qualified_role_cannot_be_relabelled_exploration() -> None:
     request = SelectionEvidenceV2(
         hypothesis_id="hypothesis:new-industry",
         hypothesis_claim_ids=(hypothesis_claim.claim_id,),
-        information_value="Unfamiliar industry.",
+        information_value_code="industry_transferability_test",
+        information_value_claim_id="claim:transferable_strengths_supported",
         daily_slot_available=True,
     )
     assert _run(
         selection=request,
-        synthesis=_synthesis(claims=_strong_claims() + (hypothesis_claim,)),
+        synthesis=_synthesis(
+            claims=_strong_claims() + (hypothesis_claim,)
+        ),
     ).assessment.selection_mode is SelectionMode.CORE
 
 
@@ -723,7 +921,8 @@ def test_unfamiliar_context_alone_cannot_create_exploration() -> None:
     selection = SelectionEvidenceV2(
         hypothesis_id="hypothesis:unfamiliar-only",
         hypothesis_claim_ids=(unfamiliar.claim_id,),
-        information_value="Tests unfamiliarity only.",
+        information_value_code="industry_transferability_test",
+        information_value_claim_id="claim:transferable_strengths_supported",
         daily_slot_available=True,
     )
     result = _run(
@@ -771,25 +970,19 @@ def test_company_action_validates_exact_transition_preconditions_independently(
     target: WatchlistStatus,
 ) -> None:
     """Mutation caught: vacancy verdict drives or bypasses a watchlist precondition."""
-    request = CompanyActionRequestV2(
-        action=action,
-        snapshot=_company_snapshot(current, review),
-    )
+    request = _company_request(action, current, review)
     company = _run(company_action=request).assessment.company_action
     assert company.action is action
     assert company.target_status is target
     assert company.state_mutated is False
-    assert company.snapshot_sha256 == request.snapshot.content_sha256
-    assert company.thesis_input_sha256 == request.snapshot.thesis_input_sha256
+    assert company.snapshot_sha256
+    assert company.thesis_input_sha256 == _company_thesis_ref().sha256
     assert _run(company_action=request).assessment.system_verdict is SystemVerdict.PRIORITY
 
 
 def test_rejected_vacancy_can_independently_nominate_company_without_mutation() -> None:
     """Mutation caught: vacancy Reject suppresses or applies a company-level action."""
-    company_request = CompanyActionRequestV2(
-        action=CompanyAction.NOMINATE,
-        snapshot=_company_snapshot(None, None),
-    )
+    company_request = _company_request(CompanyAction.NOMINATE, None, None)
     claims = _strong_claims() + (
         _claim(EvidenceDimension.MANDATE_FIT, "pure_delivery_scope_explicit"),
     )
@@ -808,9 +1001,10 @@ def test_rejected_vacancy_can_independently_nominate_company_without_mutation() 
 
 def test_invalid_company_transition_fails_closed_without_mutation() -> None:
     """Mutation caught: terminal/mismatched lifecycle state is treated as actionable."""
-    request = CompanyActionRequestV2(
-        action=CompanyAction.PROMOTE,
-        snapshot=_company_snapshot(WatchlistStatus.ACTIVE, ReviewState.CURRENT),
+    request = _company_request(
+        CompanyAction.PROMOTE,
+        WatchlistStatus.ACTIVE,
+        ReviewState.CURRENT,
     )
     result = _run(company_action=request)
     assert result.status is DecisionRunStatus.FAIL_CLOSED
@@ -819,20 +1013,75 @@ def test_invalid_company_transition_fails_closed_without_mutation() -> None:
 
 
 def test_absent_company_cannot_be_review_due_or_act_without_exact_snapshot() -> None:
-    """Mutation caught: nominate trusts caller review/evidence booleans without snapshot."""
-    with pytest.raises(ValueError, match="absent company"):
-        _company_snapshot(None, ReviewState.REVIEW_DUE)
+    """Mutation caught: nominate trusts caller review state or forged snapshot."""
+    result = _run(
+        company_action=_company_request(
+            CompanyAction.NOMINATE,
+            None,
+            ReviewState.REVIEW_DUE,
+        )
+    )
+    assert result.status is DecisionRunStatus.FAIL_CLOSED
+    assert result.failure_reason == "invalid_company_action_preconditions"
     with pytest.raises(ValidationError):
         CompanyActionRequestV2.model_validate({"action": "nominate"})
-    snapshot = _company_snapshot(WatchlistStatus.ACTIVE, ReviewState.CURRENT)
-    tampered = snapshot.model_copy(
-        update={"current_status": WatchlistStatus.CANDIDATE}
+    forged_snapshot = _company_snapshot(
+        WatchlistStatus.CANDIDATE, ReviewState.CURRENT
     )
-    with pytest.raises(ValidationError, match="content hash mismatch"):
-        CompanyActionRequestV2(
-            action=CompanyAction.PROMOTE,
-            snapshot=tampered,
+    with pytest.raises(ValidationError):
+        CompanyActionRequestV2.model_validate(
+            {
+                "action": "promote",
+                "snapshot": forged_snapshot.model_dump(mode="json"),
+            }
         )
+
+
+def test_company_action_rejects_mismatched_rehashed_bundle_and_thesis() -> None:
+    """Mutation caught: caller-rehashed Task 9 objects authenticate themselves."""
+    bundle, thesis = _company_models()
+    bundle_payload = bundle.model_dump(mode="json", exclude={"content_sha256"})
+    bundle_payload["bundle_id"] = "company-evidence:forged:2026-08-16"
+    bundle_payload["content_sha256"] = hashlib.sha256(
+        json.dumps(
+            bundle_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    rehashed_bundle = load_company_evidence_bundle(
+        bundle_payload,
+        artifacts_root=COMPANY_FIXTURES / "sources",
+    )
+    mismatched_bundle = _run(
+        company_action=_company_request(
+            CompanyAction.PROMOTE,
+            WatchlistStatus.CANDIDATE,
+            ReviewState.CURRENT,
+            evidence_bundle=rehashed_bundle,
+        )
+    )
+    assert mismatched_bundle.status is DecisionRunStatus.FAIL_CLOSED
+    assert mismatched_bundle.failure_reason == (
+        "immutable_reference_mismatch:company_evidence_bundle_sha256"
+    )
+
+    rehashed_thesis = thesis.model_copy(
+        update={"fit_thesis": "A newly forged but canonically formatted thesis."}
+    )
+    mismatched_thesis = _run(
+        company_action=_company_request(
+            CompanyAction.PROMOTE,
+            WatchlistStatus.CANDIDATE,
+            ReviewState.CURRENT,
+            thesis_input=rehashed_thesis,
+        )
+    )
+    assert mismatched_thesis.status is DecisionRunStatus.FAIL_CLOSED
+    assert mismatched_thesis.failure_reason == (
+        "immutable_reference_mismatch:company_thesis_input_sha256"
+    )
 
 
 def test_urgent_requires_priority_external_time_sensitivity_learned_after_digest() -> None:
@@ -976,6 +1225,8 @@ def test_traced_dynamic_hashes_must_match_authoritative_task_objects(
         "urgency_claims",
         "monetization_exception_claims",
         "exploration_claim_axes",
+        "information_value_rules",
+        "multi_axis_exceptions",
         "core_policy_requirements",
     ],
 )
@@ -1011,6 +1262,24 @@ def test_effective_policy_hash_blocks_every_nested_policy_mutation(family: str) 
         loaded.policy.exploration_claim_axes[
             "mutated_exploration_claim"
         ] = ExplorationAxis.INDUSTRY
+    elif family == "information_value_rules":
+        loaded.policy.information_value_rules.clear()
+    elif family == "multi_axis_exceptions":
+        object.__setattr__(
+            loaded.policy,
+            "multi_axis_exceptions",
+            (
+                MultiAxisExceptionV2(
+                    exception_id="exception:mutated",
+                    axes=(ExplorationAxis.GEOGRAPHY, ExplorationAxis.INDUSTRY),
+                    authority_ref=ImmutableArtifactRef(
+                        artifact_id="exception:mutated",
+                        version="1.0.0",
+                        sha256="9" * 64,
+                    ),
+                ),
+            ),
+        )
     else:
         loaded.policy.core_policy_requirements[
             EvidenceDimension.FEASIBILITY
@@ -1075,7 +1344,7 @@ def test_replay_is_byte_stable_and_trace_carries_all_hashes() -> None:
     assert trace.references == _references()
     assert trace.authority_inputs == _authority_inputs()
     assert trace.canonical_sha256 == (
-        "58122bc5e404e13f960fa3ece92771c35c2dbc5cb3826bbb047d1961b5aee363"
+        "eb7572569f32aa320c001cb2e374a703bf3a83b3169acd6b01bb145f143174bc"
     )
 
 

@@ -105,6 +105,15 @@ class DecisionAuthorityInputsV2(_StrictFrozenModel):
 
     assessment_references: AssessmentReferences
     company_evidence_bundle_ref: ImmutableArtifactRef
+    company_thesis_input_ref: ImmutableArtifactRef
+    multi_axis_exception_refs: tuple[ImmutableArtifactRef, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_unique_authority_refs(self) -> Self:
+        ids = tuple(ref.artifact_id for ref in self.multi_axis_exception_refs)
+        if ids != tuple(sorted(set(ids))):
+            raise ValueError("multi-axis authority refs must be sorted and unique")
+        return self
 
 
 class StageEvidenceV2(_StrictFrozenModel):
@@ -147,18 +156,33 @@ class MultiAxisExceptionV2(_StrictFrozenModel):
         return self
 
 
+class InformationValueRuleV2(_StrictFrozenModel):
+    claim_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,95}$")
+    dimension: EvidenceDimension
+    axes: tuple[ExplorationAxis, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_axes(self) -> Self:
+        if self.axes != tuple(sorted(set(self.axes), key=lambda item: item.value)):
+            raise ValueError("information-value axes must be sorted and unique")
+        return self
+
+
 class SelectionEvidenceV2(_StrictFrozenModel):
     hypothesis_id: str | None = None
     hypothesis_claim_ids: tuple[str, ...] = ()
-    multi_axis_exception: MultiAxisExceptionV2 | None = None
-    information_value: str | None = None
+    multi_axis_exception_id: str | None = None
+    information_value_code: str | None = None
+    information_value_claim_id: str | None = None
     daily_slot_available: bool = False
 
     @model_validator(mode="after")
     def validate_selection_evidence(self) -> Self:
         for field_name, value in (
             ("hypothesis_id", self.hypothesis_id),
-            ("information_value", self.information_value),
+            ("multi_axis_exception_id", self.multi_axis_exception_id),
+            ("information_value_code", self.information_value_code),
+            ("information_value_claim_id", self.information_value_claim_id),
         ):
             if value is not None and value != " ".join(value.split()):
                 raise ValueError(f"{field_name} must use canonical whitespace")
@@ -169,9 +193,18 @@ class SelectionEvidenceV2(_StrictFrozenModel):
         if self.hypothesis_claim_ids:
             if not self.hypothesis_id or not self.hypothesis_id.strip():
                 raise ValueError("Exploration requires a named hypothesis")
-            if not self.information_value or not self.information_value.strip():
-                raise ValueError("information_value must be canonical nonblank text")
-        elif self.hypothesis_id or self.information_value or self.multi_axis_exception:
+            if bool(self.information_value_code) != bool(
+                self.information_value_claim_id
+            ):
+                raise ValueError(
+                    "information-value code and claim must be supplied together"
+                )
+        elif (
+            self.hypothesis_id
+            or self.information_value_code
+            or self.information_value_claim_id
+            or self.multi_axis_exception_id
+        ):
             raise ValueError("hypothesis metadata requires structured hypothesis claims")
         return self
 
@@ -266,9 +299,25 @@ def build_company_decision_snapshot(
     return CompanyDecisionSnapshotV2.model_validate(payload)
 
 
+def company_thesis_input_ref(
+    thesis_input: CompanyThesisInputV1,
+) -> ImmutableArtifactRef:
+    return ImmutableArtifactRef(
+        artifact_id=thesis_input.thesis_id,
+        version=thesis_input.schema_version,
+        sha256=hashlib.sha256(
+            _canonical_json_bytes(thesis_input.model_dump(mode="json"))
+        ).hexdigest(),
+    )
+
+
 class CompanyActionRequestV2(_StrictFrozenModel):
     action: CompanyAction
-    snapshot: CompanyDecisionSnapshotV2
+    evidence_bundle: CompanyEvidenceBundleV1
+    thesis_input: CompanyThesisInputV1
+    current_status: WatchlistStatus | None
+    review_state: ReviewState | None
+    snapshot_id: str = Field(min_length=1)
 
 
 class CompanyActionConclusionV2(_StrictFrozenModel):
@@ -367,6 +416,8 @@ class DecisionPolicyV2(_StrictFrozenModel):
     monetization_exception_claims: tuple[str, str]
     core_policy_requirements: dict[EvidenceDimension, tuple[str, ...]]
     exploration_claim_axes: dict[str, ExplorationAxis]
+    information_value_rules: dict[str, InformationValueRuleV2]
+    multi_axis_exceptions: tuple[MultiAxisExceptionV2, ...]
 
     @model_validator(mode="after")
     def validate_closed_policy(self) -> Self:
@@ -416,6 +467,14 @@ class DecisionPolicyV2(_StrictFrozenModel):
             != len(set(self.exploration_claim_axes.values()))
         ):
             raise ValueError("exploration claims must map one-to-one to exact axes")
+        if not self.information_value_rules or any(
+            not code.strip() or code != " ".join(code.split())
+            for code in self.information_value_rules
+        ):
+            raise ValueError("information-value rules require closed canonical codes")
+        exception_ids = tuple(item.exception_id for item in self.multi_axis_exceptions)
+        if exception_ids != tuple(sorted(set(exception_ids))):
+            raise ValueError("multi-axis exceptions must be sorted and unique")
         return self
 
 
@@ -517,6 +576,18 @@ class DecisionClockTraceV2(_StrictFrozenModel):
         return value.astimezone(UTC)
 
 
+class SelectionTraceV2(_StrictFrozenModel):
+    selection_mode: SelectionMode
+    hypothesis_id: str | None
+    hypothesis_claim_ids: tuple[str, ...]
+    axes: tuple[ExplorationAxis, ...]
+    information_value_code: str | None
+    information_value_claim_id: str | None
+    information_value_citations: tuple[str, ...]
+    multi_axis_exception_ref: ImmutableArtifactRef | None
+    daily_slot_available: bool
+
+
 class DecisionTraceV2(_StrictFrozenModel):
     policy_version: str
     references: DecisionImmutableReferencesV2
@@ -525,6 +596,7 @@ class DecisionTraceV2(_StrictFrozenModel):
     steps: tuple[DecisionStepTraceV2, ...] = Field(min_length=8, max_length=8)
     evaluated_at: datetime
     clock: DecisionClockTraceV2
+    selection: SelectionTraceV2
     canonical_sha256: str = Field(pattern=SHA256_PATTERN)
 
 
@@ -618,12 +690,20 @@ def _validate_references(
     for field_name, actual_hash in linked.items():
         if getattr(references, field_name) != actual_hash:
             return f"immutable_reference_mismatch:{field_name}"
-    if (
-        request.company_action is not None
-        and request.company_action.snapshot.evidence_bundle_ref
-        != request.authority_inputs.company_evidence_bundle_ref
-    ):
-        return "immutable_reference_mismatch:company_evidence_bundle_sha256"
+    if request.company_action is not None:
+        action = request.company_action
+        actual_bundle_ref = ImmutableArtifactRef(
+            artifact_id=action.evidence_bundle.bundle_id,
+            version=action.evidence_bundle.schema_version,
+            sha256=action.evidence_bundle.content_sha256,
+        )
+        if actual_bundle_ref != request.authority_inputs.company_evidence_bundle_ref:
+            return "immutable_reference_mismatch:company_evidence_bundle_sha256"
+        if (
+            company_thesis_input_ref(action.thesis_input)
+            != request.authority_inputs.company_thesis_input_ref
+        ):
+            return "immutable_reference_mismatch:company_thesis_input_sha256"
     metadata = request.synthesis.metadata
     for field_name, expected_value in loaded.policy.provider_identity.items():
         if str(getattr(metadata, field_name)) != expected_value:
@@ -786,7 +866,8 @@ def _selection_mode(
     selection: SelectionEvidenceV2,
     claims: tuple[EvidenceClaimV1, ...],
     policy: DecisionPolicyV2,
-) -> tuple[SelectionMode, tuple[ExplorationAxis, ...]] | None:
+    authority_inputs: DecisionAuthorityInputsV2,
+) -> SelectionTraceV2 | None:
     claims_by_id = {claim.claim_id: claim for claim in claims}
     known_codes_by_dimension = {
         dimension: {
@@ -802,7 +883,17 @@ def _selection_mode(
         for dimension, requirements in policy.core_policy_requirements.items()
     )
     if core_qualified or not selection.hypothesis_claim_ids:
-        return SelectionMode.CORE, ()
+        return SelectionTraceV2(
+            selection_mode=SelectionMode.CORE,
+            hypothesis_id=None,
+            hypothesis_claim_ids=(),
+            axes=(),
+            information_value_code=None,
+            information_value_claim_id=None,
+            information_value_citations=(),
+            multi_axis_exception_ref=None,
+            daily_slot_available=False,
+        )
     axes: set[ExplorationAxis] = set()
     for claim_id in selection.hypothesis_claim_ids:
         claim = claims_by_id.get(claim_id)
@@ -815,14 +906,54 @@ def _selection_mode(
     ordered_axes = tuple(sorted(axes, key=lambda item: item.value))
     if len(ordered_axes) != len(selection.hypothesis_claim_ids):
         return None
+    information_claim = None
+    information_citations: tuple[str, ...] = ()
+    if selection.information_value_code is not None:
+        information_rule = policy.information_value_rules.get(
+            selection.information_value_code
+        )
+        information_claim = claims_by_id.get(selection.information_value_claim_id or "")
+        if (
+            information_rule is None
+            or information_claim is None
+            or information_claim.status is not EvidenceClaimStatus.EXPLICIT
+            or information_claim.claim_code != information_rule.claim_code
+            or information_claim.dimension is not information_rule.dimension
+            or not information_claim.citations
+            or information_rule.axes != ordered_axes
+        ):
+            return None
+        information_citations = tuple(sorted(information_claim.citations))
+    exception_ref = None
     if len(ordered_axes) == 1:
-        if selection.multi_axis_exception is not None:
+        if selection.multi_axis_exception_id is not None:
             return None
     else:
-        exception = selection.multi_axis_exception
-        if exception is None or exception.axes != ordered_axes:
+        exceptions = {
+            item.exception_id: item for item in policy.multi_axis_exceptions
+        }
+        exception = exceptions.get(selection.multi_axis_exception_id or "")
+        if (
+            exception is None
+            or exception.axes != ordered_axes
+            or exception.authority_ref
+            not in authority_inputs.multi_axis_exception_refs
+        ):
             return None
-    return SelectionMode.EXPLORATION, ordered_axes
+        exception_ref = exception.authority_ref
+    return SelectionTraceV2(
+        selection_mode=SelectionMode.EXPLORATION,
+        hypothesis_id=selection.hypothesis_id,
+        hypothesis_claim_ids=tuple(sorted(selection.hypothesis_claim_ids)),
+        axes=ordered_axes,
+        information_value_code=selection.information_value_code,
+        information_value_claim_id=(
+            information_claim.claim_id if information_claim is not None else None
+        ),
+        information_value_citations=information_citations,
+        multi_axis_exception_ref=exception_ref,
+        daily_slot_available=selection.daily_slot_available,
+    )
 
 
 def _company_action(
@@ -830,12 +961,15 @@ def _company_action(
 ) -> CompanyActionConclusionV2 | None | bool:
     if request is None:
         return None
-    snapshot = request.snapshot
-    snapshot_payload = snapshot.model_dump(mode="json", exclude={"content_sha256"})
-    if (
-        hashlib.sha256(_canonical_json_bytes(snapshot_payload)).hexdigest()
-        != snapshot.content_sha256
-    ):
+    try:
+        snapshot = build_company_decision_snapshot(
+            evidence_bundle=request.evidence_bundle,
+            thesis_input=request.thesis_input,
+            current_status=request.current_status,
+            review_state=request.review_state,
+            snapshot_id=request.snapshot_id,
+        )
+    except ValueError:
         return False
     if snapshot.current_status in {WatchlistStatus.REJECTED, WatchlistStatus.EXPIRED}:
         return False
@@ -1028,10 +1162,16 @@ def run_decision_v2(
     else:
         verdict = SystemVerdict.SAVE
 
-    selection = _selection_mode(request.selection, claims, loaded.policy)
-    if selection is None:
+    selection_trace = _selection_mode(
+        request.selection,
+        claims,
+        loaded.policy,
+        request.authority_inputs,
+    )
+    if selection_trace is None:
         return _failure("selection_evidence_invalid")
-    selection_mode, exploration_axes = selection
+    selection_mode = selection_trace.selection_mode
+    exploration_axes = selection_trace.axes
     company_action = _company_action(request.company_action)
     if company_action is False:
         return _failure("invalid_company_action_preconditions")
@@ -1057,9 +1197,10 @@ def run_decision_v2(
         or (
             verdict is SystemVerdict.SAVE
             and selection_mode is SelectionMode.EXPLORATION
-            and bool(request.selection.hypothesis_id)
-            and bool(request.selection.information_value)
-            and request.selection.daily_slot_available
+            and selection_trace.information_value_code is not None
+            and selection_trace.information_value_claim_id is not None
+            and bool(selection_trace.information_value_citations)
+            and selection_trace.daily_slot_available
         )
     )
     if verdict is SystemVerdict.REJECT:
@@ -1143,6 +1284,7 @@ def run_decision_v2(
                 else None
             ),
         ),
+        selection=selection_trace,
         canonical_sha256="0" * 64,
     )
     assessment = DecisionAssessmentV2(
@@ -1153,7 +1295,7 @@ def run_decision_v2(
         system_verdict=verdict,
         selection_mode=selection_mode,
         exploration_hypothesis_id=(
-            request.selection.hypothesis_id
+            selection_trace.hypothesis_id
             if selection_mode is SelectionMode.EXPLORATION
             else None
         ),

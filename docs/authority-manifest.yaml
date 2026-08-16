@@ -45,7 +45,7 @@ technical_contracts:
     version: 2.0.0
     status: deterministic_product_decision_policy
     path: config/product_search/decision_contract.v2.yaml
-    sha256: a4ee12752fe9db45d3743ed6806043f33c67f30912931ad95cb835a1056bdb3c
+    sha256: 2a3240e4d39c886c9afe11d66f67c1515b722d26d43ab7c134c78af9f2521db8
     subordinate_to: PS-SOT-2026-08-10-v1
     canonical_stage_authority: hard_gate_eligible
 
