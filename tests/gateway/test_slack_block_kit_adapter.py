@@ -14,6 +14,7 @@ import pytest
 from gateway.config import PlatformConfig
 from plugins.platforms.slack import adapter as slack_module
 from plugins.platforms.slack.adapter import SlackAdapter
+from slack_sdk.errors import SlackApiError
 
 
 def _make_adapter(extra=None):
@@ -41,6 +42,13 @@ class SlackRejectedBlocks(Exception):
     def __init__(self, error="invalid_blocks"):
         super().__init__(f"Slack API rejected blocks: {error}")
         self.response = {"error": error}
+
+
+def _slack_msg_too_long() -> SlackApiError:
+    return SlackApiError(
+        "Slack rejected the update",
+        {"ok": False, "error": "msg_too_long"},
+    )
 
 
 def _slack_connection_key():
@@ -146,6 +154,85 @@ class TestEditMessageBlocks:
         assert result.retryable is True
         assert result.error_kind == "transient"
 
+    @pytest.mark.asyncio
+    async def test_msg_too_long_retries_once_with_shorter_plain_text_for_streaming_edit(self):
+        adapter, client = _make_adapter({"rich_blocks": True})
+        original = "streaming update " * 200
+        client.chat_update = AsyncMock(
+            side_effect=[_slack_msg_too_long(), {"ts": "111.222"}]
+        )
+
+        result = await adapter.edit_message("C1", "111.222", original, finalize=False)
+
+        assert result.success is True
+        assert client.chat_update.await_count == 2
+        first, second = [call.kwargs for call in client.chat_update.await_args_list]
+        assert "blocks" not in first
+        assert "blocks" not in second
+        assert len(second["text"]) < len(first["text"])
+        assert "Reply truncated" in second["text"]
+
+    @pytest.mark.asyncio
+    async def test_msg_too_long_finalize_edit_retries_without_blocks_and_preserves_marker(self):
+        adapter, client = _make_adapter({"rich_blocks": True})
+        original = "# Final answer\n\n" + ("details " * 200)
+        client.chat_update = AsyncMock(
+            side_effect=[_slack_msg_too_long(), {"ts": "111.222"}]
+        )
+
+        result = await adapter.edit_message("C1", "111.222", original, finalize=True)
+
+        assert result.success is True
+        assert client.chat_update.await_count == 2
+        first, second = [call.kwargs for call in client.chat_update.await_args_list]
+        assert first["blocks"]
+        assert second.get("blocks") in (None, [])
+        assert len(second["text"]) < len(first["text"])
+        assert "Reply truncated" in second["text"]
+
+    @pytest.mark.asyncio
+    async def test_msg_too_long_fallback_failure_is_safe_and_non_retryable(self):
+        adapter, client = _make_adapter({"rich_blocks": True})
+        original = "secret final answer " * 200
+        client.chat_update = AsyncMock(
+            side_effect=[_slack_msg_too_long(), _slack_msg_too_long()]
+        )
+
+        result = await adapter.edit_message("C1", "111.222", original, finalize=True)
+
+        assert result.success is False
+        assert result.error == "slack_api_error:msg_too_long"
+        assert result.error_kind == "too_long"
+        assert result.retryable is False
+        diagnostic = result.raw_response
+        assert diagnostic["error_code"] == "msg_too_long"
+        assert diagnostic["original_text_length"] > diagnostic["retry_text_length"]
+        assert diagnostic["original_block_count"] > 0
+        assert diagnostic["retry_block_count"] == 0
+        assert "secret final answer" not in repr(diagnostic)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "Сводка по задаче ✅ " * 150,
+            "[готовый отчёт](https://example.test/report)\n\n" * 120,
+            "```python\nprint('ok')\n```\n" * 120,
+        ],
+    )
+    async def test_msg_too_long_fallback_handles_unicode_links_and_code_fences(self, content):
+        adapter, client = _make_adapter()
+        client.chat_update = AsyncMock(
+            side_effect=[_slack_msg_too_long(), {"ts": "111.222"}]
+        )
+
+        result = await adapter.edit_message("C1", "111.222", content, finalize=False)
+
+        assert result.success is True
+        first, second = [call.kwargs for call in client.chat_update.await_args_list]
+        assert len(second["text"]) < len(first["text"])
+        assert "Reply truncated" in second["text"]
+
 
 # ---------------------------------------------------------------------------
 # markdown_blocks mode — Slack's native ``markdown`` Block Kit block (#8552)
@@ -183,5 +270,3 @@ class TestMarkdownBlockMode:
         kwargs = client.chat_update.await_args.kwargs
         assert kwargs["blocks"][0]["type"] == "markdown"
         assert kwargs["blocks"][0]["text"] == RICH_TABLE_MD
-
-
