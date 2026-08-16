@@ -68,6 +68,52 @@ def _rehash_bundle(payload: dict[str, Any]) -> None:
     )
 
 
+def _write_bundle_with_source_artifact(
+    tmp_path: Path,
+    artifact_payload: object,
+) -> Path:
+    copied = tmp_path / "company_evidence"
+    shutil.copytree(FIXTURES, copied)
+    encoded = (
+        json.dumps(
+            artifact_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    artifact_sha256 = hashlib.sha256(encoded).hexdigest()
+    (copied / "sources" / f"{artifact_sha256}.json").write_bytes(encoded)
+
+    bundle_payload = _bundle_payload()
+    bundle_payload["sources"][0]["artifact_ref"]["sha256"] = artifact_sha256
+    _rehash_bundle(bundle_payload)
+    (copied / BUNDLE_PATH.name).write_text(
+        yaml.safe_dump(bundle_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+    return copied / BUNDLE_PATH.name
+
+
+def _closed_source_artifact() -> dict[str, Any]:
+    return {
+        "schema_version": "1.0.0",
+        "artifact_id": "company-source:company-profile:2026-08-01",
+        "company_id": "company:northstar-commerce",
+        "source_uri": "https://northstar.example/company",
+        "redaction_state": "shareable_redacted",
+        "claims": [
+            {
+                "claim_id": "claim:scale-stage:1",
+                "dimension": "scale_stage",
+                "value_codes": ["growth_stage"],
+                "integer_value": None,
+            }
+        ],
+    }
+
+
 def test_company_identity_resolution_is_deterministic_and_closed() -> None:
     """Mutation caught: fuzzy aliases silently merge or invent a company identity."""
     CompanyIdentityV1 = _symbol("CompanyIdentityV1")
@@ -157,6 +203,18 @@ def test_source_timestamps_are_aware_ordered_and_public_redacted() -> None:
             CompanyEvidenceSourceV1.model_validate(invalid)
 
 
+def test_snapshot_rejects_sources_captured_after_as_of() -> None:
+    """Mutation caught: future source capture satisfies a historical replay."""
+    CompanyEvidenceBundleV1 = _symbol("CompanyEvidenceBundleV1")
+    payload = _bundle_payload()
+    payload["sources"][0]["captured_at"] = "2026-08-11T09:00:00Z"
+    payload["sources"][0]["published_at"] = "2026-08-10T13:00:00Z"
+    _rehash_bundle(payload)
+
+    with pytest.raises(ValidationError, match="captured_at.*as_of"):
+        CompanyEvidenceBundleV1.model_validate(payload)
+
+
 def test_source_artifacts_are_content_addressed_and_tamper_evident(
     tmp_path: Path,
 ) -> None:
@@ -164,7 +222,7 @@ def test_source_artifacts_are_content_addressed_and_tamper_evident(
     load_company_evidence_bundle = _symbol("load_company_evidence_bundle")
     bundle = load_company_evidence_bundle(BUNDLE_PATH)
     assert bundle.sources[0].artifact_ref.sha256 == (
-        "bb04bf37de87fb7d3a005d3e10e8866456786169f01c69663c80bd6f1c9b1da1"
+        "036468876716f27743dfaabfeabf6e54625cafb556cdef6161cf901159810bcd"
     )
 
     copied = tmp_path / "company_evidence"
@@ -173,6 +231,73 @@ def test_source_artifacts_are_content_addressed_and_tamper_evident(
     source_path.write_text('{"tampered":true}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="source artifact sha256"):
         load_company_evidence_bundle(copied / BUNDLE_PATH.name)
+
+    missing = tmp_path / "missing_company_evidence"
+    shutil.copytree(FIXTURES, missing)
+    missing_source = missing / "sources" / f"{bundle.sources[0].artifact_ref.sha256}.json"
+    missing_source.unlink()
+    with pytest.raises(ValueError, match="source artifact unavailable"):
+        load_company_evidence_bundle(missing / BUNDLE_PATH.name)
+
+
+def test_mapping_loader_requires_and_verifies_an_explicit_artifact_root() -> None:
+    """Mutation caught: mapping input bypasses source existence/hash verification."""
+    load_company_evidence_bundle = _symbol("load_company_evidence_bundle")
+    payload = _bundle_payload()
+    with pytest.raises(ValueError, match="artifacts_root is required"):
+        load_company_evidence_bundle(payload)
+
+    first = load_company_evidence_bundle(
+        payload,
+        artifacts_root=FIXTURES / "sources",
+    )
+    second = load_company_evidence_bundle(
+        payload,
+        artifacts_root=FIXTURES / "sources",
+    )
+    assert first.model_dump_json() == second.model_dump_json()
+
+    payload["sources"][0]["artifact_ref"]["sha256"] = "e" * 64
+    _rehash_bundle(payload)
+    with pytest.raises(ValueError, match="source artifact unavailable"):
+        load_company_evidence_bundle(
+            payload,
+            artifacts_root=FIXTURES / "sources",
+        )
+
+
+@pytest.mark.parametrize(
+    "artifact_payload",
+    [
+        {
+            **_closed_source_artifact(),
+            "metadata": {"User Notes": "private nested note"},
+        },
+        {
+            **_closed_source_artifact(),
+            "claims": [
+                {
+                    **_closed_source_artifact()["claims"][0],
+                    "candidate-facts": ["private nested value"],
+                }
+            ],
+        },
+        [_closed_source_artifact()],
+        {
+            **_closed_source_artifact(),
+            "free_text": "unstructured private narrative",
+        },
+    ],
+)
+def test_source_artifact_uses_a_closed_recursive_redacted_schema(
+    tmp_path: Path,
+    artifact_payload: object,
+) -> None:
+    """Mutation caught: nested/list/free-text private data passes as public evidence."""
+    load_company_evidence_bundle = _symbol("load_company_evidence_bundle")
+    bundle_path = _write_bundle_with_source_artifact(tmp_path, artifact_payload)
+    with pytest.raises(ValueError, match="closed public evidence artifact"):
+        load_company_evidence_bundle(bundle_path)
 
 
 def test_fact_and_inference_are_distinct_closed_evidence_kinds() -> None:
@@ -234,7 +359,10 @@ def test_weekly_thesis_cannot_cite_a_superseded_evidence_revision() -> None:
     payload["evidence"][5]["contradiction_state"] = "unopposed"
     _rehash_evidence(payload["evidence"][5])
     _rehash_bundle(payload)
-    bundle = load_company_evidence_bundle(payload)
+    bundle = load_company_evidence_bundle(
+        payload,
+        artifacts_root=FIXTURES / "sources",
+    )
 
     thesis_payload = _thesis_payload()
     thesis_payload["evidence_bundle_ref"]["sha256"] = bundle.content_sha256
@@ -344,7 +472,7 @@ def test_content_hash_is_literal_tamper_evident_and_replay_is_deterministic() ->
     first = load_company_evidence_bundle(BUNDLE_PATH)
     second = load_company_evidence_bundle(BUNDLE_PATH)
     assert first.content_sha256 == (
-        "c0c7415fc0e10d799c21698579d144f8432bf648bb402aef49049b6f7816b6f7"
+        "340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a"
     )
     assert first.model_dump_json() == second.model_dump_json()
 
@@ -369,16 +497,19 @@ def test_contract_file_is_versioned_closed_and_persistence_free() -> None:
     }
 
 
-def test_company_evidence_import_has_no_persistence_or_runtime_dependencies() -> None:
+def test_company_evidence_import_has_no_persistence_or_runtime_dependencies(
+    tmp_path: Path,
+) -> None:
     """Mutation caught: importing the domain contract reaches SQL/store/runtime APIs."""
+    target_path = ROOT / "job_intel/product_search/company_evidence.py"
     script = f"""
 import importlib.abc
+import importlib.util
+from pathlib import Path
 import sys
-sys.path.insert(0, {str(ROOT)!r})
-# Existing package initialization imports the legacy store.  Preload the Task 8
-# domain dependency before installing the hook so this test measures only new
-# imports caused by the Task 9 module.
-import job_intel.product_search.contracts
+import types
+root = Path({str(ROOT)!r})
+target_path = Path(sys.argv[1])
 blocked = (
     'sqlite3',
     'sqlalchemy',
@@ -393,15 +524,46 @@ class Blocker(importlib.abc.MetaPathFinder):
         if fullname in blocked or fullname.startswith(tuple(name + '.' for name in blocked)):
             raise RuntimeError('forbidden dependency imported: ' + fullname)
         return None
+job_intel = types.ModuleType('job_intel')
+job_intel.__path__ = [str(root / 'job_intel')]
+product_search = types.ModuleType('job_intel.product_search')
+product_search.__path__ = [str(root / 'job_intel/product_search')]
+sys.modules['job_intel'] = job_intel
+sys.modules['job_intel.product_search'] = product_search
 sys.meta_path.insert(0, Blocker())
-import job_intel.product_search.company_evidence
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+
+load('job_intel.product_search.contracts', root / 'job_intel/product_search/contracts.py')
+load('job_intel.product_search.company_evidence', target_path)
+for forbidden in blocked:
+    if forbidden in sys.modules:
+        raise RuntimeError('forbidden dependency cached: ' + forbidden)
 print('domain-import-ok')
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", script],
+        [sys.executable, "-I", "-c", script, str(target_path)],
         check=False,
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "domain-import-ok"
+
+    mutated_target = tmp_path / "company_evidence_with_forbidden_import.py"
+    mutated_target.write_text(
+        target_path.read_text(encoding="utf-8") + "\nimport job_intel.store\n",
+        encoding="utf-8",
+    )
+    mutation_result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(mutated_target)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert mutation_result.returncode != 0
+    assert "forbidden dependency imported: job_intel.store" in mutation_result.stderr

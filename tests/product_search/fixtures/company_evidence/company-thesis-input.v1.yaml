@@ -4,7 +4,7 @@ company_id: company:northstar-commerce
 evidence_bundle_ref:
   artifact_id: company-evidence:northstar-commerce:2026-08-10
   version: 1.0.0
-  sha256: c0c7415fc0e10d799c21698579d144f8432bf648bb402aef49049b6f7816b6f7
+  sha256: 340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a
 supporting_evidence_ids:
   - evidence:northstar:scale:1
   - evidence:northstar:trajectory:1

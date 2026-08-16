@@ -11,10 +11,12 @@ from enum import Enum
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any, Literal, Self
 
 import yaml
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import field_validator
 from pydantic import model_validator
 
 from .contracts import ImmutableArtifactRef, SHA256_PATTERN
@@ -94,6 +96,8 @@ _REQUIRED_DIMENSIONS = frozenset(
     }
 )
 _PRIVATE_MARKERS = ("hermes-private://", "candidate facts", "user note")
+CLAIM_ID_PATTERN = r"^claim:[a-z0-9][a-z0-9:-]*$"
+MACHINE_CODE_PATTERN = r"^[a-z][a-z0-9_]{0,63}$"
 
 
 def _clean_text(value: str, field_name: str) -> str:
@@ -230,6 +234,50 @@ class CompanyEvidenceSourceV1(_StrictFrozenModel):
         return self
 
 
+class PublicCompanyEvidenceClaimV1(_StrictFrozenModel):
+    """One redacted machine-readable claim; arbitrary prose is not accepted."""
+
+    claim_id: str = Field(pattern=CLAIM_ID_PATTERN)
+    dimension: CompanyEvidenceDimension
+    value_codes: tuple[str, ...] = Field(min_length=1)
+    integer_value: int | None = None
+
+    @field_validator("value_codes")
+    @classmethod
+    def validate_machine_codes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value != tuple(sorted(set(value))):
+            raise ValueError("value_codes must be sorted and unique")
+        for code in value:
+            if not re.fullmatch(MACHINE_CODE_PATTERN, code):
+                raise ValueError("value_codes must contain bounded machine codes")
+        return value
+
+
+class PublicCompanyEvidenceArtifactV1(_StrictFrozenModel):
+    """Closed public/redacted source artifact used by deterministic replay."""
+
+    schema_version: Literal["1.0.0"]
+    artifact_id: str = Field(min_length=1)
+    company_id: str = Field(min_length=1)
+    source_uri: str = Field(min_length=1)
+    redaction_state: EvidenceRedactionState
+    claims: tuple[PublicCompanyEvidenceClaimV1, ...] = Field(min_length=1)
+
+    @field_validator("source_uri")
+    @classmethod
+    def require_public_https_source(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("source_uri must be a public https URI")
+        return value
+
+    @model_validator(mode="after")
+    def validate_claim_ids(self) -> Self:
+        claim_ids = tuple(claim.claim_id for claim in self.claims)
+        if len(claim_ids) != len(set(claim_ids)):
+            raise ValueError("claims must not contain duplicate claim_id")
+        return self
+
+
 class CompanyEvidenceRecordV1(_StrictFrozenModel):
     evidence_id: str = Field(min_length=1)
     company_id: str = Field(min_length=1)
@@ -278,6 +326,8 @@ class CompanyEvidenceBundleV1(_StrictFrozenModel):
         source_by_id = {source.source_id: source for source in self.sources}
         if len(source_by_id) != len(self.sources):
             raise ValueError("sources contain duplicate source_id")
+        if any(source.captured_at > self.as_of for source in self.sources):
+            raise ValueError("source captured_at cannot be after bundle as_of")
         evidence_by_id = {record.evidence_id: record for record in self.evidence}
         if len(evidence_by_id) != len(self.evidence):
             raise ValueError("evidence contains duplicate evidence_id")
@@ -435,11 +485,20 @@ def _load_yaml(path_or_payload: Path | str | Mapping[str, Any]) -> Mapping[str, 
 
 def load_company_evidence_bundle(
     path_or_payload: Path | str | Mapping[str, Any],
+    *,
+    artifacts_root: Path | str | None = None,
 ) -> CompanyEvidenceBundleV1:
     bundle = CompanyEvidenceBundleV1.model_validate(_load_yaml(path_or_payload))
     if isinstance(path_or_payload, Mapping):
-        return bundle
-    sources_root = Path(path_or_payload).parent / "sources"
+        if artifacts_root is None:
+            raise ValueError("artifacts_root is required for mapping company evidence")
+        sources_root = Path(artifacts_root)
+    else:
+        sources_root = (
+            Path(artifacts_root)
+            if artifacts_root is not None
+            else Path(path_or_payload).parent / "sources"
+        )
     for source in bundle.sources:
         artifact_path = sources_root / f"{source.artifact_ref.sha256}.json"
         try:
@@ -452,10 +511,27 @@ def load_company_evidence_bundle(
             source_payload = json.loads(source_bytes)
         except json.JSONDecodeError as exc:
             raise ValueError("source artifact must be valid JSON") from exc
-        if isinstance(source_payload, Mapping) and any(
-            key in source_payload for key in ("candidate_facts", "user_notes")
+        try:
+            artifact = PublicCompanyEvidenceArtifactV1.model_validate(source_payload)
+        except ValidationError as exc:
+            raise ValueError(
+                "source artifact violates closed public evidence artifact schema"
+            ) from exc
+        if (
+            artifact.artifact_id != source.artifact_ref.artifact_id
+            or artifact.company_id != bundle.company_identity.company_id
+            or artifact.source_uri != source.source_uri
+            or artifact.redaction_state is not source.redaction_state
         ):
-            raise ValueError("source artifact contains prohibited private inputs")
+            raise ValueError("source artifact provenance does not match bundle source")
+        artifact_dimensions = {claim.dimension for claim in artifact.claims}
+        referenced_dimensions = {
+            record.dimension
+            for record in bundle.evidence
+            if source.source_id in record.source_ids
+        }
+        if not referenced_dimensions <= artifact_dimensions:
+            raise ValueError("source artifact claims do not cover referenced evidence")
     return bundle
 
 

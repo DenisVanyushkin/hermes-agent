@@ -21,7 +21,7 @@ sources:
     artifact_ref:
       artifact_id: company-source:company-profile:2026-08-01
       version: 1.0.0
-      sha256: bb04bf37de87fb7d3a005d3e10e8866456786169f01c69663c80bd6f1c9b1da1
+      sha256: 036468876716f27743dfaabfeabf6e54625cafb556cdef6161cf901159810bcd
     captured_at: 2026-08-02T09:00:00Z
     published_at: 2026-08-01T08:00:00Z
     sensitivity: public
@@ -32,7 +32,7 @@ sources:
     artifact_ref:
       artifact_id: company-source:company-update:2026-08-03
       version: 1.0.0
-      sha256: 5a1f03c04807fef000c15d096f276980700dbfefd5df7db88d5d8e53d1476dde
+      sha256: 879c6d869052aea627131632ec5f7a1f8090ac8d01ce8dc3290e15350e920272
     captured_at: 2026-08-04T09:00:00Z
     published_at: 2026-08-03T08:00:00Z
     sensitivity: public
@@ -43,7 +43,7 @@ sources:
     artifact_ref:
       artifact_id: company-source:risk-signal:2026-08-05
       version: 1.0.0
-      sha256: 208c4babebfd6e4ae3ec0eda4c3d2b64c037ea996388b44577c1f3b9d012e68a
+      sha256: 4eb1bc35ddc5a3c496266c3c2da07b39f6bcb0f448e90692ef9131899875ef22
     captured_at: 2026-08-06T09:00:00Z
     published_at: 2026-08-05T08:00:00Z
     sensitivity: public
@@ -150,4 +150,4 @@ vacancy_evidence_refs:
   - artifact_id: vacancy-evidence:redacted-001
     version: 1.0.0
     sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-content_sha256: c0c7415fc0e10d799c21698579d144f8432bf648bb402aef49049b6f7816b6f7
+content_sha256: 340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a
