@@ -105,8 +105,22 @@ def test_gateway_autonomous_builds_plan_before_controller_and_uses_execution_rep
     }
     assert "# Plan for engineer" not in json.dumps(payload, sort_keys=True)
     assert "let the engineer execute" not in json.dumps(payload, sort_keys=True)
-    assert payload["pipeline_execution_report"] == {**executed_report, "execution_mode": "autonomous"}
-    assert "observe_plan_only" not in json.dumps(payload["pipeline_execution_report"])
+    execution_report = payload["pipeline_execution_report"]
+    assert execution_report["change_artifact"] == {
+        "schema_version": "change-artifact.v1",
+        "status": "not_required",
+        "verified": True,
+        "artifact_type": None,
+        "artifact_count": 0,
+        "bytes": 0,
+        "content_sha256_prefix": None,
+        "reason_code": None,
+    }
+    assert {key: value for key, value in execution_report.items() if key != "change_artifact"} == {
+        **executed_report,
+        "execution_mode": "autonomous",
+    }
+    assert "observe_plan_only" not in json.dumps(execution_report)
 
 
 def test_gateway_autonomous_prefers_helper_execution_report_fallback(monkeypatch, caplog):
