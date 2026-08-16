@@ -27667,6 +27667,60 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         }
 
     @staticmethod
+    def _build_upstream_sync_triage_ack(message, source):
+        """Answer a gate-triage proposal: ``apply fix`` or ``keep test``.
+
+        When an upstream merge turns a fork test red, the host diagnoses it and
+        proposes a patch to the test — it never applies one, because the same
+        red test is equally likely to mean the merge dropped local behaviour and
+        the test is the only sensor that noticed.
+
+        The reply is matched WHOLE-MESSAGE (see parse_upstream_sync_triage_reply):
+        "he wrote: apply fix" approves nothing. That strictness is also why this
+        intercept runs BEFORE the decision-reply one — both gates can be armed at
+        the same time and both answer to plain text, and a strict parser cannot
+        swallow a message meant for the looser gate, while the reverse can happen.
+
+        Returns an ack string when the message is an exact answer and a proposal
+        is armed; otherwise ``None`` so the normal path proceeds.
+        """
+        try:
+            from hermes_cli.upstream_sync_reply import (
+                parse_upstream_sync_triage_reply,
+                has_pending_upstream_triage,
+                record_triage_decision,
+                default_upstream_sync_state_dir,
+            )
+
+            answer = parse_upstream_sync_triage_reply(message)
+            if not answer:
+                return None
+            state_dir = default_upstream_sync_state_dir()
+            if not has_pending_upstream_triage(state_dir):
+                return None
+
+            source_dict = {
+                "platform": str(getattr(source, "platform", "") or "") or None,
+                "chat_id": str(getattr(source, "chat_id", "") or "") or None,
+                "thread_id": str(getattr(source, "thread_id", "") or "") or None,
+                "user_id": str(getattr(source, "user_id", "") or "") or None,
+            }
+            outcome = record_triage_decision(state_dir, answer, source_dict)
+        except Exception:
+            logger.warning("upstream-sync triage intercept failed", exc_info=True)
+            return None
+
+        if answer == "keep_test":
+            return ("\u2705 Understood — the failing test stays as it is. Nothing was applied; the "
+                    "merge clone is preserved in the upstream-sync state dir for you to fix the "
+                    "merge itself.")
+        if outcome.get("requested"):
+            return ("\u2705 Applying the proposed test patch: the host amends the merge with it and "
+                    "re-runs the fork-test gate. One attempt \u2014 if the gate is still red the merge "
+                    "is left unlanded and the clone preserved. The result lands in this thread.")
+        return "\u26a0\ufe0f Not applied: " + (outcome.get("reason") or "nothing to apply") + "."
+
+    @staticmethod
     def _build_upstream_sync_decision_ack(message, source):
         """Record an operator decision reply and hand the apply to the host.
 
@@ -28797,6 +28851,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # and terminally swallows the reply (_pipeline_autonomous_terminal_response).
         # Route a recognized decision reply (with a pending decision) to a one-shot
         # cron job that applies Mode B, and ack immediately.
+        # The triage gate answers to a bare word and is matched whole-message;
+        # the decision gate's parser is looser. Strict first: it cannot take an
+        # answer meant for the other one, but the loose one could.
+        _triage_ack = self._build_upstream_sync_triage_ack(_operator_text, source)
+        if _triage_ack is not None:
+            logger.info(
+                "upstream-sync triage intercept: handled: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": _triage_ack,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": _triage_ack},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
         _us_ack = self._build_upstream_sync_decision_ack(_operator_text, source)
         if _us_ack is not None:
             logger.info(

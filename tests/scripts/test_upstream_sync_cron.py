@@ -209,3 +209,47 @@ class TestDryRunAndFailures:
         proc, posts = _run(tmp_path, state, _preflight(), extra_env={"HERMES_SYNC_PREFLIGHT_CMD": str(bad)})
         assert proc.returncode != 0
         assert "preflight" in (proc.stdout + proc.stderr).lower()
+
+import datetime as _dt
+
+
+class TestArmedTriageGate:
+    """A proposal waiting for `apply fix` / `keep test` is an armed gate exactly
+    like an undecided conflict: the sync must not start another one on top of
+    it, and the operator gets the same once-a-day nudge."""
+
+    def _triage(self, state, status="awaiting_triage", reminded_at=None):
+        payload = {"schema": "upstream-sync-triage/v1", "status": status, "merge_sha": "dddd4444",
+                   "slack_channel": "C0TEST", "slack_thread_ts": "1786.001",
+                   "proposals": [{"test_file": "tests/new.py", "verdict": "test_outdated",
+                                  "patch": "def test_x():\n    assert 1\n"}]}
+        if reminded_at:
+            payload["reminded_at"] = reminded_at
+        (state / "gate-triage.json").write_text(json.dumps(payload))
+
+    def test_an_armed_proposal_is_reminded_not_restarted(self, tmp_path, state):
+        self._triage(state)
+        proc, posts = _run(tmp_path, state, _preflight())
+
+        assert proc.returncode == 0, proc.stderr
+        assert posts and "apply fix" in posts[-1]["text"] and "keep test" in posts[-1]["text"]
+        assert posts[-1]["thread_ts"] == "1786.001"
+        # No new sync was started while the operator holds the answer.
+        assert not (state / "finalize-request.json").exists()
+        assert not (state / "pending.json").exists()
+
+    def test_the_reminder_is_throttled_like_the_decision_one(self, tmp_path, state):
+        self._triage(state, reminded_at=_dt.datetime.now(_dt.timezone.utc).isoformat())
+        proc, posts = _run(tmp_path, state, _preflight())
+
+        assert proc.returncode == 0, proc.stderr
+        assert posts == []
+
+    @pytest.mark.parametrize("status", ["applied", "rejected", "exhausted", "applying"])
+    def test_an_answered_proposal_does_not_block_the_next_sync(self, tmp_path, state, status):
+        self._triage(state, status=status)
+        proc, posts = _run(tmp_path, state, _preflight(conflicts=[]))
+
+        assert proc.returncode == 0, proc.stderr
+        req = json.loads((state / "finalize-request.json").read_text())
+        assert req["action"] == "sync"

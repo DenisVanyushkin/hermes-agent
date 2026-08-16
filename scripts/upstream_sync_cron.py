@@ -128,6 +128,37 @@ def handle_armed_gate(state: Path, pending: dict, dry_run: bool) -> int:
     return 0
 
 
+def handle_armed_triage(state: Path, triage: dict, dry_run: bool) -> int:
+    """A test-gate proposal waiting for `apply fix` / `keep test`.
+
+    This is checked BEFORE the decision gate. After a red gate pending.json is
+    still on disk and fully decided, so the decision branch would read it as
+    "decided → resume apply-decisions" and re-run the whole apply against the
+    same merge that just failed the gate — answering a question the operator has
+    already been asked a better version of.
+    """
+    if in_flight(state):
+        log("upstream-sync: a finalize is in flight; leaving the armed triage alone")
+        return 0
+    last = triage.get("reminded_at") or ""
+    if last:
+        try:
+            age = _dt.datetime.now(_dt.timezone.utc) - _dt.datetime.fromisoformat(last)
+            if age.total_seconds() < REMIND_EVERY_HOURS * 3600:
+                log("upstream-sync: triage reminder throttled")
+                return 0
+        except ValueError:
+            pass
+    text = slack.triage_reminder_text(triage)
+    if dry_run:
+        print("would post triage reminder:\n" + text)
+        return 0
+    _post(triage.get("slack_channel") or DEFAULT_CHANNEL, text, triage.get("slack_thread_ts"))
+    triage["reminded_at"] = _now()
+    _write_json(state / "gate-triage.json", triage)
+    return 0
+
+
 def handle_conflicts(state: Path, pf: dict, channel: str, dry_run: bool) -> int:
     memory = load_memory(state / "decision-memory.json")
     features = group_features(pf.get("conflicts", []))
@@ -175,6 +206,15 @@ def main(argv=None) -> int:
     pf = run_preflight(args.preflight_cmd)
     log(f"upstream-sync: preflight risk={pf.get('risk')} upstream_ahead={pf.get('upstream_ahead')} "
         f"conflicts={len(pf.get('conflicts') or [])} pending={pf.get('pending_decision_present')}")
+
+    triage_path = state / "gate-triage.json"
+    if triage_path.exists():
+        try:
+            triage = json.loads(triage_path.read_text(encoding="utf-8"))
+        except ValueError:
+            triage = {}
+        if triage.get("status") == "awaiting_triage":
+            return handle_armed_triage(state, triage, args.dry_run)
 
     pending_path = state / "pending.json"
     if pending_path.exists():

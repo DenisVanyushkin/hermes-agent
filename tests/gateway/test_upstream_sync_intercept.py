@@ -92,3 +92,78 @@ def test_decision_but_no_pending_returns_none(tmp_path, monkeypatch):
     ack = GatewayRunner._build_upstream_sync_decision_ack("1: merge both", _source())
     assert ack is None
     assert called["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The triage gate: one word, whole message, checked before the decision parser
+# ---------------------------------------------------------------------------
+
+
+def _write_triage(tmp_path, status="awaiting_triage", patch="def test_x():\n    assert 1\n"):
+    (tmp_path / "gate-triage.json").write_text(json.dumps({
+        "schema": "upstream-sync-triage/v1", "status": status, "merge_sha": "abc1234567",
+        "proposals": [{"test_file": "tests/new.py", "verdict": "test_outdated",
+                       "explanation": "upstream changed the signature", "patch": patch}],
+    }))
+
+
+def test_apply_fix_arms_the_finalizer_and_acks(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_triage(tmp_path)
+
+    ack = GatewayRunner._build_upstream_sync_triage_ack("apply fix", _source())
+
+    assert ack is not None
+    req = json.loads((tmp_path / "finalize-request.json").read_text())
+    assert req["action"] == "apply-triage-fixes"
+    assert req["origin"]["thread_id"] == "1783420000.000"
+    assert json.loads((tmp_path / "gate-triage.json").read_text())["status"] == "applying"
+
+
+def test_keep_test_closes_the_gate_without_touching_anything(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_triage(tmp_path)
+
+    ack = GatewayRunner._build_upstream_sync_triage_ack("keep test", _source())
+
+    assert ack is not None
+    assert not (tmp_path / "finalize-request.json").exists()
+    assert json.loads((tmp_path / "gate-triage.json").read_text())["status"] == "rejected"
+
+
+def test_a_quoted_word_is_not_an_answer(tmp_path, monkeypatch):
+    """The whole-message rule: quoted speech and sentences containing the word
+    must not approve anything — the same rule the ops gate enforces."""
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_triage(tmp_path)
+
+    assert GatewayRunner._build_upstream_sync_triage_ack("он написал: apply fix", _source()) is None
+    assert GatewayRunner._build_upstream_sync_triage_ack("ok, apply fix", _source()) is None
+    assert not (tmp_path / "finalize-request.json").exists()
+
+
+def test_the_word_does_nothing_without_an_armed_proposal(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_triage(tmp_path, status="applied")
+
+    assert GatewayRunner._build_upstream_sync_triage_ack("apply fix", _source()) is None
+    assert not (tmp_path / "finalize-request.json").exists()
+
+
+def test_a_decision_reply_is_left_to_the_decision_intercept(tmp_path, monkeypatch):
+    """Both gates can be armed at once and both answer to plain text. The strict
+    parser runs first precisely because it cannot steal the other's answer."""
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_triage(tmp_path)
+
+    assert GatewayRunner._build_upstream_sync_triage_ack("1: merge both", _source()) is None
+
+
+def test_a_diagnosis_without_a_patch_says_so_instead_of_arming(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_triage(tmp_path, patch="")
+
+    ack = GatewayRunner._build_upstream_sync_triage_ack("apply fix", _source())
+
+    assert ack is not None and "no patch" in ack.lower()
+    assert not (tmp_path / "finalize-request.json").exists()
