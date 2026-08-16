@@ -144,9 +144,14 @@ def _call_via_cmd(cmd: str, payload: dict) -> str:
     return proc.stdout
 
 
-def _call_via_model(payload: dict) -> str:
-    # Mirrors hermes_cli.legal_review_gate._default_llm_call — the host-side
-    # model path the review gates already run in production.
+def call_json_model(system: str, user: str) -> str:
+    """One JSON-mode completion on the ``coding`` tier. Raises ResolverError.
+
+    Mirrors hermes_cli.legal_review_gate._default_llm_call — the host-side model
+    path the review gates already run in production. Shared with the gate triage
+    (``upstream_sync_triage.py``) so there is exactly one place that knows how a
+    host script reaches a model.
+    """
     from hermes_cli.review_gate import resolve_reviewer_model
     from agent.auxiliary_client import resolve_provider_client
 
@@ -155,12 +160,9 @@ def _call_via_model(payload: dict) -> str:
     client, resolved_model = resolve_provider_client(provider, model, raw_codex=False, async_mode=False)
     if client is None:
         raise ResolverError(f"unable to resolve client for {provider} / {model}")
-    user = json.dumps({k: payload[k] for k in ("path", "decision", "before", "ours", "base", "theirs",
-                                                "after", "local_subjects", "previous_error", "attempt")},
-                      ensure_ascii=False)
     response = client.chat.completions.create(
         model=resolved_model or model,
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}],
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0,
         response_format={"type": "json_object"},
     )
@@ -169,6 +171,13 @@ def _call_via_model(payload: dict) -> str:
     if not content:
         raise ResolverError("model returned empty content")
     return str(content)
+
+
+def _call_via_model(payload: dict) -> str:
+    user = json.dumps({k: payload[k] for k in ("path", "decision", "before", "ours", "base", "theirs",
+                                                "after", "local_subjects", "previous_error", "attempt")},
+                      ensure_ascii=False)
+    return call_json_model(SYSTEM_PROMPT, user)
 
 
 def default_call_model(payload: dict) -> str:

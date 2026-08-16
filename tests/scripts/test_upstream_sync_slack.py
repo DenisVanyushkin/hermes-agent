@@ -172,3 +172,84 @@ class TestCli:
         assert proc.stdout.strip() == "1786.999"
         sent = json.loads(Path(str(fake) + ".last").read_text())
         assert sent == {"channel": "C1", "text": "hi", "thread_ts": "1786.001"}
+
+
+# ---------------------------------------------------------------------------
+# Gate triage: the proposal the operator answers with one word
+# ---------------------------------------------------------------------------
+
+
+def _triage(proposals, status="awaiting_triage"):
+    return {"schema": "upstream-sync-triage/v1", "status": status, "merge_sha": "deadbeefcafe",
+            "proposals": proposals}
+
+
+def _prop(**kw):
+    base = {"test_file": "tests/gateway/test_voice.py", "test_ids": ["tests/gateway/test_voice.py::test_stt"],
+            "test_kind": "fork", "verdict": "test_outdated",
+            "explanation": "upstream added two parameters to transcribe_audio.",
+            "assertion_delta": "same assertions, new call signature",
+            "patch": "def test_stt():\n    assert transcribe('a', 'm', 's')\n",
+            "excerpt": "E   TypeError: transcribe_audio() missing 2 required positional arguments",
+            "modules_under_test": ["gateway/voice.py"], "rejected_reason": ""}
+    base.update(kw)
+    return base
+
+
+class TestTriageText:
+    def test_shows_the_verdict_explanation_and_patch(self):
+        text = slack.triage_text(_triage([_prop()]))
+        assert "tests/gateway/test_voice.py" in text
+        assert "test_outdated" in text
+        assert "transcribe_audio" in text
+        assert "same assertions, new call signature" in text
+        assert "```" in text and "def test_stt" in text
+
+    def test_spells_out_the_exact_words_the_operator_must_reply(self):
+        """The reply parser matches the whole message, so a paraphrase does
+        nothing. The instruction has to be the literal accepted word."""
+        text = slack.triage_text(_triage([_prop()]))
+        assert "apply fix" in text
+        assert "keep test" in text
+
+    def test_a_diagnosis_without_a_patch_says_why_and_offers_no_apply(self):
+        text = slack.triage_text(_triage([
+            _prop(verdict="behaviour_lost", patch="",
+                  rejected_reason="the fix belongs in the merge, not in the test")]))
+        assert "behaviour_lost" in text
+        assert "the fix belongs in the merge" in text
+        assert "```" not in text or "def test_stt" not in text
+
+    def test_apply_is_not_offered_when_no_proposal_carries_a_patch(self):
+        text = slack.triage_text(_triage([_prop(verdict="unsure", patch="")]))
+        assert "apply fix" not in text
+        assert "keep test" in text
+
+    def test_a_long_patch_is_truncated_with_a_pointer_to_the_state_file(self):
+        text = slack.triage_text(_triage([_prop(patch="x = 1\n" * 500)]))
+        assert len(text) < 8000
+        assert "gate-triage.json" in text
+
+
+class TestFailedTextMentionsTriage:
+    def test_a_test_gate_failure_points_at_the_triage_instead_of_raw_output(self):
+        prep = {"upstream_head": "a" * 40, "conflicts": ["f.py"]}
+        result = {"failed_stage": "test-gate", "detail": "the merge introduces test failures"}
+        text = slack.failed_text(prep, result, scratch="/s/scratch", triage=_triage([_prop()]))
+        assert "test-gate" in text
+        assert "tests/gateway/test_voice.py" in text
+        assert "apply fix" in text
+
+    def test_without_a_triage_the_old_summary_still_stands(self):
+        prep = {"upstream_head": "a" * 40, "conflicts": ["f.py"]}
+        result = {"failed_stage": "test-gate", "detail": "boom"}
+        text = slack.failed_text(prep, result, scratch="/s/scratch")
+        assert "test-gate" in text
+        assert "apply fix" not in text
+
+
+class TestTriageReminder:
+    def test_names_the_pending_proposal_and_the_two_answers(self):
+        text = slack.triage_reminder_text(_triage([_prop()]))
+        assert "tests/gateway/test_voice.py" in text
+        assert "apply fix" in text and "keep test" in text

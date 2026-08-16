@@ -233,3 +233,104 @@ def build_progress_reporter_argv(origin, *, repo, hermes_bin, script_path):
         "--repo", repo,
         "--hermes-bin", hermes_bin,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Triage gate — the host proposes a test patch, the operator answers one word
+# ---------------------------------------------------------------------------
+#
+# When the fork-test gate goes red on an upstream merge, the host diagnoses and
+# PROPOSES a patch to the failing test; the operator decides. Automation that
+# edits a test to make a red gate green would eventually paper over a real
+# regression — the fork tests are the only sensor for a merge that silently
+# dropped local behaviour.
+#
+# The reply is matched WHOLE-MESSAGE, the way ops_gate_service.parse_ops_reply
+# matches its approval words: normalize (strip, collapse whitespace, casefold,
+# drop trailing punctuation, cap the length) and then require exact equality.
+# A sentence that merely contains "apply fix" — a quote, a plan, a reply with a
+# trailing clause — is not an answer. This parser runs BEFORE the decision-reply
+# parser precisely because it is the strict one: a strict parser cannot steal a
+# message meant for the looser gate, but the reverse is not true.
+
+_TRIAGE_APPLY = ("apply fix", "apply the fix", "применить правку", "применяй правку")
+_TRIAGE_KEEP = ("keep test", "keep the test", "оставить тест", "оставь тест")
+_TRIAGE_MAX_LEN = 40
+
+
+def _normalize_word_reply(text) -> str:
+    if not isinstance(text, str):
+        return ""
+    s = " ".join(text.split()).strip()
+    if len(s) > _TRIAGE_MAX_LEN:
+        return ""
+    return s.rstrip(".!,;:").strip().casefold()
+
+
+def parse_upstream_sync_triage_reply(text) -> Optional[str]:
+    """``"apply_fix"`` / ``"keep_test"`` for an exact one-word answer, else None."""
+    s = _normalize_word_reply(text)
+    if not s:
+        return None
+    if s in _TRIAGE_APPLY:
+        return "apply_fix"
+    if s in _TRIAGE_KEEP:
+        return "keep_test"
+    return None
+
+
+TRIAGE_FILE = "gate-triage.json"
+
+
+def load_triage(state_dir: Path | str) -> dict:
+    try:
+        data = json.loads((Path(state_dir) / TRIAGE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def has_pending_upstream_triage(state_dir: Path | str) -> bool:
+    """True only while a proposal is armed and unanswered."""
+    return load_triage(state_dir).get("status") == "awaiting_triage"
+
+
+def record_triage_decision(state_dir: Path | str, answer: str, source: dict) -> dict:
+    """Record the operator answer; request apply-triage-fixes for ``apply_fix``.
+
+    Returns {"status": <new status>, "requested": bool, "reason": str|None}.
+    """
+    state = Path(state_dir)
+    triage = load_triage(state)
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    triage["answered_at"] = now
+    if answer == "keep_test":
+        triage["status"] = "rejected"
+        _write_json_atomic(state / TRIAGE_FILE, triage)
+        return {"status": "rejected", "requested": False, "reason": None}
+
+    proposals = [p for p in (triage.get("proposals") or []) if p.get("patch")]
+    if not proposals:
+        # Diagnosis only: validation refused every patch, so there is nothing to
+        # apply and the merge stays where it is.
+        triage["status"] = "rejected"
+        _write_json_atomic(state / TRIAGE_FILE, triage)
+        return {"status": "rejected", "requested": False,
+                "reason": "the triage carries no patch to apply (diagnosis only)"}
+    if any((state / n).exists() for n in ("finalize-request.json", "finalize-request.processing.json")):
+        return {"status": triage.get("status"), "requested": False,
+                "reason": "a finalize is already in flight; answer again once it reports"}
+
+    # "applying", not "applied": the gate is disarmed the moment it is answered
+    # (a duplicate reply must not arm a second request), but only the finalizer
+    # gets to say the fix actually landed.
+    triage["status"] = "applying"
+    _write_json_atomic(state / TRIAGE_FILE, triage)
+    _write_json_atomic(state / "finalize-request.json", {
+        "action": "apply-triage-fixes",
+        "requested_at": now,
+        "origin": {"platform": _normalize_platform(source.get("platform")),
+                   "chat_id": source.get("chat_id"), "thread_id": source.get("thread_id"),
+                   "user_id": source.get("user_id")},
+    })
+    return {"status": "applying", "requested": True, "reason": None}

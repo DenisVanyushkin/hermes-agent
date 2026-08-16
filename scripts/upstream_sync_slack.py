@@ -192,7 +192,95 @@ def applied_text(prep: dict, result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def failed_text(prep: dict, result: dict, *, scratch: str = "") -> str:
+MAX_PATCH_CHARS = 2500
+
+_VERDICT_LABEL = {
+    "test_outdated": "the test is stale — upstream changed the contract",
+    "behaviour_lost": "the merge lost local behaviour — this is a real regression",
+    "unsure": "undecided — no safe patch to offer",
+}
+
+
+def _proposal_lines(p: dict) -> list[str]:
+    ids = ", ".join(f"`{i}`" for i in (p.get("test_ids") or [])) or f"`{p.get('test_file')}`"
+    kind = "fork test" if p.get("test_kind") == "fork" else "upstream test"
+    verdict = str(p.get("verdict") or "unsure")
+    lines = [f"*{p.get('test_file')}* ({kind}) — {ids}",
+             f"- verdict: `{verdict}` — {_VERDICT_LABEL.get(verdict, '')}"]
+    if p.get("explanation"):
+        lines.append(f"- {p['explanation']}")
+    if p.get("assertion_delta"):
+        lines.append(f"- assertions: {p['assertion_delta']}")
+    excerpt = (p.get("excerpt") or "").strip()
+    if excerpt:
+        tail = "\n".join(excerpt.splitlines()[-6:])
+        lines += ["```", tail[-800:], "```"]
+    patch = p.get("patch") or ""
+    if patch:
+        shown = patch if len(patch) <= MAX_PATCH_CHARS else (
+            patch[:MAX_PATCH_CHARS] + f"\n... [truncated — full patch in `gate-triage.json`]\n")
+        lines += ["- proposed new contents of the test file:", "```", shown, "```"]
+    elif p.get("rejected_reason"):
+        lines.append(f"- no patch offered: {p['rejected_reason']}")
+    return lines
+
+
+def triage_text(triage: dict) -> str:
+    """The proposal the operator answers with one word.
+
+    The reply parser matches the WHOLE message, so this must print the literal
+    accepted words — an operator who paraphrases ("ok, apply fix") gets no
+    reaction at all, which is exactly the confusion the ops gate has trained us
+    to pre-empt in the message itself.
+    """
+    proposals = triage.get("proposals") or []
+    has_patch = any(p.get("patch") for p in proposals)
+    lines = [
+        "*Upstream sync — the fork tests went red on this merge* "
+        f"(`{_short(triage.get('merge_sha'))}`). Nothing has been applied.",
+        "Either the test is stale (upstream changed the contract) or the merge dropped local "
+        "behaviour and the test is the alarm. Triage below — the call is yours.",
+        "",
+    ]
+    for p in proposals:
+        lines += _proposal_lines(p)
+        lines.append("")
+    if has_patch:
+        lines += [
+            "Reply in this thread with *exactly one* of these words — the whole message, "
+            "nothing before or after it:",
+            "```",
+            "apply fix",
+            "keep test",
+            "```",
+            "`apply fix` — amend the merge with the patch above and re-run the gate (one attempt). "
+            "`keep test` — the regression is real: nothing is applied, the merge clone is kept "
+            "for you.",
+        ]
+    else:
+        lines += [
+            "No patch is offered, so there is nothing to approve. Reply `keep test` to close the "
+            "gate and take the merge clone yourself:",
+            "```",
+            "keep test",
+            "```",
+        ]
+    lines.append("Full triage (untruncated patches and evidence): `gate-triage.json` in the state dir.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def triage_reminder_text(triage: dict) -> str:
+    lines = ["*Upstream sync is still waiting for your call on the red test gate* "
+             f"(`{_short(triage.get('merge_sha'))}`):", ""]
+    for p in triage.get("proposals") or []:
+        verdict = str(p.get("verdict") or "unsure")
+        lines.append(f"- `{p.get('test_file')}` → `{verdict}`"
+                     + (" (patch ready)" if p.get("patch") else " (diagnosis only)"))
+    lines += ["", "Reply with exactly `apply fix` or `keep test` (the whole message)."]
+    return "\n".join(lines) + "\n"
+
+
+def failed_text(prep: dict, result: dict, *, scratch: str = "", triage: dict | None = None) -> str:
     stage = result.get("failed_stage") or "unknown"
     lines = [
         f"*Upstream sync NOT applied* — stage `{stage}` failed for upstream "
@@ -206,6 +294,11 @@ def failed_text(prep: dict, result: dict, *, scratch: str = "") -> str:
                 lines.append(f"- `{u.get('path')}` — {u.get('reason', '')}")
             else:
                 lines.append(f"- `{u}`")
+    # A red test gate has a diagnosis attached; showing the raw log tail instead
+    # buries it. The triage carries the failing tests, the verdict and (maybe) a
+    # patch the operator can approve with one word.
+    if stage == "test-gate" and (triage or {}).get("proposals"):
+        return "\n".join(lines) + "\n\n" + triage_text(triage or {})
     detail = (result.get("detail") or "").strip()
     if detail and stage != "resolve":
         tail = "\n".join(detail.splitlines()[-8:])

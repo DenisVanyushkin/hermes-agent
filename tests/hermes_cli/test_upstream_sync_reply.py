@@ -288,3 +288,105 @@ class TestRecordOperatorDecisions:
     def test_missing_pending_raises_file_not_found(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             record_operator_decisions(tmp_path, {1: "merge both"}, {})
+
+
+# ---------------------------------------------------------------------------
+# Triage gate: the host proposes a test patch, the operator answers one word
+# ---------------------------------------------------------------------------
+
+from hermes_cli.upstream_sync_reply import (  # noqa: E402
+    parse_upstream_sync_triage_reply,
+    has_pending_upstream_triage,
+    record_triage_decision,
+)
+
+
+class TestParseTriageReply:
+    """Whole-message equality, like ops_gate_service.parse_ops_reply: a strict
+    parser cannot steal an answer meant for the decision gate, which is why it
+    is consulted first."""
+
+    @pytest.mark.parametrize("text", [
+        "apply fix", "Apply Fix", "  apply   fix  ", "apply fix.", "применить правку",
+    ])
+    def test_accepts_the_apply_forms(self, text):
+        assert parse_upstream_sync_triage_reply(text) == "apply_fix"
+
+    @pytest.mark.parametrize("text", [
+        "keep test", "KEEP TEST", "keep test!", "оставить тест",
+    ])
+    def test_accepts_the_keep_forms(self, text):
+        assert parse_upstream_sync_triage_reply(text) == "keep_test"
+
+    @pytest.mark.parametrize("text", [
+        "он написал: apply fix",
+        "ok, apply fix",
+        "apply fix and push",
+        "",
+        None,
+        "1: merge both",
+        "x" * 60,
+    ])
+    def test_rejects_anything_that_is_not_the_bare_word(self, text):
+        assert parse_upstream_sync_triage_reply(text) is None
+
+
+def _triage(tmp_path, status="awaiting_triage", proposals=None):
+    payload = {
+        "schema": "upstream-sync-triage/v1",
+        "status": status,
+        "merge_sha": "abc123",
+        "proposals": proposals if proposals is not None else [
+            {"test_file": "tests/x.py", "verdict": "test_outdated", "patch": "print(1)\n"}
+        ],
+        "created_at": "2026-08-16T00:00:00+00:00",
+    }
+    (tmp_path / "gate-triage.json").write_text(json.dumps(payload))
+    return payload
+
+
+class TestHasPendingTriage:
+    def test_true_only_while_awaiting(self, tmp_path):
+        _triage(tmp_path)
+        assert has_pending_upstream_triage(tmp_path) is True
+
+    @pytest.mark.parametrize("status", ["applied", "rejected"])
+    def test_false_once_answered(self, tmp_path, status):
+        _triage(tmp_path, status=status)
+        assert has_pending_upstream_triage(tmp_path) is False
+
+    def test_false_when_absent(self, tmp_path):
+        assert has_pending_upstream_triage(tmp_path) is False
+
+
+class TestRecordTriageDecision:
+    def test_apply_fix_requests_the_finalizer_and_marks_the_file(self, tmp_path):
+        _triage(tmp_path)
+        out = record_triage_decision(tmp_path, "apply_fix", {"platform": "Platform.SLACK",
+                                                             "chat_id": "C1", "thread_id": "1.1"})
+        assert out["requested"] is True
+        req = json.loads((tmp_path / "finalize-request.json").read_text())
+        assert req["action"] == "apply-triage-fixes"
+        assert req["origin"]["platform"] == "slack"
+        assert json.loads((tmp_path / "gate-triage.json").read_text())["status"] == "applying"
+
+    def test_keep_test_rejects_without_requesting_anything(self, tmp_path):
+        _triage(tmp_path)
+        out = record_triage_decision(tmp_path, "keep_test", {})
+        assert out["requested"] is False
+        assert not (tmp_path / "finalize-request.json").exists()
+        assert json.loads((tmp_path / "gate-triage.json").read_text())["status"] == "rejected"
+
+    def test_apply_fix_with_no_proposals_does_not_request(self, tmp_path):
+        _triage(tmp_path, proposals=[])
+        out = record_triage_decision(tmp_path, "apply_fix", {})
+        assert out["requested"] is False
+        assert "no patch" in (out["reason"] or "")
+        assert not (tmp_path / "finalize-request.json").exists()
+
+    def test_apply_fix_defers_while_a_finalize_is_in_flight(self, tmp_path):
+        _triage(tmp_path)
+        (tmp_path / "finalize-request.processing.json").write_text("{}")
+        out = record_triage_decision(tmp_path, "apply_fix", {})
+        assert out["requested"] is False
+        assert "in flight" in (out["reason"] or "")

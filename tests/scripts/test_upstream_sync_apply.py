@@ -405,6 +405,43 @@ class TestCommit:
         assert first == second
 
 
+class TestCommitAmend:
+    """After the triage patches a test file inside the clone, the merge has to
+    be re-made with the patch in it — but the host will only land a commit whose
+    parents are exactly (live HEAD, gated upstream), so a fresh commit on top is
+    useless. ``--amend`` rewrites the merge in place and keeps the parents."""
+
+    def test_amend_folds_staged_changes_into_the_merge_keeping_parents(self, world):
+        _pending(world, decision="keep-local")
+        _run("prepare", world["state"], world["live"])
+        first = _out(_run("commit", world["state"], world["live"]))["merge_sha"]
+
+        scratch = world["state"] / "scratch"
+        (scratch / "tests_patched.txt").write_text("fixed\n")
+        _git(scratch, "add", "tests_patched.txt")
+        proc = _run("commit", world["state"], world["live"], "--amend")
+        out = _out(proc)
+
+        assert proc.returncode == 0, proc.stderr
+        assert out["merge_sha"] != first
+        parents = _git(scratch, "rev-list", "--parents", "-n1", out["merge_sha"]).split()[1:]
+        assert parents == [world["local_head"], world["upstream_head"]]
+        assert (scratch / "tests_patched.txt").exists()
+        prep = json.loads((world["state"] / "apply-prepare.json").read_text())
+        assert prep["merge_sha"] == out["merge_sha"]
+
+    def test_amend_without_a_merge_to_amend_is_refused(self, world):
+        """prepare leaves the clone mid-merge (MERGE_HEAD set, nothing committed
+        yet). Amending there rewrites the pre-merge commit — the local tip — into
+        something that is not a merge at all, so it is refused."""
+        _pending(world, decision="keep-local")
+        _run("prepare", world["state"], world["live"])
+        assert (world["state"] / "scratch" / ".git" / "MERGE_HEAD").exists()
+        proc = _run("commit", world["state"], world["live"], "--amend")
+        assert proc.returncode != 0
+        assert "no merge commit to fold into" in _out(proc)["reason"]
+
+
 class TestEndToEndWithTheHostFinalizer:
     """prepare -> (manual resolution) -> handoff -> the real finalizer, with the
     finalizer's downstream scripts stubbed. Proves the two halves agree on the

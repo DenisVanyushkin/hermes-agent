@@ -79,7 +79,8 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     )
     tests_stub.chmod(0o755)
     for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py", "upstream_sync_policy.py",
-                   "upstream_sync_apply.py", "upstream_sync_llm.py", "upstream_sync_slack.py"):
+                   "upstream_sync_apply.py", "upstream_sync_llm.py", "upstream_sync_slack.py",
+                   "upstream_sync_triage.py"):
         (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
     return scripts, calls
 
@@ -1443,3 +1444,233 @@ class TestModeBRecipeAgainstReadOnlyCheckout:
         assert "upstream-sync-smoketest.sh" in calls.read_text()
         # The clone is disposable and the host cleans it up on success.
         assert not scratch.exists()
+
+
+# ---------------------------------------------------------------------------
+# A red test gate is triaged, not swallowed
+# ---------------------------------------------------------------------------
+
+
+class TestRedGateIsTriagedAndProposedToTheOperator:
+    """The gate blocking a merge is the beginning of the work, not the end of
+    it. Until now a red gate left the operator a log tail and a preserved clone
+    and every occurrence — roughly every second or third sync — cost a manual
+    session. The host now keeps the evidence, diagnoses, and proposes a test
+    patch the operator can accept with one word. It never applies it itself: a
+    red fork test is equally likely to mean the merge dropped local behaviour,
+    and automation that edits the test in that case deletes the only alarm.
+    """
+
+    def _world(self, tmp_path, state, thread="1786.001"):
+        """A conflicting repo that also carries a fork test file to patch."""
+        repo = _make_repo(tmp_path)
+        (repo / "tests").mkdir()
+        (repo / "tests" / "new.py").write_text(
+            "from mod import f\n\n\ndef test_broken_by_merge():\n    assert f() == 1\n")
+        (repo / "mod.py").write_text("def f():\n    return 1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "fork test")
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~2")
+        (repo / "f.txt").write_text("three\n")
+        (repo / "g.txt").write_text("upstream only\n")   # marks a merged tree
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1", "status": "auto_apply",
+            "local_head": local_head, "upstream_head": upstream_head,
+            "slack_channel": "C0TEST", "slack_thread_ts": thread,
+            "features": [{"id": "F1", "status": "decided", "source": "policy",
+                          "decision": "merge-both", "files": ["f.txt"], "local_subjects": ["tip"]}],
+        }))
+        return repo, local_head, upstream_head
+
+    def _breaking_stub(self, scripts: Path) -> None:
+        """Red on a merged tree (g.txt is upstream-only) while the fork test
+        still calls the OLD signature — which is exactly what the proposed patch
+        changes, so the second run goes green for the real reason rather than
+        for a sentinel we planted."""
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            'if [ -f "$1/g.txt" ] && grep -q "f() ==" "$1/tests/new.py"; then\n'
+            "  echo '____ test_broken_by_merge ____'\n"
+            "  echo 'E   TypeError: f() missing 1 required positional argument'\n"
+            "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"
+            "fi\n"
+            "echo '2 failed, 4 passed in 2.00s'\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+    PATCH = ("from mod import f\n\n\ndef test_broken_by_merge():\n"
+             "    assert f(1) == 1\n    assert f(1) is not None\n")
+
+    def _triage_cmd(self, tmp_path, verdict="test_outdated", patch=None):
+        p = tmp_path / "triage_model.py"
+        answer = {"verdict": verdict, "explanation": "upstream gave f() a required argument.",
+                  "assertion_delta": "same assertion, new call signature",
+                  "patch": self.PATCH if patch is None else patch}
+        p.write_text("import json,sys\nsys.stdin.read()\n"
+                     f"sys.stdout.write(json.dumps({answer!r}))\n")
+        return f"{sys.executable} {p}"
+
+    def _env(self, tmp_path, slack_cmd, **extra):
+        ok = tmp_path / "pytest_ok.sh"
+        ok.write_text("#!/usr/bin/env bash\nexit 0\n")
+        ok.chmod(0o755)
+        resolver = _resolver(tmp_path, "import sys\nsys.stdin.read()\nsys.stdout.write('two\\nthree\\n')\n")
+        env = {"HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd),
+               "HERMES_SYNC_TRIAGE_CMD": self._triage_cmd(tmp_path),
+               "HERMES_SYNC_TRIAGE_PYTEST_CMD": str(ok)}
+        env.update(extra)
+        return env
+
+    def test_a_red_gate_keeps_its_evidence_and_arms_a_proposal(self, tmp_path, state):
+        repo, local_head, upstream_head = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr + res.get("detail", "")
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head          # not landed
+
+        # The two runs are kept side by side — until now both were mktemp'd and
+        # deleted, so the only trace of WHY the gate blocked was a log tail.
+        assert (state / "gate-baseline.log").exists()
+        assert "test_broken_by_merge" in (state / "gate-post.log").read_text()
+        failures = json.loads((state / "gate-failures.json").read_text())
+        assert failures["new_failures"] == ["tests/new.py::test_broken_by_merge"]
+        assert failures["before"] == local_head
+
+        triage = json.loads((state / "gate-triage.json").read_text())
+        assert triage["status"] == "awaiting_triage"
+        assert triage["merge_sha"] == failures["merge_sha"]
+        prop = triage["proposals"][0]
+        assert prop["test_file"] == "tests/new.py"
+        assert prop["verdict"] == "test_outdated"
+        assert prop["patch"] == self.PATCH
+
+        # The operator sees the proposal, in the report's thread, with the exact
+        # words that will actually be parsed.
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and posts[-1]["thread_ts"] == "1786.001"
+        assert "apply fix" in posts[-1]["text"] and "keep test" in posts[-1]["text"]
+        assert "tests/new.py" in posts[-1]["text"]
+
+        # Nothing was applied and the clone survives for either answer.
+        assert (state / "scratch" / ".git").exists()
+        assert (state / "pending.json").exists()
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_apply_fix_amends_the_merge_reruns_the_gate_and_lands(self, tmp_path, state):
+        repo, local_head, upstream_head = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+        assert _result(state)["failed_stage"] == "test-gate"
+        first_merge = json.loads((state / "gate-triage.json").read_text())["merge_sha"]
+
+        # The operator answers "apply fix"; the patched test now passes.
+        sys.path.insert(0, str(REPO_ROOT))
+        from hermes_cli.upstream_sync_reply import record_triage_decision
+        out = record_triage_decision(state, "apply_fix", {"platform": "slack", "chat_id": "C0TEST",
+                                                          "thread_id": "1786.001"})
+        assert out["requested"] is True
+
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert res["action"] == "apply-triage-fixes"
+        head = _git(repo, "rev-parse", "HEAD")
+        assert head != local_head and head != first_merge          # amended, then landed
+        # The amend preserved the parents the host insists on...
+        parents = _git(repo, "rev-list", "--parents", "-n1", head).split()[1:]
+        assert parents == [local_head, upstream_head]
+        # ...and the patch itself is in the landed tree.
+        assert (repo / "tests" / "new.py").read_text() == self.PATCH
+        assert f"sync-local-customizations.sh --post-update-only {local_head}" in calls.read_text()
+        assert json.loads((state / "gate-triage.json").read_text())["status"] == "applied"
+
+    def test_a_still_red_gate_after_the_fix_is_not_triaged_again(self, tmp_path, state):
+        """One attempt. A second proposal on top of a failed one is the loop
+        where automation quietly rewrites tests until they pass."""
+        repo, local_head, _ = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+        first = json.loads((state / "gate-triage.json").read_text())["created_at"]
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from hermes_cli.upstream_sync_reply import record_triage_decision
+        record_triage_decision(state, "apply_fix", {})
+        # The proposed patch does not actually fix anything here (the stub keys
+        # off a different file), so the gate stays red on the second run.
+        triage = json.loads((state / "gate-triage.json").read_text())
+        triage["proposals"][0]["patch"] = "def test_broken_by_merge():\n    assert f() == 1\n"
+        (state / "gate-triage.json").write_text(json.dumps(triage))
+
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        triage = json.loads((state / "gate-triage.json").read_text())
+        assert triage["status"] == "exhausted"
+        assert triage["created_at"] == first                       # not re-triaged
+        assert (state / "scratch" / ".git").exists()               # clone kept for the human
+
+    def test_a_patch_for_a_non_test_file_is_refused_at_apply_time(self, tmp_path, state):
+        """The proposal is validated when it is made, but the state file is
+        plain JSON on disk: the applier re-checks rather than trusting it."""
+        repo, local_head, _ = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        triage = json.loads((state / "gate-triage.json").read_text())
+        triage["proposals"][0]["test_file"] = "mod.py"          # tampered after validation
+        triage["status"] = "applying"
+        (state / "gate-triage.json").write_text(json.dumps(triage))
+        (state / "finalize-request.json").write_text(json.dumps({"action": "apply-triage-fixes"}))
+
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "test file" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert (repo / "mod.py").read_text() == "def f():\n    return 1\n"
+
+    def test_a_triage_that_falls_over_does_not_change_the_gate_outcome(self, tmp_path, state):
+        repo, local_head, _ = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts,
+                             extra_env=self._env(tmp_path, slack_cmd, HERMES_SYNC_TRIAGE_CMD="false"))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        # Still a diagnosis file naming the failing test, still no patch.
+        triage = json.loads((state / "gate-triage.json").read_text())
+        assert triage["proposals"][0]["verdict"] == "unsure"
+        assert not triage["proposals"][0]["patch"]

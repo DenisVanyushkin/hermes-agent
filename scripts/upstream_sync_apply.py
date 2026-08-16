@@ -426,7 +426,23 @@ def _commit_merge(args) -> tuple:
                                  "hint": "the live branch moved since prepare; run prepare again and redo the resolution"}
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
-    if merge_head_file.exists():
+    amend = bool(getattr(args, "amend", False))
+    if amend:
+        # The gate-triage path: test files inside the clone were patched after
+        # the merge was already committed, and the host will only land a commit
+        # whose parents are exactly (live HEAD, gated upstream) — so a fresh
+        # commit on top is unlandable. Fold the patch into the merge itself.
+        if merge_head_file.exists():
+            return EXIT_GIT_FAILED, {"status": "error",
+                                     "reason": "--amend with an uncommitted merge in the clone — there is no merge "
+                                               "commit to fold into; run commit without --amend first"}
+        head_parents = git(scratch, "rev-list", "--parents", "-n1", "HEAD").stdout.split()[1:]
+        if head_parents != [prep["local_base"], prep["upstream_head"]]:
+            return EXIT_GIT_FAILED, {"status": "error",
+                                     "reason": f"--amend refused: the clone HEAD parents {head_parents} are not "
+                                               "(local_base, upstream_head)"}
+        git(scratch, *MERGE_IDENTITY, "commit", "-q", "--amend", "--no-edit")
+    elif merge_head_file.exists():
         if merge_head_file.read_text().strip() != prep["upstream_head"]:
             return EXIT_GIT_FAILED, {"status": "error",
                                      "reason": "the clone is mid-merge of something other than the gated upstream "
@@ -597,7 +613,11 @@ def main(argv=None) -> int:
                         help="do not refuse when a finalize request is in flight (the finalizer's own call)")
     p_prep.set_defaults(func=cmd_prepare)
     sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
-    sub.add_parser("commit", parents=[common]).set_defaults(func=cmd_commit)
+    p_commit = sub.add_parser("commit", parents=[common])
+    p_commit.add_argument("--amend", action="store_true",
+                          help="fold staged changes into the existing merge commit (gate-triage fixes), "
+                               "preserving its parents")
+    p_commit.set_defaults(func=cmd_commit)
     sub.add_parser("handoff", parents=[common]).set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
     p_wait.add_argument("--after", default="",

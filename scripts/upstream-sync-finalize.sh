@@ -18,6 +18,9 @@ set -euo pipefail
 #  - apply-decisions: build AND land the merge for a decided pending.json —
 #              clone, mechanical + model resolution, commit, gate, publish.
 #              No sandbox, no agent: the host owns the whole state machine.
+#  - apply-triage-fixes: the operator answered "apply fix" to a proposal this
+#              script made after a red test gate — patch the test files in the
+#              preserved clone, amend the merge, and try to land ONCE.
 # Result written to finalize-result.json in the same dir.
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
@@ -79,7 +82,8 @@ ACTION="$(json_field action)"
 # который ещё не обновился до нового контракта. Оба означают одно:
 # применить обновление.
 is_apply_action() {
-  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ] || [ "$ACTION" = apply-merge ] || [ "$ACTION" = apply-decisions ]
+  [ "$ACTION" = sync ] || [ "$ACTION" = rebase ] || [ "$ACTION" = apply-merge ] || \
+    [ "$ACTION" = apply-decisions ] || [ "$ACTION" = apply-triage-fixes ]
 }
 UPSTREAM_SHA="$(json_field upstream_sha)"
 BACKUP_REF="$(json_field backup_ref)"
@@ -122,6 +126,21 @@ json.dump({
 PY
   rm -f "$detail_file"
   rm -f "$PROCESSING"
+  # The triage proposal is answered exactly once. "applied" closes it; a gate
+  # that is still red after the fix ends "exhausted", which is what stops the
+  # next run from proposing another patch on top of a failed one.
+  if [ "$ACTION" = apply-triage-fixes ] && [ -f "$STATE_DIR/gate-triage.json" ]; then
+    python3 - "$STATE_DIR/gate-triage.json" "$1" <<'PY' || true
+import json, sys
+path, status = sys.argv[1:3]
+try:
+    data = json.load(open(path, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+data["status"] = "applied" if status == "ok" else "exhausted"
+json.dump(data, open(path, "w"), ensure_ascii=False, indent=1)
+PY
+  fi
   notify_slack "$1"
   # On a successful apply (rebase/finalize), clear the consumed decision so a
   # stray reply or the next scheduled sync does not re-trigger against
@@ -178,12 +197,13 @@ if not channel:
     sys.exit(0)
 prep = load(os.path.join(state, "apply-prepare.json"))
 result = load(result_path)
-if status == "ok" and action in ("apply-decisions", "apply-merge"):
+triage = load(os.path.join(state, "gate-triage.json"))
+if status == "ok" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
     text = slack.applied_text(prep, result)
 elif status == "awaiting_decision":
     text = slack.report_text(pending)
-elif status == "failed" and action in ("apply-decisions", "apply-merge"):
-    text = slack.failed_text(prep, result, scratch=scratch)
+elif status == "failed" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
+    text = slack.failed_text(prep, result, scratch=scratch, triage=triage)
 else:
     sys.exit(0)
 slack.post(channel, text, thread_ts=thread)
@@ -310,6 +330,12 @@ merge_passes_fork_tests() {
   "$test_cmd" "$wt" >"$post" 2>&1 || true
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
   rm -rf "$wt"
+  # Keep both runs. They used to be mktemp'd and deleted, which left a blocked
+  # merge with no evidence beyond a truncated log tail in the result JSON —
+  # and no way to diagnose WHICH change broke WHICH test without redoing the
+  # whole thing by hand. The triage reads these.
+  cp -f "$baseline" "$STATE_DIR/gate-baseline.log" 2>/dev/null || true
+  cp -f "$post" "$STATE_DIR/gate-post.log" 2>/dev/null || true
   # set +e, not `|| true`: rc 2 (could not compare) must stay distinct from
   # "no new failures" — the same idiom the sync script uses for this gate.
   set +e
@@ -331,8 +357,45 @@ merge_passes_fork_tests() {
       echo "the merge introduces test failures:"
       printf '%s\n' "$new_failures" | sed 's/^/  /'
     } >>"$DETAIL_LOG"
+    # The list travels in a FILE, not a pipe: `python3 - <<PY` already claims
+    # stdin for the script itself, so a piped payload arrives empty and the
+    # evidence file records zero failures for a gate that just blocked.
+    local failures_file
+    failures_file="$(mktemp)"
+    printf '%s\n' "$new_failures" >"$failures_file"
+    python3 - "$STATE_DIR/gate-failures.json" "$after" "$before" "$failures_file" <<'PY' || true
+import datetime, json, sys
+path, merge_sha, before, failures_path = sys.argv[1:5]
+with open(failures_path, encoding="utf-8") as fh:
+    failures = [l.strip() for l in fh.read().splitlines() if l.strip()]
+json.dump({"merge_sha": merge_sha, "before": before, "new_failures": failures,
+           "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
+          open(path, "w"), ensure_ascii=False, indent=1)
+PY
+    rm -f "$failures_file"
     return 1
   fi
+  rm -f "$STATE_DIR/gate-failures.json"
+  return 0
+}
+
+# Diagnose a red gate and PROPOSE a test patch — never apply one. Best effort by
+# construction: the gate has already decided the merge does not land, and a
+# triage that falls over must not turn that into a different outcome. Skipped
+# when we are already applying a proposal: one attempt, no proposal on top of a
+# failed proposal (that loop is how automation ends up rewriting tests until
+# they pass).
+run_gate_triage() {
+  [ "$ACTION" = apply-triage-fixes ] && return 0
+  [ -f "$STATE_DIR/gate-failures.json" ] || return 0
+  local triage py
+  triage="$SCRIPTS_DIR/upstream_sync_triage.py"
+  [ -f "$triage" ] || triage="$REPO/scripts/upstream_sync_triage.py"
+  [ -f "$triage" ] || { echo "warning: upstream_sync_triage.py not found; no triage" >>"$DETAIL_LOG"; return 0; }
+  py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  "$py" "$triage" --state "$STATE_DIR" --repo "$REPO" >>"$DETAIL_LOG" 2>&1 || \
+    echo "warning: gate triage failed (see above); the gate outcome stands" >>"$DETAIL_LOG"
   return 0
 }
 
@@ -414,6 +477,8 @@ land_merge() {
     fi
     if ! merge_passes_fork_tests "$HEAD_SHA" "$MERGE_SHA"; then
       FAILED_STAGE=test-gate
+      # Before the report, not after: the operator's message IS the triage.
+      run_gate_triage
       write_result failed "the agent merge does not pass the fork's tests — not landed; repo untouched, no rollback, decision kept for a rework. $(cat "$DETAIL_LOG")"
       exit 0
     fi
@@ -517,6 +582,81 @@ apply_decisions() {
   land_merge
 }
 
+# apply-triage-fixes — the operator answered "apply fix" to a proposal this
+# script made after a red test gate. Patch the test files in the preserved
+# clone, fold the patch INTO the merge commit (its parents are what the host
+# will accept), and try to land once. A gate that is still red ends here: the
+# clone is kept and the human takes over.
+apply_triage_fixes() {
+  local py apply rc
+  py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  apply="$SCRIPTS_DIR/upstream_sync_apply.py"
+  [ -f "$apply" ] || apply="$REPO/scripts/upstream_sync_apply.py"
+  SCRATCH_NAME="scratch"
+  SCRATCH="$STATE_DIR/$SCRATCH_NAME"
+  SCRATCH_FOR_REPORT="$SCRATCH"
+  if [ ! -f "$STATE_DIR/gate-triage.json" ]; then
+    write_result failed "apply-triage-fixes: no gate-triage.json — nothing was proposed; repo untouched."
+    exit 0
+  fi
+  if [ ! -d "$SCRATCH/.git" ]; then
+    write_result failed "apply-triage-fixes: the merge clone is gone from $SCRATCH — re-run the sync; repo untouched."
+    exit 0
+  fi
+  # Re-validate every path here rather than trusting the state file: it is
+  # plain JSON on disk, and the one thing this action must never do is write
+  # outside tests/.
+  set +e
+  "$py" - "$STATE_DIR/gate-triage.json" "$SCRATCH" >>"$DETAIL_LOG" 2>&1 <<'PY'
+import json, pathlib, subprocess, sys
+triage_path, scratch = sys.argv[1], pathlib.Path(sys.argv[2])
+data = json.load(open(triage_path, encoding="utf-8"))
+applied = []
+for prop in data.get("proposals") or []:
+    patch = prop.get("patch") or ""
+    rel = str(prop.get("test_file") or "")
+    if not patch:
+        continue
+    parts = pathlib.PurePosixPath(rel).parts
+    if not rel.endswith(".py") or not parts or parts[0] != "tests" or ".." in parts or rel.startswith("/"):
+        print(f"refusing {rel!r}: not a test file under tests/ — the triage only ever patches tests")
+        sys.exit(3)
+    target = scratch / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(patch, encoding="utf-8")
+    applied.append(rel)
+if not applied:
+    print("no patch to apply")
+    sys.exit(4)
+subprocess.run(["git", "-C", str(scratch), "add", "--", *applied], check=True)
+print("patched: " + ", ".join(applied))
+PY
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    FAILED_STAGE=triage-apply
+    write_result failed "apply-triage-fixes: the proposed patch was refused (rc=$rc); repo untouched, clone preserved. $(cat "$DETAIL_LOG")"
+    exit 0
+  fi
+  set +e
+  "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --amend >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    FAILED_STAGE=commit
+    write_result failed "apply-triage-fixes: could not amend the merge with the patch (rc=$rc); clone preserved. $(cat "$DETAIL_LOG")"
+    exit 0
+  fi
+  UPSTREAM_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"upstream_head\") or \"\")" "$STATE_DIR/pending.json" 2>/dev/null || true)"
+  MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"merge_sha\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
+    write_result failed "apply-triage-fixes: the amended merge or the gated upstream point is unknown; clone preserved."
+    exit 0
+  fi
+  land_merge
+}
+
 case "$ACTION" in
   sync|rebase)
     if [ -z "$BACKUP_REF" ]; then
@@ -568,6 +708,9 @@ case "$ACTION" in
     ;;
   apply-decisions)
     apply_decisions
+    ;;
+  apply-triage-fixes)
+    apply_triage_fixes
     ;;
   rollback)
     if [ -z "$BACKUP_REF" ]; then
