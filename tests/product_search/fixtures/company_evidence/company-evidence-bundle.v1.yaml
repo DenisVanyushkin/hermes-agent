@@ -1,0 +1,153 @@
+schema_version: 1.0.0
+bundle_id: company-evidence:northstar-commerce:2026-08-10
+company_identity:
+  company_id: company:northstar-commerce
+  canonical_name: Northstar Commerce
+  aliases:
+    - Northstar
+    - Northstar Commerce Ltd
+  domains:
+    - northstar.example
+identity_resolution:
+  state: resolved
+  company_id: company:northstar-commerce
+  candidate_company_ids:
+    - company:northstar-commerce
+as_of: 2026-08-10T12:00:00Z
+sources:
+  - source_id: source:company-profile:2026-08-01
+    source_type: company_website
+    source_uri: https://northstar.example/company
+    artifact_ref:
+      artifact_id: company-source:company-profile:2026-08-01
+      version: 1.0.0
+      sha256: bb04bf37de87fb7d3a005d3e10e8866456786169f01c69663c80bd6f1c9b1da1
+    captured_at: 2026-08-02T09:00:00Z
+    published_at: 2026-08-01T08:00:00Z
+    sensitivity: public
+    redaction_state: shareable_redacted
+  - source_id: source:company-update:2026-08-03
+    source_type: regulatory_filing
+    source_uri: https://northstar.example/investors/annual-update
+    artifact_ref:
+      artifact_id: company-source:company-update:2026-08-03
+      version: 1.0.0
+      sha256: 5a1f03c04807fef000c15d096f276980700dbfefd5df7db88d5d8e53d1476dde
+    captured_at: 2026-08-04T09:00:00Z
+    published_at: 2026-08-03T08:00:00Z
+    sensitivity: public
+    redaction_state: shareable_redacted
+  - source_id: source:risk-signal:2026-08-05
+    source_type: news_report
+    source_uri: https://northstar.example/newsroom/leadership-update
+    artifact_ref:
+      artifact_id: company-source:risk-signal:2026-08-05
+      version: 1.0.0
+      sha256: 208c4babebfd6e4ae3ec0eda4c3d2b64c037ea996388b44577c1f3b9d012e68a
+    captured_at: 2026-08-06T09:00:00Z
+    published_at: 2026-08-05T08:00:00Z
+    sensitivity: public
+    redaction_state: shareable_redacted
+evidence:
+  - evidence_id: evidence:northstar:scale:1
+    company_id: company:northstar-commerce
+    evidence_kind: fact
+    dimension: scale_stage
+    statement: Public profile describes Northstar Commerce as growth-stage.
+    source_ids: [source:company-profile:2026-08-01]
+    freshness_state: current
+    fresh_until: 2027-08-01T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: 0b289d3f5b47f056a763bfc072502552510abb85f391d3522b61d45cac750f17
+  - evidence_id: evidence:northstar:business-model:1
+    company_id: company:northstar-commerce
+    evidence_kind: fact
+    dimension: business_model
+    statement: Public profile identifies a subscription marketplace business model.
+    source_ids: [source:company-profile:2026-08-01]
+    freshness_state: current
+    fresh_until: 2027-08-01T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: b9069e024a8634a574e2c31892dde195c37404e9a6a4098a5ca4e499469fa168
+  - evidence_id: evidence:northstar:geography:1
+    company_id: company:northstar-commerce
+    evidence_kind: fact
+    dimension: geographic_context
+    statement: Public profile states operations in Europe and Kazakhstan.
+    source_ids: [source:company-profile:2026-08-01]
+    freshness_state: current
+    fresh_until: 2027-08-01T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: 5f432fcb112c5b694f3170cc169294e068d1977d46350169a9a296664ae05b70
+  - evidence_id: evidence:northstar:trajectory:1
+    company_id: company:northstar-commerce
+    evidence_kind: fact
+    dimension: trajectory
+    statement: Annual update states expansion into two additional markets.
+    source_ids: [source:company-update:2026-08-03]
+    freshness_state: current
+    fresh_until: 2027-08-03T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: c5df276035972e3df431a67d28636784c3e617590f9e58ac926e09e107919ff0
+  - evidence_id: evidence:northstar:need:1
+    company_id: company:northstar-commerce
+    evidence_kind: inference
+    dimension: credible_need
+    statement: Multi-market expansion supports a bounded inference of operating-model need.
+    source_ids: [source:company-update:2026-08-03]
+    freshness_state: current
+    fresh_until: 2027-02-03T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: fc2d2f7cf5fdb2275f9d752a5357e799097f69d0f31b48b5bde42c60df7f8e16
+  - evidence_id: evidence:northstar:risk:1
+    company_id: company:northstar-commerce
+    evidence_kind: inference
+    dimension: employer_risk
+    statement: Initial interpretation treated the disclosed restructuring as elevated risk.
+    source_ids: [source:risk-signal:2026-08-05]
+    freshness_state: current
+    fresh_until: 2026-12-05T00:00:00Z
+    contradiction_state: contradicted
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: 6c0b69445cf1d71267d8c7bf778e93bb86d36d12e7c347cfb04d619c1648fac0
+  - evidence_id: evidence:northstar:risk:2
+    company_id: company:northstar-commerce
+    evidence_kind: inference
+    dimension: employer_risk
+    statement: Disclosure supports monitoring risk but no role-level conclusion.
+    source_ids: [source:risk-signal:2026-08-05]
+    freshness_state: current
+    fresh_until: 2026-12-05T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: evidence:northstar:risk:1
+    content_sha256: f486d4e1e484b328c2cb8bcd9324c83fbd2e55ba7028acdbaa277401ed474b26
+  - evidence_id: evidence:northstar:signal:1
+    company_id: company:northstar-commerce
+    evidence_kind: fact
+    dimension: signal_event
+    statement: A public leadership change was announced.
+    source_ids: [source:risk-signal:2026-08-05]
+    freshness_state: current
+    fresh_until: 2026-11-05T00:00:00Z
+    contradiction_state: unopposed
+    redaction_state: shareable_redacted
+    supersedes_evidence_id: null
+    content_sha256: a6587a5cd4747eff8b5eeca584bcfc044545f7859b782ed91d4d7564d90ad8e6
+sufficiency_state: sufficient
+vacancy_evidence_refs:
+  - artifact_id: vacancy-evidence:redacted-001
+    version: 1.0.0
+    sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+content_sha256: c0c7415fc0e10d799c21698579d144f8432bf648bb402aef49049b6f7816b6f7

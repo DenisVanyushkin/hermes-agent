@@ -1,0 +1,16 @@
+schema_version: 1.0.0
+thesis_id: company-thesis:northstar-commerce:2026-w33
+company_id: company:northstar-commerce
+evidence_bundle_ref:
+  artifact_id: company-evidence:northstar-commerce:2026-08-10
+  version: 1.0.0
+  sha256: c0c7415fc0e10d799c21698579d144f8432bf648bb402aef49049b6f7816b6f7
+supporting_evidence_ids:
+  - evidence:northstar:scale:1
+  - evidence:northstar:trajectory:1
+  - evidence:northstar:business-model:1
+  - evidence:northstar:geography:1
+  - evidence:northstar:need:1
+  - evidence:northstar:risk:2
+fit_thesis: Northstar may merit product-leadership research because expansion and operating-model need are supported by current public evidence.
+proposed_action: research
