@@ -13,6 +13,8 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +23,8 @@ DOCTOR_TIMEOUT = 180
 ROTATE_DAYS = 14
 MAX_EXAMPLES = 3
 MAX_TAIL_CHARS = 700
+STATUS_SCHEMA_VERSION = "collector-status.v1"
+STATUS_FILENAME = "collector-status.json"
 
 LOG_LINE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+\s+(?P<level>[A-Z]+)\s+(?P<rest>.*)$"
@@ -46,6 +50,58 @@ NOISE_PATTERNS = (
 )
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _timestamp(value: datetime) -> str:
+    return _as_aware_utc(value).isoformat(timespec="seconds")
+
+
+def _new_run_id(started_at: datetime) -> str:
+    stamp = _as_aware_utc(started_at).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}-{uuid.uuid4().hex[:12]}"
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON through a same-directory fsynced temporary file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=1, default=str)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+        directory_flags = getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(path.parent, os.O_RDONLY | directory_flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        try:
+            Path(temp_name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def write_collector_status(diagnostics_dir: Path, status: dict) -> None:
+    payload = {"schema_version": STATUS_SCHEMA_VERSION, **status}
+    _atomic_write_json(Path(diagnostics_dir) / STATUS_FILENAME, payload)
+
+
 def _is_noise(text: str) -> bool:
     return any(pattern in text for pattern in NOISE_PATTERNS)
 
@@ -69,10 +125,12 @@ def normalize_signature(text: str) -> str:
 
 
 def extract_log_findings(lines, since: datetime) -> list[dict]:
+    since_utc = _as_aware_utc(since)
     buckets: dict[str, dict] = {}
     for raw in lines:
         parsed = parse_log_line(raw)
-        if not parsed or parsed["ts"] < since:
+        parsed_ts = _as_aware_utc(parsed["ts"]) if parsed else None
+        if not parsed or parsed_ts < since_utc:
             continue
         if parsed["level"] not in ("ERROR", "WARNING", "CRITICAL"):
             continue
@@ -89,10 +147,12 @@ def extract_log_findings(lines, since: datetime) -> list[dict]:
 
 
 def memory_trend(lines, since: datetime) -> dict | None:
+    since_utc = _as_aware_utc(since)
     values: list[int] = []
     for raw in lines:
         parsed = parse_log_line(raw)
-        if not parsed or parsed["ts"] < since:
+        parsed_ts = _as_aware_utc(parsed["ts"]) if parsed else None
+        if not parsed or parsed_ts < since_utc:
             continue
         match = MEMORY_RE.search(parsed["rest"])
         if match:
@@ -557,14 +617,23 @@ def collect_doctors(workdir: Path, hermes_home: Path, db_path: Path) -> dict:
     return result
 
 
-def build_digest(hermes_home: Path, workdir: Path, db_path: Path, now: datetime) -> dict:
+def build_digest(
+    hermes_home: Path,
+    workdir: Path,
+    db_path: Path,
+    now: datetime,
+    *,
+    run_id: str | None = None,
+) -> dict:
     since = now - timedelta(hours=WINDOW_HOURS)
     digest: dict = {
-        "generated_at": now.isoformat(timespec="seconds"),
+        "generated_at": _timestamp(now),
         "window_hours": WINDOW_HOURS,
         "sections": {},
         "section_errors": {},
     }
+    if run_id:
+        digest["run_id"] = run_id
 
     def section(name, fn):
         try:
@@ -589,14 +658,85 @@ def write_digest(digest: dict, diagnostics_dir: Path, now: datetime) -> None:
     (diagnostics_dir / "digest-latest.json").write_text(payload, encoding="utf-8")
     dated = diagnostics_dir / f"digest-{now.date().isoformat()}.json"
     dated.write_text(payload, encoding="utf-8")
-    cutoff = now - timedelta(days=ROTATE_DAYS)
+    cutoff = _as_aware_utc(now) - timedelta(days=ROTATE_DAYS)
     for old in diagnostics_dir.glob("digest-????-??-??.json"):
         try:
-            stamp = datetime.strptime(old.stem, "digest-%Y-%m-%d")
+            stamp = datetime.strptime(old.stem, "digest-%Y-%m-%d").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
         if stamp < cutoff:
             old.unlink(missing_ok=True)
+
+
+def run_collection(
+    hermes_home: Path,
+    workdir: Path,
+    db_path: Path,
+    *,
+    now: datetime | None = None,
+    run_id: str | None = None,
+) -> int:
+    """Run one collector cycle and publish an atomic lifecycle status."""
+    started_at = _as_aware_utc(now or _utc_now())
+    run_id = run_id or _new_run_id(started_at)
+    diagnostics_dir = Path(hermes_home) / "diagnostics"
+
+    try:
+        write_collector_status(
+            diagnostics_dir,
+            {
+                "state": "running",
+                "run_id": run_id,
+                "started_at": _timestamp(started_at),
+                "exit_code": None,
+                "reason_code": None,
+            },
+        )
+    except Exception:
+        # Do not overwrite a previous valid status when the status path itself
+        # is unavailable. A non-zero exit makes the scheduler surface this.
+        return 1
+
+    try:
+        digest = build_digest(
+            Path(hermes_home), Path(workdir), Path(db_path), started_at, run_id=run_id
+        )
+        write_digest(digest, diagnostics_dir, started_at)
+    except Exception:
+        finished_at = _utc_now()
+        try:
+            write_collector_status(
+                diagnostics_dir,
+                {
+                    "state": "failed",
+                    "run_id": run_id,
+                    "started_at": _timestamp(started_at),
+                    "finished_at": _timestamp(finished_at),
+                    "exit_code": 1,
+                    "reason_code": "collector_exception",
+                },
+            )
+        except Exception:
+            pass
+        return 1
+
+    finished_at = _utc_now()
+    try:
+        write_collector_status(
+            diagnostics_dir,
+            {
+                "state": "ok",
+                "run_id": run_id,
+                "started_at": _timestamp(started_at),
+                "finished_at": _timestamp(finished_at),
+                "exit_code": 0,
+                "reason_code": "section_errors" if digest.get("section_errors") else None,
+                "digest_generated_at": digest.get("generated_at"),
+            },
+        )
+    except Exception:
+        return 1
+    return 0
 
 
 def resolve_hermes_home() -> Path:
@@ -610,10 +750,7 @@ def main() -> int:
     hermes_home = resolve_hermes_home()
     workdir = Path(os.environ.get("DIAG_WORKDIR", "") or hermes_home / "hermes-agent")
     db_path = Path(os.environ.get("JOB_INTEL_DB_PATH", "") or "/var/lib/job-intel/state/job_intel.sqlite3")
-    now = datetime.now()
-    digest = build_digest(hermes_home, workdir, db_path, now)
-    write_digest(digest, hermes_home / "diagnostics", now)
-    return 0
+    return run_collection(hermes_home, workdir, db_path)
 
 
 if __name__ == "__main__":
