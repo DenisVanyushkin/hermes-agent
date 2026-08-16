@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "gate": "gate-a",
-  "status": "decision_pending",
+  "status": "closed",
   "candidate_commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
   "manifest_sha256": "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d",
   "run_id": "gate-a-20260816T141344Z",
@@ -146,6 +146,8 @@
   "sqlite_foreign_key_violations": 0,
   "teardown_state": "complete",
   "recommendation": "proceed",
-  "owner_decision": "pending",
-  "next_task_authorized": false
+  "owner_decision": "proceed",
+  "next_task_authorized": true,
+  "product_search_runtime_state": "dormant",
+  "legacy_job_intel_state": "masked"
 }

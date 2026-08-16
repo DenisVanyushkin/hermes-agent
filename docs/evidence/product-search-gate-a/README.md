@@ -68,4 +68,6 @@ The run exposed 15 raw new-company names among title-signal records, with a lowe
 
 ## Recommendation
 
-Record the superseding Gate A decision as `proceed`, keep legacy Job Intel masked, and begin Task 8 only after explicit owner approval. Carry the following known gaps into later work without reopening acquisition viability: cross-source identity reconciliation, DuckDuckGo quality, SmartRecruiters detail enrichment, empty configured tenants, and query-plan latency.
+The owner recorded the superseding Gate A decision as `proceed` with the exact approval: `Одобряю Gate A: proceed`.
+
+Gate A is closed and Task 8 is authorized to begin. This authorization does not activate Product Search: its runtime remains dormant, and legacy Job Intel remains masked. Carry the following known gaps into later work without reopening acquisition viability: cross-source identity reconciliation, DuckDuckGo quality, SmartRecruiters detail enrichment, empty configured tenants, and query-plan latency.

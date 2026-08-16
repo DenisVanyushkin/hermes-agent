@@ -62,4 +62,13 @@ The audit also records non-blocking downstream gaps: cross-source identity recon
 
 Recommended superseding owner decision: `proceed`.
 
-Recorded superseding owner decision: **pending**. Task 8 remains blocked until the owner explicitly records `proceed`, `bounded_additive_source`, `sot_amendment_required`, or `stop`. Legacy Job Intel remains masked and Product Search remains dormant while the decision is pending.
+## Recorded superseding owner decision (2026-08-16)
+
+- Exact owner approval: `Одобряю Gate A: proceed`
+- Decision: `proceed`
+- Gate A state: closed
+- Continuation permission: Task 8 is authorized to begin.
+- Product Search runtime: remains dormant.
+- Legacy Job Intel state: remains masked.
+
+This approval closes Gate A only. It does not enable Product Search runtime, restore legacy Job Intel, modify the immutable raw evidence package, or authorize any production delivery.

@@ -44,4 +44,4 @@
 - Canonical code contains the browser cleanup fix and corrected vacancy URL canonicalizer.
 - Product Search runtime remains dormant.
 - Legacy Job Intel remains masked.
-- Task 8 remains blocked until the owner records the superseding Gate A decision.
+- Gate A is closed with the recorded superseding owner decision `proceed`; Task 8 is authorized to begin without activating Product Search or restoring legacy Job Intel.
