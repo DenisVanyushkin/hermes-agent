@@ -184,10 +184,17 @@ class DimensionEvidenceInput(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def require_explicit_evidence_or_unknown(self) -> Self:
-        if any(not value.strip() for value in self.evidence_refs):
-            raise ValueError("evidence_refs must contain trimmed non-empty values")
-        if any(not value.strip() for value in self.unknown_reasons):
-            raise ValueError("unknown_reasons must contain trimmed non-empty values")
+        for field_name, values in (
+            ("evidence_refs", self.evidence_refs),
+            ("unknown_reasons", self.unknown_reasons),
+        ):
+            canonical = tuple(value.strip() for value in values)
+            if any(not value for value in canonical):
+                raise ValueError(f"{field_name} must contain non-empty values")
+            if values != canonical:
+                raise ValueError(f"{field_name} must not contain surrounding whitespace")
+            if len(canonical) != len(set(canonical)):
+                raise ValueError(f"{field_name} must not contain duplicates")
         if self.state is DimensionEvidenceState.EVIDENCE_AVAILABLE and not self.evidence_refs:
             raise ValueError("evidence_available requires evidence_refs")
         if self.state is DimensionEvidenceState.EVIDENCE_AVAILABLE and self.unknown_reasons:

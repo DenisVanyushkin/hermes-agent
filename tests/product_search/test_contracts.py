@@ -534,6 +534,49 @@ def test_dimension_evidence_rejects_blank_or_opposite_state_data(
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "state": "evidence_available",
+            "evidence_refs": (" snapshot:fact-1",),
+            "unknown_reasons": (),
+        },
+        {
+            "state": "unknown",
+            "evidence_refs": (),
+            "unknown_reasons": ("evidence_not_published ",),
+        },
+        {
+            "state": "evidence_available",
+            "evidence_refs": ("snapshot:fact-1", "snapshot:fact-1"),
+            "unknown_reasons": (),
+        },
+        {
+            "state": "unknown",
+            "evidence_refs": (),
+            "unknown_reasons": ("evidence_not_published", "evidence_not_published"),
+        },
+        {
+            "state": "evidence_available",
+            "evidence_refs": ("snapshot:fact-1", " snapshot:fact-1"),
+            "unknown_reasons": (),
+        },
+        {
+            "state": "unknown",
+            "evidence_refs": (),
+            "unknown_reasons": ("evidence_not_published", "evidence_not_published "),
+        },
+    ],
+)
+def test_dimension_evidence_rejects_noncanonical_whitespace_and_duplicates(
+    payload: dict[str, object],
+) -> None:
+    """Mutation caught: replay inputs retain padding or duplicate canonical values."""
+    with pytest.raises(ValidationError):
+        DimensionEvidenceInput.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     "axis",
     ["unfamiliar_company", "unfamiliar_industry", "unfamiliar_geography", "nominated", "other"],
 )
