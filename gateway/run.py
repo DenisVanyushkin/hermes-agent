@@ -1571,12 +1571,21 @@ def _resolve_gateway_engineering_task_context(
     history: List[Dict[str, Any]],
     session_id: str,
 ) -> Optional[Dict[str, Any]]:
-    """Build an engineering task envelope only for the selected pipeline."""
+    """Build an engineering task envelope from raw same-session context.
+
+    A pre-router call is allowed so a typed continuation can select the
+    engineering pipeline before the LLM router sees the short approval.  A
+    non-engineering router decision still suppresses the context for the
+    downstream helper, preserving the existing recruiter/default behavior.
+    """
 
     if (
-        getattr(router_decision, "status", None) != "selected"
-        or getattr(router_decision, "selected_pipeline_id", None)
-        != "engineering_review_pipeline"
+        router_decision is not None
+        and (
+            getattr(router_decision, "status", None) != "selected"
+            or getattr(router_decision, "selected_pipeline_id", None)
+            != "engineering_review_pipeline"
+        )
     ):
         return None
 
@@ -28783,7 +28792,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         router_decision = None
 
-        if _pipeline_platform_ok:
+        # Resolve the raw operator instruction before asking an LLM to route it.
+        # A context-bound short approval must not be downgraded to the default
+        # conversation pipeline merely because the current message is terse.
+        _operator_text = _operator_reply_text(message, raw_message)
+        _engineering_task_context = _resolve_gateway_engineering_task_context(
+            router_decision=None,
+            operator_text=_operator_text,
+            enriched_message=message,
+            history=history,
+            session_id=session_id,
+        )
+        _typed_engineering_route = None
+        if (
+            _pipeline_platform_ok
+            and isinstance(_engineering_task_context, dict)
+            and _engineering_task_context.get("source_kind") == "approved_plan"
+        ):
+            from hermes_cli.pipeline_observe import (
+                route_resolved_engineering_task_context,
+            )
+
+            _typed_engineering_route = route_resolved_engineering_task_context(
+                context=_engineering_task_context,
+            )
+            router_decision = _typed_engineering_route
+            logger.info(
+                "typed engineering context selected pipeline: session=%s status=%s",
+                session_id,
+                _engineering_task_context.get("resolution_status"),
+            )
+
+        if _pipeline_platform_ok and _typed_engineering_route is None:
             try:
                 from hermes_cli.pipeline_observe import observe_pipeline_router_decision
 
@@ -28808,17 +28848,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 platform_key,
             )
         else:
-            logger.info("pipeline router skipped for platform=%s (not in pipelines.allowed_platforms)", platform_key)
+            logger.info(
+                "pipeline router skipped for platform=%s (not in pipelines.allowed_platforms)",
+                platform_key,
+            )
 
-        # Гейты ниже разбирают текст оператора, а не склейку для модели.
-        _operator_text = _operator_reply_text(message, raw_message)
-        _engineering_task_context = _resolve_gateway_engineering_task_context(
-            router_decision=router_decision,
-            operator_text=_operator_text,
-            enriched_message=message,
-            history=history,
-            session_id=session_id,
-        )
+        # A non-engineering LLM decision still suppresses the pre-resolved
+        # context, preserving existing default/recruiter routing semantics.
+        if _typed_engineering_route is None:
+            _engineering_task_context = _resolve_gateway_engineering_task_context(
+                router_decision=router_decision,
+                operator_text=_operator_text,
+                enriched_message=message,
+                history=history,
+                session_id=session_id,
+            )
         _engineering_reference_context = ""
         if (
             isinstance(_engineering_task_context, dict)

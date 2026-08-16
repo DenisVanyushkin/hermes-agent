@@ -1,8 +1,10 @@
 import importlib.util
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "nightly_diagnostics_collect.py"
 SPEC = importlib.util.spec_from_file_location("nightly_diagnostics_collect", SCRIPT_PATH)
@@ -256,7 +258,7 @@ def test_build_digest_isolates_section_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(collect, "run_command", lambda *a, **k: (127, "boom: not found"))
     now = datetime(2026, 7, 5, 6, 40, 0)
     digest = collect.build_digest(tmp_path, tmp_path, tmp_path / "no.sqlite3", now)
-    assert digest["generated_at"] == "2026-07-05T06:40:00"
+    assert digest["generated_at"] == "2026-07-05T06:40:00+00:00"
     assert digest["window_hours"] == collect.WINDOW_HOURS
     assert "logs" in digest["sections"] or "logs" in digest["section_errors"]
     assert "job_intel" in digest["sections"]  # returns {"error": ...} rather than raising
@@ -299,3 +301,111 @@ def test_write_digest_rotates_old_copies(tmp_path):
     assert (diag / "digest-latest.json").exists()
     assert (diag / "digest-2026-07-05.json").exists()
     assert not old.exists()
+
+
+def test_write_digest_accepts_timezone_aware_now_and_rotates(tmp_path):
+    diag = tmp_path / "diagnostics"
+    diag.mkdir()
+    old = diag / "digest-2026-06-01.json"
+    old.write_text("{}", encoding="utf-8")
+    now = datetime(2026, 7, 5, 6, 40, tzinfo=timezone.utc)
+    collect.write_digest({"generated_at": now.isoformat()}, diag, now)
+    assert (diag / "digest-latest.json").exists()
+    assert not old.exists()
+
+
+def test_run_collection_publishes_atomic_running_then_ok_and_correlates_digest(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 16, 5, 0, tzinfo=timezone.utc)
+    run_id = "20260816T050000Z-test"
+    digest = {
+        "run_id": run_id,
+        "generated_at": now.isoformat(timespec="seconds"),
+        "sections": {},
+        "section_errors": {},
+    }
+    monkeypatch.setattr(collect, "build_digest", lambda *args, **kwargs: digest)
+    monkeypatch.setattr(collect, "write_digest", lambda payload, directory, stamp: collect._atomic_write_json(
+        directory / "digest-latest.json", payload
+    ))
+
+    assert collect.run_collection(tmp_path, tmp_path, tmp_path / "db.sqlite3", now=now, run_id=run_id) == 0
+
+    status = json.loads((tmp_path / "diagnostics" / "collector-status.json").read_text())
+    assert status["schema_version"] == "collector-status.v1"
+    assert status["state"] == "ok"
+    assert status["run_id"] == run_id
+    assert status["exit_code"] == 0
+    assert status["digest_generated_at"] == digest["generated_at"]
+    assert datetime.fromisoformat(status["started_at"]).tzinfo is not None
+    assert datetime.fromisoformat(status["finished_at"]).tzinfo is not None
+    assert json.loads((tmp_path / "diagnostics" / "digest-latest.json").read_text())["run_id"] == run_id
+
+
+def test_run_collection_marks_failed_when_digest_build_raises(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 16, 5, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(collect, "build_digest", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    assert collect.run_collection(tmp_path, tmp_path, tmp_path / "db.sqlite3", now=now, run_id="run-failed") == 1
+
+    status = json.loads((tmp_path / "diagnostics" / "collector-status.json").read_text())
+    assert status["state"] == "failed"
+    assert status["run_id"] == "run-failed"
+    assert status["exit_code"] == 1
+    assert status["reason_code"] == "collector_exception"
+    assert "digest_generated_at" not in status
+
+
+def test_status_write_failure_preserves_previous_valid_status(tmp_path, monkeypatch):
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir()
+    path = diagnostics / "collector-status.json"
+    previous = {"schema_version": "collector-status.v1", "state": "ok", "run_id": "old"}
+    path.write_text(json.dumps(previous), encoding="utf-8")
+    monkeypatch.setattr(collect, "_atomic_write_json", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    assert collect.run_collection(tmp_path, tmp_path, tmp_path / "db.sqlite3", run_id="new") == 1
+    assert json.loads(path.read_text()) == previous
+
+
+def test_atomic_status_replace_failure_keeps_previous_file(tmp_path, monkeypatch):
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir()
+    path = diagnostics / "collector-status.json"
+    previous_text = '{"schema_version":"collector-status.v1","state":"ok"}\n'
+    path.write_text(previous_text, encoding="utf-8")
+
+    monkeypatch.setattr(collect.os, "replace", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("rename failed")))
+    with pytest.raises(OSError, match="rename failed"):
+        collect.write_collector_status(diagnostics, {"state": "running"})
+
+    assert path.read_text(encoding="utf-8") == previous_text
+    assert list(diagnostics.glob(".collector-status.json.*.tmp")) == []
+
+
+def test_atomic_status_fsyncs_temp_file_and_parent_directory(tmp_path, monkeypatch):
+    diagnostics = tmp_path / "diagnostics"
+    fsync_fds = []
+    monkeypatch.setattr(collect.os, "fsync", lambda fd: fsync_fds.append(fd))
+
+    collect.write_collector_status(diagnostics, {"state": "running"})
+
+    assert len(fsync_fds) == 2
+
+
+def test_section_errors_still_finish_collector_ok(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 16, 5, 0, tzinfo=timezone.utc)
+    digest = {
+        "run_id": "run-sections",
+        "generated_at": now.isoformat(timespec="seconds"),
+        "sections": {"logs": {}},
+        "section_errors": {"docker": "RuntimeError: unavailable"},
+    }
+    monkeypatch.setattr(collect, "build_digest", lambda *args, **kwargs: digest)
+    monkeypatch.setattr(collect, "write_digest", lambda payload, directory, stamp: collect._atomic_write_json(
+        directory / "digest-latest.json", payload
+    ))
+
+    assert collect.run_collection(tmp_path, tmp_path, tmp_path / "db.sqlite3", now=now, run_id="run-sections") == 0
+    status = json.loads((tmp_path / "diagnostics" / "collector-status.json").read_text())
+    assert status["state"] == "ok"
+    assert status["reason_code"] == "section_errors"

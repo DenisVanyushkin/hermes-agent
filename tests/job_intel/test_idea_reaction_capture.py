@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import job_intel.idea_reaction_capture as mod
@@ -50,8 +52,9 @@ def test_process_event_persists_dedupe_state_on_real_append(tmp_path, monkeypatc
 
     captured: dict[str, list[str]] = {}
 
-    def fake_run(cmd, capture_output, text):
+    def fake_run(cmd, capture_output, text, env):
         captured["cmd"] = cmd
+        captured["env"] = env
 
         class Proc:
             returncode = 0
@@ -73,5 +76,30 @@ def test_process_event_persists_dedupe_state_on_real_append(tmp_path, monkeypatc
 
     assert result["status"] == "ok"
     assert captured["cmd"][2] == "docs"
+    assert captured["cmd"][0] == sys.executable
+    assert captured["env"]["HERMES_HOME"] == str(hermes_home)
+    assert captured["env"]["PATH"] == os.environ["PATH"]
     state_path = Path(hermes_home) / "state" / "slack_idea_reactions.json"
     assert state_path.exists()
+
+
+def test_append_to_doc_surfaces_google_cli_stderr(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "hermes"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    def fake_run(cmd, capture_output, text, env):
+        class Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "Google credentials are unavailable"
+
+        return Proc()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    try:
+        mod._append_to_doc("- idea\n")
+    except RuntimeError as exc:
+        assert "Google credentials are unavailable" in str(exc)
+    else:  # pragma: no cover - assertion keeps the failure actionable
+        raise AssertionError("Google CLI failure must preserve stderr")

@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from hermes_cli.config import cfg_get
 from hermes_cli.pipeline_execution_controller import evaluate_pipeline_execution_controller
@@ -14,7 +14,12 @@ from hermes_cli.pipeline_autonomous_execution import AUTONOMOUS_MODE, build_auto
 from hermes_cli.pipeline_gate import PipelineGateDecision, PipelineGateMode, PipelineGateRequest, evaluate_pipeline_gate
 from hermes_cli.pipeline_router import DEFAULT_PIPELINE_ID, RouterDecision
 from hermes_cli.pipeline_report import build_pipeline_execution_report
-from hermes_cli.pipeline_report_artifacts import DEFAULT_DURABLE_ROOT, persist_controlled_execution_report_artifacts
+from hermes_cli.pipeline_report_artifacts import (
+    DEFAULT_DURABLE_ROOT,
+    persist_controlled_execution_report_artifacts,
+    sanitize_report_run_id,
+)
+from hermes_cli.pipeline_change_artifacts import persist_change_artifacts, safe_change_artifact_metadata
 from hermes_cli.pipeline_controlled_dry_run import format_controlled_manual_summary
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_state import (
@@ -140,6 +145,7 @@ def observe_gateway_turn(
     helper_execution_context = None
     allow_test_execution = False
     allow_registered_helper_selection = False
+    artifact_failure = False
     if mode == AUTONOMOUS_MODE and pipeline_preflight.allowed:
         helper_execution_context = build_autonomous_helper_context(
             config=config,
@@ -200,10 +206,36 @@ def observe_gateway_turn(
                     controller_payload["execution_mode"] = mode
         if helper_report is not None:
             pipeline_execution_report_payload = helper_report
+        change_artifact = _persist_change_artifact_for_run(
+            session=session,
+            helper_execution_context=helper_execution_context,
+            pipeline_execution_report_payload=pipeline_execution_report_payload,
+        )
+        artifact_failure = bool(
+            isinstance(pipeline_execution_report_payload, dict)
+            and isinstance(pipeline_execution_report_payload.get("git_gate"), dict)
+            and pipeline_execution_report_payload["git_gate"].get("material_changes_present")
+            and change_artifact.get("status") != "verified"
+        )
+        if isinstance(pipeline_execution_report_payload, dict):
+            pipeline_execution_report_payload["change_artifact"] = safe_change_artifact_metadata(change_artifact)
+            if artifact_failure:
+                _block_report_for_missing_change_artifact(pipeline_execution_report_payload)
+                _clear_pending_commit_for_artifact_failure(session.pipeline_session_id)
+        controller_payload = pipeline_execution_controller.to_safe_dict()
+        if artifact_failure:
+            controller_payload.update(
+                {
+                    "status": "blocked",
+                    "execution_allowed": False,
+                    "blocked_reason": "artifact_not_persisted",
+                    "helper_result_status": "artifact_not_persisted",
+                }
+            )
         report_artifacts = persist_controlled_execution_report_artifacts(
             session=session,
             state_snapshot=state_snapshot,
-            controller_payload=pipeline_execution_controller.to_safe_dict(),
+            controller_payload=controller_payload,
             pipeline_execution_report_payload=pipeline_execution_report_payload,
             router_decision=router_decision,
             workspace_path=helper_execution_context.get("repo_path") if isinstance(helper_execution_context, dict) else None,
@@ -226,6 +258,11 @@ def observe_gateway_turn(
                     pipeline_final_text = candidate_text
         pipeline_execution_controller = replace(
             pipeline_execution_controller,
+            status="blocked" if artifact_failure else pipeline_execution_controller.status,
+            execution_allowed=False if artifact_failure else pipeline_execution_controller.execution_allowed,
+            blocked_reason="artifact_not_persisted" if artifact_failure else pipeline_execution_controller.blocked_reason,
+            helper_result_status="artifact_not_persisted" if artifact_failure else pipeline_execution_controller.helper_result_status,
+            helper_result=response_helper_result if artifact_failure else pipeline_execution_controller.helper_result,
             final_response_text=pipeline_final_text
             or format_controlled_manual_summary(
                 response_helper_result,
@@ -233,6 +270,13 @@ def observe_gateway_turn(
             ),
             report_artifacts=report_artifacts,
         )
+        if artifact_failure:
+            execution_report = replace(
+                execution_report,
+                completion_allowed=False,
+                completion_reason="artifact_not_persisted",
+                runtime_status="blocked",
+            )
     report = OrchestratorObserveReport(
         session=session,
         state=state,
@@ -251,6 +295,87 @@ def observe_gateway_turn(
         engineering_task_context=engineering_task_context,
     )
     return report
+
+
+def _persist_change_artifact_for_run(
+    *,
+    session: PipelineSession,
+    helper_execution_context: Mapping[str, Any] | None,
+    pipeline_execution_report_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    report = dict(pipeline_execution_report_payload or {})
+    git_gate = report.get("git_gate") if isinstance(report.get("git_gate"), Mapping) else {}
+    workspace = helper_execution_context.get("repo_path") if isinstance(helper_execution_context, Mapping) else None
+    canonical = helper_execution_context.get("canonical_repo_path") if isinstance(helper_execution_context, Mapping) else None
+    try:
+        return persist_change_artifacts(
+            repo_path=str(workspace or ""),
+            canonical_repo_path=str(canonical) if canonical else None,
+            durable_run_root=DEFAULT_DURABLE_ROOT / sanitize_report_run_id(session.pipeline_session_id),
+            baseline_head_sha=git_gate.get("baseline_head_sha"),
+            run_head_sha=git_gate.get("post_head_sha"),
+            branch=git_gate.get("branch"),
+            changed_files=list(git_gate.get("changed_files") or []),
+            tracked_changed_files=list(git_gate.get("tracked_changed_files") or []),
+            untracked_files=list(git_gate.get("untracked_files") or []),
+            staged_files=list(git_gate.get("staged_files") or []),
+            unstaged_files=list(git_gate.get("unstaged_files") or []),
+            material_changes_present=bool(git_gate.get("material_changes_present")),
+        )
+    except Exception:
+        return {
+            "schema_version": "change-artifact.v1",
+            "status": "artifact_not_persisted",
+            "verified": False,
+            "artifact_type": None,
+            "artifact_count": 0,
+            "bytes": 0,
+            "content_sha256": None,
+            "reason_code": "artifact_persistence_error",
+            "metadata_path": None,
+        }
+
+
+def _block_report_for_missing_change_artifact(report: dict[str, Any]) -> None:
+    completion = dict(report.get("completion") or {})
+    completion.update(
+        {
+            "completion_allowed": False,
+            "candidate_complete": False,
+            "blocked_reason": "artifact_not_persisted",
+            "final_verdict": "artifact_not_persisted",
+            "user_action_required": True,
+        }
+    )
+    report["completion"] = completion
+    report["status"] = "blocked"
+    git_gate = dict(report.get("git_gate") or {})
+    git_gate["completion_blocked_reason"] = "artifact_not_persisted"
+    git_gate["artifact_status"] = "artifact_not_persisted"
+    report["git_gate"] = git_gate
+    final_response = dict(report.get("final_response") or {})
+    final_response.update(
+        {
+            "status": "blocked",
+            "text": (
+                "⚠️ Изменения обнаружены, но durable change artifact не удалось "
+                "сохранить или проверить. Ветка и рабочее дерево сохранены; "
+                "нужна операторская recovery-проверка."
+            ),
+        }
+    )
+    report["final_response"] = final_response
+
+
+def _clear_pending_commit_for_artifact_failure(pipeline_session_id: str | None) -> None:
+    try:
+        from hermes_cli import commit_gate_service
+
+        pending = commit_gate_service.get_pending()
+        if pending and str(pending.get("session_id") or "") == str(pipeline_session_id or ""):
+            commit_gate_service.clear_pending()
+    except Exception:
+        return
 
 
 def _helper_runtime_report_payload(helper_result: dict[str, Any] | None) -> dict[str, Any] | None:

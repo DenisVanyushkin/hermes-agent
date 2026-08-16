@@ -157,7 +157,7 @@ def test_controlled_engineering_pipeline_e2e_repairs_existing_workspace_without_
     assert payload["blocked_reason"] is None
     assert payload["test_summary"]["status"] == "passed"
     assert repo.joinpath("venv").is_symlink()
-    assert repo.joinpath("venv").resolve() == REPO_ROOT.joinpath("venv").resolve()
+    assert repo.joinpath("venv").resolve() == SPEC_ROOT.joinpath("venv").resolve()
 
 
 def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(tmp_path: Path) -> None:
@@ -205,23 +205,23 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
             "controlled_runner": module.ControlledRuntimeRunner(),
             "allow_real_provider_execution": True,
             "request_real_provider_execution": True,
-            "allowed_real_providers": ("openrouter", "openai-codex"),
-            "allowed_real_models": ("xiaomi/mimo-v2.5-pro", "gpt-5.5"),
+            "allowed_real_providers": ("openai-codex",),
+            "allowed_real_models": ("gpt-5.6-terra", "gpt-5.6-sol"),
             "allowed_real_providers_by_role": {
-                "engineer": ("openrouter",),
+                "engineer": ("openai-codex",),
                 "reviewer": ("openai-codex",),
             },
             "allowed_real_models_by_role": {
-                "engineer": ("xiaomi/mimo-v2.5-pro",),
-                "reviewer": ("gpt-5.5",),
+                "engineer": ("gpt-5.6-terra",),
+                "reviewer": ("gpt-5.6-sol",),
             },
             "allowed_real_providers_by_subagent": {
-                "hermes_engineer_core": ("openrouter",),
+                "hermes_engineer_core": ("openai-codex",),
                 "hermes_code_reviewer": ("openai-codex",),
             },
             "allowed_real_models_by_subagent": {
-                "hermes_engineer_core": ("xiaomi/mimo-v2.5-pro",),
-                "hermes_code_reviewer": ("gpt-5.5",),
+                "hermes_engineer_core": ("gpt-5.6-terra",),
+                "hermes_code_reviewer": ("gpt-5.6-sol",),
             },
             "real_provider_client_factory": _real_provider_factory,
             "allow_mutations": True,
@@ -238,8 +238,10 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
     created_file = repo / "tests/test_generated_example.py"
 
     assert factory_calls == [
-        ("hermes_engineer_core", "openrouter", "xiaomi/mimo-v2.5-pro"),
-        ("hermes_code_reviewer", "openai-codex", "gpt-5.5"),
+        ("hermes_engineer_core", "openai-codex", "gpt-5.6-terra"),
+        ("hermes_engineer_core", "openai-codex", "gpt-5.6-terra"),
+        ("hermes_engineer_core", "openai-codex", "gpt-5.6-terra"),
+        ("hermes_code_reviewer", "openai-codex", "gpt-5.6-sol"),
     ]
     assert created_file.exists()
     assert created_file.read_text(encoding="utf-8") == "def test_generated_example():\n    assert 1 + 1 == 2\n"
@@ -257,8 +259,8 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
     assert safe_result["subagent_runs"][0]["runtime_mode"] == "real_provider"
     assert safe_result["subagent_runs"][0]["real_provider_allowed"] is True
     assert safe_result["subagent_runs"][0]["provider_policy_status"] == "allowed"
-    assert safe_result["subagent_runs"][0]["actual_provider"] == "openrouter"
-    assert safe_result["subagent_runs"][0]["actual_model"] == "xiaomi/mimo-v2.5-pro"
+    assert safe_result["subagent_runs"][0]["actual_provider"] == "openai-codex"
+    assert safe_result["subagent_runs"][0]["actual_model"] == "gpt-5.6-terra"
     assert safe_result["subagent_runs"][1]["runtime_mode"] == "real_provider"
     assert report_payload["subagent_runs"][0]["runtime_mode"] == "real_provider"
     assert report_payload["subagent_runs"][0]["raw_output_redacted"] is True
@@ -293,7 +295,7 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
 
     assert report_payload["schema_version"] == "pipeline_execution_report.v1"
     assert report_payload["summary"]["pipeline_id"] == "engineering_review_pipeline"
-    assert report_payload["usage"]["total_tokens"] == 21
+    assert report_payload["usage"]["total_tokens"] == 51
     assert safe_result["usage_summary"]["total_tokens"] == 21
     assert "usage_summary" in safe_result
     assert "peer_messages" in report_payload and report_payload["peer_messages"] == []
@@ -307,9 +309,13 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
 
     for forbidden in (
         str(repo),
-        "assert 1 + 1 == 2",
         "engineer runtime completed",
         "reviewer runtime approved",
     ):
         assert forbidden not in encoded_result
         assert forbidden not in encoded_report
+
+    # Reviewer packets intentionally carry bounded source excerpts for the
+    # reviewer; the durable change-artifact metadata is the path-free safe
+    # surface and must never carry those bytes.
+    assert "assert 1 + 1 == 2" not in json.dumps(report_payload.get("change_artifact"), sort_keys=True)

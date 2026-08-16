@@ -1,6 +1,6 @@
 # Hermes Operator Runbook
 
-Last updated: 2026-06-06
+Last updated: 2026-08-16
 
 ## Purpose
 
@@ -148,6 +148,99 @@ systemctl status job-intel-alert.timer --no-pager -l
   - `scripts/rebase-local-customizations.sh`
   - `scripts/sync-runtime-scripts.sh`
 - Critical implementation detail: re-exec through `sudo` must preserve `HOME`, otherwise paths can resolve under `/root/.hermes/...`.
+
+## Engineering Continuation And Diagnostics Recovery
+
+These contracts apply to Slack-originated engineering work and to the
+nightly diagnostics digest. They are deliberately fail-closed: an operator
+must repair or re-run the controlled flow rather than infer missing state from
+Slack prose.
+
+### Bare approval binding
+
+- A bare `выполняй` is executable only when the same session/history contains
+  exactly one eligible approved engineering plan. No plan, an ambiguous set of
+  plans, or a plan from another session fails closed.
+- Long plans are retained byte-for-byte and are bound to a SHA-256 digest
+  before execution. Do not reconstruct a lost plan from a shortened Slack
+  message.
+- If the router reports an authorization or plan-resolution failure, ask for a
+  fresh explicit plan/approval in the same thread; do not treat a bare command
+  as a new authorization.
+
+### Change-artifact recovery
+
+- A controlled run persists its independently verifiable evidence below
+  `/home/hermes/.hermes/controlled-runs/<run_id>/`. The metadata file is
+  `change-artifact.json` with schema `change-artifact.v1`.
+- A successful material-change run must report `status=verified`; the report
+  exposes only bounded metadata (type, count, bytes, and a short content-hash
+  prefix), never absolute paths or file contents. A no-change run reports
+  `status=not_required`.
+- `artifact_not_persisted` is a completion blocker. Do not sweep, delete, or
+  release the linked worktree/ref until the controlled report and artifact
+  root have been inspected. Verify the durable evidence from the canonical
+  checkout with:
+
+  ```sh
+  python -c 'from hermes_cli.pipeline_change_artifacts import verify_change_artifact; from pathlib import Path; ok, reason = verify_change_artifact(metadata_path=Path("/home/hermes/.hermes/controlled-runs/<run_id>/change-artifact.json"), repo_path=Path("<linked-worktree>"), canonical_repo_path=Path("/home/hermes/.hermes/hermes-agent")); print({"verified": ok, "reason": reason})'
+  ```
+
+  Keep the worktree and ref until this returns `verified=True`, or until a
+  new controlled run captures a replacement artifact.
+
+### Collector lifecycle and morning report
+
+- The collector publishes `/home/hermes/.hermes/diagnostics/collector-status.json`
+  with schema `collector-status.v1`, `state`, `run_id`, timezone-aware
+  timestamps, `exit_code`, and `reason_code`. A successful run also records
+  `digest_generated_at`, which must match the digest's `generated_at` and
+  `run_id`.
+- Status writes use a same-directory temporary file, `fsync`, atomic replace,
+  and a parent-directory `fsync`; a failed write must not replace a previous
+  valid status.
+- The morning consumer treats `failed` as `COLLECTOR FAILED`, a stale
+  `running` state as `COLLECTOR STUCK`, and missing/corrupt/mismatched state as
+  `COLLECTOR STATUS MISSING` or `DIGEST STALE`. Fresh `ok` status is required;
+  the default maximum age is two hours and can be overridden with the positive
+  `DIAGNOSTICS_MAX_AGE_HOURS` environment variable.
+
+### Google Workspace capture prerequisites
+
+- `HERMES_HOME` must point to the Hermes home containing both
+  `google_client_secret.json` and `google_token.json`. Never put either file
+  in Git or print token contents in logs.
+- Check the credentials before capture:
+
+  ```sh
+  python "$HERMES_HOME/skills/productivity/google-workspace/scripts/setup.py" --check
+  ```
+
+  The expected result is `AUTHENTICATED` (or an explicit partial-auth warning).
+  If setup is missing, provide the client secret with `--client-secret`, then
+  run `--auth-url` and exchange the returned code with `--auth-code`. The
+  bundled `setup.py` currently has no `--services` flag: it requests its
+  built-in Workspace scope set and records the scopes actually granted. Do not
+  add unsupported flags; if a least-privilege scope set is required, change
+  and review the helper before starting OAuth. Enable the matching Google APIs.
+  An Advanced Protection account also needs the OAuth client allowlisted by the
+  Workspace administrator.
+- The Slack capture helper runs the repository's Google API script with
+  `sys.executable` and forwards the resolved `HERMES_HOME`; this avoids using a
+  different interpreter or silently falling back to `/home/hermes/.hermes`.
+
+### Controlled gateway restart (only after rollout approval)
+
+The gateway is a user-level systemd service, not `hermes-agent.service`. The
+single restart command is:
+
+```sh
+ssh hermes-agent 'systemctl --user restart hermes-gateway.service'
+```
+
+After a restart, verify `systemctl --user status hermes-gateway.service`, the
+main process command, and recent journal lines before declaring the rollout
+healthy.
 
 ## Quick Decision Rule
 

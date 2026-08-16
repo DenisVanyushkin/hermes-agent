@@ -13,7 +13,9 @@ from typing import Any
 from hermes_cli.config import cfg_get
 from hermes_cli.pipeline_router import (
     DEFAULT_LLM_FALLBACK_STRATEGY,
+    DEFAULT_PIPELINE_ID,
     DEFAULT_ROUTER_STRATEGY,
+    ENGINEERING_PIPELINE_ID,
     VALID_ROUTER_STRATEGIES,
     RouterDecision,
     build_pipeline_router,
@@ -31,6 +33,46 @@ logger = logging.getLogger(__name__)
 # Autonomous routing builds metadata first; execution remains gated downstream.
 AUTONOMOUS_ROUTER_MODE = "autonomous"
 _VALID_ROUTER_MODES = {"disabled", "observe", AUTONOMOUS_ROUTER_MODE}
+
+
+def route_resolved_engineering_task_context(
+    *,
+    context: dict[str, Any] | None,
+    pipeline_session_id: str | None = None,
+    router_subagent_id: str = "hermes_pipeline_router",
+) -> RouterDecision | None:
+    """Turn a context-bound continuation into a deterministic route.
+
+    A short approval is executable only after the typed resolver binds it to
+    the same-session approved-plan store.  Keeping this route independent of
+    the LLM prevents a valid approval from being downgraded to the default
+    conversational pipeline, while unresolved approved-plan states remain in
+    the engineering pipeline and are blocked before any unrestricted tools.
+    """
+
+    if not isinstance(context, dict):
+        return None
+    if str(context.get("source_kind") or "").strip() != "approved_plan":
+        return None
+    resolution_status = str(context.get("resolution_status") or "").strip()
+    if not resolution_status:
+        return None
+    return RouterDecision(
+        pipeline_session_id=str(pipeline_session_id or uuid.uuid4().hex),
+        router_subagent_id=router_subagent_id,
+        status="selected",
+        selected_pipeline_id=ENGINEERING_PIPELINE_ID,
+        fallback_pipeline_id=DEFAULT_PIPELINE_ID,
+        confidence=1.0,
+        reasoning_summary=(
+            "A typed engineering task context bound this continuation to the "
+            "same-session approved-plan store."
+        ),
+        matched_signals=("typed_engineering_task_context",),
+        fallback_safe=False,
+        router_strategy="deterministic",
+        routing_confidence_source="typed_task_context",
+    )
 
 
 def observe_pipeline_router_decision(

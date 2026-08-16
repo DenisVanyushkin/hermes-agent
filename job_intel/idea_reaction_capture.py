@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -138,8 +139,10 @@ def _append_to_doc(text: str) -> dict[str, Any]:
     hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     home_script = hermes_home / "skills" / "productivity" / "google-workspace" / "scripts" / "google_api.py"
     script = repo_script if repo_script.exists() else home_script
-    cmd = [os.environ.get("PYTHON", "python"), str(script), "docs", "append", doc_id, "--text", text]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    cmd = [sys.executable, str(script), "docs", "append", doc_id, "--text", text]
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "google docs append failed").strip())
     try:

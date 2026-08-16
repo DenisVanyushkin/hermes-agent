@@ -2084,22 +2084,6 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_app_context_changed(event, say, body):
                 await self._handle_app_context_changed(event, body)
 
-            @self._app.event("reaction_added")
-            async def handle_reaction_added(event, say):
-                await self._handle_reaction_event(event)
-
-            @self._app.event("reaction_removed")
-            async def handle_reaction_removed(event, say):
-                await self._handle_reaction_event(event)
-
-            @self._app.event("reaction_added")
-            async def handle_reaction_added(event, say):
-                await self._handle_reaction_event(event)
-
-            @self._app.event("reaction_removed")
-            async def handle_reaction_removed(event, say):
-                await self._handle_reaction_event(event)
-
             # File lifecycle events can arrive around snippet uploads even when
             # the actual user message is what we care about. Ack them so Slack
             # doesn't log noisy 404 "unhandled request" warnings.
@@ -2121,13 +2105,7 @@ class SlackAdapter(BasePlatformAdapter):
             # end-to-end. Registered explicitly so high-traffic channels do
             # not fill gateway.error.log with Slack Bolt "Unhandled request"
             # warnings.
-            @self._app.event("reaction_added")
-            async def handle_reaction_added(event, say):
-                await self._handle_slack_reaction(event)
-
-            @self._app.event("reaction_removed")
-            async def handle_reaction_removed(event, say):
-                await self._handle_slack_reaction(event, removed=True)
+            self._register_reaction_handlers()
 
             @self._app.event("assistant_thread_started")
             async def handle_assistant_thread_started(event, say, body):
@@ -2357,6 +2335,30 @@ class SlackAdapter(BasePlatformAdapter):
             if lock_acquired and not self._running:
                 self._release_platform_lock()
 
+
+    def _register_reaction_handlers(self) -> None:
+        """Register the two intentional Slack reaction pipelines once.
+
+        ``_handle_reaction_event`` owns job-intel/idea-capture side effects;
+        ``_handle_slack_reaction`` owns the opt-in message-pipeline and hook
+        surface.  Both event types are registered exactly once for each
+        pipeline so Slack Bolt cannot dispatch duplicate work.
+        """
+        @self._app.event("reaction_added")
+        async def handle_reaction_added(event, say):
+            await self._handle_reaction_event(event)
+
+        @self._app.event("reaction_removed")
+        async def handle_reaction_removed(event, say):
+            await self._handle_reaction_event(event)
+
+        @self._app.event("reaction_added")
+        async def handle_reaction_added(event, say):
+            await self._handle_slack_reaction(event)
+
+        @self._app.event("reaction_removed")
+        async def handle_reaction_removed(event, say):
+            await self._handle_slack_reaction(event, removed=True)
 
     async def _handle_reaction_event(self, event: dict) -> None:
         """Route Slack reaction events into job-intel vacancy feedback."""
@@ -3542,7 +3544,59 @@ class SlackAdapter(BasePlatformAdapter):
                     chat_id, team_id=self._metadata_team_id(metadata)
                 ).chat_update(**update_kwargs)
             except Exception as e:
-                if update_kwargs.get("blocks") and self._is_block_payload_rejection(e):
+                provider_error = self._slack_provider_error_code(e)
+                if provider_error == "msg_too_long":
+                    retry_text = self._shorten_slack_text_for_retry(formatted)
+                    retry_kwargs: Dict[str, Any] = {
+                        "channel": chat_id,
+                        "ts": message_id,
+                        "text": retry_text,
+                    }
+                    if "blocks" in update_kwargs:
+                        # Explicitly clear stale blocks on the existing message
+                        # while retrying the shortened plain-text payload.
+                        retry_kwargs["blocks"] = []
+                    diagnostic = {
+                        "provider": "slack",
+                        "error_code": provider_error,
+                        "original_text_length": len(formatted),
+                        "retry_text_length": len(retry_text),
+                        "original_block_count": len(update_kwargs.get("blocks") or [])
+                        if isinstance(update_kwargs.get("blocks"), list)
+                        else 0,
+                        "retry_block_count": 0,
+                        "fallback_attempted": True,
+                    }
+                    logger.info(
+                        "[Slack] msg_too_long; retrying shortened edit "
+                        "text_length=%d->%d blocks=%d->0",
+                        diagnostic["original_text_length"],
+                        diagnostic["retry_text_length"],
+                        diagnostic["original_block_count"],
+                    )
+                    try:
+                        await self._get_client(
+                            chat_id, team_id=self._metadata_team_id(metadata)
+                        ).chat_update(**retry_kwargs)
+                    except Exception as retry_error:
+                        if self._slack_provider_error_code(retry_error) == "msg_too_long":
+                            if finalize:
+                                await self._clear_thread_status_quietly(chat_id, metadata)
+                            logger.warning(
+                                "[Slack] shortened edit still rejected as msg_too_long "
+                                "text_length=%d->%d",
+                                diagnostic["original_text_length"],
+                                diagnostic["retry_text_length"],
+                            )
+                            return SendResult(
+                                success=False,
+                                error="slack_api_error:msg_too_long",
+                                raw_response=diagnostic,
+                                retryable=False,
+                                error_kind="too_long",
+                            )
+                        raise
+                elif update_kwargs.get("blocks") and self._is_block_payload_rejection(e):
                     retry_kwargs = dict(update_kwargs)
                     # Explicitly clear any stale blocks when falling back to the
                     # flat text update path; otherwise Slack can preserve the
@@ -4450,6 +4504,51 @@ class SlackAdapter(BasePlatformAdapter):
                 pass
         message = str(error)
         return any(code in message for code in recoverable_codes)
+
+    @staticmethod
+    def _slack_provider_error_code(error: BaseException) -> str:
+        """Extract a bounded Slack Web API error code from an exception."""
+        response = getattr(error, "response", None)
+        response_get = getattr(response, "get", None)
+        if callable(response_get):
+            try:
+                code = str(response_get("error") or "").strip()
+            except Exception:
+                code = ""
+            if code:
+                return code
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            code = str(data.get("error") or "").strip()
+            if code:
+                return code
+        # Keep this fallback limited to provider codes that have explicit
+        # handling; never copy the full exception into a safe diagnostic.
+        message = str(error).lower()
+        for code in ("msg_too_long", "invalid_blocks", "too_many_blocks"):
+            if code in message:
+                return code
+        return ""
+
+    def _shorten_slack_text_for_retry(self, text: str) -> str:
+        """Return one strictly shorter plain-text retry with a visible marker."""
+        marker = "\n\n_[Reply truncated: Slack shortened this update after msg_too_long.]_"
+        if len(text) <= 1:
+            return ""
+        # Keep the retry below both the provider limit and the rejected text's
+        # length. The marker is deliberately part of the visible fallback so a
+        # successful recovery cannot look like a complete answer.
+        prefix_limit = min(
+            len(text) - 1,
+            max(1, self.MAX_MESSAGE_LENGTH - len(marker)),
+            max(1, len(text) - len(marker) - 1),
+        )
+        candidate = text[:prefix_limit].rstrip() + marker
+        if len(candidate) >= len(text):
+            # Extremely short content cannot fit the full marker and remain
+            # shorter; preserve the strict retry invariant in that edge case.
+            return text[: max(1, len(text) - 1)]
+        return candidate
 
     def _rich_blocks_enabled(self) -> bool:
         """Whether to render outbound agent messages as Slack Block Kit blocks.

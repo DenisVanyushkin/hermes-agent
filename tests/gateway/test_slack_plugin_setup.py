@@ -7,9 +7,27 @@ from ``hermes_cli.config`` (get_env_value / save_env_value / remove_env_value)
 and ``hermes_cli.cli_output`` (prompt / prompt_yes_no / print_*), so we patch
 those source modules.
 """
+import asyncio
+
+from unittest.mock import AsyncMock
+
 import hermes_cli.config as config_mod
 import hermes_cli.cli_output as cli_output_mod
-from plugins.platforms.slack.adapter import interactive_setup
+from plugins.platforms.slack.adapter import SlackAdapter, interactive_setup
+
+
+class _EventRegistry:
+    """Minimal AsyncApp.event facade for registration tests."""
+
+    def __init__(self):
+        self.handlers = {}
+
+    def event(self, event_name):
+        def register(handler):
+            self.handlers.setdefault(event_name, []).append(handler)
+            return handler
+
+        return register
 
 
 def _patch_setup_io(monkeypatch, prompts, saved, removed, existing):
@@ -52,6 +70,33 @@ def test_interactive_setup_saves_home_channel(monkeypatch, tmp_path):
     assert "SLACK_HOME_CHANNEL" not in removed
 
 
+def test_reaction_handlers_are_registered_once_per_logical_pipeline():
+    """Each Slack reaction event must reach each intended pipeline exactly once."""
+    adapter = SlackAdapter.__new__(SlackAdapter)
+    adapter._app = _EventRegistry()
+    adapter._handle_reaction_event = AsyncMock()
+    adapter._handle_slack_reaction = AsyncMock()
+
+    adapter._register_reaction_handlers()
+
+    assert len(adapter._app.handlers["reaction_added"]) == 2
+    assert len(adapter._app.handlers["reaction_removed"]) == 2
+
+    added = {"type": "reaction_added", "reaction": "+1"}
+    for handler in adapter._app.handlers["reaction_added"]:
+        asyncio.run(handler(added, None))
+    adapter._handle_reaction_event.assert_awaited_once_with(added)
+    adapter._handle_slack_reaction.assert_awaited_once_with(added)
+
+    adapter._handle_reaction_event.reset_mock()
+    adapter._handle_slack_reaction.reset_mock()
+    removed = {"type": "reaction_removed", "reaction": "+1"}
+    for handler in adapter._app.handlers["reaction_removed"]:
+        asyncio.run(handler(removed, None))
+    adapter._handle_reaction_event.assert_awaited_once_with(removed)
+    adapter._handle_slack_reaction.assert_awaited_once_with(removed, removed=True)
+
+
 class TestSlackHomeChannelClear:
     """Blank home-channel answer must clear SLACK_HOME_CHANNEL (#12423)."""
 
@@ -68,5 +113,3 @@ class TestSlackHomeChannelClear:
         interactive_setup()
         assert "SLACK_HOME_CHANNEL" in removed
         assert "SLACK_HOME_CHANNEL" not in saved
-
-

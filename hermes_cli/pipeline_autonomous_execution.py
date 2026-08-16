@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from hermes_cli.baseline_git import classify_dirty
+from hermes_cli.pipeline_change_artifacts import is_verified_change_artifact
 from hermes_cli.pipeline_aiagent_executor import AIAgentReviewerExecutorBridge, AIAgentSubagentExecutorBridge
 from hermes_cli.pipeline_specs import load_pipeline_specs
 from hermes_cli.runtime_factory import RuntimeFactory, build_runtime_factory_plan
@@ -32,12 +33,14 @@ def build_autonomous_helper_context(
     inferred_repo_root = Path(__file__).resolve().parent.parent
     base_repo_root = inferred_repo_root if repo_root is None else Path(repo_root)
     workspace = base_repo_root.resolve()
+    canonical_repo_root = _repo_root_of(workspace) or workspace
     runtime_context = _default_runtime_context(workspace)
     helper_context = {
         "runtime_factory": RuntimeFactory(repo_root=base_repo_root),
         "runner": SubagentRunner(executor=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy runner must not be used"))),
         "user_message": user_message,
         "repo_path": str(workspace),
+        "canonical_repo_path": str(canonical_repo_root.resolve()),
         "allow_completion_after_review": True,
         "controlled_runtime_context": runtime_context,
     }
@@ -84,6 +87,7 @@ def build_autonomous_helper_context(
     runtime_context["run_branch"] = run_worktree.branch
 
     helper_context["repo_path"] = str(workspace)
+    helper_context["canonical_repo_path"] = str(canonical_repo_root.resolve())
     runtime_context["mutation_workspace"] = str(workspace)
     runtime_context["test_workspace"] = str(workspace)
     runtime_context["workspace_baseline_head"] = _git_stdout(workspace, "rev-parse", "HEAD")
@@ -314,7 +318,13 @@ def release_run_worktree(
 
 
 def sweep_run_worktrees(
-    *, repo_root: Path, runs_root: Path, max_age_seconds: float, now: float
+    *,
+    repo_root: Path,
+    runs_root: Path,
+    max_age_seconds: float,
+    now: float,
+    durable_root: Path | None = None,
+    target_branch: str | None = None,
 ) -> list[str]:
     """Drop run worktrees nobody came back for. Returns what was removed.
 
@@ -325,6 +335,8 @@ def sweep_run_worktrees(
     if not runs_root.exists():
         return []
     removed: list[str] = []
+    target = target_branch or _git_result(repo_root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    artifact_root = Path(durable_root or "/home/hermes/.hermes/controlled-runs")
     for candidate in sorted(runs_root.iterdir()):
         if not candidate.is_dir() or not (candidate / ".git").exists():
             continue
@@ -335,10 +347,30 @@ def sweep_run_worktrees(
                 continue
         except Exception:
             continue
+        branch = _git_result(candidate, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if branch.startswith(RUN_BRANCH_PREFIX) and target and not _branch_reachable_from_target(
+            repo_root=repo_root,
+            branch=branch,
+            target=target,
+        ):
+            run_id = branch[len(RUN_BRANCH_PREFIX):]
+            if not is_verified_change_artifact(
+                durable_root=artifact_root / run_id,
+                repo_path=candidate,
+                canonical_repo_path=repo_root,
+            ):
+                # A clean worktree can still be the only checkout containing a
+                # committed run branch.  Keep it until a verified durable
+                # artifact exists or the branch has reached the target.
+                continue
         release_run_worktree(repo_root=repo_root, workspace=candidate)
         if not candidate.exists():
             removed.append(str(candidate))
     return removed
+
+
+def _branch_reachable_from_target(*, repo_root: Path, branch: str, target: str) -> bool:
+    return _git_result(repo_root, "merge-base", "--is-ancestor", branch, target).returncode == 0
 
 
 class CommitGateAuthorization(SimpleNamespace):
