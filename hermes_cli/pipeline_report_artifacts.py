@@ -11,6 +11,7 @@ import uuid
 
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSession
+from hermes_cli.pipeline_change_artifacts import safe_change_artifact_metadata
 
 if TYPE_CHECKING:
     from hermes_state import SessionDB
@@ -100,6 +101,7 @@ def persist_controlled_execution_report_artifacts(
         "report_workspace_filename": CONTROLLED_EXECUTION_REPORT_FILENAME,
         "durable_report_available": durable_report_path is not None,
         "db_persisted": db_persisted,
+        "change_artifact": sanitize_report_change_artifact_metadata(payload.get("change_artifact")),
     }
 
 
@@ -122,7 +124,14 @@ def sanitize_report_artifact_metadata(report_artifacts: Mapping[str, Any] | None
         "durable_report_written": bool(artifacts.get("durable_report_written")),
         "workspace_report_written": bool(artifacts.get("workspace_report_written")),
         "workspace_basename": _string(artifacts.get("workspace_basename")),
+        "change_artifact": sanitize_report_change_artifact_metadata(artifacts.get("change_artifact")),
     }
+
+
+def sanitize_report_change_artifact_metadata(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return safe_change_artifact_metadata(value)
 
 
 def build_controlled_execution_report_artifact(

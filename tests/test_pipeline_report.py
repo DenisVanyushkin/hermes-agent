@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import importlib
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -16,6 +19,7 @@ from hermes_cli.pipeline_report_artifacts import (
     sanitize_report_artifact_metadata,
     sanitize_report_run_id,
 )
+from hermes_cli.pipeline_change_artifacts import persist_change_artifacts, safe_change_artifact_metadata
 from hermes_cli.pipeline_router import RouterDecision
 from hermes_cli.pipeline_session import PipelineSessionRequest, create_pipeline_session
 from hermes_cli.pipeline_specs import load_pipeline_specs
@@ -1256,3 +1260,228 @@ def test_sanitize_report_artifact_metadata_excludes_absolute_paths() -> None:
 def test_sanitize_report_run_id_accepts_safe_ids_and_rewrites_unsafe_ids() -> None:
     assert sanitize_report_run_id("pipe-report-1") == "pipe-report-1"
     assert sanitize_report_run_id("../pipe-report-1") != "../pipe-report-1"
+
+
+def _artifact_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+
+def _artifact_repo(tmp_path: Path, name: str = "repo") -> Path:
+    repo = tmp_path / name
+    repo.mkdir()
+    _artifact_git(repo, "init", "-q", "-b", "main")
+    _artifact_git(repo, "config", "user.name", "Artifact Test")
+    _artifact_git(repo, "config", "user.email", "artifact@example.com")
+    (repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+    _artifact_git(repo, "add", "tracked.txt")
+    _artifact_git(repo, "commit", "-qm", "initial")
+    return repo
+
+
+def test_change_artifacts_persist_and_verify_committed_bundle(tmp_path: Path) -> None:
+    repo = _artifact_repo(tmp_path)
+    baseline = _artifact_git(repo, "rev-parse", "HEAD")
+    (repo / "tracked.txt").write_text("committed\n", encoding="utf-8")
+    _artifact_git(repo, "add", "tracked.txt")
+    _artifact_git(repo, "commit", "-qm", "change")
+    head = _artifact_git(repo, "rev-parse", "HEAD")
+
+    result = persist_change_artifacts(
+        repo_path=repo,
+        canonical_repo_path=repo,
+        durable_run_root=tmp_path / "durable" / "run-1",
+        baseline_head_sha=baseline,
+        run_head_sha=head,
+        branch="hermes-run/run-1",
+        changed_files=["tracked.txt"],
+        tracked_changed_files=["tracked.txt"],
+        material_changes_present=True,
+    )
+
+    assert result["status"] == "verified"
+    assert result["artifact_type"] == "git_bundle"
+    metadata_path = Path(result["metadata_path"])
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    bundle = metadata_path.parent / payload["artifacts"][0]["path"]
+    assert bundle.exists()
+    assert hashlib.sha256(bundle.read_bytes()).hexdigest() == payload["artifacts"][0]["sha256"]
+    verify = subprocess.run(
+        ["git", "-C", str(repo), "bundle", "verify", str(bundle)],
+        text=True,
+        capture_output=True,
+    )
+    assert verify.returncode == 0
+
+
+def test_change_artifacts_persist_tracked_patch_and_untracked_manifest(tmp_path: Path) -> None:
+    repo = _artifact_repo(tmp_path)
+    head = _artifact_git(repo, "rev-parse", "HEAD")
+    (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    (repo / "new.txt").write_text("new content\n", encoding="utf-8")
+
+    result = persist_change_artifacts(
+        repo_path=repo,
+        canonical_repo_path=repo,
+        durable_run_root=tmp_path / "durable" / "run-2",
+        baseline_head_sha=head,
+        run_head_sha=head,
+        branch="hermes-run/run-2",
+        changed_files=["tracked.txt", "new.txt"],
+        tracked_changed_files=["tracked.txt"],
+        untracked_files=["new.txt"],
+        material_changes_present=True,
+    )
+
+    assert result["status"] == "verified"
+    assert "binary_patch" in result["artifact_type"].split("+")
+    metadata = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+    assert any(item["kind"] == "binary_patch" for item in metadata["artifacts"])
+    manifest = Path(result["metadata_path"]).parent / "untracked-manifest.json"
+    assert json.loads(manifest.read_text(encoding="utf-8"))["files"][0]["path"] == "new.txt"
+    assert (manifest.parent / "untracked" / "new.txt").read_text(encoding="utf-8") == "new content\n"
+
+
+def test_change_artifacts_no_change_is_not_required(tmp_path: Path) -> None:
+    repo = _artifact_repo(tmp_path)
+    head = _artifact_git(repo, "rev-parse", "HEAD")
+
+    result = persist_change_artifacts(
+        repo_path=repo,
+        canonical_repo_path=repo,
+        durable_run_root=tmp_path / "durable" / "run-clean",
+        baseline_head_sha=head,
+        run_head_sha=head,
+        branch="hermes-run/run-clean",
+        changed_files=[],
+        material_changes_present=False,
+    )
+
+    assert result["status"] == "not_required"
+    assert result["verified"] is True
+    assert not (tmp_path / "durable" / "run-clean" / "change-artifact.json").exists()
+
+
+def test_change_artifacts_fail_closed_on_symlink_and_size_limits(tmp_path: Path) -> None:
+    repo = _artifact_repo(tmp_path)
+    head = _artifact_git(repo, "rev-parse", "HEAD")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    (repo / "escape.txt").symlink_to(outside)
+
+    symlink_result = persist_change_artifacts(
+        repo_path=repo,
+        canonical_repo_path=repo,
+        durable_run_root=tmp_path / "durable" / "run-symlink",
+        baseline_head_sha=head,
+        run_head_sha=head,
+        branch="hermes-run/run-symlink",
+        changed_files=["escape.txt"],
+        untracked_files=["escape.txt"],
+        material_changes_present=True,
+    )
+    assert symlink_result["status"] == "artifact_not_persisted"
+    assert symlink_result["reason_code"] == "unsafe_untracked_path"
+
+    (repo / "escape.txt").unlink()
+    (repo / "big.txt").write_text("0123456789", encoding="utf-8")
+    size_result = persist_change_artifacts(
+        repo_path=repo,
+        canonical_repo_path=repo,
+        durable_run_root=tmp_path / "durable" / "run-size",
+        baseline_head_sha=head,
+        run_head_sha=head,
+        branch="hermes-run/run-size",
+        changed_files=["big.txt"],
+        untracked_files=["big.txt"],
+        material_changes_present=True,
+        max_artifact_bytes=4,
+    )
+    assert size_result["status"] == "artifact_not_persisted"
+    assert size_result["reason_code"] == "artifact_too_large"
+
+
+def test_change_artifacts_reject_workspace_not_linked_to_canonical_repo(tmp_path: Path) -> None:
+    workspace = _artifact_repo(tmp_path, "workspace")
+    canonical = _artifact_repo(tmp_path, "canonical")
+    head = _artifact_git(workspace, "rev-parse", "HEAD")
+    (workspace / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = persist_change_artifacts(
+        repo_path=workspace,
+        canonical_repo_path=canonical,
+        durable_run_root=tmp_path / "durable" / "run-unlinked",
+        baseline_head_sha=head,
+        run_head_sha=head,
+        branch="main",
+        changed_files=["tracked.txt"],
+        tracked_changed_files=["tracked.txt"],
+        material_changes_present=True,
+    )
+
+    assert result["status"] == "artifact_not_persisted"
+    assert result["reason_code"] == "workspace_not_linked_to_canonical"
+
+
+def test_change_artifacts_write_failure_is_not_reported_as_verified(tmp_path: Path) -> None:
+    repo = _artifact_repo(tmp_path)
+    head = _artifact_git(repo, "rev-parse", "HEAD")
+    blocked_root = tmp_path / "durable-file"
+    blocked_root.write_text("not a directory\n", encoding="utf-8")
+
+    result = persist_change_artifacts(
+        repo_path=repo,
+        canonical_repo_path=repo,
+        durable_run_root=blocked_root / "run",
+        baseline_head_sha=head,
+        run_head_sha=head,
+        branch="hermes-run/run-write-failure",
+        changed_files=["tracked.txt"],
+        untracked_files=["tracked.txt"],
+        material_changes_present=True,
+    )
+
+    assert result["status"] == "artifact_not_persisted"
+    assert result["verified"] is False
+    assert result["reason_code"] == "artifact_persistence_error"
+
+
+def test_material_change_report_cannot_claim_completion_without_verified_artifact(tmp_path: Path, monkeypatch) -> None:
+    orchestrator = importlib.import_module("hermes_cli.orchestrator")
+    monkeypatch.setattr(orchestrator, "DEFAULT_DURABLE_ROOT", tmp_path / "durable")
+    session = _session_for("engineering_review_pipeline", status="selected")
+    report = {
+        "git_gate": {
+            "material_changes_present": True,
+            "changed_files": ["tracked.txt"],
+            "baseline_head_sha": "a" * 40,
+            "post_head_sha": "b" * 40,
+        },
+        "completion": {
+            "completion_allowed": True,
+            "candidate_complete": True,
+            "blocked_reason": None,
+        },
+        "final_response": {"status": "completed", "text": "Готово"},
+        "status": "completed",
+    }
+
+    artifact = orchestrator._persist_change_artifact_for_run(
+        session=session,
+        helper_execution_context={
+            "repo_path": str(tmp_path / "missing-worktree"),
+            "canonical_repo_path": str(tmp_path / "canonical"),
+        },
+        pipeline_execution_report_payload=report,
+    )
+    assert artifact["status"] == "artifact_not_persisted"
+
+    report["change_artifact"] = safe_change_artifact_metadata(artifact)
+    orchestrator._block_report_for_missing_change_artifact(report)
+
+    assert report["completion"]["completion_allowed"] is False
+    assert report["completion"]["blocked_reason"] == "artifact_not_persisted"
+    assert report["git_gate"]["completion_blocked_reason"] == "artifact_not_persisted"
+    assert report["final_response"]["status"] == "blocked"
+    assert "Готово" not in report["final_response"]["text"]

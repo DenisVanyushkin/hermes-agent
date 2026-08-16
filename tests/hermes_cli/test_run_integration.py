@@ -19,11 +19,13 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.pipeline_autonomous_execution import (
+    build_autonomous_helper_context,
     integrate_run_branch,
     prepare_run_worktree,
     release_run_worktree,
     sweep_run_worktrees,
 )
+from hermes_cli.pipeline_change_artifacts import persist_change_artifacts, verify_change_artifact
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -188,3 +190,75 @@ def test_sweep_leaves_a_worktree_with_uncommitted_work(repo: Path, tmp_path: Pat
 
     assert removed == []
     assert stale.path.exists()
+
+
+def test_sweep_keeps_clean_unlanded_commits_until_artifact_is_verified(repo: Path, tmp_path: Path):
+    runs_root = tmp_path / "runs"
+    stale = prepare_run_worktree(
+        repo_root=repo, workspace=runs_root / "stale-committed", run_id="stale-committed"
+    )
+    (stale.path / "a.py").write_text("committed engineer work\n")
+    _git(stale.path, "add", "a.py")
+    _git(stale.path, "commit", "-qm", "engineer change")
+    import os
+
+    os.utime(stale.path, (1000, 1000))
+
+    removed_without_artifact = sweep_run_worktrees(
+        repo_root=repo,
+        runs_root=runs_root,
+        max_age_seconds=3600,
+        now=100_000,
+        durable_root=tmp_path / "durable",
+    )
+    assert removed_without_artifact == []
+    assert stale.path.exists()
+
+    baseline = _git(repo, "rev-parse", "HEAD")
+    head = _git(stale.path, "rev-parse", "HEAD")
+    persist_change_artifacts(
+        repo_path=stale.path,
+        canonical_repo_path=repo,
+        durable_run_root=tmp_path / "durable" / "stale-committed",
+        baseline_head_sha=baseline,
+        run_head_sha=head,
+        branch=stale.branch,
+        changed_files=["a.py"],
+        tracked_changed_files=["a.py"],
+        material_changes_present=True,
+    )
+    os.utime(stale.path, (1000, 1000))
+
+    removed_with_artifact = sweep_run_worktrees(
+        repo_root=repo,
+        runs_root=runs_root,
+        max_age_seconds=3600,
+        now=100_000,
+        durable_root=tmp_path / "durable",
+    )
+    assert [Path(path).name for path in removed_with_artifact] == ["stale-committed"]
+    assert not stale.path.exists()
+    assert _git(repo, "rev-parse", "--verify", stale.branch)
+    verified, reason = verify_change_artifact(
+        metadata_path=tmp_path / "durable" / "stale-committed" / "change-artifact.json",
+        repo_path=repo,
+        canonical_repo_path=repo,
+    )
+    assert verified is True, reason
+
+
+def test_autonomous_helper_context_resolves_main_checkout_from_linked_worktree(repo: Path, tmp_path: Path):
+    linked = prepare_run_worktree(
+        repo_root=repo, workspace=tmp_path / "runs" / "linked", run_id="linked"
+    )
+    try:
+        helper = build_autonomous_helper_context(
+            config={"pipelines": {"enabled": False}},
+            user_message="inspect linked context",
+            session_id="session-linked",
+            pipeline_session_id="pipeline-linked",
+            repo_root=linked.path,
+        )
+        assert helper["canonical_repo_path"] == str(repo.resolve())
+    finally:
+        release_run_worktree(repo_root=repo, workspace=linked.path, delete_branch=False)

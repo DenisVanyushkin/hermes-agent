@@ -3570,6 +3570,13 @@ def _git_gate_from_snapshots(
         "review_required": bool(git_result.review_required) if git_result is not None else False,
         "completion_blocked_reason": git_result.blocked_reason if git_result is not None else None,
         "changed_files": list(git_result.changed_files) if git_result is not None else [],
+        "tracked_changed_files": list(post_snapshot.tracked_changed_files) if post_snapshot is not None else [],
+        "untracked_files": list(git_result.untracked_files) if git_result is not None else [],
+        "staged_files": list(git_result.staged_files) if git_result is not None else [],
+        "unstaged_files": list(git_result.unstaged_files) if git_result is not None else [],
+        "baseline_head_sha": baseline_snapshot.head_sha,
+        "post_head_sha": post_snapshot.head_sha if post_snapshot is not None else None,
+        "branch": post_snapshot.branch if post_snapshot is not None else None,
         "head_changed": bool(git_result.head_changed) if git_result is not None else False,
         "baseline_dirty": bool(git_result.baseline_dirty if git_result is not None else baseline_snapshot.is_dirty),
     }
