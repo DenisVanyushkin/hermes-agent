@@ -39,7 +39,7 @@ technical_contracts:
     version: 2.0.0
     status: technical_execution_profile
     path: config/product_search/career_profile.v2.yaml
-    sha256: a6a6ea3e5c59ab32de41d3ff4bb863fdd865faf951b9b440b7f657512995cbba
+    sha256: 19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651
     subordinate_to: PS-SOT-2026-08-10-v1
 
 precedence:

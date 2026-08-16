@@ -433,6 +433,54 @@ def test_profile_rejects_statement_broader_than_its_cited_candidate_value() -> N
 
 
 @pytest.mark.parametrize(
+    ("claim_id", "approved_statement", "required_pointers"),
+    [
+        (
+            "growth_and_monetization",
+            "Acquisition, retention, customer lifecycle, pricing, and monetization experience.",
+            {
+                "/core_competencies/1",
+                "/core_competencies/7",
+                "/metrics_index/6",
+                "/experience/5/roles/0/responsibilities/1",
+            },
+        ),
+        (
+            "portfolio_and_transformation",
+            "Product portfolio, go-to-market, organization design, operating-model transformation, and turnaround experience.",
+            {
+                "/experience/0/roles/1/function",
+                "/core_competencies/6",
+                "/experience/0/roles/1/achievements/2/statement",
+                "/core_competencies/4",
+                "/experience/0/roles/1/achievements/0/statement",
+            },
+        ),
+        (
+            "executive_context",
+            "Executive and board-level stakeholder work in B2C digital products and telecom/banking partner environments.",
+            {
+                "/experience/3/roles/0/responsibilities/2",
+                "/candidate/headline",
+                "/experience/1/roles/0/achievements/1/statement",
+            },
+        ),
+    ],
+)
+def test_candidate_claim_clauses_require_complete_exact_pointer_groups(
+    claim_id: str,
+    approved_statement: str,
+    required_pointers: set[str],
+) -> None:
+    """Mutation caught: a clause remains authored without its Candidate Facts evidence."""
+    profile = load_career_profile(PROFILE_PATH)
+    claim = next(item for item in profile.candidate_fact_claims if item.claim_id == claim_id)
+
+    assert claim.statement == approved_statement
+    assert set(claim.candidate_fact_pointers) == required_pointers
+
+
+@pytest.mark.parametrize(
     ("field", "unknown_value"),
     [
         ("mandate_role_families", "invented_executive"),

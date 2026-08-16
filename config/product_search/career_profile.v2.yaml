@@ -68,20 +68,26 @@ candidate_fact_claims:
       - /core_competencies/1
       - /core_competencies/7
       - /metrics_index/6
+      - /experience/5/roles/0/responsibilities/1
     candidate_fact_value_sha256s:
       - 55fe188c35718da2296ba48f75973e2ce8aad4d2e34eceb402e011fb4865cbe0
       - 33e32cb404d4c368fa6f7179a59719a4baa78559a3adfb67b3c365d032f22c3b
       - 4521bb6d470608376231947cffb8256866f6ec74698318bbb877f18d1f4fd760
+      - c7a618c60b8857c201d1405390199d18864150ff53b5d53d35d5cbcac7e0f7e0
   - claim_id: portfolio_and_transformation
     statement: Product portfolio, go-to-market, organization design, operating-model transformation, and turnaround experience.
     candidate_fact_pointers:
-      - /core_competencies/0
+      - /experience/0/roles/1/function
       - /core_competencies/6
-      - /core_competencies/9
+      - /experience/0/roles/1/achievements/2/statement
+      - /core_competencies/4
+      - /experience/0/roles/1/achievements/0/statement
     candidate_fact_value_sha256s:
-      - 5731b64a472a1f2bf77b83b11182ee42846b7123e6337445c0e767e9a01b308d
+      - 8d0004245bf03cdaa4b3514fb28b72dbe75510e5dbd222b6e54a9cf3ee7fa3fc
       - ed7e90d4fc06378ff09c22e27eaa66a27c2e0fa2daff69beca6c56c00ea74c1e
-      - b44084ca9c70c1bbdf2e3be5ea02b4e2406435a7a8112c1d70a0ff9c6513f42f
+      - 26249ffccab9fe05821640fd4f29181730858afc6c2c00f692944011e0439fe4
+      - 6468e7afbca233f934e85a3e666d9caad2d7e88e2291d8ab4f223ba09641f2a0
+      - d39af877b05206ed6e97b239868ff36d72dcdc794d756b50dc2cfe3dff6a7215
   - claim_id: launch_pivot_stop
     statement: New-product and new-business-line launches, strategic pivots, and decisions to stop non-viable initiatives.
     candidate_fact_pointers:
@@ -93,13 +99,15 @@ candidate_fact_claims:
       - 1e9d0f91ffadcbc20212150c970234ac834a1bc4ea1ed93324d94de1394f9e73
       - eb06d39d2445f72c16765ebe831a38ac03aee57e0ec282268ce40ec309fa4ec4
   - claim_id: executive_context
-    statement: Executive and board-level stakeholder work in large-scale consumer products and complex partner environments.
+    statement: Executive and board-level stakeholder work in B2C digital products and telecom/banking partner environments.
     candidate_fact_pointers:
       - /experience/3/roles/0/responsibilities/2
-      - /professional_summary/raw
+      - /candidate/headline
+      - /experience/1/roles/0/achievements/1/statement
     candidate_fact_value_sha256s:
       - 3780748a3d9e4cc390bddc4909c86d19ba7380ad28d7be0c53c8effc098adfc4
-      - 70f8769634036cd3ac923f67dca909732b6dd38ca178f72916f9a8e379f0f73b
+      - f503ef7c1f9fd3340b5c4bce7a82785bc64a754c207a8163ccc859189dacc3bf
+      - 2a2753c1f35866a9696fa653ab92ccc19c4c05f58fc9cab1ff55d870cbe6b269
 
 mandate_role_families:
   - executive_product

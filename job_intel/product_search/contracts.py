@@ -517,11 +517,22 @@ _CANDIDATE_CLAIM_CONTRACT: dict[
     ),
     CandidateClaimId.GROWTH_AND_MONETIZATION: (
         "Acquisition, retention, customer lifecycle, pricing, and monetization experience.",
-        ("/core_competencies/1", "/core_competencies/7", "/metrics_index/6"),
+        (
+            "/core_competencies/1",
+            "/core_competencies/7",
+            "/metrics_index/6",
+            "/experience/5/roles/0/responsibilities/1",
+        ),
     ),
     CandidateClaimId.PORTFOLIO_AND_TRANSFORMATION: (
         "Product portfolio, go-to-market, organization design, operating-model transformation, and turnaround experience.",
-        ("/core_competencies/0", "/core_competencies/6", "/core_competencies/9"),
+        (
+            "/experience/0/roles/1/function",
+            "/core_competencies/6",
+            "/experience/0/roles/1/achievements/2/statement",
+            "/core_competencies/4",
+            "/experience/0/roles/1/achievements/0/statement",
+        ),
     ),
     CandidateClaimId.LAUNCH_PIVOT_STOP: (
         "New-product and new-business-line launches, strategic pivots, and decisions to stop non-viable initiatives.",
@@ -532,7 +543,11 @@ _CANDIDATE_CLAIM_CONTRACT: dict[
         ),
     ),
     CandidateClaimId.EXECUTIVE_CONTEXT: (
-        "Executive and board-level stakeholder work in large-scale consumer products and complex partner environments.",
-        ("/experience/3/roles/0/responsibilities/2", "/professional_summary/raw"),
+        "Executive and board-level stakeholder work in B2C digital products and telecom/banking partner environments.",
+        (
+            "/experience/3/roles/0/responsibilities/2",
+            "/candidate/headline",
+            "/experience/1/roles/0/achievements/1/statement",
+        ),
     ),
 }
