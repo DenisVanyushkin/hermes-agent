@@ -43,9 +43,12 @@ All commits are on the isolated branch and are reachable from the baseline:
 | `d3af301dda` | `fix(diagnostics): publish atomic collector lifecycle status` |
 | `61b60630e8` | `test(pipeline): align observe artifact report contract` |
 | `f35f888cd0` | `fix(diagnostics): narrow parsed log entries before comparison` |
+| `e05d5eb68b` | `docs(ops): document engineering diagnostics recovery` |
+| `b8083f4033` | `docs(ops): clean rollout report formatting` |
 
-The report and operator runbook are included together in the final
-documentation commit at the tip of this branch.
+The implementation and operator-documentation commits above are all reachable
+from the branch tip. Any later commit that only refreshes this report's
+metadata does not change runtime behavior.
 
 ## Verification evidence
 
