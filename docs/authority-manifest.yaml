@@ -41,6 +41,13 @@ technical_contracts:
     path: config/product_search/career_profile.v2.yaml
     sha256: 19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651
     subordinate_to: PS-SOT-2026-08-10-v1
+  decision_contract_v2:
+    version: 2.0.0
+    status: deterministic_product_decision_policy
+    path: config/product_search/decision_contract.v2.yaml
+    sha256: eca44bcf1049d51745661e8911f5629037b2a5a00b70024dc5fe72b80b2b5aa8
+    subordinate_to: PS-SOT-2026-08-10-v1
+    canonical_stage_authority: hard_gate_eligible
 
 precedence:
   - candidate_facts_for_candidate_experience

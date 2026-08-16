@@ -1,0 +1,89 @@
+schema_version: 2.0.0
+product_authority_id: PS-SOT-2026-08-10-v1
+policy_version: product-search-decision-v2.0.0
+
+authority_hashes:
+  product_contract_sha256: 8eb49dbb31a72321a874db35c7a4bdf94036a238dc486107e10013a4416d83c0
+  career_profile_sha256: 19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651
+  candidate_facts_sha256: 7219eea2fbf04c92291254f83a76b8d2d1ef53e6004ac64ff4601c726eb9fac9
+  search_contract_sha256: faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1
+  product_sot_sha256: 430340de2613ee733926d73ce276c93676fe64b1841bb2f68f3f9303b61fc3a8
+  company_evidence_contract_sha256: 4ea5a5ff3eb66340edfb57796efb0ffc6832a5fd70d18d26afe96554ba27cd32
+  evidence_synthesis_contract_sha256: 6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f
+
+provider_identity:
+  provider_id: llm-observation
+  provider_version: product-search-evidence-replay/1.0
+  model_id: openai/gpt-5-mini
+  semantic_prompt_version: llm-obs-1.0.0
+  prompt_version: product-search-evidence-synthesis-1.0.0
+  schema_version: 1.0.0
+
+positive_claims:
+  feasibility:
+    - feasible_work_arrangement_explicit
+    - remote_us_country_eligible_explicit
+  mandate_fit:
+    - material_business_ownership_explicit
+    - gm_digital_business_ownership_explicit
+  company_fit:
+    - useful_company_context_explicit
+  transferability:
+    - transferable_strengths_supported
+  career_value:
+    - career_scope_improves_explicit
+  evidence_confidence:
+    - evidence_complete_explicit
+
+negative_claims:
+  feasibility: []
+  mandate_fit: []
+  company_fit:
+    - strategically_weak_company_explicit
+  transferability:
+    - non_transferable_gap_explicit
+  career_value:
+    - career_scope_regresses_explicit
+  evidence_confidence: []
+
+hard_gate_claims:
+  sanctioned_environment_explicit: sanctioned_or_clearly_unstable_environment
+  africa_proactive_search_explicit: africa_as_proactive_search_region
+  us_onsite_without_sponsorship_explicit: us_onsite_or_hybrid_without_explicit_sponsorship
+  no_work_authorization_path_explicit: onsite_or_hybrid_with_explicitly_no_viable_work_authorization_path
+  below_executive_scope_explicit: below_minimum_executive_scope
+  non_product_without_business_ownership_explicit: non_product_function_without_real_digital_business_ownership
+  non_transferable_domain_or_language_explicit: non_transferable_required_domain_or_language
+  pure_delivery_scope_explicit: pure_delivery_project_or_program_ownership
+  platform_engineering_without_business_ownership: internal_tools_infrastructure_or_back_office_without_business_scope
+
+warning_claims:
+  crypto_employer_observed: crypto_employer_company_risk_review
+  b2b_model_observed: b2b_context_requires_scope_review_not_penalty
+
+qualified_questions:
+  - question_code: clarify_work_format
+    dimension: feasibility
+    question: Is the role remote or office-based?
+    action_kind: feasibility
+    material: true
+    bounded: true
+    realistically_resolvable: true
+  - question_code: clarify_reporting_line
+    dimension: evidence_confidence
+    question: What is the role's reporting line?
+    action_kind: research
+    material: true
+    bounded: true
+    realistically_resolvable: true
+
+urgency_claims:
+  explicit_closing_date_within_48_hours: closing_within_48_hours_explicit
+  confirmed_short_referral_or_outreach_window: short_referral_window_confirmed
+  recruiter_deadline: recruiter_deadline_explicit
+  limited_intake: limited_intake_explicit
+  confirmed_rapidly_closing_shortlist: rapidly_closing_shortlist_confirmed
+
+monetization_exception_claims:
+  - material_revenue_authority_explicit
+  - strategic_leverage_explicit
