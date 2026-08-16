@@ -129,8 +129,10 @@ def extract_log_findings(lines, since: datetime) -> list[dict]:
     buckets: dict[str, dict] = {}
     for raw in lines:
         parsed = parse_log_line(raw)
-        parsed_ts = _as_aware_utc(parsed["ts"]) if parsed else None
-        if not parsed or parsed_ts < since_utc:
+        if not parsed:
+            continue
+        parsed_ts = _as_aware_utc(parsed["ts"])
+        if parsed_ts < since_utc:
             continue
         if parsed["level"] not in ("ERROR", "WARNING", "CRITICAL"):
             continue
@@ -151,8 +153,10 @@ def memory_trend(lines, since: datetime) -> dict | None:
     values: list[int] = []
     for raw in lines:
         parsed = parse_log_line(raw)
-        parsed_ts = _as_aware_utc(parsed["ts"]) if parsed else None
-        if not parsed or parsed_ts < since_utc:
+        if not parsed:
+            continue
+        parsed_ts = _as_aware_utc(parsed["ts"])
+        if parsed_ts < since_utc:
             continue
         match = MEMORY_RE.search(parsed["rest"])
         if match:
