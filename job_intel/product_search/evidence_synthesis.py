@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 import re
 import time
-from typing import Any, Literal, Protocol, Self
+from typing import Any, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -28,6 +28,7 @@ from job_intel.product_search.contracts import (
     SHA256_PATTERN,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    LLMObservationProvider,
     LLMProviderError,
     RecordingStore,
 )
@@ -38,9 +39,6 @@ DEFAULT_POLICY_PATH = (
     / "config/product_search/evidence_synthesis.v1.yaml"
 )
 OUTPUT_SCHEMA_VERSION = "1.0.0"
-PROMPT_VERSION = "product-search-evidence-synthesis-1.0.0"
-PROVIDER_RUNTIME = "semantic-contract-recording"
-PROVIDER_VERSION = "semantic-runtime-recording/1.0"
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _PRIVATE_MARKERS = ("hermes-private://", "user note", "private resume")
 
@@ -157,12 +155,41 @@ class EvidenceFragmentV1(_StrictFrozenModel):
         return self
 
 
+class VacancyEvidenceArtifactFragmentV1(_StrictFrozenModel):
+    source_locator: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_redacted_fragment(self) -> Self:
+        _canonical_text(self.source_locator, "source_locator")
+        _canonical_text(self.text, "text")
+        return self
+
+
+class VacancyEvidenceArtifactV1(_StrictFrozenModel):
+    """Closed redacted vacancy artifact resolved by an immutable byte hash."""
+
+    schema_version: Literal["1.0.0"]
+    artifact_id: str = Field(min_length=1)
+    artifact_version: str
+    redaction_state: Literal["shareable_redacted"]
+    fragments: tuple[VacancyEvidenceArtifactFragmentV1, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_locators(self) -> Self:
+        locators = [fragment.source_locator for fragment in self.fragments]
+        if len(locators) != len(set(locators)):
+            raise ValueError("vacancy artifact fragments contain duplicate locators")
+        return self
+
+
 class EvidenceSynthesisInputV1(_StrictFrozenModel):
     schema_version: Literal["1.0.0"]
     assessment_input: AssessmentInputV1
     career_profile: CareerProfileV2
     company_evidence_bundle: CompanyEvidenceBundleV1
     fragments: tuple[EvidenceFragmentV1, ...] = Field(min_length=1)
+    vacancy_artifacts_root: Path
 
     @property
     def company_evidence_ref(self) -> ImmutableArtifactRef:
@@ -199,6 +226,30 @@ class EvidenceSynthesisInputV1(_StrictFrozenModel):
             claim.claim_id.value: claim for claim in self.career_profile.candidate_fact_claims
         }
         vacancy_refs = set(self.company_evidence_bundle.vacancy_evidence_refs)
+        vacancy_artifacts: dict[
+            ImmutableArtifactRef, dict[str, VacancyEvidenceArtifactFragmentV1]
+        ] = {}
+        for vacancy_ref in vacancy_refs:
+            artifact_path = self.vacancy_artifacts_root / f"{vacancy_ref.sha256}.json"
+            try:
+                artifact_bytes = artifact_path.read_bytes()
+            except OSError as exc:
+                raise ValueError("vacancy evidence artifact is unavailable") from exc
+            if hashlib.sha256(artifact_bytes).hexdigest() != vacancy_ref.sha256:
+                raise ValueError("vacancy evidence artifact sha256 does not match reference")
+            try:
+                artifact_payload = json.loads(artifact_bytes)
+                artifact = VacancyEvidenceArtifactV1.model_validate(artifact_payload)
+            except Exception as exc:
+                raise ValueError("vacancy evidence artifact violates closed schema") from exc
+            if (
+                artifact.artifact_id != vacancy_ref.artifact_id
+                or artifact.artifact_version != vacancy_ref.version
+            ):
+                raise ValueError("vacancy evidence artifact identity does not match reference")
+            vacancy_artifacts[vacancy_ref] = {
+                item.source_locator: item for item in artifact.fragments
+            }
         authorized_fragment_ids: set[str] = set()
         unknown_locators: dict[EvidenceDimension, set[str]] = {}
 
@@ -223,6 +274,11 @@ class EvidenceSynthesisInputV1(_StrictFrozenModel):
             if fragment.source_kind is EvidenceSourceKind.VACANCY:
                 if fragment.artifact_ref not in vacancy_refs:
                     raise ValueError("vacancy fragment weakens immutable vacancy reference")
+                artifact_fragment = vacancy_artifacts[fragment.artifact_ref].get(
+                    fragment.source_locator
+                )
+                if artifact_fragment is None or artifact_fragment.text != fragment.text:
+                    raise ValueError("vacancy evidence artifact fragment is mismatched")
             elif fragment.source_kind is EvidenceSourceKind.COMPANY:
                 if fragment.artifact_ref != self.company_evidence_ref:
                     raise ValueError("company fragment weakens company evidence bundle hash")
@@ -285,7 +341,10 @@ class QuestionTemplateV1(_StrictFrozenModel):
 class EvidenceSynthesisPolicyV1(_StrictFrozenModel):
     schema_version: Literal["1.0.0"]
     product_authority_id: Literal["PS-SOT-2026-08-10-v1"]
-    provider_runtime: Literal["semantic-contract-recording"]
+    provider_runtime: Literal["llm-observation"]
+    provider_adapter_version: Literal["product-search-evidence-replay/1.0"]
+    semantic_prompt_version: Literal["llm-obs-1.0.0"]
+    model_id: Literal["openai/gpt-5-mini"]
     prompt_version: Literal["product-search-evidence-synthesis-1.0.0"]
     output_schema_version: Literal["1.0.0"]
     dimensions: tuple[EvidenceDimension, ...]
@@ -417,6 +476,7 @@ class EvidenceSynthesisMetadataV1(_StrictFrozenModel):
     provider_id: str
     provider_version: str
     model_id: str
+    semantic_prompt_version: str
     prompt_version: str
     schema_version: Literal["1.0.0"]
     latency_ms: int = Field(ge=0)
@@ -445,23 +505,14 @@ class EvidenceSynthesisResultV1(_StrictFrozenModel):
         return self
 
 
-class EvidenceSynthesisProvider(Protocol):
-    provider_id: str
-    provider_version: str
-    model_id: str
-    prompt_version: str
-    last_call_metadata: dict[str, Any]
-
-    def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object: ...
-
-
 def synthesis_input_sha256(
-    input_payload: dict[str, Any], *, provider: EvidenceSynthesisProvider
+    input_payload: dict[str, Any], *, provider: RecordedEvidenceSynthesisProvider
 ) -> str:
     envelope = {
         "provider_id": provider.provider_id,
         "provider_version": provider.provider_version,
         "model_id": provider.model_id,
+        "semantic_prompt_version": provider.semantic_prompt_version,
         "prompt_version": provider.prompt_version,
         "schema_version": OUTPUT_SCHEMA_VERSION,
         "input": input_payload,
@@ -472,13 +523,29 @@ def synthesis_input_sha256(
 class RecordedEvidenceSynthesisProvider:
     """Offline-only Task 10 adapter over the existing Semantic recording store."""
 
-    provider_id = PROVIDER_RUNTIME
-    provider_version = PROVIDER_VERSION
-    prompt_version = PROMPT_VERSION
-
-    def __init__(self, *, store: RecordingStore, model_id: str) -> None:
-        self.store = store
-        self.model_id = model_id
+    def __init__(
+        self,
+        *,
+        semantic_provider: LLMObservationProvider,
+        policy: EvidenceSynthesisPolicyV1,
+    ) -> None:
+        if not isinstance(semantic_provider, LLMObservationProvider):
+            raise TypeError("governed Semantic provider must be LLMObservationProvider")
+        if semantic_provider.mode != "replay":
+            raise ValueError("evidence synthesis accepts only offline Semantic replay")
+        if (
+            semantic_provider.provider_id != policy.provider_runtime
+            or semantic_provider.prompt_version != policy.semantic_prompt_version
+            or semantic_provider.model_id != policy.model_id
+        ):
+            raise ValueError("governed Semantic provider identity does not match policy")
+        self.semantic_provider = semantic_provider
+        self.store = semantic_provider.store
+        self.provider_id = semantic_provider.provider_id
+        self.provider_version = policy.provider_adapter_version
+        self.model_id = semantic_provider.model_id
+        self.semantic_prompt_version = semantic_provider.prompt_version
+        self.prompt_version = policy.prompt_version
         self.last_call_metadata: dict[str, Any] = {}
 
     def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
@@ -488,10 +555,15 @@ class RecordedEvidenceSynthesisProvider:
             ("provider_id", self.provider_id),
             ("provider_version", self.provider_version),
             ("model_id", self.model_id),
+            ("semantic_prompt_version", self.semantic_prompt_version),
             ("prompt_version", self.prompt_version),
         ):
             if record.get(field) != expected:
                 raise LLMProviderError("provider_metadata_mismatch", field)
+        self.last_call_metadata = {
+            "latency_ms": record.get("latency_ms", 0),
+            "cost_usd": record.get("cost_usd"),
+        }
         if record.get("error"):
             error_detail = str(record["error"])
             recorded_reason = error_detail.split(":", 1)[0]
@@ -504,19 +576,15 @@ class RecordedEvidenceSynthesisProvider:
             }:
                 recorded_reason = "recorded_call_failed"
             raise LLMProviderError(recorded_reason, error_detail)
-        self.last_call_metadata = {
-            "latency_ms": record.get("latency_ms", 0),
-            "cost_usd": record.get("cost_usd"),
-        }
         try:
             return json.loads(record["raw_response_text"])
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMProviderError("schema_invalid", "recorded JSON is invalid") from exc
 
 
-def _normalized_key(value: str) -> tuple[str, str]:
-    snake = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
-    return snake, snake.replace("_", "")
+def _normalized_key(value: str) -> str:
+    """Canonical key space: exact alphanumerics, case/separators ignored."""
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
 
 
 def _find_forbidden_field(value: object, forbidden_fields: tuple[str, ...]) -> str | None:
@@ -548,7 +616,7 @@ def _safe_output_sha256(value: object | None) -> str:
 
 def _metadata(
     *,
-    provider: EvidenceSynthesisProvider,
+    provider: RecordedEvidenceSynthesisProvider,
     input_hash: str,
     output_hash: str,
     elapsed_ms: int,
@@ -564,6 +632,7 @@ def _metadata(
         provider_id=provider.provider_id,
         provider_version=provider.provider_version,
         model_id=provider.model_id,
+        semantic_prompt_version=provider.semantic_prompt_version,
         prompt_version=provider.prompt_version,
         schema_version=OUTPUT_SCHEMA_VERSION,
         latency_ms=latency,
@@ -576,7 +645,7 @@ def _metadata(
 def _failure(
     status: EvidenceSynthesisStatus,
     *,
-    provider: EvidenceSynthesisProvider,
+    provider: RecordedEvidenceSynthesisProvider,
     input_hash: str,
     output_hash: str,
     elapsed_ms: int,
@@ -645,13 +714,15 @@ def _validate_provider_payload(
         )
         if citation_failure is not None:
             return citation_failure
-        supported = any(
-            allowed.claim_code == claim.claim_code
-            and allowed.dimension is claim.dimension
-            and allowed.status is claim.status
-            and allowed.statement == claim.statement
+        supported = all(
+            any(
+                allowed.claim_code == claim.claim_code
+                and allowed.dimension is claim.dimension
+                and allowed.status is claim.status
+                and allowed.statement == claim.statement
+                for allowed in fragments_by_id[citation].allowed_claims
+            )
             for citation in claim.citations
-            for allowed in fragments_by_id[citation].allowed_claims
         )
         if not supported:
             return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
@@ -677,6 +748,12 @@ def _validate_provider_payload(
             for citation in claim.citations
         }
         if not set(conflict.citations).issubset(cited_by_claims):
+            return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+        if any(
+            not set(claim.citations).intersection(conflict.citations)
+            for claim in conflict_claims
+            if claim is not None
+        ):
             return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
 
     templates = {
@@ -722,17 +799,24 @@ def _status_for_provider_error(error: Exception) -> EvidenceSynthesisStatus:
 def run_evidence_synthesis(
     *,
     synthesis_input: EvidenceSynthesisInputV1,
-    provider: EvidenceSynthesisProvider,
+    provider: RecordedEvidenceSynthesisProvider,
     policy: EvidenceSynthesisPolicyV1 | None = None,
 ) -> EvidenceSynthesisResultV1:
     """Run one bounded synthesis; every failure returns non-deliverable data."""
     policy = policy or load_evidence_synthesis_policy()
+    if not isinstance(provider, RecordedEvidenceSynthesisProvider):
+        raise TypeError(
+            "governed Semantic provider requires RecordedEvidenceSynthesisProvider"
+        )
     input_payload = synthesis_input.provider_payload()
     input_hash = synthesis_input_sha256(input_payload, provider=provider)
     started = time.monotonic()
 
     if (
         provider.provider_id != policy.provider_runtime
+        or provider.provider_version != policy.provider_adapter_version
+        or provider.semantic_prompt_version != policy.semantic_prompt_version
+        or provider.model_id != policy.model_id
         or provider.prompt_version != policy.prompt_version
     ):
         return _failure(

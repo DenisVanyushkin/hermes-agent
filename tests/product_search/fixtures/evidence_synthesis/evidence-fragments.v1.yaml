@@ -4,7 +4,7 @@ fragments:
     artifact_ref: &vacancy_ref
       artifact_id: vacancy-evidence:redacted-001
       version: 1.0.0
-      sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      sha256: 652764df4ebc272fdc96b966cac79551df4ec2af7dcc0b365f8085374174306e
     source_kind: vacancy
     source_locator: vacancy:work-format
     permitted_dimensions: [feasibility]
@@ -55,7 +55,7 @@ fragments:
     artifact_ref:
       artifact_id: company-evidence:northstar-commerce:2026-08-10
       version: 1.0.0
-      sha256: 340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a
+      sha256: dbcd9c0ec0fb621b6a949fca9d3df2ea2b3b925ea1a2b84908b4602e0f7db41e
     source_kind: company
     source_locator: evidence:northstar:need:1
     permitted_dimensions: [company_fit]

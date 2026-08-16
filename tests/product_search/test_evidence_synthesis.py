@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 import pytest
@@ -27,9 +28,12 @@ from job_intel.product_search.evidence_synthesis import (
     RecordedEvidenceSynthesisProvider,
     load_evidence_synthesis_policy,
     run_evidence_synthesis,
+    synthesis_input_sha256,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
-    LLMProviderError,
+    DEFAULT_MODEL_ID,
+    LLM_PROMPT_VERSION,
+    LLMObservationProvider,
     RecordingStore,
 )
 
@@ -42,7 +46,10 @@ COMPANY_BUNDLE = (
 )
 PROFILE = ROOT / "config/product_search/career_profile.v2.yaml"
 POLICY = ROOT / "config/product_search/evidence_synthesis.v1.yaml"
-GOLDEN_INPUT_HASH = "4d0e7ac649071a8eae1cb316fc4d4e4c087a73758a677441aa7bfa77ecd40b06"
+VACANCY_ARTIFACT_SHA256 = (
+    "652764df4ebc272fdc96b966cac79551df4ec2af7dcc0b365f8085374174306e"
+)
+GOLDEN_INPUT_HASH = "dbde1d7461fa4a22878da6af6736ab1da35720d2b596c4d467ac2668ba192601"
 GOLDEN_OUTPUT_HASH = "d20c91b80ea13da0f5123dab03cc5b4b179b9b00c13d14942c2bf01e51460751"
 
 
@@ -137,12 +144,32 @@ def _input() -> EvidenceSynthesisInputV1:
     profile = CareerProfileV2.model_validate(
         yaml.safe_load(PROFILE.read_text(encoding="utf-8"))
     )
+    bundle_payload = yaml.safe_load(COMPANY_BUNDLE.read_text(encoding="utf-8"))
+    bundle_payload["vacancy_evidence_refs"][0]["sha256"] = VACANCY_ARTIFACT_SHA256
+    bundle_payload["content_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                key: value
+                for key, value in bundle_payload.items()
+                if key != "content_sha256"
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=lambda item: item.isoformat().replace("+00:00", "Z"),
+        ).encode("utf-8")
+    ).hexdigest()
+    company_bundle = load_company_evidence_bundle(
+        bundle_payload,
+        artifacts_root=COMPANY_BUNDLE.parent / "sources",
+    )
     return EvidenceSynthesisInputV1(
         schema_version="1.0.0",
         assessment_input=_assessment(),
         career_profile=profile,
-        company_evidence_bundle=load_company_evidence_bundle(COMPANY_BUNDLE),
+        company_evidence_bundle=company_bundle,
         fragments=fragments,
+        vacancy_artifacts_root=FIXTURES / "vacancy-artifacts",
     )
 
 
@@ -152,37 +179,97 @@ def _golden_output() -> dict[str, Any]:
     )
 
 
-class _FixtureProvider:
+class _ArbitraryProvider:
     provider_id = "semantic-contract-recording"
     provider_version = "semantic-runtime-recording/1.0"
     model_id = "fixture-model-1"
     prompt_version = "product-search-evidence-synthesis-1.0.0"
 
-    def __init__(
-        self,
-        payload: object | None = None,
-        *,
-        error: Exception | None = None,
-    ) -> None:
-        self.payload = _golden_output() if payload is None else payload
-        self.error = error
+    def __init__(self) -> None:
+        self.payload = _golden_output()
         self.last_call_metadata = {
             "latency_ms": 37,
             "cost_usd": "0.000321",
         }
 
     def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
-        if self.error is not None:
-            raise self.error
         return deepcopy(self.payload)
 
 
-def _run(payload: object | None = None):
-    return run_evidence_synthesis(
-        synthesis_input=_input(),
-        provider=_FixtureProvider(payload),
-        policy=load_evidence_synthesis_policy(POLICY),
+def _adapter(
+    store: RecordingStore,
+    *,
+    policy=None,
+) -> RecordedEvidenceSynthesisProvider:
+    policy = policy or load_evidence_synthesis_policy(POLICY)
+    semantic_provider = LLMObservationProvider(
+        store=store,
+        mode="replay",
+        model_id=DEFAULT_MODEL_ID,
+        prompt_version=LLM_PROMPT_VERSION,
     )
+    return RecordedEvidenceSynthesisProvider(
+        semantic_provider=semantic_provider,
+        policy=policy,
+    )
+
+
+def _run(
+    payload: object | None = None,
+    *,
+    synthesis_input: EvidenceSynthesisInputV1 | None = None,
+    recorded_error: str | None = None,
+):
+    synthesis_input = synthesis_input or _input()
+    policy = load_evidence_synthesis_policy(POLICY)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        store = RecordingStore(temp_dir)
+        provider = _adapter(store, policy=policy)
+        input_hash = synthesis_input_sha256(
+            synthesis_input.provider_payload(), provider=provider
+        )
+        response_payload = _golden_output() if payload is None else payload
+        raw = json.dumps(
+            response_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        store.save(
+            {
+                "recording_format_version": "1.0",
+                "input_hash": input_hash,
+                "provider_id": provider.provider_id,
+                "provider_version": provider.provider_version,
+                "model_id": provider.model_id,
+                "semantic_prompt_version": provider.semantic_prompt_version,
+                "prompt_version": provider.prompt_version,
+                "raw_response_text": raw if recorded_error is None else "",
+                "response_hash": hashlib.sha256(
+                    (raw if recorded_error is None else "").encode("utf-8")
+                ).hexdigest(),
+                "latency_ms": 37,
+                "cost_usd": "0.000321",
+                "error": recorded_error,
+            }
+        )
+        return run_evidence_synthesis(
+            synthesis_input=synthesis_input,
+            provider=provider,
+            policy=policy,
+        )
+
+
+def _input_with_remote_confirmation() -> EvidenceSynthesisInputV1:
+    payload = _input().model_dump(mode="json")
+    confirmation = deepcopy(payload["fragments"][0])
+    confirmation["fragment_id"] = "vacancy:remote-format-confirmation"
+    confirmation["source_locator"] = "vacancy:work-format-confirmation"
+    payload["fragments"].append(confirmation)
+    payload["assessment_input"]["dimensions"]["feasibility"][
+        "evidence_refs"
+    ].append(confirmation["fragment_id"])
+    return EvidenceSynthesisInputV1.model_validate(payload)
 
 
 def test_six_dimension_result_is_cited_bounded_and_audit_complete() -> None:
@@ -213,9 +300,10 @@ def test_six_dimension_result_is_cited_bounded_and_audit_complete() -> None:
         "clarify_work_format",
     ]
     assert result.metadata.model_dump(mode="json") == {
-        "provider_id": "semantic-contract-recording",
-        "provider_version": "semantic-runtime-recording/1.0",
-        "model_id": "fixture-model-1",
+        "provider_id": "llm-observation",
+        "provider_version": "product-search-evidence-replay/1.0",
+        "model_id": "openai/gpt-5-mini",
+        "semantic_prompt_version": "llm-obs-1.0.0",
         "prompt_version": "product-search-evidence-synthesis-1.0.0",
         "schema_version": "1.0.0",
         "latency_ms": 37,
@@ -229,7 +317,12 @@ def test_six_dimension_result_is_cited_bounded_and_audit_complete() -> None:
     "forbidden_payload",
     [
         {"system_verdict": "Priority"},
+        {"analysis": {"SystemVerdict": "Priority"}},
         {"analysis": {"selection_mode": "Core"}},
+        {"wrapper": [{"SelectionMode": "Core"}]},
+        {"wrapper": [{"deliveryInstruction": "send"}]},
+        {"wrapper": [{"hardGateOutcome": "pass"}]},
+        {"wrapper": [{"stage4": {"urgency": "high"}}]},
         {"wrapper": [{"delivery_instruction": "send to Slack"}]},
         {"wrapper": {"stage_4": {"urgency": "high"}}},
         {"crm": {"user_decision": "Pursue"}},
@@ -268,6 +361,19 @@ def test_closed_schema_rejects_unknown_fields_at_each_result_level() -> None:
         assert result.deliverable is False
 
 
+def test_forbidden_alias_matching_does_not_use_broad_substrings() -> None:
+    """Mutation caught: substring matching misclassifies descriptive extra fields."""
+    payload = _golden_output()
+    payload["provider_commentary"] = {
+        "SystemVerdictExplanation": "descriptive extra, still schema-invalid"
+    }
+
+    result = _run(payload)
+
+    assert result.status is EvidenceSynthesisStatus.INVALID_SCHEMA
+    assert result.deliverable is False
+
+
 def test_missing_and_foreign_dimension_citations_fail_closed() -> None:
     """Mutation caught: a missing or cross-dimension citation supports a claim."""
     missing = _golden_output()
@@ -277,6 +383,58 @@ def test_missing_and_foreign_dimension_citations_fail_closed() -> None:
     foreign = _golden_output()
     foreign["claims"][0]["citations"] = ["vacancy:hq-new-york"]
     assert _run(foreign).status is EvidenceSynthesisStatus.FOREIGN_CITATION
+
+
+def test_every_claim_citation_must_authorize_the_claim() -> None:
+    """Mutation caught: existential support admits an irrelevant extra citation."""
+    payload = _golden_output()
+    payload["claims"][0]["citations"] = [
+        "vacancy:remote-format",
+        "vacancy:office-format",
+    ]
+
+    result = _run(payload)
+
+    assert result.status is EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    assert result.deliverable is False
+
+
+def test_conflict_must_cite_support_for_each_referenced_claim() -> None:
+    """Mutation caught: aggregate citation union omits support for one conflict claim."""
+    synthesis_input = _input_with_remote_confirmation()
+    payload = _golden_output()
+    payload["claims"][0]["citations"] = [
+        "vacancy:remote-format",
+        "vacancy:remote-format-confirmation",
+    ]
+    payload["conflicts"][0]["citations"] = [
+        "vacancy:remote-format",
+        "vacancy:remote-format-confirmation",
+    ]
+
+    result = _run(payload, synthesis_input=synthesis_input)
+
+    assert result.status is EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    assert result.deliverable is False
+
+
+def test_multi_citation_claim_and_conflict_are_valid_when_each_is_supported() -> None:
+    """Mutation caught: universal checks reject a fully supported multi-citation result."""
+    synthesis_input = _input_with_remote_confirmation()
+    payload = _golden_output()
+    payload["claims"][0]["citations"] = [
+        "vacancy:remote-format",
+        "vacancy:remote-format-confirmation",
+    ]
+    payload["conflicts"][0]["citations"] = [
+        "vacancy:remote-format-confirmation",
+        "vacancy:office-format",
+    ]
+
+    result = _run(payload, synthesis_input=synthesis_input)
+
+    assert result.status is EvidenceSynthesisStatus.DELIVERABLE
+    assert result.deliverable is True
 
 
 def test_adversarial_fact_substitutions_never_become_deliverable() -> None:
@@ -316,29 +474,21 @@ def test_six_dimensions_and_question_limits_are_enforced() -> None:
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        (TimeoutError("provider timed out"), EvidenceSynthesisStatus.TIMEOUT),
-        (ConnectionError("provider unavailable"), EvidenceSynthesisStatus.PROVIDER_OUTAGE),
-        (LLMProviderError("refusal", "policy refusal"), EvidenceSynthesisStatus.REFUSAL),
+        ("timeout: provider timed out", EvidenceSynthesisStatus.TIMEOUT),
+        ("provider_outage: unavailable", EvidenceSynthesisStatus.PROVIDER_OUTAGE),
+        ("refusal: policy refusal", EvidenceSynthesisStatus.REFUSAL),
         (
-            LLMProviderError("schema_invalid", "structured output mismatch"),
+            "schema_invalid: structured output mismatch",
             EvidenceSynthesisStatus.INVALID_SCHEMA,
-        ),
-        (
-            LLMProviderError("provider_outage", "transport unavailable"),
-            EvidenceSynthesisStatus.PROVIDER_OUTAGE,
         ),
     ],
 )
 def test_provider_failures_are_explicit_non_deliverable_results(
-    error: Exception,
+    error: str,
     expected: EvidenceSynthesisStatus,
 ) -> None:
     """Mutation caught: provider failure falls back to a legacy evaluator."""
-    result = run_evidence_synthesis(
-        synthesis_input=_input(),
-        provider=_FixtureProvider(error=error),
-        policy=load_evidence_synthesis_policy(POLICY),
-    )
+    result = _run(recorded_error=error)
     assert result.status is expected
     assert result.deliverable is False
     assert result.claims == ()
@@ -355,13 +505,13 @@ def test_task8_and_task9_references_and_fragment_hashes_remain_authoritative() -
         synthesis_input.career_profile.authorities.candidate_facts_ref
     )
     assert synthesis_input.company_evidence_bundle.content_sha256 == (
-        "340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a"
+        "dbcd9c0ec0fb621b6a949fca9d3df2ea2b3b925ea1a2b84908b4602e0f7db41e"
     )
     assert synthesis_input.company_evidence_bundle.vacancy_evidence_refs == (
         ImmutableArtifactRef(
             artifact_id="vacancy-evidence:redacted-001",
             version="1.0.0",
-            sha256="d" * 64,
+            sha256=VACANCY_ARTIFACT_SHA256,
         ),
     )
 
@@ -387,20 +537,37 @@ def test_task8_and_task9_references_and_fragment_hashes_remain_authoritative() -
         EvidenceSynthesisInputV1.model_validate(payload)
 
 
+def test_recomputed_hash_cannot_admit_invented_vacancy_text() -> None:
+    """Mutation caught: caller rewrites vacancy text and recomputes local hashes."""
+    payload = _input().model_dump(mode="json")
+    invented = "Role guarantees global P&L ownership."
+    payload["fragments"][0]["text"] = invented
+    payload["fragments"][0]["text_sha256"] = hashlib.sha256(
+        invented.encode("utf-8")
+    ).hexdigest()
+    payload["fragments"][0]["allowed_claims"][0]["statement"] = invented
+
+    with pytest.raises(ValidationError, match="vacancy evidence artifact"):
+        EvidenceSynthesisInputV1.model_validate(payload)
+
+
 def test_golden_recording_replays_offline_with_exact_hashes(tmp_path: Path) -> None:
     """Mutation caught: replay performs network I/O or accepts altered recording bytes."""
     raw = json.dumps(
         _golden_output(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
+    policy = load_evidence_synthesis_policy(POLICY)
     store = RecordingStore(tmp_path)
+    provider = _adapter(store, policy=policy)
     store.save(
         {
             "recording_format_version": "1.0",
             "input_hash": GOLDEN_INPUT_HASH,
-            "provider_id": "semantic-contract-recording",
-            "provider_version": "semantic-runtime-recording/1.0",
-            "model_id": "fixture-model-1",
-            "prompt_version": "product-search-evidence-synthesis-1.0.0",
+            "provider_id": provider.provider_id,
+            "provider_version": provider.provider_version,
+            "model_id": provider.model_id,
+            "semantic_prompt_version": provider.semantic_prompt_version,
+            "prompt_version": provider.prompt_version,
             "raw_response_text": raw,
             "response_hash": GOLDEN_OUTPUT_HASH,
             "latency_ms": 37,
@@ -408,15 +575,10 @@ def test_golden_recording_replays_offline_with_exact_hashes(tmp_path: Path) -> N
             "error": None,
         }
     )
-    provider = RecordedEvidenceSynthesisProvider(
-        store=store,
-        model_id="fixture-model-1",
-    )
-
     result = run_evidence_synthesis(
         synthesis_input=_input(),
         provider=provider,
-        policy=load_evidence_synthesis_policy(POLICY),
+        policy=policy,
     )
 
     assert result.status is EvidenceSynthesisStatus.DELIVERABLE
@@ -426,15 +588,18 @@ def test_golden_recording_replays_offline_with_exact_hashes(tmp_path: Path) -> N
 
 def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> None:
     """Mutation caught: replay collapses a recorded refusal into provider_error."""
+    policy = load_evidence_synthesis_policy(POLICY)
     store = RecordingStore(tmp_path)
+    provider = _adapter(store, policy=policy)
     store.save(
         {
             "recording_format_version": "1.0",
             "input_hash": GOLDEN_INPUT_HASH,
-            "provider_id": "semantic-contract-recording",
-            "provider_version": "semantic-runtime-recording/1.0",
-            "model_id": "fixture-model-1",
-            "prompt_version": "product-search-evidence-synthesis-1.0.0",
+            "provider_id": provider.provider_id,
+            "provider_version": provider.provider_version,
+            "model_id": provider.model_id,
+            "semantic_prompt_version": provider.semantic_prompt_version,
+            "prompt_version": provider.prompt_version,
             "raw_response_text": "",
             "response_hash": hashlib.sha256(b"").hexdigest(),
             "latency_ms": 41,
@@ -444,15 +609,45 @@ def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> N
     )
     result = run_evidence_synthesis(
         synthesis_input=_input(),
-        provider=RecordedEvidenceSynthesisProvider(
-            store=store,
-            model_id="fixture-model-1",
-        ),
-        policy=load_evidence_synthesis_policy(POLICY),
+        provider=provider,
+        policy=policy,
     )
 
     assert result.status is EvidenceSynthesisStatus.REFUSAL
     assert result.deliverable is False
+    assert result.metadata.provider_id == "llm-observation"
+    assert result.metadata.model_id == "openai/gpt-5-mini"
+    assert result.metadata.latency_ms == 41
+    assert result.metadata.cost_usd == "0.000111"
+    assert result.metadata.input_sha256 == GOLDEN_INPUT_HASH
+    assert result.metadata.output_sha256 == hashlib.sha256(b"").hexdigest()
+
+
+def test_arbitrary_provider_object_is_not_an_authorized_boundary() -> None:
+    """Mutation caught: a duck-typed callable spoofs governed provider metadata."""
+    with pytest.raises(TypeError, match="governed Semantic provider"):
+        run_evidence_synthesis(
+            synthesis_input=_input(),
+            provider=_ArbitraryProvider(),  # type: ignore[arg-type]
+            policy=load_evidence_synthesis_policy(POLICY),
+        )
+
+
+def test_live_semantic_provider_cannot_enter_replay_adapter() -> None:
+    """Mutation caught: governed type check accidentally admits live transport mode."""
+    policy = load_evidence_synthesis_policy(POLICY)
+    live_provider = LLMObservationProvider(
+        store=RecordingStore(FIXTURES / "not-used"),
+        mode="record",
+        model_id=DEFAULT_MODEL_ID,
+        transport=object(),
+        prompt_version=LLM_PROMPT_VERSION,
+    )
+    with pytest.raises(ValueError, match="only offline Semantic replay"):
+        RecordedEvidenceSynthesisProvider(
+            semantic_provider=live_provider,
+            policy=policy,
+        )
 
 
 def test_policy_is_closed_and_pins_six_dimensions_and_provider_versions() -> None:
@@ -466,7 +661,10 @@ def test_policy_is_closed_and_pins_six_dimensions_and_provider_versions() -> Non
         "career_value",
         "evidence_confidence",
     )
-    assert policy.provider_runtime == "semantic-contract-recording"
+    assert policy.provider_runtime == "llm-observation"
+    assert policy.provider_adapter_version == "product-search-evidence-replay/1.0"
+    assert policy.semantic_prompt_version == "llm-obs-1.0.0"
+    assert policy.model_id == "openai/gpt-5-mini"
     assert policy.prompt_version == "product-search-evidence-synthesis-1.0.0"
     assert policy.output_schema_version == "1.0.0"
     assert policy.max_questions_total == 6
