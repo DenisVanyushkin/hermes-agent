@@ -2084,22 +2084,6 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_app_context_changed(event, say, body):
                 await self._handle_app_context_changed(event, body)
 
-            @self._app.event("reaction_added")
-            async def handle_reaction_added(event, say):
-                await self._handle_reaction_event(event)
-
-            @self._app.event("reaction_removed")
-            async def handle_reaction_removed(event, say):
-                await self._handle_reaction_event(event)
-
-            @self._app.event("reaction_added")
-            async def handle_reaction_added(event, say):
-                await self._handle_reaction_event(event)
-
-            @self._app.event("reaction_removed")
-            async def handle_reaction_removed(event, say):
-                await self._handle_reaction_event(event)
-
             # File lifecycle events can arrive around snippet uploads even when
             # the actual user message is what we care about. Ack them so Slack
             # doesn't log noisy 404 "unhandled request" warnings.
@@ -2121,13 +2105,7 @@ class SlackAdapter(BasePlatformAdapter):
             # end-to-end. Registered explicitly so high-traffic channels do
             # not fill gateway.error.log with Slack Bolt "Unhandled request"
             # warnings.
-            @self._app.event("reaction_added")
-            async def handle_reaction_added(event, say):
-                await self._handle_slack_reaction(event)
-
-            @self._app.event("reaction_removed")
-            async def handle_reaction_removed(event, say):
-                await self._handle_slack_reaction(event, removed=True)
+            self._register_reaction_handlers()
 
             @self._app.event("assistant_thread_started")
             async def handle_assistant_thread_started(event, say, body):
@@ -2357,6 +2335,30 @@ class SlackAdapter(BasePlatformAdapter):
             if lock_acquired and not self._running:
                 self._release_platform_lock()
 
+
+    def _register_reaction_handlers(self) -> None:
+        """Register the two intentional Slack reaction pipelines once.
+
+        ``_handle_reaction_event`` owns job-intel/idea-capture side effects;
+        ``_handle_slack_reaction`` owns the opt-in message-pipeline and hook
+        surface.  Both event types are registered exactly once for each
+        pipeline so Slack Bolt cannot dispatch duplicate work.
+        """
+        @self._app.event("reaction_added")
+        async def handle_reaction_added(event, say):
+            await self._handle_reaction_event(event)
+
+        @self._app.event("reaction_removed")
+        async def handle_reaction_removed(event, say):
+            await self._handle_reaction_event(event)
+
+        @self._app.event("reaction_added")
+        async def handle_reaction_added(event, say):
+            await self._handle_slack_reaction(event)
+
+        @self._app.event("reaction_removed")
+        async def handle_reaction_removed(event, say):
+            await self._handle_slack_reaction(event, removed=True)
 
     async def _handle_reaction_event(self, event: dict) -> None:
         """Route Slack reaction events into job-intel vacancy feedback."""
