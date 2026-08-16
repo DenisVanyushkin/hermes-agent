@@ -1,0 +1,79 @@
+commit: 65d60daae16093a9a7e34a11a159e2f789dd14dd
+config_sha256: 13c1d33dd4fe1178ddaf2315032a0ce962986e41235994a3c38bd618b96583f9
+environment:
+  dependency_lock_sha256: 321d9f34b233b378d02aed66920828ac1d02e6e088c2786cfaf965ef6f7ccbe7
+  editable_installs: []
+  import_root: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/runtime
+  installed_distributions_sha256: c988a0053b21af2f005166839954667ee54ba6eadd02a097e9673f9c3cb4b59b
+  sys_path:
+  - /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/runtime
+  - /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/runtime
+  - /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/python-runtime/cpython/lib/python312.zip
+  - /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/python-runtime/cpython/lib/python3.12
+  - /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/python-runtime/cpython/lib/python3.12/lib-dynload
+  - /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/python-runtime/venv/lib/python3.12/site-packages
+  sys_path_sha256: 30e20f10a969861f982ce83f5681386db5d32642703171a73a180e7ec066f688
+environment_id: product-search-gate-a
+gate: gate-a
+paths:
+  browser-profile: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/browser-profile
+  cache: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/cache
+  experiment.sqlite3: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/experiment.sqlite3
+  locks: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks
+  logs: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/logs
+  raw-evidence: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/raw-evidence
+  runtime: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/runtime
+  tmp: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/tmp
+python:
+  executable_path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/python-runtime/venv/bin/python
+  executable_sha256: f34d56540249843fa28d9a1f6e197457890a18cbf07cdb334baa19e888068182
+  implementation: CPython
+  stdlib_root: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/python-runtime/cpython/lib/python3.12
+  stdlib_tree_sha256: 1655e64e1c5eb986011dde70f10b3feeddaaa8dd27cd77cd1d8be5cb83f60f10
+  version: 3.12.13
+root: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd
+runtime_sha256: 50a09ccf69ce28aeadd4087a33460b17681b0d84aeda481c1d8eb044188b5abd
+schema_version: 1.0.0
+source_isolation:
+  ashby:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/ashby.lock
+  duckduckgo:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/duckduckgo.lock
+  greenhouse:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/greenhouse.lock
+  headhunter:
+    backup_path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/browser-profile-backup/headhunter
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/headhunter-profile.lock
+    shared_profile_path: /var/lib/browser-desktop/profiles/hh
+  lever:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/lever.lock
+  linkedin:
+    backup_path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/browser-profile-backup/linkedin
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/linkedin-profile.lock
+    shared_profile_path: /var/lib/browser-desktop/profiles/linkedin
+  personio:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/personio.lock
+  recruitee:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/recruitee.lock
+  remoteok:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/remoteok.lock
+  remotive:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/remotive.lock
+  smartrecruiters:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/smartrecruiters.lock
+  teamtailor:
+    mode: exclusive_lock
+    path: /home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks/teamtailor.lock
+source_sha256: 21bf52c742aba8ae3b736ff7569e4c6560a333715ec329f6a540fc1a773122a9
+unit_sha256: 1749fdf030a2e360b1d25bb5c316d1d0e33c63a67b7bb3aa7013b53b2ae7cf59

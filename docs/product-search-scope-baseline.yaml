@@ -1,6 +1,6 @@
 schema_version: "1.0.0"
 base_branch: local/customizations
-base_commit: 65d60daae16093a9a7e34a11a159e2f789dd14dd
+base_commit: f46d2559d6e26c7981f351dc7be5574aad6ab6b8
 protected_paths:
   job_intel/sources.py: b767db50daef9a7f29e64eb544b57591d0375b63a34207515acf560fdcd6f3f5
   job_intel/ats_sources.py: 9f287293d13a0b16da8c2379ad5dede1560f54c59b217ef13b14415fed06fa2d

@@ -43,3 +43,23 @@ The repair evidence is source-specific:
 - After repair, the WireGuard handshake refreshed, namespace DNS and LinkedIn HTTPS returned successfully, and a live isolated LinkedIn search completed as `healthy` with `session_ok`, six returned vacancies, and zero login-wall, auth-redirect, anti-bot, or attach-retry events.
 
 The canonical repair commit is the new reviewed Product Search base. The feature scope baseline is repinned to it so the guard continues to reject any later unrecorded protected-path mutation.
+
+## Superseding snapshot decision package (2026-08-16)
+
+- Runtime commit: `65d60daae16093a9a7e34a11a159e2f789dd14dd`
+- Manifest SHA-256: `6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d`
+- Run ID: `gate-a-20260816T141344Z`
+- Runner result: exit `0`, latency `3139.615234` seconds
+- Source result: all 12 approved families executed; LinkedIn and HeadHunter are `observed`; DuckDuckGo is `observed_with_failures`; the other families are `observed`
+- Corrected stages 1-3: 2,414 raw observations, 1,814 canonical current vacancies, and 1,314 with minimum evidence
+- Corrected duplicates: 600
+- Manual audit: 53 records; clearly noncanonical likely stage-4 range 15-35
+- New-company candidates: 15 raw names, at least 14 after obvious spelling normalization
+
+The immutable runner summary originally reported 2,401 canonical records and 13 duplicates. The audit found that LinkedIn `refId`/`trackingId` parameters and HeadHunter search parameters incorrectly participated in vacancy identity. Canonical commit `f46d2559d6e26c7981f351dc7be5574aad6ab6b8` fixes those URL rules. The corrected decision counts are a deterministic replay of the unchanged content-addressed raw evidence; the original summary and database remain preserved without alteration.
+
+The audit also records non-blocking downstream gaps: cross-source identity reconciliation, weak DuckDuckGo result-page quality, missing SmartRecruiters descriptions, five observed zero-result interfaces, and a 52-minute sequential query plan. None is a remaining source-access failure, and none creates stage 4 or authorizes delivery.
+
+Recommended superseding owner decision: `proceed`.
+
+Recorded superseding owner decision: **pending**. Task 8 remains blocked until the owner explicitly records `proceed`, `bounded_additive_source`, `sot_amendment_required`, or `stop`. Legacy Job Intel remains masked and Product Search remains dormant while the decision is pending.
