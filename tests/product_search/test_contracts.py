@@ -399,3 +399,159 @@ def test_authority_manifest_pins_profile_and_candidate_facts_hashes() -> None:
         "source_uri": "hermes-private://career/denis_vanyushkin_structured_resume_v1_1.json",
         "sha256": "7219eea2fbf04c92291254f83a76b8d2d1ef53e6004ac64ff4601c726eb9fac9",
     }
+
+
+def test_profile_rejects_nonexistent_candidate_fact_pointer() -> None:
+    """Mutation caught: an invented path is treated as Candidate Facts evidence."""
+    payload = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
+    payload["candidate_fact_claims"][0]["candidate_fact_pointers"][0] = (
+        "/experience/99/roles/0/invented"
+    )
+
+    with pytest.raises(ValidationError, match="candidate_fact"):
+        load_career_profile(payload)
+
+
+def test_profile_rejects_candidate_facts_hash_mismatch() -> None:
+    """Mutation caught: a profile is validated against different Candidate Facts bytes."""
+    payload = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
+    payload["authorities"]["candidate_facts_ref"]["sha256"] = "b" * 64
+
+    with pytest.raises(ValueError, match="candidate facts sha256"):
+        load_career_profile(payload)
+
+
+def test_profile_rejects_statement_broader_than_its_cited_candidate_value() -> None:
+    """Mutation caught: pointers exist but the authored claim adds unsupported scope."""
+    payload = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
+    payload["candidate_fact_claims"][1]["statement"] = (
+        "Direct management across five countries and global product launch ownership."
+    )
+
+    with pytest.raises(ValidationError, match="statement"):
+        load_career_profile(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "unknown_value"),
+    [
+        ("mandate_role_families", "invented_executive"),
+        ("transferable_patterns", "global_launch_experience"),
+        ("hard_gates", "title_is_not_cpo"),
+        ("feasibility_unknowns", "industry_unfamiliar"),
+    ],
+)
+def test_profile_authority_vocabularies_reject_unknown_values(
+    field: str,
+    unknown_value: str,
+) -> None:
+    """Mutation caught: free-form profile policy silently expands authority."""
+    payload = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
+    payload[field][-1] = unknown_value
+
+    with pytest.raises(ValidationError):
+        load_career_profile(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "mandate_role_families",
+        "transferable_patterns",
+        "hard_gates",
+        "feasibility_unknowns",
+    ],
+)
+def test_profile_authority_vocabularies_reject_omissions_and_duplicates(
+    field: str,
+) -> None:
+    """Mutation caught: an authoritative rule disappears or is double-counted."""
+    missing = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
+    missing[field].pop()
+    with pytest.raises(ValidationError, match=field):
+        load_career_profile(missing)
+
+    duplicate = yaml.safe_load(PROFILE_PATH.read_text(encoding="utf-8"))
+    duplicate[field][-1] = duplicate[field][0]
+    with pytest.raises(ValidationError, match=field):
+        load_career_profile(duplicate)
+
+
+def test_profile_contains_complete_authority_derived_policy_sets() -> None:
+    """Mutation caught: hard gates or unknown semantics drift from approved authority."""
+    profile = load_career_profile(PROFILE_PATH)
+
+    assert {item.value for item in profile.hard_gates} == {
+        "sanctioned_or_clearly_unstable_environment",
+        "africa_as_proactive_search_region",
+        "us_onsite_or_hybrid_without_explicit_sponsorship",
+        "onsite_or_hybrid_with_explicitly_no_viable_work_authorization_path",
+        "below_minimum_executive_scope",
+        "non_product_function_without_real_digital_business_ownership",
+        "non_transferable_required_domain_or_language",
+        "pure_delivery_project_or_program_ownership",
+        "internal_tools_infrastructure_or_back_office_without_business_scope",
+    }
+    assert {item.value for item in profile.feasibility_unknowns} == {
+        "sponsorship_outside_onsite_us",
+        "reporting_line",
+        "compensation",
+        "timezone",
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "state": "evidence_available",
+            "evidence_refs": (" ",),
+            "unknown_reasons": (),
+        },
+        {
+            "state": "unknown",
+            "evidence_refs": (),
+            "unknown_reasons": ("",),
+        },
+        {
+            "state": "evidence_available",
+            "evidence_refs": ("snapshot:fact-1",),
+            "unknown_reasons": ("contradiction",),
+        },
+        {
+            "state": "unknown",
+            "evidence_refs": ("snapshot:fact-1",),
+            "unknown_reasons": ("not_published",),
+        },
+    ],
+)
+def test_dimension_evidence_rejects_blank_or_opposite_state_data(
+    payload: dict[str, object],
+) -> None:
+    """Mutation caught: blank/contradictory evidence passes an explicit state."""
+    with pytest.raises(ValidationError):
+        DimensionEvidenceInput.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "axis",
+    ["unfamiliar_company", "unfamiliar_industry", "unfamiliar_geography", "nominated", "other"],
+)
+def test_legacy_compatibility_rejects_unrecognized_exploration_axes(axis: str) -> None:
+    """Mutation caught: any nonblank legacy marker becomes Exploration."""
+    with pytest.raises(ValidationError, match="exploration_axis"):
+        LegacyAssessmentV1(
+            boundary_version="shadow-evaluator-decision/1.1.0",
+            recommendation="strong",
+            exploration_axis=axis,
+        )
+
+
+def test_authoritative_legacy_axis_maps_explicitly_to_exploration() -> None:
+    """Mutation caught: removing the named approved compatibility axis."""
+    record = LegacyAssessmentV1(
+        boundary_version="shadow-evaluator-decision/1.1.0",
+        recommendation="strong",
+        exploration_axis="exp_industry",
+    )
+    assert map_legacy_assessment(record).target_selection_mode is SelectionMode.EXPLORATION
