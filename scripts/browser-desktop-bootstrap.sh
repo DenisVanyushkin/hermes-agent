@@ -29,8 +29,14 @@ DISPLAY_NUM="99"
 VNC_PORT="5901"
 NOVNC_PORT="6080"
 CDP_PORT="9222"
+CDP_RELAY_PORT="19222"
+CDP_ENDPOINT="http://127.0.0.1:${CDP_PORT}"
+CDP_TUNNEL_HOST="127.0.0.1"
+CDP_TUNNEL_PORT="${CDP_PORT}"
 BASE_DIR="/var/lib/browser-desktop"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CDP_RELAY_SOURCE="${SCRIPT_DIR}/browser-desktop-cdp-relay.py"
+CDP_RELAY="/usr/local/libexec/browser-desktop-cdp-relay.py"
 # Объявляется здесь, до первого использования: под `set -u` раскрытие
 # необъявленного массива — ошибка. Значение выставляется ниже, после
 # разбора профиля.
@@ -192,27 +198,39 @@ mkdirs() {
     "${LOG_DIR}/xfce.log" \
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
-    "${LOG_DIR}/chromium-${PROFILE}.log"
+    "${LOG_DIR}/chromium-${PROFILE}.log" \
+    "${LOG_DIR}/cdp-relay-${PROFILE}.log"
   chown "${USER_NAME}:${USER_NAME}" \
     "${BASE_DIR}/.browser-desktop-managed" \
     "${LOG_DIR}/xvfb.log" \
     "${LOG_DIR}/xfce.log" \
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
-    "${LOG_DIR}/chromium-${PROFILE}.log"
+    "${LOG_DIR}/chromium-${PROFILE}.log" \
+    "${LOG_DIR}/cdp-relay-${PROFILE}.log"
   chmod 0640 \
     "${BASE_DIR}/.browser-desktop-managed" \
     "${LOG_DIR}/xvfb.log" \
     "${LOG_DIR}/xfce.log" \
     "${LOG_DIR}/x11vnc.log" \
     "${LOG_DIR}/websockify.log" \
-    "${LOG_DIR}/chromium-${PROFILE}.log"
+    "${LOG_DIR}/chromium-${PROFILE}.log" \
+    "${LOG_DIR}/cdp-relay-${PROFILE}.log"
 
   if id -u hermes >/dev/null 2>&1; then
     setfacl -m u:hermes:r-x,m:r-x "${BASE_DIR}" "${BASE_DIR}/profiles"
     setfacl -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/${PROFILE}"
     setfacl -d -m u:hermes:rwx,m:rwx "${BASE_DIR}/profiles/${PROFILE}"
   fi
+}
+
+install_cdp_relay() {
+  if [[ ! -f "${CDP_RELAY_SOURCE}" ]]; then
+    echo "CDP relay source is missing: ${CDP_RELAY_SOURCE}" >&2
+    exit 1
+  fi
+  install -d -o root -g root -m 0755 "$(dirname -- "${CDP_RELAY}")"
+  install -o root -g root -m 0755 "${CDP_RELAY_SOURCE}" "${CDP_RELAY}"
 }
 
 is_snap_path() {
@@ -500,6 +518,7 @@ ensure_pkg "${CHROMIUM_PKG}" xfce4 dbus-x11 x11vnc novnc websockify xvfb x11-uti
 ensure_base_dir_safety
 ensure_user
 mkdirs
+install_cdp_relay
 ensure_browser_binary
 write_browser_launcher
 
@@ -513,7 +532,10 @@ write_browser_launcher
 # потери сессии (наблюдалось 2026-08-12).
 PROFILE_DIRECTORY="Default"
 if [[ "${PROFILE}" == "linkedin" ]]; then
-  resolver_python="${SCRIPT_DIR}/../venv/bin/python"
+  resolver_python="${JOB_INTEL_BROWSER_PYTHON:-}"
+  if [[ -z "${resolver_python}" || ! -x "${resolver_python}" ]]; then
+    resolver_python="${SCRIPT_DIR}/../venv/bin/python"
+  fi
   if [[ -x "${resolver_python}" ]]; then
     resolved="$(PYTHONPATH="${SCRIPT_DIR}/.." "${resolver_python}" -m job_intel.linkedin_session \
       --user-data-dir "${BASE_DIR}/profiles/${PROFILE}" 2>/dev/null || true)"
@@ -542,6 +564,9 @@ if [[ "${PROFILE}" == "linkedin" ]]; then
   bash "${SCRIPT_DIR}/linkedin-netns-up.sh"
   NETNS_PREFIX=(ip netns exec "${LINKEDIN_NETNS:-ln-eg}")
   NOVNC_BIND="169.254.77.2"
+  CDP_ENDPOINT="http://169.254.77.2:${CDP_RELAY_PORT}"
+  CDP_TUNNEL_HOST="169.254.77.2"
+  CDP_TUNNEL_PORT="${CDP_RELAY_PORT}"
 fi
 
 ensure_display_free
@@ -580,7 +605,14 @@ if [[ -z "${CHROMIUM_BIN}" || ! -x "${CHROMIUM_BIN}" ]]; then
   exit 1
 fi
 
-ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chromium CDP"
+if [[ "${PROFILE}" == "linkedin" ]]; then
+  if [[ ! -x "${CDP_RELAY}" ]]; then
+    echo "CDP relay is missing or not executable: ${CDP_RELAY}" >&2
+    exit 1
+  fi
+else
+  ensure_port_free_or_owned "${CDP_PORT}" "remote-debugging-port=${CDP_PORT}" "Chromium CDP"
+fi
 if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
   start_as_browser "${LOG_DIR}/chromium-${PROFILE}.log" dbus-run-session -- "${CHROMIUM_BIN}" \
     --user-data-dir="${BASE_DIR}/profiles/${PROFILE}" \
@@ -596,8 +628,18 @@ if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
     --new-window "${URL}"
 fi
 
+if [[ "${PROFILE}" == "linkedin" ]]; then
+  if ! process_matches "browser-desktop-cdp-relay.py.*--listen-port ${CDP_RELAY_PORT}"; then
+    start_as_browser "${LOG_DIR}/cdp-relay-${PROFILE}.log" python3 "${CDP_RELAY}" \
+      --listen-host 169.254.77.2 \
+      --listen-port "${CDP_RELAY_PORT}" \
+      --target-host 127.0.0.1 \
+      --target-port "${CDP_PORT}"
+  fi
+fi
+
 sleep 2
-if ! curl -fsS "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; then
+if ! curl -fsS "${CDP_ENDPOINT}/json/version" >/dev/null 2>&1; then
   echo "Chromium CDP endpoint is not responding yet; check ${LOG_DIR}/chromium-${PROFILE}.log" >&2
 fi
 
@@ -605,7 +647,7 @@ cat <<EOF
 Browser desktop bootstrap complete.
 
 Connect securely via SSH tunnel:
-  ssh -L ${NOVNC_PORT}:${NOVNC_BIND}:${NOVNC_PORT} -L ${CDP_PORT}:127.0.0.1:${CDP_PORT} user@YOUR_VPS
+  ssh -L ${NOVNC_PORT}:${NOVNC_BIND}:${NOVNC_PORT} -L ${CDP_PORT}:${CDP_TUNNEL_HOST}:${CDP_TUNNEL_PORT} user@YOUR_VPS
 
 Open noVNC:
   http://127.0.0.1:${NOVNC_PORT}/vnc.html

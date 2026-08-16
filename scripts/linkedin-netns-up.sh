@@ -76,8 +76,31 @@ ensure_netns() {
   ip -n "${NETNS}" link set lo up
 }
 
+refresh_peer_endpoint() {
+  # Firewalla advertises a DDNS hostname. WireGuard stores only the numeric
+  # address resolved by userspace, so an already-running interface otherwise
+  # remains pinned to a stale address after the home endpoint changes.
+  # Resolve on the host: namespace DNS is behind the tunnel being repaired.
+  local endpoint peer_key endpoint_host endpoint_port resolved_endpoint
+  endpoint="$(grep -iE '^[[:space:]]*Endpoint[[:space:]]*=' "${WG_CONF}" | head -1 | cut -d= -f2- | tr -d ' ' || true)"
+  peer_key="$(grep -iE '^[[:space:]]*PublicKey[[:space:]]*=' "${WG_CONF}" | head -1 | cut -d= -f2- | tr -d ' ' || true)"
+  if [[ -z "${endpoint}" || -z "${peer_key}" || "${endpoint}" != *:* ]]; then
+    echo "Конфиг ${WG_CONF} не содержит корректные peer endpoint/public key." >&2
+    exit 1
+  fi
+  endpoint_host="${endpoint%:*}"
+  endpoint_port="${endpoint##*:}"
+  resolved_endpoint="$(getent ahostsv4 "${endpoint_host}" | awk 'NR == 1 {print $1}' || true)"
+  if [[ -z "${resolved_endpoint}" ]]; then
+    echo "Не удалось разрешить WireGuard endpoint ${endpoint_host} на хосте." >&2
+    exit 1
+  fi
+  ip netns exec "${NETNS}" wg set "${WG_IF}" peer "${peer_key}" endpoint "${resolved_endpoint}:${endpoint_port}"
+}
+
 ensure_tunnel() {
   if ip -n "${NETNS}" link show "${WG_IF}" >/dev/null 2>&1; then
+    refresh_peer_endpoint
     return
   fi
   if ! ip link show "${WG_IF}" >/dev/null 2>&1; then

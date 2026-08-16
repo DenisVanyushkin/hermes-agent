@@ -37,6 +37,24 @@ def test_bring_up_is_idempotent() -> None:
     assert 'ip -n "${NETNS}" link show "${WG_IF}"' in body
 
 
+def test_existing_tunnel_refreshes_the_dynamic_peer_endpoint() -> None:
+    """Firewalla publishes a DDNS hostname whose address can change.
+
+    Returning merely because wg0-ln exists leaves WireGuard pinned to the old
+    numeric endpoint forever.  Resolution must happen in the host namespace,
+    because the namespace DNS itself depends on the tunnel being repaired.
+    """
+    body = _body()
+    start = body.index("ensure_tunnel() {")
+    end = body.index("\n}", start)
+    function = body[start:end]
+    refresh = function.index("refresh_peer_endpoint")
+    early_return = function.index("return", refresh)
+    assert refresh < early_return
+    assert 'getent ahostsv4 "${endpoint_host}"' in body
+    assert 'ip netns exec "${NETNS}" wg set "${WG_IF}" peer' in body
+
+
 def test_script_verifies_fail_closed_before_returning() -> None:
     """Проверка обязана быть в самом скрипте: конструкция, чья корректность
     держится на том, что оператор не забыл посмотреть глазами, однажды

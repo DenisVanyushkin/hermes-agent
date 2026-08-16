@@ -27,7 +27,7 @@ _CDP_TARGETS = {
     "linkedin": {
         "profile": "linkedin",
         "start_url": "https://www.linkedin.com/",
-        "cdp_url": "http://127.0.0.1:9222",
+        "cdp_url": "http://169.254.77.2:19222",
         "allowed_prefixes": ("https://www.linkedin.com/", "chrome://newtab/", "about:blank"),
         "max_page_targets": 8,
     },
@@ -184,9 +184,13 @@ def _recycle_browser_desktop(source: str) -> None:
     profile = str(target["profile"])
     kill_script = """
 set -e
-pattern="remote-debugging-port={port}.*profiles/{profile}"
-# Find matching top-level chrome PIDs.
-pids="$(pgrep -f "$pattern" || true)"
+port="{port}"
+profile="{profile}"
+# Match both arguments independently: Chromium places --user-data-dir before
+# --remote-debugging-port, while renderer processes may use another order.
+pids="$(ps -u browser -o pid=,args= | awk -v port="$port" -v profile="$profile" '
+  index($0, "remote-debugging-port=" port) && index($0, "profiles/" profile) {{print $1}}
+')"
 if [ -n "$pids" ]; then
   # First try graceful termination.
   for pid in $pids; do
@@ -283,8 +287,22 @@ def _ensure_browser_desktop(source: str, *, force_recycle: bool = False) -> str:
     script = _bootstrap_script()
     if not script.exists():
         raise BrowserNativeUnavailable(f"browser-desktop bootstrap script is missing: {script}")
+    browser_python = os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or sys.executable
+    repo_root = Path(__file__).resolve().parents[1]
     proc = subprocess.run(
-        ["sudo", "-n", "bash", str(script), "--profile", str(target["profile"]), "--url", str(target["start_url"])],
+        [
+            "sudo",
+            "-n",
+            "env",
+            f"JOB_INTEL_BROWSER_PYTHON={browser_python}",
+            f"PYTHONPATH={repo_root}",
+            "bash",
+            str(script),
+            "--profile",
+            str(target["profile"]),
+            "--url",
+            str(target["start_url"]),
+        ],
         capture_output=True,
         text=True,
         timeout=240,

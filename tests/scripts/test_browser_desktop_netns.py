@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "browser-desktop-bootstrap.sh"
+STOP_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "browser-desktop-stop.sh"
 
 
 def _body() -> str:
@@ -78,6 +79,32 @@ def test_novnc_binds_an_address_reachable_from_the_host() -> None:
     assert '"${NOVNC_BIND}:${NOVNC_PORT}"' in body
 
 
+def test_linkedin_cdp_is_relayed_over_the_management_veth() -> None:
+    """Chrome 149 ignores a non-loopback remote-debugging bind.
+
+    Keep Chromium on the namespace loopback and expose it only on the
+    management-veth address.  Chrome builds the returned WebSocket URL from
+    the HTTP Host header, so Playwright can connect directly through one relay.
+    """
+    body = _body()
+    assert 'CDP_RELAY_SOURCE="${SCRIPT_DIR}/browser-desktop-cdp-relay.py"' in body
+    assert 'CDP_RELAY="/usr/local/libexec/browser-desktop-cdp-relay.py"' in body
+    assert 'install -o root -g root -m 0755 "${CDP_RELAY_SOURCE}" "${CDP_RELAY}"' in body
+    assert 'CDP_RELAY_PORT="19222"' in body
+    assert '--listen-host 169.254.77.2' in body
+    assert '--target-host 127.0.0.1' in body
+    assert '--remote-debugging-address=127.0.0.1' in body
+    assert 'CDP_ENDPOINT="http://169.254.77.2:${CDP_RELAY_PORT}"' in body
+    assert "start_as_browser_host" not in body
+
+
+def test_stop_script_stops_the_linkedin_cdp_relay() -> None:
+    body = STOP_SCRIPT.read_text(encoding="utf-8")
+    assert 'browser-desktop-cdp-relay.py.*--listen-port ${CDP_RELAY_PORT}' in body
+    assert 'browser-desktop-cdp-relay.py.*--listen-port ${CDP_PORT}' not in body
+    assert 'pgrep -u "$USER_NAME" -f -- "$pattern"' in body
+
+
 def test_printed_tunnel_hint_matches_the_actual_bind_address() -> None:
     """Скрипт печатает оператору команду туннеля. Для профиля linkedin noVNC
     слушает на veth-адресе, и статичная подсказка про 127.0.0.1 отправляет
@@ -108,3 +135,14 @@ def test_profile_resolution_falls_back_to_default() -> None:
     строка в аргументе Chromium."""
     body = _body()
     assert 'PROFILE_DIRECTORY="Default"' in body
+
+
+def test_profile_resolution_accepts_the_pinned_browser_python() -> None:
+    """Exported experiment runtimes do not contain runtime/venv.
+
+    The bootstrap must use the experiment's pinned Python supplied by the
+    worker; otherwise it silently falls back to Default instead of the
+    authenticated Profile 1.
+    """
+    body = _body()
+    assert 'resolver_python="${JOB_INTEL_BROWSER_PYTHON:-}"' in body

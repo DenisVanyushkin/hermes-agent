@@ -4,6 +4,7 @@ set -euo pipefail
 BASE_DIR="/var/lib/browser-desktop"
 USER_NAME="browser"
 PROFILE="all"
+CDP_RELAY_PORT=""
 
 usage() {
   cat <<'EOF'
@@ -79,6 +80,7 @@ select_ports() {
       VNC_PORT="5901"
       NOVNC_PORT="6080"
       CDP_PORT="9222"
+      CDP_RELAY_PORT="19222"
       ;;
     hh)
       DISPLAY_NUM="100"
@@ -99,7 +101,7 @@ select_ports() {
 
 pids_for_pattern() {
   local pattern="$1"
-  pgrep -u "$USER_NAME" -f "$pattern" 2>/dev/null || true
+  pgrep -u "$USER_NAME" -f -- "$pattern" 2>/dev/null || true
 }
 
 kill_pids() {
@@ -125,7 +127,7 @@ kill_pattern() {
   kill_pids TERM "${pids[@]}"
   local tries=20
   while (( tries-- > 0 )); do
-    if ! pgrep -u "$USER_NAME" -f "$pattern" >/dev/null 2>&1; then
+    if ! pgrep -u "$USER_NAME" -f -- "$pattern" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.25
@@ -137,8 +139,11 @@ stop_profile() {
   local profile="$1"
   select_ports "$profile"
 
+  if [[ -n "${CDP_RELAY_PORT}" ]]; then
+    kill_pattern "browser-desktop-cdp-relay.py.*--listen-port ${CDP_RELAY_PORT}" "CDP relay (${profile})"
+  fi
   kill_pattern "--user-data-dir=${BASE_DIR}/profiles/${profile}" "Chromium (${profile})"
-  kill_pattern "websockify .*127.0.0.1:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}" "noVNC (${profile})"
+  kill_pattern "websockify .*:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}" "noVNC (${profile})"
   kill_pattern "x11vnc .* -display :${DISPLAY_NUM} .* -rfbport ${VNC_PORT}" "x11vnc (${profile})"
   kill_pattern "DISPLAY=:${DISPLAY_NUM} .*dbus-run-session -- startxfce4" "XFCE (${profile})"
   kill_pattern "Xvfb :${DISPLAY_NUM}" "Xvfb (${profile})"
@@ -148,8 +153,9 @@ stop_profile() {
 
 if [[ "$PROFILE" == "all" ]]; then
   echo "Stopping all browser desktop processes..."
+  kill_pattern "browser-desktop-cdp-relay.py.*--listen-port [0-9]+" "CDP relays"
   kill_pattern "remote-debugging-port=[0-9]+" "Chromium"
-  kill_pattern "websockify .*127.0.0.1:[0-9]+ .*127.0.0.1:[0-9]+" "noVNC"
+  kill_pattern "websockify .*:[0-9]+ .*127.0.0.1:[0-9]+" "noVNC"
   kill_pattern "x11vnc .* -display :[0-9]+ .* -rfbport [0-9]+" "x11vnc"
   kill_pattern "DISPLAY=:[0-9]+ .*dbus-run-session -- startxfce4" "XFCE"
   kill_pattern "Xvfb :[0-9]+" "Xvfb"

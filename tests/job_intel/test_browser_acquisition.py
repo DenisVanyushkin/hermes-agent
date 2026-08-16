@@ -135,7 +135,7 @@ def test_extract_company_career_vacancies_from_html_handles_custom_ats_domains()
     assert vacancy.url == "https://careers.adapty.io/roles/vp-product"
 
 
-def test_extract_linkedin_vacancies_from_html_does_not_infer_wrong_company_from_view_path() -> None:
+def test_extract_linkedin_vacancies_from_html_skips_link_without_company() -> None:
     html = """
     <html>
       <body>
@@ -146,8 +146,7 @@ def test_extract_linkedin_vacancies_from_html_does_not_infer_wrong_company_from_
 
     vacancies = extract_linkedin_vacancies_from_html(html, page_url="https://www.linkedin.com/jobs/search")
 
-    assert len(vacancies) == 1
-    assert vacancies[0].company == "Unknown"
+    assert vacancies == []
 
 
 def test_metrics_from_counts_calculates_quality_ratios() -> None:
@@ -259,7 +258,7 @@ def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
     )
 
     page_urls: list[str] = []
-    feed_page = "<html><body><div class='feed-identity-module'>Feed</div></body></html>"
+    feed_page = '<html><body><main data-testid="mainfeed">Feed</main></body></html>'
     first_page = """
     <html>
       <head>
@@ -309,12 +308,15 @@ def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
     )
 
     page_urls: list[str] = []
-    feed_page = "<html><body><div class='feed-identity-module'>Feed</div></body></html>"
+    feed_page = '<html><body><main data-testid="mainfeed">Feed</main></body></html>'
     search_page = """
     <html>
       <head>
         <script type="application/ld+json">
         {"@context": "https://schema.org", "@type": "JobPosting", "title": "VP Product", "description": "Own monetization", "url": "https://www.linkedin.com/jobs/view/123", "hiringOrganization": {"name": "Spark"}}
+        </script>
+        <script type="application/ld+json">
+        {"@context": "https://schema.org", "@type": "JobPosting", "title": "Director of Product", "description": "Lead ecosystem", "url": "https://www.linkedin.com/jobs/view/456", "hiringOrganization": {"name": "Spark"}}
         </script>
       </head>
       <body>
