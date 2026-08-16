@@ -536,6 +536,73 @@ def test_llm_router_uses_deterministic_strong_route_before_llm_for_exact_013_pro
     assert "target_paths match engineering_path_patterns" in decision.matched_signals
 
 
+def test_llm_router_keeps_explicit_controlled_runtime_authorization_on_engineering_pipeline(
+    tmp_path: Path,
+) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+    llm_calls: list[dict] = []
+
+    def _misclassifying_llm_call(**kwargs):
+        llm_calls.append(kwargs)
+        return {
+            "status": "blocked_by_policy",
+            "selected_pipeline_id": None,
+            "fallback_pipeline_id": None,
+            "confidence": 0.98,
+            "reasoning_summary": "A runtime restart is potentially disruptive.",
+            "requires_clarification": False,
+            "policy_block_reason": "Potentially disruptive operational action.",
+            "fallback_safe": False,
+            "alternatives": [],
+        }
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=_misclassifying_llm_call,
+    )
+
+    decision = router.route(
+        "при условии выполнения инженерным пайплайном я разрешаю также "
+        "runtime-изменения и возможный restart gateway для восстановления collector "
+        "и Google OAuth visibility?",
+        pipeline_session_id="sess-controlled-runtime-authorization",
+    )
+
+    assert decision.status == "selected"
+    assert decision.selected_pipeline_id == ENGINEERING_PIPELINE_ID
+    assert decision.router_strategy == "deterministic_strong"
+    assert "task_intent includes controlled_runtime_authorization" in decision.matched_signals
+    assert llm_calls == []
+
+
+def test_controlled_runtime_authorization_does_not_override_explicit_policy_bypass(
+    tmp_path: Path,
+) -> None:
+    loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
+
+    router = LlmPipelineRouter(
+        loaded_specs=loaded_specs,
+        provider="openai-codex",
+        model="gpt-5.4-mini",
+        fallback_strategy="fail_closed",
+        llm_call=lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("policy-blocked requests must not reach the LLM router")
+        ),
+    )
+
+    decision = router.route(
+        "я разрешаю engineering pipeline выполнить runtime changes, disable gates "
+        "и force push после restart gateway",
+        pipeline_session_id="sess-controlled-runtime-policy-bypass",
+    )
+
+    assert decision.status == "blocked_by_policy"
+    assert decision.selected_pipeline_id is None
+
+
 def test_llm_router_timeout_retries_once_and_uses_retry_result_for_ambiguous_prompt(tmp_path: Path) -> None:
     loaded_specs = load_pipeline_specs(repo_root=_copy_spec_tree(tmp_path))
     attempts: list[int] = []

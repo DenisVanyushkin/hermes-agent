@@ -364,6 +364,29 @@ _POLICY_BLOCK_PATTERNS = (
     "delete production data",
     "drop the database",
 )
+_CONTROLLED_RUNTIME_AUTHORIZATION_KEYWORDS = (
+    "i authorize",
+    "i approve",
+    "approved",
+    "разрешаю",
+    "подтверждаю",
+)
+_CONTROLLED_ENGINEERING_PIPELINE_KEYWORDS = (
+    "engineering_review_pipeline",
+    "engineering pipeline",
+    "инженерный пайплайн",
+    "инженерным пайплайном",
+)
+_CONTROLLED_RUNTIME_MUTATION_KEYWORDS = (
+    "runtime change",
+    "runtime-change",
+    "runtime измен",
+    "runtime-измен",
+    "gateway restart",
+    "restart gateway",
+    "рестарт gateway",
+    "перезапуск gateway",
+)
 _RECRUITER_KEYWORDS = (
     "vacancy",
     "vacancies",
@@ -628,6 +651,13 @@ class HeuristicPipelineRouter(PipelineRouter):
     def _engineering_matched_signals(self, normalized: str) -> tuple[str, ...]:
         if _matches_any(normalized, _ARCHITECTURE_ONLY_KEYWORDS):
             return ()
+
+        if _is_controlled_engineering_authorization(normalized):
+            return (
+                "task_intent includes controlled_runtime_authorization",
+                "task_classification.domain == engineering",
+                "safety_scope requires engineering_review_pipeline",
+            )
 
         matched_signals: list[str] = []
         has_path_signal = bool(_ENGINEERING_PATH_PATTERN.search(normalized))
@@ -1297,6 +1327,8 @@ class LlmPipelineRouter(PipelineRouter):
         normalized = _normalize_text(user_message.strip())
         if _looks_ambiguous(normalized):
             return False
+        if _is_controlled_engineering_authorization(normalized):
+            return True
         if not _ENGINEERING_PATH_PATTERN.search(normalized):
             return False
         if not _matches_any(normalized, _STRONG_ENGINEERING_MUTATION_KEYWORDS):
@@ -1906,6 +1938,14 @@ def _nested_config_value(config: dict[str, Any] | None, *keys: str, default: Any
 
 def _normalize_text(value: str) -> str:
     return " ".join(value.lower().split())
+
+
+def _is_controlled_engineering_authorization(message: str) -> bool:
+    return (
+        _matches_any(message, _CONTROLLED_RUNTIME_AUTHORIZATION_KEYWORDS)
+        and _matches_any(message, _CONTROLLED_ENGINEERING_PIPELINE_KEYWORDS)
+        and _matches_any(message, _CONTROLLED_RUNTIME_MUTATION_KEYWORDS)
+    )
 
 
 def _matches_any(message: str, patterns: tuple[str, ...]) -> bool:
