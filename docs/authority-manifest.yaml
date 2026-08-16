@@ -22,6 +22,11 @@ candidate_facts:
   authority: structured_resume_and_candidate_facts
   scope: candidate_experience_and_constraints
   broadening: prohibited
+  artifact:
+    id: candidate-facts-structured-resume-v1.1.0
+    version: 1.1.0
+    source_uri: hermes-private://career/denis_vanyushkin_structured_resume_v1_1.json
+    sha256: 7219eea2fbf04c92291254f83a76b8d2d1ef53e6004ac64ff4601c726eb9fac9
 
 technical_contracts:
   search_contract_v1:
@@ -29,6 +34,12 @@ technical_contracts:
     status: technical_execution_policy
     path: config/product_search/search_contract.v1.yaml
     sha256: faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1
+    subordinate_to: PS-SOT-2026-08-10-v1
+  career_profile_v2:
+    version: 2.0.0
+    status: technical_execution_profile
+    path: config/product_search/career_profile.v2.yaml
+    sha256: a1178f27b875f420b13c1423e3bc223428b439a7a2f92549fe5e79923afb6243
     subordinate_to: PS-SOT-2026-08-10-v1
 
 precedence:

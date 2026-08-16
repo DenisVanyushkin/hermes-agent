@@ -1,0 +1,19 @@
+{
+  "schema_version_const": "1.0.0",
+  "assessment_required": [
+    "schema_version",
+    "assessment_id",
+    "references",
+    "dimensions"
+  ],
+  "assessment_additional_properties": false,
+  "references_required": [
+    "profile_ref",
+    "candidate_facts_ref",
+    "semantic_contract_ref",
+    "search_contract_ref",
+    "policy_ref",
+    "evidence_snapshot_ref"
+  ],
+  "references_additional_properties": false
+}

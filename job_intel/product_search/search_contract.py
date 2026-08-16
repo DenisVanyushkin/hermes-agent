@@ -7,10 +7,7 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
-
-class SelectionMode(str, Enum):
-    CORE = "Core"
-    EXPLORATION = "Exploration"
+from job_intel.product_search.contracts import SelectionMode
 
 
 class ObservabilityState(str, Enum):
