@@ -22,3 +22,11 @@ Success requires both sources to execute with the pinned runtime and to record a
 - Legacy state: masked and paused
 - Temporary runner state at decision: timer disabled and service stopped before candidate replacement
 - Original evidence retention: preserve the complete immutable experiment root at `/home/hermes/.hermes/job_intel/experiments/gate-a/49070955c7d73a485e2d4bbc3acb2197e12a0f5f`
+
+## Snapshot-first and shared-profile override (2026-08-16)
+
+The owner authorizes LinkedIn and HeadHunter acquisition to use the existing authenticated browser profiles at `/var/lib/browser-desktop/profiles/linkedin` and `/var/lib/browser-desktop/profiles/hh`. Each profile must have an experiment-local backup, legacy Job Intel and overlapping profile users must remain stopped, and the Gate A runner must hold exclusive execution ownership. Use of these recorded shared profiles is not contamination.
+
+The owner also replaces the calendar-duration requirement for the current Gate A decision with a snapshot-first evaluation. One complete broad-source run plus a manual quality audit may close Gate A. Repeat attempts are required only for technically failed or materially ambiguous sources; the experiment does not wait seven days merely to repeat an already interpretable market snapshot.
+
+The approved source inventory now includes every existing bounded public acquisition interface: LinkedIn, HeadHunter, DuckDuckGo, RemoteOK, Remotive, Greenhouse, Lever, Ashby, SmartRecruiters, Teamtailor, Personio, and Recruitee. ATS sources run as a global tenant snapshot, not as fabricated country-level independent coverage. Existing protected scraper implementations and the Product Search SoT remain unchanged.

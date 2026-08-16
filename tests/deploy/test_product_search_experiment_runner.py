@@ -178,17 +178,41 @@ def test_manifest_relocation_repins_all_runtime_paths(tmp_path: Path) -> None:
     assert all(str(old_root) not in path for path in relocated["environment"]["sys_path"])
     assert relocated["environment"]["sys_path_sha256"] != manifest["environment"]["sys_path_sha256"]
     assert relocated["source_isolation"] == {
+        "ashby": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/ashby.lock"),
+        },
         "duckduckgo": {
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
         "headhunter": {
-            "mode": "cloned_profile",
-            "path": str(new_root / "browser-profile/headhunter"),
+            "backup_path": str(new_root / "browser-profile-backup/headhunter"),
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/headhunter-profile.lock"),
+            "shared_profile_path": "/var/lib/browser-desktop/profiles/hh",
+        },
+        "greenhouse": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/greenhouse.lock"),
+        },
+        "lever": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/lever.lock"),
         },
         "linkedin": {
-            "mode": "cloned_profile",
-            "path": str(new_root / "browser-profile/linkedin"),
+            "backup_path": str(new_root / "browser-profile-backup/linkedin"),
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/linkedin-profile.lock"),
+            "shared_profile_path": "/var/lib/browser-desktop/profiles/linkedin",
+        },
+        "personio": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/personio.lock"),
+        },
+        "recruitee": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/recruitee.lock"),
         },
         "remoteok": {
             "mode": "exclusive_lock",
@@ -197,6 +221,14 @@ def test_manifest_relocation_repins_all_runtime_paths(tmp_path: Path) -> None:
         "remotive": {
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/remotive.lock"),
+        },
+        "smartrecruiters": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/smartrecruiters.lock"),
+        },
+        "teamtailor": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/teamtailor.lock"),
         },
     }
 

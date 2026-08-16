@@ -25,6 +25,10 @@ FORBIDDEN_PROBE_ROOTS = (
     Path("/home/hermes/.hermes/hermes-agent/.worktrees"),
 )
 GATE_A_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-a")
+SHARED_BROWSER_PROFILES = {
+    "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
+    "headhunter": Path("/var/lib/browser-desktop/profiles/hh"),
+}
 
 
 class ProbeSourceBlocked(RuntimeError):
@@ -57,21 +61,47 @@ def build_isolated_probe_environment(
         raise ValueError("experiment root must be absolute")
     paths = dict(manifest.get("paths") or {})
     isolation = dict(manifest.get("source_isolation") or {})
-    linkedin = Path(str(dict(isolation.get("linkedin") or {}).get("path") or ""))
-    headhunter = Path(str(dict(isolation.get("headhunter") or {}).get("path") or ""))
+    linkedin_settings = dict(isolation.get("linkedin") or {})
+    headhunter_settings = dict(isolation.get("headhunter") or {})
+    linkedin = Path(
+        str(
+            linkedin_settings.get("shared_profile_path")
+            or linkedin_settings.get("path")
+            or ""
+        )
+    )
+    headhunter = Path(
+        str(
+            headhunter_settings.get("shared_profile_path")
+            or headhunter_settings.get("path")
+            or ""
+        )
+    )
     required = {
         "experiment.sqlite3": Path(str(paths.get("experiment.sqlite3") or "")),
         "browser-profile": Path(str(paths.get("browser-profile") or "")),
         "cache": Path(str(paths.get("cache") or "")),
         "logs": Path(str(paths.get("logs") or "")),
         "tmp": Path(str(paths.get("tmp") or "")),
-        "linkedin": linkedin,
-        "headhunter": headhunter,
         "python": Path(str(dict(manifest.get("python") or {}).get("executable_path") or "")),
     }
     for name, path in required.items():
         if not _inside(str(path), root):
             raise ValueError(f"isolated environment path outside experiment root: {name}")
+    for family, settings, profile in (
+        ("linkedin", linkedin_settings, linkedin),
+        ("headhunter", headhunter_settings, headhunter),
+    ):
+        shared = settings.get("shared_profile_path")
+        if not shared:
+            if not _inside(str(profile), root):
+                raise ValueError(f"isolated environment path outside experiment root: {family}")
+            continue
+        if profile != SHARED_BROWSER_PROFILES[family]:
+            raise ValueError(f"unapproved shared browser profile: {family}")
+        backup = Path(str(settings.get("backup_path") or ""))
+        if not _inside(str(backup), root) or not backup.is_dir():
+            raise ValueError(f"shared profile backup is missing: {family}")
 
     environment = dict(ambient or {})
     browser_profile = required["browser-profile"]
@@ -148,6 +178,24 @@ def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> 
                         )
                     )
     return tuple(sorted(expanded, key=lambda item: item.query_id))
+
+
+def build_snapshot_queries() -> tuple[ProbeQuery, ...]:
+    from .acquisition_plugins.ats_snapshot import ATS_FAMILIES
+
+    query = (
+        "Chief Product Officer OR VP Product OR Head of Product OR GM Digital "
+        "OR Product Director"
+    )
+    return tuple(
+        ProbeQuery(
+            query_id=hashlib.sha256(f"ats_global_snapshot\0{family}\0{query}".encode()).hexdigest()[:20],
+            cell_id="ats_global_snapshot",
+            source_family=family,
+            query=query,
+        )
+        for family in ATS_FAMILIES
+    )
 
 
 def validate_probe_output_path(path: Path) -> None:
@@ -253,7 +301,12 @@ def run_probe(
         for attempt in range(1, max_attempts + 1):
             try:
                 records = list(source(query.query))
-                _record_source_state(source_states, query.source_family, "observed")
+                state = (
+                    "observed_with_failures"
+                    if tuple(getattr(source, "last_errors", ()) or ())
+                    else "observed"
+                )
+                _record_source_state(source_states, query.source_family, state)
                 break
             except ProbeSourceBlocked as exc:
                 _record_source_state(
@@ -424,7 +477,7 @@ def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
         search_remotive_jobs,
     )
 
-    return {
+    sources: dict[str, Callable[[str], Iterable[Any]]] = {
         "linkedin": lambda query: fetch_linkedin_vacancies(query, max_pages=2),
         "headhunter": lambda query: fetch_headhunter_vacancies(query, per_page=10),
         "duckduckgo": lambda query: [
@@ -433,6 +486,11 @@ def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
         "remoteok": lambda _query: search_remoteok_jobs(max_results=25),
         "remotive": lambda _query: search_remotive_jobs(max_results=25),
     }
+    from .acquisition_plugins.ats_snapshot import build_ats_snapshot_sources
+
+    registry = Path(__file__).resolve().parents[2] / "docs/company-registry-seed.yaml"
+    sources.update(build_ats_snapshot_sources(registry))
+    return sources
 
 
 def _inside(path: str, root: Path) -> bool:
@@ -465,6 +523,14 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
             raise ValueError(f"invalid source isolation mode: {family}")
         if not _inside(path, root):
             raise ValueError(f"source isolation path outside experiment root: {family}")
+        shared_profile = dict(settings).get("shared_profile_path")
+        if shared_profile:
+            if family not in SHARED_BROWSER_PROFILES:
+                raise ValueError(f"shared browser profile forbidden for source: {family}")
+            if Path(str(shared_profile)) != SHARED_BROWSER_PROFILES[family]:
+                raise ValueError(f"unapproved shared browser profile: {family}")
+            if not _inside(str(dict(settings).get("backup_path") or ""), root):
+                raise ValueError(f"shared profile backup outside experiment root: {family}")
     for section, keys in {
         "python": ("executable_sha256", "stdlib_tree_sha256"),
         "environment": (
@@ -611,17 +677,41 @@ def relocate_experiment_manifest(
         "\n".join(relocated_sys_path).encode()
     ).hexdigest()
     relocated["source_isolation"] = {
+        "ashby": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/ashby.lock"),
+        },
         "duckduckgo": {
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
         "headhunter": {
-            "mode": "cloned_profile",
-            "path": str(new_root / "browser-profile/headhunter"),
+            "backup_path": str(new_root / "browser-profile-backup/headhunter"),
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/headhunter-profile.lock"),
+            "shared_profile_path": str(SHARED_BROWSER_PROFILES["headhunter"]),
+        },
+        "greenhouse": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/greenhouse.lock"),
+        },
+        "lever": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/lever.lock"),
         },
         "linkedin": {
-            "mode": "cloned_profile",
-            "path": str(new_root / "browser-profile/linkedin"),
+            "backup_path": str(new_root / "browser-profile-backup/linkedin"),
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/linkedin-profile.lock"),
+            "shared_profile_path": str(SHARED_BROWSER_PROFILES["linkedin"]),
+        },
+        "personio": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/personio.lock"),
+        },
+        "recruitee": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/recruitee.lock"),
         },
         "remoteok": {
             "mode": "exclusive_lock",
@@ -630,6 +720,14 @@ def relocate_experiment_manifest(
         "remotive": {
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/remotive.lock"),
+        },
+        "smartrecruiters": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/smartrecruiters.lock"),
+        },
+        "teamtailor": {
+            "mode": "exclusive_lock",
+            "path": str(new_root / "locks/teamtailor.lock"),
         },
     }
     validate_experiment_manifest(relocated)
@@ -730,7 +828,7 @@ def main() -> int:
         queries = expand_queries(
             contract,
             role_terms=("Chief Product Officer", "VP Product", "Head of Product", "GM Digital"),
-        )
+        ) + build_snapshot_queries()
         isolation = {
             family: SourceIsolation(
                 mode=str(settings.get("mode") or "blocked"),
