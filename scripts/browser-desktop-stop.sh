@@ -144,7 +144,7 @@ stop_profile() {
   fi
   kill_pattern "--user-data-dir=${BASE_DIR}/profiles/${profile}" "Chromium (${profile})"
   kill_pattern "websockify .*:${NOVNC_PORT} .*127.0.0.1:${VNC_PORT}" "noVNC (${profile})"
-  kill_pattern "x11vnc .* -display :${DISPLAY_NUM} .* -rfbport ${VNC_PORT}" "x11vnc (${profile})"
+  kill_pattern "x11vnc -display :${DISPLAY_NUM}.*-rfbport ${VNC_PORT}" "x11vnc (${profile})"
   kill_pattern "DISPLAY=:${DISPLAY_NUM} .*dbus-run-session -- startxfce4" "XFCE (${profile})"
   kill_pattern "Xvfb :${DISPLAY_NUM}" "Xvfb (${profile})"
 
@@ -156,7 +156,7 @@ if [[ "$PROFILE" == "all" ]]; then
   kill_pattern "browser-desktop-cdp-relay.py.*--listen-port [0-9]+" "CDP relays"
   kill_pattern "remote-debugging-port=[0-9]+" "Chromium"
   kill_pattern "websockify .*:[0-9]+ .*127.0.0.1:[0-9]+" "noVNC"
-  kill_pattern "x11vnc .* -display :[0-9]+ .* -rfbport [0-9]+" "x11vnc"
+  kill_pattern "x11vnc -display :[0-9]+.*-rfbport [0-9]+" "x11vnc"
   kill_pattern "DISPLAY=:[0-9]+ .*dbus-run-session -- startxfce4" "XFCE"
   kill_pattern "Xvfb :[0-9]+" "Xvfb"
   rm -f /tmp/.X*-lock /tmp/.X11-unix/X* 2>/dev/null || true

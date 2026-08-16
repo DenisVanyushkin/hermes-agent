@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -103,6 +104,30 @@ def test_stop_script_stops_the_linkedin_cdp_relay() -> None:
     assert 'browser-desktop-cdp-relay.py.*--listen-port ${CDP_RELAY_PORT}' in body
     assert 'browser-desktop-cdp-relay.py.*--listen-port ${CDP_PORT}' not in body
     assert 'pgrep -u "$USER_NAME" -f -- "$pattern"' in body
+
+
+def test_stop_script_matches_x11vnc_started_without_wrapper_arguments() -> None:
+    """The managed x11vnc command starts directly with ``-display``.
+
+    A pattern that requires an extra argument between ``x11vnc`` and
+    ``-display`` leaves the VNC server running after the browser is stopped.
+    """
+    body = STOP_SCRIPT.read_text(encoding="utf-8")
+    configured = re.search(
+        r'kill_pattern "(x11vnc[^\"]+)" "x11vnc \(\$\{profile\}\)"', body
+    )
+    assert configured is not None
+    pattern = (
+        configured.group(1)
+        .replace("${DISPLAY_NUM}", "100")
+        .replace("${VNC_PORT}", "5902")
+    )
+    command = (
+        "x11vnc -display :100 -localhost "
+        "-rfbauth /var/lib/browser-desktop/.vnc/passwd "
+        "-rfbport 5902 -forever -shared"
+    )
+    assert re.search(pattern, command)
 
 
 def test_printed_tunnel_hint_matches_the_actual_bind_address() -> None:
