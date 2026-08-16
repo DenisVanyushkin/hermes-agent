@@ -115,6 +115,51 @@ def test_bare_execution_authorization_without_plan_fails_closed():
     assert envelope.task_text is None
 
 
+def test_bare_execution_authorization_rejects_cross_session_plan():
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="выполняй",
+        history=[
+            {"role": "user", "content": "пиши план инженеру", "session_id": "other"},
+            {
+                "role": "assistant",
+                "content": "# План для инженера\nчужая задача",
+                "session_id": "other",
+            },
+        ],
+        session_id="current",
+        history_session_id="other",
+    )
+
+    assert envelope.resolution_status == "history_session_mismatch"
+    assert envelope.source_kind == "approved_plan"
+    assert envelope.task_text is None
+
+
+def test_bare_execution_authorization_rejects_ambiguous_plans():
+    envelope = _module().resolve_engineering_task_context(
+        operator_instruction="выполняй",
+        history=[
+            {"role": "user", "content": "пиши план задача для инженера"},
+            {
+                "role": "assistant",
+                "content": "# План для инженера\nвариант A",
+                "_engineering_task": {"status": "ready_for_approval"},
+            },
+            {
+                "role": "assistant",
+                "content": "# План для инженера\nвариант B",
+                "_engineering_task": {"status": "ready_for_approval"},
+            },
+        ],
+        session_id="session-bare-ambiguous",
+        history_session_id="session-bare-ambiguous",
+    )
+
+    assert envelope.resolution_status == "ambiguous_approved_plan"
+    assert envelope.source_kind == "approved_plan"
+    assert envelope.task_text is None
+
+
 def test_pre_router_resolved_plan_forces_engineering_pipeline():
     run = importlib.import_module("gateway.run")
     observe = importlib.import_module("hermes_cli.pipeline_observe")
