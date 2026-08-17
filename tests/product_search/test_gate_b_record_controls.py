@@ -11,6 +11,8 @@ from pathlib import Path
 import socket
 import sqlite3
 import subprocess
+from threading import Event, Thread
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -268,6 +270,109 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
     assert snapshot["outstanding_reserved_usd"] == "0.000000"
 
 
+def test_reconciliation_waits_for_live_runner_manifest_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    entered_transport = Event()
+    release_transport = Event()
+
+    class _BlockingCompletions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **_: Any) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                entered_transport.set()
+                assert release_transport.wait(10)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps({
+                                "schema_version": "2.0.0",
+                                "claims": [],
+                                "conflicts": [],
+                                "question_candidates": [],
+                            }),
+                            refusal=None,
+                        )
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=10, total_tokens=20
+                ),
+                model="openai/gpt-5-mini",
+            )
+
+    completions = _BlockingCompletions()
+    semantic = LLMObservationProvider(
+        store=RecordingStore(authorization.experiment_root / "recordings"),
+        mode="record",
+        transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", lambda **_: semantic)
+    runner_errors: list[BaseException] = []
+    reconciliation_errors: list[BaseException] = []
+    reconciliation_results: list[dict[str, Any]] = []
+
+    def run_live() -> None:
+        try:
+            run_gate_b_record(authorization=authorization)
+        except BaseException as exc:
+            runner_errors.append(exc)
+
+    input_hash = authorization.ordered_input_sha256s[0]
+    evidence = {
+        "schema_version": "1.0.0",
+        "run_identity_sha256": authorization.run_identity_sha256,
+        "input_hash": input_hash,
+        "disposition": "confirmed_unbilled",
+        "provider_evidence_sha256": "c" * 64,
+    }
+
+    def reconcile() -> None:
+        try:
+            reconciliation_results.append(
+                gate_b.reconcile_gate_b_charge_unknown(
+                    authorization=authorization,
+                    owner_capability=OWNER_CAPABILITY,
+                    input_hash=input_hash,
+                    disposition="confirmed_unbilled",
+                    measured_cost_usd=None,
+                    reconciliation_evidence=evidence,
+                )
+            )
+        except BaseException as exc:
+            reconciliation_errors.append(exc)
+
+    runner = Thread(target=run_live)
+    recovery = Thread(target=reconcile)
+    runner.start()
+    assert entered_transport.wait(10)
+    recovery.start()
+    recovery.join(0.5)
+    recovery_was_serialized = recovery.is_alive()
+    release_transport.set()
+    runner.join(20)
+    recovery.join(20)
+
+    assert recovery_was_serialized
+    assert not runner.is_alive()
+    assert not recovery.is_alive()
+    assert runner_errors == []
+    assert reconciliation_errors == []
+    assert reconciliation_results[0]["status"] == "sealed_record_replayed"
+    assert reconciliation_results[0]["cost_semantics"] == "measured"
+    assert completions.calls == 48
+
+
 @pytest.mark.parametrize(
     ("disposition", "measured", "expected_semantics", "expected_cost"),
     [
@@ -489,7 +594,7 @@ def test_ledger_rejects_final_symlink_without_mutating_its_target(
     assert external.read_bytes() == b""
 
 
-def test_ledger_private_directory_remains_anchored_across_path_swap(
+def test_ledger_uses_descriptor_journal_without_sqlite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "experiment", monkeypatch)
@@ -499,31 +604,20 @@ def test_ledger_private_directory_remains_anchored_across_path_swap(
         owner_capability=OWNER_CAPABILITY,
     )
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
-    displaced = authorization.experiment_root / "run-ledger.displaced"
-    external = tmp_path / "swapped-target"
-    external.mkdir()
-    original_connect = gate_b.sqlite3.connect
-    swapped = False
-
-    def swap_then_connect(database: object, *args: object, **kwargs: object) -> object:
-        nonlocal swapped
-        if not swapped:
-            swapped = True
-            ledger_path.rename(displaced)
-            ledger_path.symlink_to(external, target_is_directory=True)
-            connection = original_connect(database, *args, **kwargs)
-            ledger_path.unlink()
-            displaced.rename(ledger_path)
-            return connection
-        return original_connect(database, *args, **kwargs)
-
-    monkeypatch.setattr(gate_b.sqlite3, "connect", swap_then_connect)
+    monkeypatch.setattr(
+        gate_b.sqlite3,
+        "connect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("budget ledger must not use SQLite")
+        ),
+    )
     ledger = GateBBudgetLedger(ledger_path, authorization)
     assert ledger.snapshot()["calls_reserved"] == 0
-    assert list(external.iterdir()) == []
+    assert ledger_path.is_file()
+    assert not list(authorization.experiment_root.glob(".gate-b-ledger-*"))
 
 
-def test_ledger_sqlite_connection_is_bound_to_pinned_inode_across_aba_swap(
+def test_ledger_creation_fsyncs_state_and_parent_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "experiment", monkeypatch)
@@ -532,8 +626,38 @@ def test_ledger_sqlite_connection_is_bound_to_pinned_inode_across_aba_swap(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
-    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
-    displaced = authorization.experiment_root / "run-ledger.displaced"
+    original_fsync = gate_b.os.fsync
+    synced_modes: list[int] = []
+
+    def tracked_fsync(descriptor: int) -> None:
+        synced_modes.append(os.fstat(descriptor).st_mode)
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(gate_b.os, "fsync", tracked_fsync)
+    GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+
+    assert any(gate_b.stat.S_ISREG(mode) for mode in synced_modes)
+    assert any(gate_b.stat.S_ISDIR(mode) for mode in synced_modes)
+
+
+def test_ledger_eliminates_private_path_swap_connect_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    private_root = authorization.experiment_root / (
+        f".gate-b-ledger-{authorization.run_identity_sha256[:16]}"
+    )
+    private_root.mkdir(mode=0o700)
+    database = private_root / "ledger.db"
+    database.write_bytes(b"")
+    displaced = private_root / "ledger.displaced"
     external = tmp_path / "aba-target.sqlite3"
     external.write_bytes(b"")
     original_connect = gate_b.sqlite3.connect
@@ -543,24 +667,46 @@ def test_ledger_sqlite_connection_is_bound_to_pinned_inode_across_aba_swap(
         nonlocal swapped
         if not swapped:
             swapped = True
-            assert str(database).startswith("file:/proc/self/fd/")
-            assert "run-ledger.sqlite3" not in str(database)
-            ledger_path.rename(displaced)
-            ledger_path.symlink_to(external)
+            database_path = private_root / "ledger.db"
+            database_path.rename(displaced)
+            database_path.symlink_to(external)
             connection = original_connect(database, *args, **kwargs)
-            ledger_path.unlink()
-            displaced.rename(ledger_path)
+            database_path.unlink()
+            displaced.rename(database_path)
             return connection
         return original_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(gate_b.sqlite3, "connect", aba_connect)
-    ledger = GateBBudgetLedger(ledger_path, authorization)
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
 
     assert ledger.snapshot()["calls_reserved"] == 0
+    assert swapped is False
     assert external.read_bytes() == b""
 
 
-def test_ledger_private_database_rejects_preexisting_symlink(
+def test_ledger_rejects_preexisting_hard_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    external = tmp_path / "external-ledger-state"
+    external.write_bytes(b"")
+    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
+    os.link(external, ledger_path)
+
+    with pytest.raises(GateBPreflightError, match="ledger_path_unsafe"):
+        GateBBudgetLedger(ledger_path, authorization)
+
+    assert external.read_bytes() == b""
+
+
+def test_open_ledger_remains_pinned_when_public_path_is_swapped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "experiment", monkeypatch)
@@ -571,18 +717,46 @@ def test_ledger_private_database_rejects_preexisting_symlink(
     )
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger = GateBBudgetLedger(ledger_path, authorization)
+    displaced = authorization.experiment_root / "run-ledger.displaced"
+    external = tmp_path / "external-ledger-target"
+    external.write_bytes(b"outside")
+    ledger_path.rename(displaced)
+    ledger_path.symlink_to(external)
+
+    input_hash = authorization.ordered_input_sha256s[0]
+    ledger.reserve(input_hash, Decimal("0.010000"))
+
+    assert ledger.call_state(input_hash) == "reserved"
+    assert external.read_bytes() == b"outside"
     ledger.close()
-    private_root = next(authorization.experiment_root.glob(".gate-b-ledger-*"))
-    database = private_root / "ledger.db"
-    database.unlink()
-    external = tmp_path / "private-target.sqlite3"
-    external.write_bytes(b"")
-    database.symlink_to(external)
+    ledger_path.unlink()
+    displaced.rename(ledger_path)
+    resumed = GateBBudgetLedger(ledger_path, authorization)
+    assert resumed.call_state(input_hash) == "reserved"
 
-    with pytest.raises(GateBPreflightError, match="ledger_path_unsafe"):
-        GateBBudgetLedger(ledger_path, authorization)
 
-    assert external.read_bytes() == b""
+def test_ledger_recovers_last_fsynced_state_from_torn_journal_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
+    input_hash = authorization.ordered_input_sha256s[0]
+    ledger = GateBBudgetLedger(ledger_path, authorization)
+    ledger.reserve(input_hash, Decimal("0.010000"))
+    ledger.close()
+    with ledger_path.open("ab") as journal:
+        journal.write(b'{"partial"')
+
+    resumed = GateBBudgetLedger(ledger_path, authorization)
+
+    assert resumed.call_state(input_hash) == "reserved"
+    assert ledger_path.read_bytes().endswith(b"\n")
+    assert b'{"partial"' not in ledger_path.read_bytes()
 
 
 def test_recording_store_remains_anchored_after_root_path_swap(tmp_path: Path) -> None:
@@ -791,6 +965,131 @@ def test_dry_preflight_resolves_nested_symlink_containment_and_repo_allowlist(
     with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
         build_dry_run_preflight(
             gate_a_root=GATE_A_ROOT, boundary_attempt=repo_secret_attempt
+        )
+
+
+@pytest.mark.parametrize("descriptor", [0, 1, 2])
+def test_dry_preflight_neutralizes_inherited_stdio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    descriptor: int,
+) -> None:
+    output_root = tmp_path / f"stdio-{descriptor}"
+    outside = tmp_path / f"stdio-{descriptor}.log"
+    outside.write_bytes(b"unchanged")
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+    saved = os.dup(descriptor)
+    target = os.open(outside, os.O_WRONLY | os.O_APPEND)
+    os.dup2(target, descriptor)
+
+    def attempt(_: object) -> None:
+        os.write(descriptor, b"forbidden")
+
+    try:
+        with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+            build_dry_run_preflight(
+                gate_a_root=GATE_A_ROOT,
+                boundary_attempt=attempt,
+            )
+    finally:
+        os.dup2(saved, descriptor)
+        os.close(saved)
+        os.close(target)
+
+    assert outside.read_bytes() == b"unchanged"
+
+
+def test_dry_preflight_neutralizes_fd_opened_concurrently_before_fork(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "concurrent-fd-output"
+    outside = tmp_path / "concurrent-fd.log"
+    outside.write_bytes(b"unchanged")
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+    real_fork = os.fork
+    start_open = Event()
+    opened = Event()
+    descriptors: list[int] = []
+
+    def opener() -> None:
+        assert start_open.wait(10)
+        descriptors.append(os.open(outside, os.O_WRONLY | os.O_APPEND))
+        opened.set()
+
+    opener_thread = Thread(target=opener)
+    opener_thread.start()
+
+    def fork_after_concurrent_open() -> int:
+        start_open.set()
+        assert opened.wait(10)
+        return real_fork()
+
+    monkeypatch.setattr(gate_b.os, "fork", fork_after_concurrent_open)
+
+    def attempt(_: object) -> None:
+        os.write(descriptors[0], b"forbidden")
+
+    try:
+        with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+            build_dry_run_preflight(
+                gate_a_root=GATE_A_ROOT,
+                boundary_attempt=attempt,
+            )
+    finally:
+        opener_thread.join(10)
+        if descriptors:
+            os.close(descriptors[0])
+
+    assert outside.read_bytes() == b"unchanged"
+
+
+def test_dry_preflight_keeps_policy_until_delayed_child_thread_is_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "delayed-thread-output"
+    outside = tmp_path / "delayed-thread.log"
+    outside.write_bytes(b"unchanged")
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+    original_canonical_json = gate_b._canonical_json
+
+    def yield_during_child_protocol(value: object) -> str:
+        if isinstance(value, dict) and "ok" in value:
+            time.sleep(0.2)
+        return original_canonical_json(value)
+
+    monkeypatch.setattr(gate_b, "_canonical_json", yield_during_child_protocol)
+
+    def attempt(_: object) -> None:
+        def delayed_write() -> None:
+            while gate_b._ACTIVE_DRY_RUN_POLICY is not None:
+                time.sleep(0.001)
+            outside.write_text("forbidden", encoding="utf-8")
+
+        Thread(target=delayed_write, daemon=True).start()
+
+    with pytest.raises(GateBPreflightError, match="dry_run_child_thread"):
+        build_dry_run_preflight(
+            gate_a_root=GATE_A_ROOT,
+            boundary_attempt=attempt,
+        )
+
+    assert outside.read_bytes() == b"unchanged"
+
+
+def test_dry_preflight_callback_has_no_fresh_path_io_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "callback-output"
+    output_root.mkdir()
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+
+    def attempt(_: object) -> None:
+        (output_root / "callback.txt").write_text("forbidden", encoding="utf-8")
+
+    with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+        build_dry_run_preflight(
+            gate_a_root=GATE_A_ROOT,
+            boundary_attempt=attempt,
         )
 
 
