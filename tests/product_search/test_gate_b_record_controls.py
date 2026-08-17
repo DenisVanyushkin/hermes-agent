@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,7 @@ from job_intel.product_search.gate_b import (
     run_gate_b_record,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    LLMProviderError,
     LLMObservationProvider,
     RecordingStore,
 )
@@ -178,7 +180,25 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
             self.calls += 1
             if self.calls == 1:
                 raise SystemExit("fixture crash after dispatch")
-            raise AssertionError("ambiguous call must not be retried")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps({
+                                "schema_version": "2.0.0",
+                                "claims": [],
+                                "conflicts": [],
+                                "question_candidates": [],
+                            }),
+                            refusal=None,
+                        )
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=10, total_tokens=20
+                ),
+                model="openai/gpt-5-mini",
+            )
 
     completions = _CrashingCompletions()
     semantic = LLMObservationProvider(
@@ -199,6 +219,123 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
     with pytest.raises(GateBPreflightError, match="owner_reconciliation_required"):
         run_gate_b_record(authorization=authorization)
     assert completions.calls == 1
+
+    evidence = {
+        "schema_version": "1.0.0",
+        "run_identity_sha256": authorization.run_identity_sha256,
+        "input_hash": input_hash,
+        "disposition": "charge_amount_unknown",
+        "provider_evidence_sha256": "a" * 64,
+    }
+    with pytest.raises(GateBPreflightError, match="owner_capability"):
+        gate_b.reconcile_gate_b_charge_unknown(
+            authorization=authorization,
+            owner_capability="wrong-owner-capability",
+            input_hash=input_hash,
+            disposition="charge_amount_unknown",
+            measured_cost_usd=None,
+            reconciliation_evidence=evidence,
+        )
+    reconciliation = gate_b.reconcile_gate_b_charge_unknown(
+        authorization=authorization,
+        owner_capability=OWNER_CAPABILITY,
+        input_hash=input_hash,
+        disposition="charge_amount_unknown",
+        measured_cost_usd=None,
+        reconciliation_evidence=evidence,
+    )
+    assert reconciliation == {
+        "status": "terminal_failure_recorded",
+        "cost_semantics": "unknown_reserved_max",
+        "cost_usd": "0.010000",
+        "input_hash": input_hash,
+        "record_replayed": False,
+    }
+
+    results = run_gate_b_record(authorization=authorization)
+    assert len(results) == 48
+    assert completions.calls == 48
+    assert ledger.call_state(input_hash) == "failure"
+    assert ledger.reconciliation_for(input_hash) == {
+        "disposition": "charge_amount_unknown",
+        "cost_semantics": "unknown_reserved_max",
+        "actual_cost_usd": "0.010000",
+        "provider_evidence_sha256": "a" * 64,
+        "run_identity_sha256": authorization.run_identity_sha256,
+    }
+    snapshot = ledger.snapshot()
+    assert snapshot["calls_completed"] == 48
+    assert snapshot["outstanding_reserved_usd"] == "0.000000"
+
+
+@pytest.mark.parametrize(
+    ("disposition", "measured", "expected_semantics", "expected_cost"),
+    [
+        ("confirmed_unbilled", None, "confirmed_zero", "0.000000"),
+        (
+            "confirmed_charged_measured",
+            Decimal("0.001250"),
+            "measured",
+            "0.001250",
+        ),
+        ("charge_amount_unknown", None, "unknown_reserved_max", "0.010000"),
+    ],
+)
+def test_owner_reconciliation_has_closed_terminal_cost_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    disposition: str,
+    measured: Decimal | None,
+    expected_semantics: str,
+    expected_cost: str,
+) -> None:
+    preflight = _preflight(tmp_path / disposition, monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    input_hash = authorization.ordered_input_sha256s[0]
+    reservation = ledger.reserve(input_hash, Decimal("0.010000"))
+    ledger.mark_dispatching(reservation)
+    evidence = {
+        "schema_version": "1.0.0",
+        "run_identity_sha256": authorization.run_identity_sha256,
+        "input_hash": input_hash,
+        "disposition": disposition,
+        "provider_evidence_sha256": "b" * 64,
+    }
+
+    result = gate_b.reconcile_gate_b_charge_unknown(
+        authorization=authorization,
+        owner_capability=OWNER_CAPABILITY,
+        input_hash=input_hash,
+        disposition=disposition,
+        measured_cost_usd=measured,
+        reconciliation_evidence=evidence,
+    )
+
+    assert result["cost_semantics"] == expected_semantics
+    assert result["cost_usd"] == expected_cost
+    assert ledger.call_state(input_hash) == "failure"
+    replayed = gate_b.reconcile_gate_b_charge_unknown(
+        authorization=authorization,
+        owner_capability=OWNER_CAPABILITY,
+        input_hash=input_hash,
+        disposition=disposition,
+        measured_cost_usd=measured,
+        reconciliation_evidence=evidence,
+    )
+    assert replayed == {
+        "status": "sealed_record_replayed",
+        "cost_semantics": expected_semantics,
+        "cost_usd": expected_cost,
+        "input_hash": input_hash,
+        "record_replayed": True,
+    }
 
 
 def test_ledger_reconciles_crash_after_owner_sealed_record_write(
@@ -352,7 +489,7 @@ def test_ledger_rejects_final_symlink_without_mutating_its_target(
     assert external.read_bytes() == b""
 
 
-def test_ledger_detects_final_path_swap_before_any_database_mutation(
+def test_ledger_private_directory_remains_anchored_across_path_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "experiment", monkeypatch)
@@ -362,8 +499,9 @@ def test_ledger_detects_final_path_swap_before_any_database_mutation(
         owner_capability=OWNER_CAPABILITY,
     )
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
-    external = tmp_path / "swapped-target.sqlite3"
-    external.write_bytes(b"")
+    displaced = authorization.experiment_root / "run-ledger.displaced"
+    external = tmp_path / "swapped-target"
+    external.mkdir()
     original_connect = gate_b.sqlite3.connect
     swapped = False
 
@@ -371,13 +509,79 @@ def test_ledger_detects_final_path_swap_before_any_database_mutation(
         nonlocal swapped
         if not swapped:
             swapped = True
-            ledger_path.unlink(missing_ok=True)
-            ledger_path.symlink_to(external)
+            ledger_path.rename(displaced)
+            ledger_path.symlink_to(external, target_is_directory=True)
+            connection = original_connect(database, *args, **kwargs)
+            ledger_path.unlink()
+            displaced.rename(ledger_path)
+            return connection
         return original_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(gate_b.sqlite3, "connect", swap_then_connect)
-    with pytest.raises(GateBPreflightError, match="ledger_path_changed"):
+    ledger = GateBBudgetLedger(ledger_path, authorization)
+    assert ledger.snapshot()["calls_reserved"] == 0
+    assert list(external.iterdir()) == []
+
+
+def test_ledger_sqlite_connection_is_bound_to_pinned_inode_across_aba_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
+    displaced = authorization.experiment_root / "run-ledger.displaced"
+    external = tmp_path / "aba-target.sqlite3"
+    external.write_bytes(b"")
+    original_connect = gate_b.sqlite3.connect
+    swapped = False
+
+    def aba_connect(database: object, *args: object, **kwargs: object) -> object:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            assert str(database).startswith("file:/proc/self/fd/")
+            assert "run-ledger.sqlite3" not in str(database)
+            ledger_path.rename(displaced)
+            ledger_path.symlink_to(external)
+            connection = original_connect(database, *args, **kwargs)
+            ledger_path.unlink()
+            displaced.rename(ledger_path)
+            return connection
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(gate_b.sqlite3, "connect", aba_connect)
+    ledger = GateBBudgetLedger(ledger_path, authorization)
+
+    assert ledger.snapshot()["calls_reserved"] == 0
+    assert external.read_bytes() == b""
+
+
+def test_ledger_private_database_rejects_preexisting_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
+    ledger = GateBBudgetLedger(ledger_path, authorization)
+    ledger.close()
+    private_root = next(authorization.experiment_root.glob(".gate-b-ledger-*"))
+    database = private_root / "ledger.db"
+    database.unlink()
+    external = tmp_path / "private-target.sqlite3"
+    external.write_bytes(b"")
+    database.symlink_to(external)
+
+    with pytest.raises(GateBPreflightError, match="ledger_path_unsafe"):
         GateBBudgetLedger(ledger_path, authorization)
+
     assert external.read_bytes() == b""
 
 
@@ -397,6 +601,27 @@ def test_recording_store_remains_anchored_after_root_path_swap(tmp_path: Path) -
 
     assert (relocated / f"{second_hash}.json").is_file()
     assert not (outside / f"{second_hash}.json").exists()
+
+
+def test_recording_load_rejects_nonregular_opened_descriptor_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RecordingStore(tmp_path)
+    input_hash = "3" * 64
+    read_descriptor, write_descriptor = os.pipe()
+    os.write(write_descriptor, b"{}")
+    os.close(write_descriptor)
+    original_open = os.open
+
+    def swapped_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == f"{input_hash}.json":
+            assert flags & os.O_NONBLOCK
+            return read_descriptor
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapped_open)
+    with pytest.raises(LLMProviderError, match="recording_not_regular"):
+        store.load(input_hash)
 
 
 def test_package_publish_remains_anchored_after_subdirectory_swap(
@@ -486,6 +711,89 @@ def test_dry_preflight_blocks_forbidden_io_at_the_actual_boundary(
     outside.unlink(missing_ok=True)
 
 
+@pytest.mark.parametrize("operation", ["descriptor", "socket", "sqlite"])
+def test_dry_preflight_neutralizes_preopened_outside_handles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    output_root = tmp_path / "allowed-output"
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"unchanged")
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+    cleanup: list[Any] = []
+    if operation == "descriptor":
+        descriptor = os.open(outside, os.O_WRONLY | os.O_APPEND)
+        cleanup.append(lambda: os.close(descriptor))
+
+        def attempt(_: object) -> None:
+            os.write(descriptor, b"forbidden")
+
+    elif operation == "socket":
+        sender, receiver = socket.socketpair()
+        receiver.setblocking(False)
+        cleanup.extend((sender.close, receiver.close))
+
+        def attempt(_: object) -> None:
+            sender.sendall(b"forbidden")
+
+    else:
+        database = tmp_path / "outside.sqlite3"
+        connection = sqlite3.connect(database)
+        connection.execute("CREATE TABLE protected(value TEXT)")
+        connection.commit()
+        cleanup.append(connection.close)
+
+        def attempt(_: object) -> None:
+            connection.execute("INSERT INTO protected VALUES ('forbidden')")
+            connection.commit()
+
+    try:
+        with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+            build_dry_run_preflight(gate_a_root=GATE_A_ROOT, boundary_attempt=attempt)
+        assert outside.read_bytes() == b"unchanged"
+        if operation == "socket":
+            with pytest.raises(BlockingIOError):
+                receiver.recv(1)
+        if operation == "sqlite":
+            assert connection.execute("SELECT COUNT(*) FROM protected").fetchone() == (
+                0,
+            )
+    finally:
+        for close in cleanup:
+            close()
+
+
+def test_dry_preflight_resolves_nested_symlink_containment_and_repo_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_root = tmp_path / "allowed-output"
+    output_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (output_root / "nested-link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+
+    def symlink_attempt(_: object) -> None:
+        (output_root / "nested-link" / "escape.txt").write_text(
+            "forbidden", encoding="utf-8"
+        )
+
+    with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+        build_dry_run_preflight(
+            gate_a_root=GATE_A_ROOT, boundary_attempt=symlink_attempt
+        )
+    assert not (outside / "escape.txt").exists()
+
+    def repo_secret_attempt(_: object) -> None:
+        (gate_b.REPO_ROOT / "pyproject.toml").read_bytes()
+
+    with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+        build_dry_run_preflight(
+            gate_a_root=GATE_A_ROOT, boundary_attempt=repo_secret_attempt
+        )
+
+
 def test_dry_preflight_scrubs_slack_credentials_inside_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -501,7 +809,9 @@ def test_dry_preflight_scrubs_slack_credentials_inside_boundary(
         boundary_attempt=attempt,
     )
 
-    assert observed == [None]
+    # The callback executes in the isolated child, so its parent closure is
+    # intentionally not mutable even though the credential was absent there.
+    assert observed == []
     assert result["side_effect_evidence"]["slack_credentials_scrubbed"] == 1
     assert os.environ["SLACK_BOT_TOKEN"] == "fixture-secret-must-not-be-visible"
 

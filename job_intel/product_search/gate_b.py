@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -65,6 +66,9 @@ from job_intel.product_search.contracts import (
 from job_intel.vacancy_understanding.semantic.contract import load_semantic_contract
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     GovernedPricingSchedule,
+    LLMObservationProvider,
+    LLMProviderError,
+    RecordingStore,
     StructuredCallCapability,
     build_prompt_for_version,
     _issue_structured_call_capability,
@@ -175,20 +179,39 @@ _AUDIT_HOOK_INSTALLED = False
 _DRY_RUN_EXECUTION_LOCK = threading.Lock()
 _ACTIVE_DRY_RUN_POLICY: Any = None
 _SLACK_CREDENTIAL_ENV = ("SLACK_BOT_TOKEN", "JOB_INTEL_SLACK_BOT_TOKEN")
+_DRY_RUN_REPO_READ_FILES = (
+    REPO_ROOT / "config/product_search/career_profile.v2.yaml",
+    REPO_ROOT / "config/product_search/search_contract.v1.yaml",
+    REPO_ROOT / "config/product_search/evidence_synthesis.v1.yaml",
+    REPO_ROOT / "config/product_search/decision_contract.v2.yaml",
+    REPO_ROOT / "config/product_search/company_evidence_contract.v1.yaml",
+    REPO_ROOT
+    / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml",
+)
 
 
-def _contained_path(path: object, roots: tuple[Path, ...]) -> bool:
+def _resolved_path(path: object) -> Path | None:
     if isinstance(path, int):
-        return True
+        return None
     try:
         candidate = Path(os.fsdecode(path))
     except (TypeError, ValueError):
-        return False
+        return None
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
-    candidate = Path(os.path.abspath(candidate))
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _contained_path(path: object, roots: tuple[Path, ...]) -> bool:
+    candidate = _resolved_path(path)
+    if candidate is None:
+        return False
     for root in roots:
-        if candidate == root or root in candidate.parents:
+        resolved_root = root.resolve(strict=False)
+        if candidate == resolved_root or resolved_root in candidate.parents:
             return True
     return False
 
@@ -202,11 +225,14 @@ class _DryRunIOPolicy:
         boundary: DryRunBoundary,
     ) -> None:
         self.read_roots = (
-            Path(os.path.abspath(gate_a_root)),
-            Path(os.path.abspath(output_root)),
-            Path(os.path.abspath(REPO_ROOT)),
+            gate_a_root.resolve(strict=False),
+            output_root.resolve(strict=False),
         )
-        self.write_roots = (Path(os.path.abspath(output_root)),)
+        self.read_files = frozenset(
+            path.resolve(strict=False) for path in _DRY_RUN_REPO_READ_FILES
+        )
+        self.runtime_code_files: set[Path] = set()
+        self.write_roots = (output_root.resolve(strict=False),)
         self.boundary = boundary
 
     def deny(self, category: str, event: str) -> None:
@@ -218,6 +244,23 @@ class _DryRunIOPolicy:
             return
         if event.startswith("socket."):
             self.deny("network", event)
+        if event == "import" and args and str(args[0]).split(".", 1)[0] in {
+            "pydantic",
+        }:
+            try:
+                spec = importlib.util.find_spec(str(args[0]))
+            except (ImportError, AttributeError, ValueError):
+                spec = None
+            origin = None if spec is None else spec.origin
+            if origin and origin not in {"built-in", "frozen"}:
+                source = Path(origin).resolve(strict=False)
+                self.runtime_code_files.add(source)
+                if source.suffix == ".py":
+                    self.runtime_code_files.add(
+                        Path(importlib.util.cache_from_source(str(source))).resolve(
+                            strict=False
+                        )
+                    )
         if event in {"subprocess.Popen", "os.system", "pty.spawn"} or event.startswith(
             ("os.exec", "os.spawn")
         ):
@@ -227,6 +270,11 @@ class _DryRunIOPolicy:
             database_path = str(database).removeprefix("file:").split("?", 1)[0]
             if not _contained_path(database_path, self.read_roots):
                 self.deny("production_write", event)
+            return
+        if event in {"os.listdir", "os.scandir"}:
+            path = args[0] if args else None
+            if not _contained_path(path, self.read_roots):
+                self.deny("protected_read", event)
             return
         if event == "open":
             path = args[0] if args else None
@@ -244,7 +292,10 @@ class _DryRunIOPolicy:
             if not isinstance(path, (str, bytes, os.PathLike)):
                 return
             roots = self.write_roots if write else self.read_roots
-            if not _contained_path(path, roots):
+            exact_read = not write and _resolved_path(path) in (
+                self.read_files | self.runtime_code_files
+            )
+            if not exact_read and not _contained_path(path, roots):
                 self.deny("production_write" if write else "protected_read", event)
             return
         if event in {
@@ -1387,7 +1438,14 @@ def _build_dry_run_preflight_core(
     gate_a_before = _gate_a_snapshot(gate_a_root, boundary)
     protected_before = _protected_metadata_snapshot()
     if boundary_attempt is not None:
-        boundary_attempt(boundary)
+        try:
+            boundary_attempt(boundary)
+        except GateBPreflightError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            raise GateBPreflightError(
+                "dry_run_io_denied:preopened_handle"
+            ) from exc
     records, protected_paths = _load_gate_a(gate_a_root, boundary)
     selected = _corpus_records(records, sample_size)
     corpus = {
@@ -1506,19 +1564,86 @@ def build_dry_run_preflight(
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     boundary_attempt: Any = None,
 ) -> dict[str, Any]:
-    """Run preparation inside an enforced offline, output-contained boundary."""
-    boundary = DryRunBoundary()
-    with _dry_run_io_enforcement(
-        gate_a_root=gate_a_root,
-        output_root=GATE_B_EXPERIMENT_ROOT,
-        boundary=boundary,
-    ):
-        return _build_dry_run_preflight_core(
-            gate_a_root=gate_a_root,
-            sample_size=sample_size,
-            boundary_attempt=boundary_attempt,
-            boundary=boundary,
+    """Run preparation in a child with no usable inherited I/O handles."""
+    if not hasattr(os, "fork"):
+        raise GateBPreflightError("dry_run_process_isolation_unavailable")
+    inherited_descriptors = [
+        int(name)
+        for name in os.listdir("/proc/self/fd")
+        if name.isdigit() and int(name) >= 3
+    ]
+    inherited_max = max(inherited_descriptors, default=2)
+    read_descriptor, write_descriptor = os.pipe()
+    process_id = os.fork()
+    if process_id == 0:
+        os.close(read_descriptor)
+        try:
+            for descriptor in range(3, inherited_max + 1):
+                if descriptor != write_descriptor:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+            fillers: list[int] = []
+            for expected in range(3, inherited_max + 1):
+                if expected == write_descriptor:
+                    continue
+                descriptor = os.open(os.devnull, os.O_RDONLY)
+                if descriptor != expected:
+                    raise GateBPreflightError("dry_run_descriptor_isolation_failed")
+                fillers.append(descriptor)
+            boundary = DryRunBoundary()
+            with _dry_run_io_enforcement(
+                gate_a_root=gate_a_root,
+                output_root=GATE_B_EXPERIMENT_ROOT,
+                boundary=boundary,
+            ):
+                result = _build_dry_run_preflight_core(
+                    gate_a_root=gate_a_root,
+                    sample_size=sample_size,
+                    boundary_attempt=boundary_attempt,
+                    boundary=boundary,
+                )
+            message = {"ok": True, "result": result}
+        except BaseException as exc:
+            message = {
+                "ok": False,
+                "gate_b_error": isinstance(exc, GateBPreflightError),
+                "message": str(exc),
+                "type": type(exc).__name__,
+            }
+        payload = _canonical_json(message).encode("utf-8")
+        try:
+            while payload:
+                written = os.write(write_descriptor, payload)
+                payload = payload[written:]
+        finally:
+            os.close(write_descriptor)
+        os._exit(0)
+    os.close(write_descriptor)
+    chunks: list[bytes] = []
+    try:
+        while True:
+            chunk = os.read(read_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(read_descriptor)
+    _, wait_status = os.waitpid(process_id, 0)
+    if wait_status != 0:
+        raise GateBPreflightError(f"dry_run_child_failed:{wait_status}")
+    try:
+        message = json.loads(b"".join(chunks))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise GateBPreflightError("dry_run_child_protocol") from exc
+    if not message.get("ok"):
+        if message.get("gate_b_error"):
+            raise GateBPreflightError(str(message.get("message")))
+        raise GateBPreflightError(
+            f"dry_run_child_error:{message.get('type')}:{message.get('message')}"
         )
+    return dict(message["result"])
 
 
 _AUTHORIZATION_ISSUER = object()
@@ -1539,6 +1664,7 @@ class GateBRunAuthorization:
     ordered_input_sha256s: tuple[str, ...]
     gate_a_root: Path
     record_count: int
+    _owner_capability_sha256: str
     _metadata_seal_key: bytes
     _issuer: object
 
@@ -1666,6 +1792,9 @@ def authorize_record_run(
         ordered_input_sha256s=ordered_input_sha256s,
         gate_a_root=gate_a_root,
         record_count=len(corpus["records"]),
+        _owner_capability_sha256=_sha256_bytes(
+            owner_capability.encode("utf-8")
+        ),
         _metadata_seal_key=hashlib.sha256(
             b"gate-b-record-seal\x00"
             + owner_capability.encode("utf-8")
@@ -1673,6 +1802,26 @@ def authorize_record_run(
         ).digest(),
         _issuer=_AUTHORIZATION_ISSUER,
     )
+
+
+class _LedgerConnectionLease:
+    """Serialize one persistent SQLite handle without exposing close semantics."""
+
+    def __init__(
+        self, connection: sqlite3.Connection, lock: threading.RLock
+    ) -> None:
+        self._connection = connection
+        self._lock = lock
+        self._closed = False
+        self._lock.acquire()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._lock.release()
 
 
 class GateBBudgetLedger:
@@ -1697,63 +1846,125 @@ class GateBBudgetLedger:
                 follow_symlinks=False,
             )
             if stat.S_ISLNK(path_stat.st_mode):
-                os.close(self._root_descriptor)
-                self._root_descriptor = None
+                self.close()
                 raise GateBPreflightError("ledger_final_symlink")
         except FileNotFoundError:
-            pass
-        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        try:
             try:
-                self._ledger_descriptor = os.open(
-                    path.name, flags, dir_fd=self._root_descriptor
-                )
-            except FileNotFoundError:
-                self._ledger_descriptor = os.open(
+                self._ledger_marker_descriptor = os.open(
                     path.name,
-                    flags | os.O_CREAT | os.O_EXCL,
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0),
                     0o600,
                     dir_fd=self._root_descriptor,
                 )
-        except OSError as exc:
-            os.close(self._root_descriptor)
-            raise GateBPreflightError("ledger_path_unsafe") from exc
-        ledger_stat = os.fstat(self._ledger_descriptor)
-        if not stat.S_ISREG(ledger_stat.st_mode):
+            except OSError as exc:
+                self.close()
+                raise GateBPreflightError("ledger_path_unsafe") from exc
+        else:
+            try:
+                self._ledger_marker_descriptor = os.open(
+                    path.name,
+                    os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=self._root_descriptor,
+                )
+            except OSError as exc:
+                self.close()
+                raise GateBPreflightError("ledger_path_unsafe") from exc
+        marker_stat = os.fstat(self._ledger_marker_descriptor)
+        if not stat.S_ISREG(marker_stat.st_mode):
             self.close()
             raise GateBPreflightError("ledger_path_unsafe")
-        self._ledger_identity = (ledger_stat.st_dev, ledger_stat.st_ino)
-        os.fchmod(self._ledger_descriptor, 0o600)
-        self._initialize()
-
-    def _connect(self) -> sqlite3.Connection:
-        database_uri = (
-            f"file:/proc/self/fd/{self._root_descriptor}/{self.path.name}?mode=rw"
+        os.fchmod(self._ledger_marker_descriptor, 0o600)
+        private_name = (
+            ".gate-b-ledger-"
+            f"{authorization.run_identity_sha256[:16]}"
         )
-        connection = sqlite3.connect(database_uri, timeout=30, uri=True)
         try:
-            current = os.stat(
-                self.path.name,
-                dir_fd=self._root_descriptor,
-                follow_symlinks=False,
+            try:
+                os.mkdir(private_name, mode=0o700, dir_fd=self._root_descriptor)
+            except FileExistsError:
+                pass
+            self._ledger_directory_descriptor = _open_child_directory(
+                self._root_descriptor, private_name
+            )
+        except (OSError, GateBPreflightError) as exc:
+            self.close()
+            raise GateBPreflightError("ledger_path_unsafe") from exc
+        ledger_directory_stat = os.fstat(self._ledger_directory_descriptor)
+        if (
+            not stat.S_ISDIR(ledger_directory_stat.st_mode)
+            or ledger_directory_stat.st_uid != os.geteuid()
+            or ledger_directory_stat.st_mode & 0o077
+        ):
+            self.close()
+            raise GateBPreflightError("ledger_path_unsafe")
+        try:
+            self._database_guard_descriptor = os.open(
+                "ledger.db",
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=self._ledger_directory_descriptor,
             )
         except OSError as exc:
-            connection.close()
-            raise GateBPreflightError("ledger_path_changed") from exc
+            self.close()
+            raise GateBPreflightError("ledger_path_unsafe") from exc
+        database_stat = os.fstat(self._database_guard_descriptor)
         if (
-            not stat.S_ISREG(current.st_mode)
-            or (current.st_dev, current.st_ino) != self._ledger_identity
+            not stat.S_ISREG(database_stat.st_mode)
+            or database_stat.st_uid != os.geteuid()
         ):
-            connection.close()
-            raise GateBPreflightError("ledger_path_changed")
-        connection.row_factory = sqlite3.Row
-        return connection
+            self.close()
+            raise GateBPreflightError("ledger_path_unsafe")
+        os.fchmod(self._database_guard_descriptor, 0o600)
+        self._connection_lock = threading.RLock()
+        database_uri = (
+            f"file:/proc/self/fd/{self._ledger_directory_descriptor}/ledger.db"
+            "?mode=rwc"
+        )
+        self._connection = sqlite3.connect(
+            database_uri,
+            timeout=30,
+            uri=True,
+            check_same_thread=False,
+        )
+        self._connection.row_factory = sqlite3.Row
+        self._initialize()
+
+    def _connect(self) -> _LedgerConnectionLease:
+        connection = getattr(self, "_connection", None)
+        if connection is None:
+            raise GateBPreflightError("ledger_closed")
+        return _LedgerConnectionLease(
+            connection,
+            self._connection_lock,
+        )
 
     def close(self) -> None:
-        ledger_descriptor = getattr(self, "_ledger_descriptor", None)
-        if ledger_descriptor is not None:
-            os.close(ledger_descriptor)
-            self._ledger_descriptor = None
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            with self._connection_lock:
+                connection.close()
+                self._connection = None
+        database_guard_descriptor = getattr(
+            self, "_database_guard_descriptor", None
+        )
+        if database_guard_descriptor is not None:
+            os.close(database_guard_descriptor)
+            self._database_guard_descriptor = None
+        ledger_directory_descriptor = getattr(
+            self, "_ledger_directory_descriptor", None
+        )
+        if ledger_directory_descriptor is not None:
+            os.close(ledger_directory_descriptor)
+            self._ledger_directory_descriptor = None
+        ledger_marker_descriptor = getattr(
+            self, "_ledger_marker_descriptor", None
+        )
+        if ledger_marker_descriptor is not None:
+            os.close(ledger_marker_descriptor)
+            self._ledger_marker_descriptor = None
         root_descriptor = getattr(self, "_root_descriptor", None)
         if root_descriptor is not None:
             os.close(root_descriptor)
@@ -1779,6 +1990,13 @@ class GateBBudgetLedger:
                 "('reserved','charge_unknown','success','failure')));"
                 "CREATE TABLE IF NOT EXISTS run_inputs ("
                 "ordinal INTEGER PRIMARY KEY, input_hash TEXT UNIQUE NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS charge_unknown_reconciliation ("
+                "input_hash TEXT PRIMARY KEY, run_identity_sha256 TEXT NOT NULL, "
+                "disposition TEXT NOT NULL, cost_semantics TEXT NOT NULL, "
+                "actual_microusd INTEGER NOT NULL, "
+                "provider_evidence_sha256 TEXT NOT NULL, "
+                "owner_capability_sha256 TEXT NOT NULL, "
+                "record_metadata_sha256 TEXT NOT NULL);"
             )
             connection.execute(
                 "INSERT OR IGNORE INTO run_budget VALUES (?, ?, ?)",
@@ -1810,7 +2028,6 @@ class GateBBudgetLedger:
             elif existing_inputs != self.authorization.ordered_input_sha256s:
                 raise GateBPreflightError("ledger_input_allowlist_mismatch")
             connection.commit()
-            os.fchmod(self._ledger_descriptor, 0o600)
         finally:
             connection.close()
 
@@ -1983,22 +2200,157 @@ class GateBBudgetLedger:
         outcome = str(record.get("status"))
         if outcome not in {"success", "failure"}:
             raise GateBPreflightError("recording_status_invalid")
+        reconciliation = self._validated_reconciliation(
+            input_hash=input_hash,
+            record=record,
+            actual_cost=actual_cost,
+        )
+        actual_micros = _usd_to_micros(actual_cost)
         connection = self._connect()
         try:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM call_ledger WHERE input_hash = ?", (input_hash,)
             ).fetchone()
+            if row is None:
+                raise GateBPreflightError("recording_without_reservation")
+            if actual_micros > row["reserved_microusd"]:
+                raise GateBPreflightError("actual_cost_exceeds_reservation")
+            expected_audit = None
+            if reconciliation is not None:
+                expected_audit = (
+                    self.authorization.run_identity_sha256,
+                    reconciliation["disposition"],
+                    reconciliation["cost_semantics"],
+                    actual_micros,
+                    reconciliation["provider_evidence_sha256"],
+                    reconciliation["owner_capability_sha256"],
+                    str(record["metadata_sha256"]),
+                )
+            if row["status"] in {"reserved", "charge_unknown"}:
+                if reconciliation is not None and row["status"] != "charge_unknown":
+                    raise GateBPreflightError("reconciliation_state_invalid")
+                if reconciliation is not None:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO charge_unknown_reconciliation "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            input_hash,
+                            self.authorization.run_identity_sha256,
+                            reconciliation["disposition"],
+                            reconciliation["cost_semantics"],
+                            actual_micros,
+                            reconciliation["provider_evidence_sha256"],
+                            reconciliation["owner_capability_sha256"],
+                            str(record["metadata_sha256"]),
+                        ),
+                    )
+                    audit = connection.execute(
+                        "SELECT * FROM charge_unknown_reconciliation "
+                        "WHERE input_hash = ?",
+                        (input_hash,),
+                    ).fetchone()
+                    if audit is None or tuple(audit)[1:] != expected_audit:
+                        raise GateBPreflightError("reconciliation_audit_mismatch")
+                connection.execute(
+                    "UPDATE call_ledger SET actual_microusd = ?, status = ? "
+                    "WHERE input_hash = ?",
+                    (actual_micros, outcome, input_hash),
+                )
+                connection.commit()
+                return
+            if row["status"] != outcome or row["actual_microusd"] != actual_micros:
+                raise GateBPreflightError("recording_ledger_mismatch")
+            if reconciliation is not None:
+                audit = connection.execute(
+                    "SELECT * FROM charge_unknown_reconciliation "
+                    "WHERE input_hash = ?",
+                    (input_hash,),
+                ).fetchone()
+                if audit is None or tuple(audit)[1:] != expected_audit:
+                    raise GateBPreflightError("reconciliation_audit_mismatch")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
-        if row is None:
-            raise GateBPreflightError("recording_without_reservation")
-        if row["status"] in {"reserved", "charge_unknown"}:
-            self.reconcile(str(row["reservation_id"]), actual_cost, outcome)
-            return
-        if row["status"] != outcome or row["actual_microusd"] != _usd_to_micros(
-            actual_cost
+
+    def _validated_reconciliation(
+        self,
+        *,
+        input_hash: str,
+        record: Mapping[str, Any],
+        actual_cost: Decimal,
+    ) -> Mapping[str, Any] | None:
+        reconciliation = record.get("charge_unknown_reconciliation")
+        if reconciliation is None:
+            return None
+        if not isinstance(reconciliation, Mapping) or set(reconciliation) != {
+            "schema_version",
+            "run_identity_sha256",
+            "input_hash",
+            "disposition",
+            "cost_semantics",
+            "provider_evidence_sha256",
+            "owner_capability_sha256",
+        }:
+            raise GateBPreflightError("reconciliation_record_invalid")
+        if (
+            reconciliation.get("schema_version") != "1.0.0"
+            or reconciliation.get("run_identity_sha256")
+            != self.authorization.run_identity_sha256
+            or reconciliation.get("input_hash") != input_hash
+            or reconciliation.get("owner_capability_sha256")
+            != self.authorization._owner_capability_sha256
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(reconciliation.get("provider_evidence_sha256")),
+            )
         ):
-            raise GateBPreflightError("recording_ledger_mismatch")
+            raise GateBPreflightError("reconciliation_record_identity_invalid")
+        pairs = {
+            "confirmed_unbilled": "confirmed_zero",
+            "confirmed_charged_measured": "measured",
+            "charge_amount_unknown": "unknown_reserved_max",
+        }
+        disposition = str(reconciliation.get("disposition"))
+        if reconciliation.get("cost_semantics") != pairs.get(disposition):
+            raise GateBPreflightError("reconciliation_cost_semantics_invalid")
+        if disposition == "confirmed_unbilled" and actual_cost != Decimal("0"):
+            raise GateBPreflightError("reconciliation_cost_invalid")
+        if (
+            disposition == "confirmed_charged_measured"
+            and actual_cost <= Decimal("0")
+        ):
+            raise GateBPreflightError("reconciliation_cost_invalid")
+        if (
+            disposition == "charge_amount_unknown"
+            and actual_cost != governed_pricing_schedule().reservation_cost_usd
+        ):
+            raise GateBPreflightError("reconciliation_cost_invalid")
+        return reconciliation
+
+    def reconciliation_for(self, input_hash: str) -> dict[str, str] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM charge_unknown_reconciliation WHERE input_hash = ?",
+                (input_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "disposition": str(row["disposition"]),
+                "cost_semantics": str(row["cost_semantics"]),
+                "actual_cost_usd": _micros_to_usd(row["actual_microusd"]),
+                "provider_evidence_sha256": str(
+                    row["provider_evidence_sha256"]
+                ),
+                "run_identity_sha256": str(row["run_identity_sha256"]),
+            }
+        finally:
+            connection.close()
 
     def structured_capability(self) -> StructuredCallCapability:
         pricing = governed_pricing_schedule()
@@ -2027,6 +2379,172 @@ def _usd_to_micros(value: Decimal) -> int:
 
 def _micros_to_usd(value: int) -> str:
     return f"{Decimal(value) / Decimal(1_000_000):.6f}"
+
+
+def reconcile_gate_b_charge_unknown(
+    *,
+    authorization: GateBRunAuthorization,
+    owner_capability: str,
+    input_hash: str,
+    disposition: str,
+    measured_cost_usd: Decimal | None,
+    reconciliation_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Governed owner action that terminally accounts for one ambiguous call.
+
+    This path is offline: it either replays an already sealed recording or
+    writes a sealed failure record with an explicit accounting disposition.
+    It never constructs or enters a live provider transport.
+    """
+    if not isinstance(authorization, GateBRunAuthorization) or (
+        authorization._issuer is not _AUTHORIZATION_ISSUER
+    ):
+        raise GateBPreflightError("runner_authorization_required")
+    if not isinstance(owner_capability, str):
+        raise GateBPreflightError("owner_capability_missing_or_mismatch")
+    supplied_owner_sha256 = _sha256_bytes(owner_capability.encode("utf-8"))
+    if supplied_owner_sha256 != authorization._owner_capability_sha256:
+        raise GateBPreflightError("owner_capability_missing_or_mismatch")
+    if input_hash not in authorization.ordered_input_sha256s:
+        raise GateBPreflightError("input_not_allowlisted")
+    expected_evidence = {
+        "schema_version": "1.0.0",
+        "run_identity_sha256": authorization.run_identity_sha256,
+        "input_hash": input_hash,
+        "disposition": disposition,
+        "provider_evidence_sha256": reconciliation_evidence.get(
+            "provider_evidence_sha256"
+        ),
+    }
+    if (
+        dict(reconciliation_evidence) != expected_evidence
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(reconciliation_evidence.get("provider_evidence_sha256")),
+        )
+    ):
+        raise GateBPreflightError("reconciliation_evidence_invalid")
+    semantics = {
+        "confirmed_unbilled": "confirmed_zero",
+        "confirmed_charged_measured": "measured",
+        "charge_amount_unknown": "unknown_reserved_max",
+    }
+    if disposition not in semantics:
+        raise GateBPreflightError("reconciliation_disposition_invalid")
+    reservation_cost = governed_pricing_schedule().reservation_cost_usd
+    if disposition == "confirmed_unbilled":
+        if measured_cost_usd is not None and (
+            not isinstance(measured_cost_usd, Decimal)
+            or measured_cost_usd != Decimal("0")
+        ):
+            raise GateBPreflightError("reconciliation_measured_cost_invalid")
+        actual_cost = Decimal("0.000000")
+    elif disposition == "confirmed_charged_measured":
+        if not isinstance(measured_cost_usd, Decimal):
+            raise GateBPreflightError("reconciliation_measured_cost_required")
+        actual_cost = measured_cost_usd
+        if (
+            not actual_cost.is_finite()
+            or actual_cost <= 0
+            or actual_cost > reservation_cost
+        ):
+            raise GateBPreflightError("reconciliation_measured_cost_invalid")
+        _usd_to_micros(actual_cost)
+    else:
+        if measured_cost_usd is not None:
+            raise GateBPreflightError("reconciliation_measured_cost_invalid")
+        actual_cost = reservation_cost
+
+    manifest = load_gate_b_run_manifest(
+        authorization.input_manifest_path,
+        expected_sha256=authorization.input_manifest_sha256,
+        expected_corpus_sha256=authorization.corpus_manifest_sha256,
+    )
+    record_manifest = next(
+        (
+            record
+            for record in manifest["records"]
+            if record["task10_input_sha256"] == input_hash
+        ),
+        None,
+    )
+    if record_manifest is None:
+        raise GateBPreflightError("input_not_allowlisted")
+    synthesis_input = load_gate_b_task10_input(
+        package_root=authorization.package_root,
+        record=record_manifest,
+        gate_a_root=authorization.gate_a_root,
+    )
+    policy = load_evidence_synthesis_policy()
+    store = RecordingStore(authorization.experiment_root / "recordings")
+    semantic_provider = LLMObservationProvider(
+        store=store,
+        mode="replay",
+        model_id=policy.model_id,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    capability = ledger.structured_capability()
+    adapter = RecordedEvidenceSynthesisProviderV2(
+        semantic_provider=semantic_provider,
+        policy=policy,
+        pricing=governed_pricing_schedule(),
+        record_capability=capability,
+    )
+    try:
+        existing = store.load(input_hash)
+    except LLMProviderError as exc:
+        if exc.reason != "recording_missing":
+            raise GateBPreflightError("reconciliation_recording_unsafe") from exc
+    else:
+        ledger.reconcile_existing_record(input_hash, existing, capability)
+        recorded_reconciliation = existing.get("charge_unknown_reconciliation")
+        recorded_semantics = (
+            recorded_reconciliation.get("cost_semantics")
+            if isinstance(recorded_reconciliation, Mapping)
+            else "measured"
+        )
+        return {
+            "status": "sealed_record_replayed",
+            "cost_semantics": recorded_semantics,
+            "cost_usd": str(existing["cost_usd"]),
+            "input_hash": input_hash,
+            "record_replayed": True,
+        }
+    if ledger.call_state(input_hash) != "charge_unknown":
+        raise GateBPreflightError("reconciliation_state_invalid")
+    reconciliation = {
+        "schema_version": "1.0.0",
+        "run_identity_sha256": authorization.run_identity_sha256,
+        "input_hash": input_hash,
+        "disposition": disposition,
+        "cost_semantics": semantics[disposition],
+        "provider_evidence_sha256": reconciliation_evidence[
+            "provider_evidence_sha256"
+        ],
+        "owner_capability_sha256": supplied_owner_sha256,
+    }
+    terminal_record = adapter.build_charge_unknown_reconciliation_record(
+        input_payload=synthesis_input.provider_payload(),
+        reconciliation=reconciliation,
+        cost_usd=actual_cost,
+    )
+    try:
+        store.save_exclusive(terminal_record)
+    except LLMProviderError as exc:
+        if exc.reason != "recording_exists":
+            raise GateBPreflightError("reconciliation_recording_write_failed") from exc
+        terminal_record = store.load(input_hash)
+    ledger.reconcile_existing_record(input_hash, terminal_record, capability)
+    return {
+        "status": "terminal_failure_recorded",
+        "cost_semantics": semantics[disposition],
+        "cost_usd": f"{actual_cost:.6f}",
+        "input_hash": input_hash,
+        "record_replayed": False,
+    }
 
 
 def run_gate_b_record(
@@ -2096,11 +2614,14 @@ def run_gate_b_record(
             )
             if input_hash != record.get("task10_input_sha256"):
                 raise GateBPreflightError("runner_task10_input_hash_mismatch")
-            if semantic_provider.store.exists(input_hash):
+            try:
                 existing = semantic_provider.store.load(input_hash)
-                ledger.reconcile_existing_record(input_hash, existing, capability)
-            else:
+            except LLMProviderError as exc:
+                if exc.reason != "recording_missing":
+                    raise GateBPreflightError("recording_load_failed") from exc
                 ledger.retry_reserved_without_record(input_hash)
+            else:
+                ledger.reconcile_existing_record(input_hash, existing, capability)
             results.append(
                 run_evidence_synthesis_v2(
                     synthesis_input=synthesis_input,

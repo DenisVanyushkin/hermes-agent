@@ -597,15 +597,26 @@ class RecordingStore:
         try:
             descriptor = os.open(
                 p.name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
                 dir_fd=directory_descriptor,
             )
-            with os.fdopen(descriptor, encoding="utf-8") as stream:
-                record = json.load(stream)
         except FileNotFoundError as exc:
             raise LLMProviderError("recording_missing", input_hash) from exc
+        except OSError as exc:
+            raise LLMProviderError("recording_unsafe", p.name) from exc
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise LLMProviderError("recording_not_regular", p.name)
+            with os.fdopen(descriptor, encoding="utf-8") as stream:
+                descriptor = -1
+                record = json.load(stream)
         except json.JSONDecodeError as exc:
             raise LLMProviderError("recording_corrupt", f"{p.name}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         if record.get("recording_format_version") != RECORDING_FORMAT_VERSION:
             raise LLMProviderError("recording_format_mismatch", str(record.get("recording_format_version")))
         raw = record.get("raw_response_text")

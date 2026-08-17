@@ -30,10 +30,12 @@ from job_intel.product_search.contracts import (
     SHA256_PATTERN,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    DECODING_PARAMETERS,
     GovernedPricingSchedule,
     GovernedStructuredRequest,
     LLMObservationProvider,
     LLMProviderError,
+    RECORDING_FORMAT_VERSION,
     RecordingStore,
     StructuredCallCapability,
     build_live_llm_provider,
@@ -859,13 +861,59 @@ class RecordedEvidenceSynthesisProvider:
     def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
         input_hash = synthesis_input_sha256(input_payload, provider=self)
         if self.semantic_provider.mode == "record":
-            existing = self.store.path_for(input_hash)
-            if not existing.exists():
+            try:
+                record = self.store.load(input_hash)
+            except LLMProviderError as exc:
+                if exc.reason != "recording_missing":
+                    raise
                 return self._record_call(input_hash, input_payload)
-        record = self.store.load(input_hash)
+        else:
+            record = self.store.load(input_hash)
         return self._replay_record(
             record, expected_input_hash=input_hash, input_payload=input_payload
         )
+
+    def build_charge_unknown_reconciliation_record(
+        self,
+        *,
+        input_payload: dict[str, Any],
+        reconciliation: dict[str, Any],
+        cost_usd: Decimal,
+    ) -> dict[str, Any]:
+        """Build one sealed terminal failure record without entering transport."""
+        if self.record_capability is None:
+            raise LLMProviderError("structured_capability_required")
+        input_hash = synthesis_input_sha256(input_payload, provider=self)
+        record = {
+            "recording_format_version": RECORDING_FORMAT_VERSION,
+            "input_hash": input_hash,
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "requested_model": self.model_id,
+            "response_model": None,
+            "semantic_prompt_version": self.semantic_prompt_version,
+            "semantic_prompt_sha256": self.semantic_provider.semantic_prompt_sha256,
+            "structured_prompt_sha256": _sha256_text(self._task10_prompt),
+            "response_schema_sha256": self.output_schema_sha256,
+            "governance_identity": self._governance_identity(),
+            "input": input_payload,
+            "input_payload_sha256": _sha256_text(_canonical_json(input_payload)),
+            "raw_response_text": "",
+            "response_hash": _EMPTY_SHA256,
+            "usage": None,
+            "pricing": self.pricing.as_record(),
+            "pricing_sha256": self.pricing.identity_sha256,
+            "cost_usd": str(cost_usd),
+            "latency_ms": 0,
+            "retry_count": 0,
+            "decoding_parameters": dict(DECODING_PARAMETERS),
+            "max_output_tokens": self.pricing.max_output_tokens,
+            "status": "failure",
+            "failure_code": "transport_error",
+            "failure_diagnostic": "charge_unknown_reconciled",
+            "charge_unknown_reconciliation": reconciliation,
+        }
+        return self.record_capability.seal_record(record)
 
     def _expected_record_identity(
         self, input_hash: str, input_payload: dict[str, Any]
@@ -930,7 +978,15 @@ class RecordedEvidenceSynthesisProvider:
             raise LLMProviderError("provider_metadata_mismatch", "retry_count")
         usage_payload = record.get("usage")
         if usage_payload is None:
-            if status == "success" or record.get("cost_usd") != "0.000000":
+            reconciliation = record.get("charge_unknown_reconciliation")
+            reconciliation_valid = self._reconciliation_matches_record(
+                reconciliation,
+                expected_input_hash=expected_input_hash,
+                record_cost=record.get("cost_usd"),
+            )
+            if status == "success" or (
+                record.get("cost_usd") != "0.000000" and not reconciliation_valid
+            ):
                 raise LLMProviderError(
                     "provider_metadata_mismatch", "usage/cost_usd"
                 )
@@ -983,6 +1039,51 @@ class RecordedEvidenceSynthesisProvider:
             return json.loads(record["raw_response_text"])
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMProviderError("schema_invalid", "recorded JSON is invalid") from exc
+
+    def _reconciliation_matches_record(
+        self,
+        reconciliation: object,
+        *,
+        expected_input_hash: str,
+        record_cost: object,
+    ) -> bool:
+        if not isinstance(reconciliation, dict) or set(reconciliation) != {
+            "schema_version",
+            "run_identity_sha256",
+            "input_hash",
+            "disposition",
+            "cost_semantics",
+            "provider_evidence_sha256",
+            "owner_capability_sha256",
+        }:
+            return False
+        if (
+            reconciliation.get("schema_version") != "1.0.0"
+            or reconciliation.get("run_identity_sha256") != self.run_identity_sha256
+            or reconciliation.get("input_hash") != expected_input_hash
+            or not re.fullmatch(SHA256_PATTERN, str(reconciliation.get("provider_evidence_sha256")))
+            or not re.fullmatch(SHA256_PATTERN, str(reconciliation.get("owner_capability_sha256")))
+        ):
+            return False
+        pairs = {
+            "confirmed_unbilled": "confirmed_zero",
+            "confirmed_charged_measured": "measured",
+            "charge_amount_unknown": "unknown_reserved_max",
+        }
+        disposition = str(reconciliation.get("disposition"))
+        if reconciliation.get("cost_semantics") != pairs.get(disposition):
+            return False
+        try:
+            cost = Decimal(str(record_cost))
+        except Exception:
+            return False
+        if not cost.is_finite() or cost < 0 or cost > self.pricing.reservation_cost_usd:
+            return False
+        if disposition == "confirmed_unbilled":
+            return cost == Decimal("0.000000")
+        if disposition == "charge_amount_unknown":
+            return cost == self.pricing.reservation_cost_usd
+        return cost > Decimal("0.000000")
 
     def _record_call(self, input_hash: str, input_payload: dict[str, Any]) -> object:
         if self.record_capability is None:
