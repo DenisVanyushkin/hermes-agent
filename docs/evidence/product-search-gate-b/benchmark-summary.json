@@ -41,15 +41,20 @@
   },
   "budget": {
     "estimated_calls": 48,
+    "exact_call_cap": 48,
+    "exact_spend_cap_usd": "0.48",
     "max_cost_per_call_usd": "0.01",
     "maximum_spend_usd": "0.48"
   },
   "record_identity": {
     "corpus_manifest_sha256": "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
     "decision_contract_sha256": "2a3240e4d39c886c9afe11d66f67c1515b722d26d43ab7c134c78af9f2521db8",
+    "max_output_tokens": "2000",
     "model_id": "openai/gpt-5-mini",
     "model_sha256": "020751dc92eb7ffd06a66f45b63322618c811e48a4553198624dfa88200dc6b2",
     "policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
+    "pricing_sha256": "975559f76b1e8c6bebdbbae3011a166f3d490caf703e555cebb53e45ebc8eb3e",
+    "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
     "profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
     "provider_output_schema_sha256": "4efb390cda26c5cff7689518463e02d15847597baf3e28741591fd6b3c893a46",
     "provider_output_schema_version": "1.0.0",
@@ -59,7 +64,11 @@
     "task10_prompt_sha256": "afc29d6cb70591598b0670522f5696864d03cbd809d06a1ca51a46ceb2f79a49",
     "task10_prompt_version": "product-search-evidence-synthesis-1.0.0"
   },
-  "approval_token_sha256": "8020e32a93ba73d5d4e25883a04f7b15957700e8d9985ccee3d556d79f7ab2c8",
+  "record_identity_sha256": "d76b2b03b2edef455b4839c823eb9d286af634e52e7e70927bdeb0586faf53cd",
+  "approval_capability": {
+    "status": "not_supplied",
+    "value": null
+  },
   "record_run_authorized": false,
   "stage_4": {
     "status": "not_run",

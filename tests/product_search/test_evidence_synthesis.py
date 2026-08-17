@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 import hashlib
 import importlib
 import importlib.abc
@@ -34,9 +35,11 @@ from job_intel.product_search.evidence_synthesis import (
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     DEFAULT_MODEL_ID,
+    GovernedPricingSchedule,
     LLM_PROMPT_VERSION,
     LLMObservationProvider,
     RecordingStore,
+    _issue_structured_call_capability,
 )
 
 
@@ -181,6 +184,32 @@ def _golden_output() -> dict[str, Any]:
     )
 
 
+RUN_IDENTITY_SHA256 = "2" * 64
+
+
+def _pricing() -> GovernedPricingSchedule:
+    return GovernedPricingSchedule(
+        version="openrouter-openai-gpt5-mini-2026-08-17",
+        model_id=DEFAULT_MODEL_ID,
+        input_usd_per_mtok=Decimal("0.25"),
+        output_usd_per_mtok=Decimal("2.00"),
+        max_input_tokens=24_000,
+        max_output_tokens=2_000,
+    )
+
+
+def _record_capability():
+    return _issue_structured_call_capability(
+        run_identity_sha256=RUN_IDENTITY_SHA256,
+        pricing=_pricing(),
+        exact_call_cap=48,
+        exact_spend_cap_usd=Decimal("0.48"),
+        metadata_seal_key=b"fixture-owner-bound-seal-key",
+        reserve=lambda input_hash, amount: f"reservation:{input_hash}",
+        reconcile=lambda reservation_id, actual_cost, outcome: None,
+    )
+
+
 class _FakeUsage:
     prompt_tokens = 1_000
     completion_tokens = 2_000
@@ -255,7 +284,48 @@ def _adapter(
     return RecordedEvidenceSynthesisProvider(
         semantic_provider=semantic_provider,
         policy=policy,
+        pricing=_pricing(),
+        record_capability=_record_capability(),
     )
+
+
+def _fixture_record(
+    provider: RecordedEvidenceSynthesisProvider,
+    synthesis_input: EvidenceSynthesisInputV1,
+    *,
+    raw: str,
+    failure_code: str | None = None,
+    latency_ms: int = 37,
+) -> dict[str, Any]:
+    usage = {
+        "prompt_tokens": 484,
+        "completion_tokens": 100 if failure_code is None else 0,
+        "total_tokens": 584 if failure_code is None else 484,
+    }
+    input_payload = synthesis_input.provider_payload()
+    input_hash = synthesis_input_sha256(input_payload, provider=provider)
+    record = {
+        "recording_format_version": "1.0",
+        **dict(provider._expected_record_identity(input_hash, input_payload)),
+        "input": input_payload,
+        "response_model": provider.model_id if failure_code is None else None,
+        "raw_response_text": raw if failure_code is None else "",
+        "response_hash": hashlib.sha256(
+            (raw if failure_code is None else "").encode("utf-8")
+        ).hexdigest(),
+        "governance_identity": provider._governance_identity(),
+        "pricing": _pricing().as_record(),
+        "latency_ms": latency_ms,
+        "usage": usage,
+        "retry_count": 0,
+        "cost_usd": "0.000321" if failure_code is None else "0.010000",
+        "decoding_parameters": {"temperature": 0},
+        "status": "failure" if failure_code else "success",
+        "failure_code": failure_code,
+        "failure_diagnostic": "fixture failure" if failure_code else None,
+    }
+    assert provider.record_capability is not None
+    return provider.record_capability.seal_record(record)
 
 
 def _run(
@@ -279,38 +349,8 @@ def _run(
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        store.save(
-            {
-                "recording_format_version": "1.0",
-                **dict(
-                    provider._expected_record_identity(
-                        input_hash, synthesis_input.provider_payload()
-                    )
-                ),
-                "input_hash": input_hash,
-                "provider_id": provider.provider_id,
-                "provider_version": provider.provider_version,
-                "model_id": provider.model_id,
-                "semantic_prompt_version": provider.semantic_prompt_version,
-                "prompt_version": provider.prompt_version,
-                "input": synthesis_input.provider_payload(),
-                "response_model": provider.model_id,
-                "raw_response_text": raw if recorded_error is None else "",
-                "response_hash": hashlib.sha256(
-                    (raw if recorded_error is None else "").encode("utf-8")
-                ).hexdigest(),
-                "latency_ms": 37,
-                "usage": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 100,
-                    "total_tokens": 200,
-                },
-                "retry_count": 0,
-                "cost_usd": "0.000321",
-                "status": "failure" if recorded_error else "success",
-                "error": recorded_error,
-            }
-        )
+        failure_code = recorded_error.split(":", 1)[0] if recorded_error else None
+        store.save(_fixture_record(provider, synthesis_input, raw=raw, failure_code=failure_code))
         return run_evidence_synthesis(
             synthesis_input=synthesis_input,
             provider=provider,
@@ -617,36 +657,7 @@ def test_golden_recording_replays_offline_with_exact_hashes(tmp_path: Path) -> N
     policy = load_evidence_synthesis_policy(POLICY)
     store = RecordingStore(tmp_path)
     provider = _adapter(store, policy=policy)
-    store.save(
-        {
-            "recording_format_version": "1.0",
-            **dict(
-                provider._expected_record_identity(
-                    GOLDEN_INPUT_HASH, _input().provider_payload()
-                )
-            ),
-            "input_hash": GOLDEN_INPUT_HASH,
-            "provider_id": provider.provider_id,
-            "provider_version": provider.provider_version,
-            "model_id": provider.model_id,
-            "semantic_prompt_version": provider.semantic_prompt_version,
-            "prompt_version": provider.prompt_version,
-            "input": _input().provider_payload(),
-            "response_model": provider.model_id,
-            "raw_response_text": raw,
-            "response_hash": GOLDEN_OUTPUT_HASH,
-            "latency_ms": 37,
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": 100,
-                "total_tokens": 200,
-            },
-            "retry_count": 0,
-            "cost_usd": "0.000321",
-            "status": "success",
-            "error": None,
-        }
-    )
+    store.save(_fixture_record(provider, _input(), raw=raw))
     result = run_evidence_synthesis(
         synthesis_input=_input(),
         provider=provider,
@@ -664,34 +675,9 @@ def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> N
     store = RecordingStore(tmp_path)
     provider = _adapter(store, policy=policy)
     store.save(
-        {
-            "recording_format_version": "1.0",
-            **dict(
-                provider._expected_record_identity(
-                    GOLDEN_INPUT_HASH, _input().provider_payload()
-                )
-            ),
-            "input_hash": GOLDEN_INPUT_HASH,
-            "provider_id": provider.provider_id,
-            "provider_version": provider.provider_version,
-            "model_id": provider.model_id,
-            "semantic_prompt_version": provider.semantic_prompt_version,
-            "prompt_version": provider.prompt_version,
-            "input": _input().provider_payload(),
-            "response_model": provider.model_id,
-            "raw_response_text": "",
-            "response_hash": hashlib.sha256(b"").hexdigest(),
-            "latency_ms": 41,
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": 0,
-                "total_tokens": 100,
-            },
-            "retry_count": 0,
-            "cost_usd": "0.000111",
-            "status": "failure",
-            "error": "refusal: provider declined the request",
-        }
+        _fixture_record(
+            provider, _input(), raw="", failure_code="refusal", latency_ms=41
+        )
     )
     result = run_evidence_synthesis(
         synthesis_input=_input(),
@@ -704,7 +690,7 @@ def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> N
     assert result.metadata.provider_id == "llm-observation"
     assert result.metadata.model_id == "openai/gpt-5-mini"
     assert result.metadata.latency_ms == 41
-    assert result.metadata.cost_usd == "0.000111"
+    assert result.metadata.cost_usd == "0.010000"
     assert result.metadata.input_sha256 == GOLDEN_INPUT_HASH
     assert result.metadata.output_sha256 == hashlib.sha256(b"").hexdigest()
 
@@ -726,8 +712,8 @@ def test_governed_record_mode_records_task10_contract_and_replays_offline(
     record_provider = RecordedEvidenceSynthesisProvider(
         semantic_provider=semantic_record,
         policy=policy,
-        input_usd_per_mtok="0.25",
-        output_usd_per_mtok="2.00",
+        pricing=_pricing(),
+        record_capability=_record_capability(),
     )
 
     recorded = run_evidence_synthesis(
@@ -755,14 +741,14 @@ def test_governed_record_mode_records_task10_contract_and_replays_offline(
         ).encode("utf-8")
     ).hexdigest()
     assert persisted["provider_id"] == "llm-observation"
-    assert persisted["provider_version"] == "product-search-evidence-replay/1.0"
+    assert persisted["governance_identity"]["provider_version"] == "product-search-evidence-replay/1.0"
     assert persisted["semantic_prompt_version"] == "llm-obs-1.0.0"
-    assert persisted["prompt_version"] == "product-search-evidence-synthesis-1.0.0"
-    assert persisted["task10_prompt_sha256"] == hashlib.sha256(
+    assert persisted["governance_identity"]["prompt_version"] == "product-search-evidence-synthesis-1.0.0"
+    assert persisted["governance_identity"]["task10_prompt_sha256"] == hashlib.sha256(
         system_prompt.encode("utf-8")
     ).hexdigest()
-    assert persisted["output_schema_version"] == "1.0.0"
-    assert persisted["output_schema_sha256"] == provider_output_schema_sha256()
+    assert persisted["governance_identity"]["output_schema_version"] == "1.0.0"
+    assert persisted["governance_identity"]["output_schema_sha256"] == provider_output_schema_sha256()
     assert persisted["response_model"] == DEFAULT_MODEL_ID
     assert persisted["status"] == "success"
     assert persisted["usage"] == {
@@ -781,6 +767,8 @@ def test_governed_record_mode_records_task10_contract_and_replays_offline(
     replay_provider = RecordedEvidenceSynthesisProvider(
         semantic_provider=semantic_replay,
         policy=policy,
+        pricing=_pricing(),
+        record_capability=_record_capability(),
     )
     replayed = run_evidence_synthesis(
         synthesis_input=_input(), provider=replay_provider, policy=policy
@@ -817,8 +805,8 @@ def test_task10_replay_rejects_tampered_record_identity_or_bytes(
             prompt_version=LLM_PROMPT_VERSION,
         ),
         policy=policy,
-        input_usd_per_mtok="0.25",
-        output_usd_per_mtok="2.00",
+        pricing=_pricing(),
+        record_capability=_record_capability(),
     )
     original = run_evidence_synthesis(
         synthesis_input=_input(), provider=record_provider, policy=policy
@@ -837,6 +825,49 @@ def test_task10_replay_rejects_tampered_record_identity_or_bytes(
         EvidenceSynthesisStatus.PROVIDER_METADATA_MISMATCH,
         EvidenceSynthesisStatus.PROVIDER_ERROR,
     }
+
+
+def test_task10_replay_rejects_rehashed_but_owner_unsealed_metadata(
+    tmp_path: Path,
+) -> None:
+    policy = load_evidence_synthesis_policy(POLICY)
+    store = RecordingStore(tmp_path)
+    transport = _FakeTransport()
+    capability = _record_capability()
+    record_provider = RecordedEvidenceSynthesisProvider(
+        semantic_provider=LLMObservationProvider(
+            store=store,
+            mode="record",
+            model_id=DEFAULT_MODEL_ID,
+            transport=transport,
+            prompt_version=LLM_PROMPT_VERSION,
+        ),
+        policy=policy,
+        pricing=_pricing(),
+        record_capability=capability,
+    )
+    original = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+    path = store.path_for(original.metadata.input_sha256)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted["latency_ms"] += 1
+    unsigned = {
+        key: value
+        for key, value in persisted.items()
+        if key not in {"metadata_sha256", "metadata_hmac_sha256"}
+    }
+    persisted["metadata_sha256"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    replayed = run_evidence_synthesis(
+        synthesis_input=_input(),
+        provider=_adapter(store, policy=policy),
+        policy=policy,
+    )
+    assert replayed.status is EvidenceSynthesisStatus.PROVIDER_METADATA_MISMATCH
 
 
 def test_recorded_transport_failure_replays_with_same_explicit_status(
@@ -859,8 +890,8 @@ def test_recorded_transport_failure_replays_with_same_explicit_status(
             prompt_version=LLM_PROMPT_VERSION,
         ),
         policy=policy,
-        input_usd_per_mtok="0.25",
-        output_usd_per_mtok="2.00",
+        pricing=_pricing(),
+        record_capability=_record_capability(),
     )
     recorded = run_evidence_synthesis(
         synthesis_input=_input(), provider=record_provider, policy=policy
@@ -873,7 +904,9 @@ def test_recorded_transport_failure_replays_with_same_explicit_status(
     assert recorded.status is EvidenceSynthesisStatus.PROVIDER_OUTAGE
     assert replayed.status is recorded.status
     assert persisted["status"] == "failure"
-    assert persisted["error"].startswith("transport_error:")
+    assert persisted["failure_code"] == "transport_error"
+    assert persisted["failure_diagnostic"] == "ConnectionError"
+    assert "error" not in persisted
 
 
 def test_arbitrary_provider_object_is_not_an_authorized_boundary() -> None:
@@ -896,8 +929,8 @@ def test_record_factory_retains_semantic_live_spend_gate(
         build_live_evidence_synthesis_provider(
             store_dir=tmp_path,
             policy=policy,
-            input_usd_per_mtok="0.25",
-            output_usd_per_mtok="2.00",
+            pricing=_pricing(),
+            record_capability=_record_capability(),
         )
 
 

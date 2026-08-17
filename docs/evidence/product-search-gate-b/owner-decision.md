@@ -11,9 +11,11 @@ corpus_manifest_sha256: b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c7114
 # Product Search Gate B owner decision
 
 The requested revision is prepared, but no live benchmark has run. The
-governed Task 10 record/replay seam and a content-addressed 48-record corpus
-are ready for a separate exact run authorization. This preparation did not
-make a provider call or authorize spend.
+governed Task 10 public structured-call seam, owner-bound metadata sealing,
+transactional exact-cap ledger, single resumable record runner, and a
+content-addressed 48-record corpus are ready for a separate exact run
+authorization. No owner capability was supplied; this preparation did not make
+a provider call or authorize spend.
 
 The recommendation remains `request_revision` until the real record/replay
 benchmark, deterministic Decision v2 trace comparison, and human audit have

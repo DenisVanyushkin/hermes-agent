@@ -7,14 +7,15 @@ No live provider call or spend occurred, no benchmark metric is reported, the
 owner decision remains `pending` with recommendation `request_revision`, and
 Task 13 remains unauthorized.
 
-Task 10 now has a bounded record/replay adapter over the existing governed
-Semantic `LLMObservationProvider`. The live factory delegates to the existing
-Semantic spend-gated factory; it does not introduce a client. A recording is
-keyed by the same Task 10 input envelope used by replay and pins the provider,
-served model, Semantic prompt, Task 10 prompt, output schema, input and response
-hashes, status/failure, usage, computable cost, latency, and retry count.
-Replay has no transport and rejects tampered bytes, input, model identity,
-prompt identity, schema identity, or status metadata.
+Task 10 now uses one public structured-call capability on the existing governed
+Semantic `LLMObservationProvider`; Product Search no longer reads its private
+prompt or transport. The single resumable Gate B runner supplies the only
+record capability after authorization, locks and rehashes the corpus and every
+source before use, and atomically reserves/reconciles calls and spend. Records
+pin the exact pricing schedule and 2,000-token output limit, validate provider
+usage, recompute cost, use owner-bound metadata HMACs, and persist only closed
+failure codes plus sanitized diagnostics. Replay has no transport and rejects
+tampered identity, bytes, usage, cost, latency, retry, or decoding metadata.
 
 ## Exact Gate A input and corpus
 
@@ -38,12 +39,13 @@ not Decision v2 outputs. Gate A contains no Strategic Watchlist evidence.
 
 ## Record authorization boundary
 
-The prepared call estimate is 48. The maximum is bounded at USD 0.01 per call
-and USD 0.48 total. Authorization fails closed unless the operator supplies the
-exact corpus, Decision/Search contracts, profile, Task 10 policy/schema,
-Semantic prompt, and model identity hashes, plus the exact explicit approval
-token, a call cap of at least 48, and a spend cap of at least USD 0.48. This
-revision generated only the hash of that token; it did not authorize a run.
+The prepared and exact call cap is 48; the exact spend cap is USD 0.48, with a
+conservative USD 0.010000 reservation per call. Authorization fails closed
+unless the owner supplies an opaque capability whose hash is bound to the exact
+corpus/run identity, pinned pricing (`975559f7...eb3e`), exact caps, prompts,
+schemas, model, profile, and contracts. No deterministic/self-generated token
+is accepted or recorded. This revision did not supply a capability or authorize
+a run.
 
 ## TDD and side effects
 
@@ -54,16 +56,17 @@ Task 10 and runner suite passed 44 tests. Acceptance was then changed first and
 failed 3 of 8 tests against the old blocked documents before the evidence
 package was updated.
 
-The fresh dry preflight ran with Slack token variables removed and recorded
-zero provider calls, network enablement, Slack credential access/calls,
-production writes, runtime mutations, and Gate A mutations. It wrote only the
-content-addressed Gate B corpus. No production database/store/outbox/profile/
+The fresh dry preflight ran with Slack token variables removed. Its instrumented
+boundary measured 2,416 Gate A file reads, zero provider/network/Slack-
+credential attempts, and zero production/protected/runtime writes; immutable
+before/after snapshots matched. The content-addressed corpus already existed,
+so the fresh rerun created zero files. No production database/store/outbox/profile/
 cache, systemd unit, scraper, source configuration, protected source, or Gate A
 artifact was changed. Legacy remains non-authoritative.
 
 ## Remaining Gate B work
 
-A future, separately authorized run must capture all 48 Task 10 responses,
+A future, separately authorized invocation of the single Gate B runner must capture all 48 Task 10 responses,
 replay every response fully offline, execute deterministic Decision v2 for both
 paths, compare exact traces, report all stage-4 and six-dimension denominators,
 provider failures/cost/latency, delivery and urgency eligibility, and complete

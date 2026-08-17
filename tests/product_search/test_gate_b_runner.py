@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
+import job_intel.product_search.gate_b as gate_b
 
 from job_intel.product_search.gate_b import (
     GateBPreflightError,
     assert_paths_unchanged,
     authorize_record_run,
     build_dry_run_preflight,
-    expected_record_approval_token,
     snapshot_paths,
     validate_gate_a_run_ids,
 )
@@ -24,15 +25,21 @@ GATE_A_ROOT = Path(
 
 
 def test_dry_run_materializes_content_addressed_corpus_and_is_idempotent(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = build_dry_run_preflight(gate_a_root=GATE_A_ROOT, output_root=tmp_path)
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", tmp_path)
+    first = build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
     manifest_path = Path(first["corpus"]["manifest_path"])
+    manifest_path.chmod(0o644)
     before = (manifest_path.read_bytes(), manifest_path.stat().st_mtime_ns)
-    second = build_dry_run_preflight(gate_a_root=GATE_A_ROOT, output_root=tmp_path)
+    second = build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
 
-    assert second == first
-    assert (manifest_path.read_bytes(), manifest_path.stat().st_mtime_ns) == before
+    assert second["side_effect_evidence"]["corpus_files_created"] == 0
+    comparable_second = deepcopy(second)
+    comparable_second["side_effect_evidence"]["corpus_files_created"] = 1
+    assert comparable_second == first
+    assert manifest_path.read_bytes() == before[0]
+    assert (manifest_path.stat().st_mode & 0o777) == 0o600
     assert first["status"] == "ready_for_record_approval"
     assert first["gate_a"]["raw_observed"] == 2414
     assert first["gate_a"]["corrected_canonical_current"] == 1814
@@ -78,57 +85,56 @@ def test_preflight_rejects_mixed_gate_a_runs() -> None:
 
 
 def test_record_authorization_requires_exact_identity_token_and_caps(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    preflight = build_dry_run_preflight(gate_a_root=GATE_A_ROOT, output_root=tmp_path)
-    identity = deepcopy(preflight["record_identity"])
-    token = expected_record_approval_token(identity)
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", tmp_path)
+    preflight = build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
+    capability = "owner-random-fixture-capability-90125"
+    approval = {
+        "status": "approved",
+        "run_identity_sha256": preflight["record_identity_sha256"],
+        "capability_sha256": hashlib.sha256(capability.encode()).hexdigest(),
+        "exact_call_cap": 48,
+        "exact_spend_cap_usd": "0.48",
+        "pricing_sha256": preflight["record_identity"]["pricing_sha256"],
+        "corpus_manifest_sha256": preflight["corpus"]["manifest_sha256"],
+    }
 
     for supplied_token in (None, "wrong"):
-        with pytest.raises(GateBPreflightError, match="approval_token"):
+        with pytest.raises(GateBPreflightError, match="capability"):
             authorize_record_run(
                 preflight,
-                supplied_identity=identity,
-                approval_token=supplied_token,
-                call_cap=48,
-                spend_cap_usd="0.48",
+                approval_record=approval,
+                owner_capability=supplied_token,
             )
 
-    wrong_identity = deepcopy(identity)
-    wrong_identity["model_sha256"] = "0" * 64
-    with pytest.raises(GateBPreflightError, match="record_identity_mismatch"):
+    wrong_identity = deepcopy(approval)
+    wrong_identity["run_identity_sha256"] = "0" * 64
+    with pytest.raises(GateBPreflightError, match="identity_mismatch"):
         authorize_record_run(
             preflight,
-            supplied_identity=wrong_identity,
-            approval_token=token,
-            call_cap=48,
-            spend_cap_usd="0.48",
+            approval_record=wrong_identity,
+            owner_capability=capability,
         )
-    with pytest.raises(GateBPreflightError, match="call_cap"):
+    with pytest.raises(GateBPreflightError, match="exact_caps"):
         authorize_record_run(
             preflight,
-            supplied_identity=identity,
-            approval_token=token,
-            call_cap=47,
-            spend_cap_usd="0.48",
+            approval_record={**approval, "exact_call_cap": 47},
+            owner_capability=capability,
         )
-    with pytest.raises(GateBPreflightError, match="spend_cap"):
+    with pytest.raises(GateBPreflightError, match="exact_caps"):
         authorize_record_run(
             preflight,
-            supplied_identity=identity,
-            approval_token=token,
-            call_cap=48,
-            spend_cap_usd="0.47",
+            approval_record={**approval, "exact_spend_cap_usd": "0.47"},
+            owner_capability=capability,
         )
     authorized = authorize_record_run(
         preflight,
-        supplied_identity=identity,
-        approval_token=token,
-        call_cap=48,
-        spend_cap_usd="0.48",
+        approval_record=approval,
+        owner_capability=capability,
     )
-    assert authorized["record_authorized"] is True
-    assert authorized["provider_calls_started"] is False
+    assert authorized.exact_call_cap == 48
+    assert authorized.exact_spend_cap_usd == gate_b.EXACT_SPEND_CAP_USD
 
 
 def test_forbidden_side_effect_mutation_fails_closed(tmp_path: Path) -> None:

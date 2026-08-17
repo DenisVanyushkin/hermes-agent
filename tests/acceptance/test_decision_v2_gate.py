@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
+import job_intel.product_search.gate_b as gate_b
 import yaml
 
 from job_intel.product_search.acquisition_probe import (
@@ -227,12 +228,11 @@ def test_gate_a_import_rejects_a_mixed_run_evidence_set() -> None:
 
 
 def test_gate_b_dry_preflight_materializes_exact_corpus_without_calls(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Break caught: readiness uses another corpus or attempts provider/runtime work."""
-    preflight = build_dry_run_preflight(
-        gate_a_root=GATE_A_ROOT, output_root=tmp_path
-    )
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", tmp_path)
+    preflight = build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
     summary = _load_summary()
     assert preflight["status"] == "ready_for_record_approval"
     assert preflight["corpus"]["manifest_sha256"] == summary["corpus"][

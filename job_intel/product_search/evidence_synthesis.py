@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
@@ -29,12 +28,12 @@ from job_intel.product_search.contracts import (
     SHA256_PATTERN,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
-    DECODING_PARAMETERS,
+    GovernedPricingSchedule,
+    GovernedStructuredRequest,
     LLMObservationProvider,
     LLMProviderError,
-    NO_FALLBACK_EXTRA_BODY,
     RecordingStore,
-    allowed_response_model,
+    StructuredCallCapability,
     build_live_llm_provider,
 )
 
@@ -572,8 +571,9 @@ class RecordedEvidenceSynthesisProvider:
         *,
         semantic_provider: LLMObservationProvider,
         policy: EvidenceSynthesisPolicyV1,
-        input_usd_per_mtok: str | None = None,
-        output_usd_per_mtok: str | None = None,
+        pricing: GovernedPricingSchedule | None = None,
+        record_capability: StructuredCallCapability | None = None,
+        run_identity_sha256: str | None = None,
     ) -> None:
         if not isinstance(semantic_provider, LLMObservationProvider):
             raise TypeError("governed Semantic provider must be LLMObservationProvider")
@@ -583,6 +583,20 @@ class RecordedEvidenceSynthesisProvider:
             or semantic_provider.model_id != policy.model_id
         ):
             raise ValueError("governed Semantic provider identity does not match policy")
+        if semantic_provider.mode == "record" and record_capability is None:
+            raise ValueError("Task 10 record mode requires a runner-issued capability")
+        if pricing is None and record_capability is not None:
+            pricing = record_capability.pricing
+        if pricing is None:
+            raise ValueError("governed pricing schedule is required")
+        if record_capability is not None and record_capability.pricing != pricing:
+            raise ValueError("runner-issued capability pricing does not match adapter")
+        if record_capability is not None:
+            run_identity_sha256 = record_capability.run_identity_sha256
+        if not isinstance(run_identity_sha256, str) or not re.fullmatch(
+            SHA256_PATTERN, run_identity_sha256
+        ):
+            raise ValueError("run_identity_sha256 is required")
         self.semantic_provider = semantic_provider
         self.store = semantic_provider.store
         self.provider_id = semantic_provider.provider_id
@@ -591,12 +605,9 @@ class RecordedEvidenceSynthesisProvider:
         self.semantic_prompt_version = semantic_provider.prompt_version
         self.prompt_version = policy.prompt_version
         self._task10_prompt = build_task10_prompt(policy)
-        self._input_price = (
-            Decimal(input_usd_per_mtok) if input_usd_per_mtok is not None else None
-        )
-        self._output_price = (
-            Decimal(output_usd_per_mtok) if output_usd_per_mtok is not None else None
-        )
+        self.pricing = pricing
+        self.record_capability = record_capability
+        self.run_identity_sha256 = run_identity_sha256
         self.last_call_metadata: dict[str, Any] = {}
 
     def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
@@ -617,15 +628,25 @@ class RecordedEvidenceSynthesisProvider:
             ("input_hash", input_hash),
             ("input_payload_sha256", _sha256_text(_canonical_json(input_payload))),
             ("provider_id", self.provider_id),
-            ("provider_version", self.provider_version),
             ("model_id", self.model_id),
             ("semantic_prompt_version", self.semantic_prompt_version),
-            ("semantic_prompt_sha256", _sha256_text(self.semantic_provider._prompt)),
-            ("prompt_version", self.prompt_version),
-            ("task10_prompt_sha256", _sha256_text(self._task10_prompt)),
-            ("output_schema_version", OUTPUT_SCHEMA_VERSION),
-            ("output_schema_sha256", provider_output_schema_sha256()),
+            ("semantic_prompt_sha256", self.semantic_provider.semantic_prompt_sha256),
+            ("structured_prompt_sha256", _sha256_text(self._task10_prompt)),
+            ("response_schema_sha256", provider_output_schema_sha256()),
+            ("pricing_sha256", self.pricing.identity_sha256),
+            ("max_output_tokens", self.pricing.max_output_tokens),
         )
+
+    def _governance_identity(self) -> dict[str, Any]:
+        return {
+            "run_identity_sha256": self.run_identity_sha256,
+            "provider_version": self.provider_version,
+            "prompt_version": self.prompt_version,
+            "task10_prompt_sha256": _sha256_text(self._task10_prompt),
+            "output_schema_version": OUTPUT_SCHEMA_VERSION,
+            "output_schema_sha256": provider_output_schema_sha256(),
+            "pricing_sha256": self.pricing.identity_sha256,
+        }
 
     def _replay_record(
         self,
@@ -634,6 +655,9 @@ class RecordedEvidenceSynthesisProvider:
         expected_input_hash: str,
         input_payload: dict[str, Any],
     ) -> object:
+        if self.record_capability is None:
+            raise LLMProviderError("provider_metadata_mismatch", "metadata_seal")
+        self.record_capability.verify_record(record)
         for field, expected in self._expected_record_identity(
             expected_input_hash, input_payload
         ):
@@ -641,11 +665,18 @@ class RecordedEvidenceSynthesisProvider:
                 raise LLMProviderError("provider_metadata_mismatch", field)
         if record.get("input") != input_payload:
             raise LLMProviderError("provider_metadata_mismatch", "input")
+        if record.get("governance_identity") != self._governance_identity():
+            raise LLMProviderError("provider_metadata_mismatch", "governance_identity")
+        if record.get("pricing") != self.pricing.as_record():
+            raise LLMProviderError("provider_metadata_mismatch", "pricing")
+        if record.get("decoding_parameters") != {"temperature": 0}:
+            raise LLMProviderError("provider_metadata_mismatch", "decoding_parameters")
         status = record.get("status")
         if status not in {"success", "failure"}:
             raise LLMProviderError("provider_metadata_mismatch", "status")
-        if (status == "success") == bool(record.get("error")):
-            raise LLMProviderError("provider_metadata_mismatch", "status/error")
+        failure_code = record.get("failure_code")
+        if (status == "success") == bool(failure_code):
+            raise LLMProviderError("provider_metadata_mismatch", "status/failure_code")
         latency_ms = record.get("latency_ms")
         if not isinstance(latency_ms, int) or latency_ms < 0:
             raise LLMProviderError("provider_metadata_mismatch", "latency_ms")
@@ -653,29 +684,28 @@ class RecordedEvidenceSynthesisProvider:
             raise LLMProviderError("provider_metadata_mismatch", "retry_count")
         if status == "success":
             response_model = record.get("response_model")
-            if not isinstance(response_model, str) or not allowed_response_model(
-                self.model_id, response_model
-            ):
+            if response_model != self.model_id:
                 raise LLMProviderError(
                     "provider_metadata_mismatch", "response_model"
                 )
-            if self._usage_dict(record.get("usage")) is None:
-                raise LLMProviderError("provider_metadata_mismatch", "usage")
             try:
-                cost = Decimal(str(record.get("cost_usd")))
+                usage = self.pricing.validate_usage(record.get("usage"))
+                cost = self.pricing.cost(
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                )
             except Exception as exc:
                 raise LLMProviderError(
-                    "provider_metadata_mismatch", "cost_usd"
+                    "provider_metadata_mismatch", "usage"
                 ) from exc
-            if cost < 0:
+            if str(cost) != record.get("cost_usd"):
                 raise LLMProviderError("provider_metadata_mismatch", "cost_usd")
         self.last_call_metadata = {
             "latency_ms": record.get("latency_ms", 0),
             "cost_usd": record.get("cost_usd"),
         }
-        if record.get("error"):
-            error_detail = str(record["error"])
-            recorded_reason = error_detail.split(":", 1)[0]
+        if failure_code:
+            recorded_reason = str(failure_code)
             if recorded_reason not in {
                 "refusal",
                 "timeout",
@@ -683,117 +713,48 @@ class RecordedEvidenceSynthesisProvider:
                 "transport_error",
                 "schema_invalid",
                 "invalid_json",
+                "usage_invalid",
+                "provider_metadata_mismatch",
+                "forbidden_response_marker",
             }:
                 recorded_reason = "recorded_call_failed"
-            raise LLMProviderError(recorded_reason, error_detail)
+            diagnostic = str(record.get("failure_diagnostic") or "")
+            raise LLMProviderError(recorded_reason, diagnostic)
         try:
             return json.loads(record["raw_response_text"])
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMProviderError("schema_invalid", "recorded JSON is invalid") from exc
 
-    @staticmethod
-    def _usage_dict(value: object) -> dict[str, int] | None:
-        if value is None:
-            return None
-        usage = value if isinstance(value, Mapping) else {
-            "prompt_tokens": getattr(value, "prompt_tokens", None),
-            "completion_tokens": getattr(value, "completion_tokens", None),
-            "total_tokens": getattr(value, "total_tokens", None),
-        }
-        if not all(isinstance(usage.get(name), int) and usage[name] >= 0 for name in (
-            "prompt_tokens", "completion_tokens", "total_tokens"
-        )):
-            return None
-        return {name: int(usage[name]) for name in (
-            "prompt_tokens", "completion_tokens", "total_tokens"
-        )}
-
-    def _cost(self, usage: dict[str, int] | None) -> str | None:
-        if usage is None or self._input_price is None or self._output_price is None:
-            return None
-        cost = (
-            Decimal(usage["prompt_tokens"]) * self._input_price
-            + Decimal(usage["completion_tokens"]) * self._output_price
-        ) / Decimal(1_000_000)
-        return f"{cost:.6f}"
-
     def _record_call(self, input_hash: str, input_payload: dict[str, Any]) -> object:
-        started = time.monotonic()
-        raw_text = ""
-        response_model: str | None = None
-        usage: dict[str, int] | None = None
-        error: str | None = None
+        if self.record_capability is None:
+            raise LLMProviderError("structured_capability_required")
         try:
-            response = self.semantic_provider._transport.chat.completions.create(
-                model=self.model_id,
-                messages=[
-                    {"role": "system", "content": self._task10_prompt},
-                    {"role": "user", "content": _canonical_json(input_payload)},
-                ],
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "product_search_evidence_synthesis",
-                        "schema": ProviderEvidencePayloadV1.model_json_schema(),
-                        "strict": True,
-                    },
-                },
-                extra_body=NO_FALLBACK_EXTRA_BODY,
-                **DECODING_PARAMETERS,
+            result = self.semantic_provider.governed_structured_call(
+                request=GovernedStructuredRequest(
+                    input_hash=input_hash,
+                    system_prompt=self._task10_prompt,
+                    user_payload=input_payload,
+                    schema_name="product_search_evidence_synthesis",
+                    response_schema=ProviderEvidencePayloadV1.model_json_schema(),
+                    governance_identity=self._governance_identity(),
+                    forbidden_markers=_PRIVATE_MARKERS,
+                ),
+                capability=self.record_capability,
             )
-            choice = response.choices[0]
-            message = getattr(choice, "message", None)
-            refusal = getattr(message, "refusal", None)
-            content = getattr(message, "content", None)
-            raw_text = content if isinstance(content, str) else ""
-            response_model = getattr(response, "model", None)
-            usage = self._usage_dict(getattr(response, "usage", None))
-            if refusal:
-                error = f"refusal: {refusal}"
-            elif not raw_text:
-                error = "schema_invalid: empty response"
-            elif not response_model:
-                error = "provider_metadata_mismatch: response.model missing"
-            elif not allowed_response_model(self.model_id, response_model):
-                error = f"provider_metadata_mismatch: response.model={response_model}"
-            elif usage is None or self._cost(usage) is None:
-                error = "provider_metadata_mismatch: cost_uncomputable"
-            else:
-                try:
-                    ProviderEvidencePayloadV1.model_validate_json(raw_text)
-                except Exception as exc:
-                    error = f"schema_invalid: {exc}"
-        except Exception as exc:
-            error = f"transport_error: {exc}"
-        latency_ms = int((time.monotonic() - started) * 1000)
-        record = {
-            "recording_format_version": "1.0",
-            **dict(self._expected_record_identity(input_hash, input_payload)),
-            "requested_model": self.model_id,
-            "response_model": response_model,
-            "decoding_parameters": DECODING_PARAMETERS,
-            "input": input_payload,
-            "response_hash": _sha256_text(raw_text),
-            "raw_response_text": raw_text,
-            "usage": usage,
-            "cost_usd": self._cost(usage),
-            "latency_ms": latency_ms,
-            "retry_count": 0,
-            "status": "failure" if error else "success",
-            "error": error,
-        }
-        self.store.save(record)
-        return self._replay_record(
-            record, expected_input_hash=input_hash, input_payload=input_payload
-        )
+        finally:
+            self.last_call_metadata = dict(self.semantic_provider.last_call_metadata)
+        try:
+            return json.loads(result.raw_response_text)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise LLMProviderError("schema_invalid", "structured JSON invalid") from exc
 
 
 def build_live_evidence_synthesis_provider(
     *,
     store_dir: Path | str,
     policy: EvidenceSynthesisPolicyV1,
-    input_usd_per_mtok: str,
-    output_usd_per_mtok: str,
+    pricing: GovernedPricingSchedule,
+    record_capability: StructuredCallCapability,
 ) -> RecordedEvidenceSynthesisProvider:
     """Build Task 10 record mode only through the Semantic spend-gated factory."""
     semantic_provider = build_live_llm_provider(
@@ -804,8 +765,8 @@ def build_live_evidence_synthesis_provider(
     return RecordedEvidenceSynthesisProvider(
         semantic_provider=semantic_provider,
         policy=policy,
-        input_usd_per_mtok=input_usd_per_mtok,
-        output_usd_per_mtok=output_usd_per_mtok,
+        pricing=pricing,
+        record_capability=record_capability,
     )
 
 
