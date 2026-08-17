@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 from typing import Any, Iterable, Mapping
@@ -26,13 +27,36 @@ from job_intel.product_search.acquisition_probe import (
     _minimum_evidence_sufficient,
 )
 from job_intel.product_search.evidence_synthesis import (
+    AllowedEvidenceClaimV1,
+    CompanyAuthorityUnavailableV2,
+    EvidenceClaimStatus,
+    EvidenceDimension,
+    EvidenceFragmentV1,
+    EvidenceSourceKind,
+    EvidenceSynthesisInputV2,
     OUTPUT_SCHEMA_VERSION,
-    RecordedEvidenceSynthesisProvider,
+    OUTPUT_SCHEMA_VERSION_V2,
+    PROVIDER_ADAPTER_VERSION_V2,
+    RecordedEvidenceSynthesisProviderV2,
+    TASK10_PROMPT_VERSION_V2,
+    VacancyEvidenceArtifactFragmentV1,
+    VacancyEvidenceArtifactV1,
+    provider_output_schema_v2_sha256,
     load_evidence_synthesis_policy,
     provider_output_schema_sha256,
-    run_evidence_synthesis,
+    run_evidence_synthesis_v2,
     synthesis_input_sha256,
     task10_prompt_sha256,
+    task10_prompt_v2_sha256,
+)
+from job_intel.product_search.contracts import (
+    AssessmentInputV2,
+    AssessmentReferences,
+    CompanyAuthorityStatus,
+    DecisionDimensionsInput,
+    DimensionEvidenceInput,
+    DimensionEvidenceState,
+    ImmutableArtifactRef,
 )
 from job_intel.vacancy_understanding.semantic.contract import load_semantic_contract
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
@@ -40,6 +64,7 @@ from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     StructuredCallCapability,
     build_prompt_for_version,
     _issue_structured_call_capability,
+    build_live_llm_provider,
 )
 
 
@@ -56,6 +81,9 @@ GATE_A_DATABASE_SHA256 = (
     "08fefb5a0fdcaee7c59b5921b1b74291471e58405fd3299e8834c5a5a6c0d8ff"
 )
 GATE_B_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-b")
+GATE_B_CORPUS_SHA256 = (
+    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
+)
 PRODUCTION_DATABASE_PATH = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -82,6 +110,7 @@ class DryRunBoundary:
     def __init__(self) -> None:
         self.gate_a_files: set[str] = set()
         self.corpus_files: set[str] = set()
+        self.package_files: set[str] = set()
         self.denied: dict[str, int] = defaultdict(int)
 
     def gate_a_read(self, path: Path) -> None:
@@ -89,6 +118,9 @@ class DryRunBoundary:
 
     def corpus_write(self, path: Path) -> None:
         self.corpus_files.add(str(path))
+
+    def package_write(self, path: Path) -> None:
+        self.package_files.add(str(path))
 
     def _deny(self, operation: str) -> None:
         self.denied[operation] += 1
@@ -116,6 +148,7 @@ class DryRunBoundary:
         return {
             "gate_a_files_read": len(self.gate_a_files),
             "corpus_files_created": len(self.corpus_files),
+            "package_files_created": len(self.package_files),
             "provider_attempts_denied": self.denied["provider"],
             "network_attempts_denied": self.denied["network"],
             "slack_credential_attempts_denied": self.denied["slack_credential"],
@@ -143,6 +176,8 @@ def _sha256_json(value: object) -> str:
 
 def read_contained_nofollow(root: Path, reference: str) -> bytes:
     """Read a regular file beneath root without traversal or symlink following."""
+    if root.is_symlink():
+        raise GateBPreflightError("contained_nofollow:root_symlink")
     root = root.resolve(strict=True)
     relative = Path(reference)
     if relative.is_absolute() or ".." in relative.parts:
@@ -496,7 +531,526 @@ def _corpus_records(
     return sorted(selected, key=lambda item: item["selection_key"])
 
 
-def _record_identity(corpus_sha256: str) -> dict[str, str]:
+def _canonical_bytes(value: object) -> bytes:
+    return _canonical_json(value).encode("utf-8")
+
+
+def _secure_package_write(
+    *,
+    package_root: Path,
+    reference: str,
+    payload: bytes,
+    boundary: DryRunBoundary,
+) -> Path:
+    relative = Path(reference)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise GateBPreflightError("package_path_invalid")
+    package_root.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(package_root, 0o700)
+    target = package_root / relative
+    current = package_root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise GateBPreflightError("package_path_symlink")
+        current.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(current, 0o700)
+    if target.exists():
+        if target.is_symlink() or read_contained_nofollow(package_root, reference) != payload:
+            raise GateBPreflightError("package_content_address_collision")
+        os.chmod(target, 0o600)
+        return target
+    temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.link(temporary, target, follow_symlinks=False)
+    except FileExistsError:
+        if read_contained_nofollow(package_root, reference) != payload:
+            raise GateBPreflightError("package_content_address_collision")
+    finally:
+        temporary.unlink(missing_ok=True)
+    os.chmod(target, 0o600)
+    boundary.package_write(target)
+    return target
+
+
+def _exact_field_spans(value: object, *, maximum: int) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value.strip():
+        return ()
+    result: list[str] = []
+    for match in re.finditer(r"\S+(?: \S+)*", value):
+        remaining = match.group(0)
+        while remaining and len(result) < maximum:
+            if len(remaining) <= 500:
+                fragment = remaining
+                remaining = ""
+            else:
+                boundary = remaining.rfind(" ", 0, 501)
+                if boundary <= 0:
+                    boundary = 500
+                fragment = remaining[:boundary]
+                remaining = remaining[boundary:].lstrip(" ")
+            lowered = fragment.casefold()
+            if not any(
+                marker in lowered
+                for marker in (
+                    "http://",
+                    "https://",
+                    "bearer ",
+                    "hermes-private://",
+                    "private resume",
+                    "user note",
+                )
+            ):
+                result.append(fragment)
+        if len(result) >= maximum:
+            break
+    return tuple(result)
+
+
+def _vacancy_artifact(
+    record: Mapping[str, Any], raw: Mapping[str, Any]
+) -> VacancyEvidenceArtifactV1:
+    fragments: list[VacancyEvidenceArtifactFragmentV1] = []
+    limits = {"title": 1, "location": 1, "description": 6, "posted_at": 1, "salary": 1}
+    for field_name, maximum in limits.items():
+        for index, text in enumerate(
+            _exact_field_spans(raw.get(field_name), maximum=maximum)
+        ):
+            fragments.append(
+                VacancyEvidenceArtifactFragmentV1(
+                    source_locator=f"/{field_name}#{index:03d}",
+                    text=text,
+                )
+            )
+    if not fragments:
+        raise GateBPreflightError("vacancy_has_no_admissible_exact_fragment")
+    return VacancyEvidenceArtifactV1(
+        schema_version="1.0.0",
+        artifact_id=f"gate-b-vacancy:{record['selection_key']}",
+        artifact_version="1.0.0",
+        redaction_state="shareable_redacted",
+        fragments=tuple(fragments),
+    )
+
+
+def _authority_references(vacancy_ref: ImmutableArtifactRef) -> AssessmentReferences:
+    profile_payload = yaml.safe_load(
+        (REPO_ROOT / "config/product_search/career_profile.v2.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    authorities = profile_payload["authorities"]
+    semantic_path = (
+        REPO_ROOT
+        / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
+    )
+    return AssessmentReferences(
+        profile_ref=ImmutableArtifactRef(
+            artifact_id="career-profile-v2",
+            version="2.0.0",
+            sha256=_sha256_file(
+                REPO_ROOT / "config/product_search/career_profile.v2.yaml"
+            ),
+        ),
+        candidate_facts_ref=ImmutableArtifactRef.model_validate(
+            authorities["candidate_facts_ref"]
+        ),
+        semantic_contract_ref=ImmutableArtifactRef(
+            artifact_id="semantic-fact-contract",
+            version="1.0.0",
+            sha256=_sha256_file(semantic_path),
+        ),
+        search_contract_ref=ImmutableArtifactRef.model_validate(
+            authorities["search_contract_ref"]
+        ),
+        policy_ref=ImmutableArtifactRef.model_validate(authorities["product_sot_ref"]),
+        evidence_snapshot_ref=vacancy_ref,
+    )
+
+
+def _build_task10_input(
+    record: Mapping[str, Any], raw: Mapping[str, Any]
+) -> EvidenceSynthesisInputV2:
+    artifact = _vacancy_artifact(record, raw)
+    artifact_sha256 = _sha256_bytes(
+        _canonical_bytes(artifact.model_dump(mode="json"))
+    )
+    vacancy_ref = ImmutableArtifactRef(
+        artifact_id=artifact.artifact_id,
+        version=artifact.artifact_version,
+        sha256=artifact_sha256,
+    )
+    fragments: list[EvidenceFragmentV1] = []
+    dimension_refs: dict[EvidenceDimension, list[str]] = defaultdict(list)
+    locator_dimensions = {
+        "title": (EvidenceDimension.MANDATE_FIT, EvidenceDimension.EVIDENCE_CONFIDENCE),
+        "location": (EvidenceDimension.FEASIBILITY, EvidenceDimension.EVIDENCE_CONFIDENCE),
+        "description": (
+            EvidenceDimension.MANDATE_FIT,
+            EvidenceDimension.CAREER_VALUE,
+            EvidenceDimension.EVIDENCE_CONFIDENCE,
+        ),
+        "posted_at": (EvidenceDimension.EVIDENCE_CONFIDENCE,),
+        "salary": (EvidenceDimension.FEASIBILITY, EvidenceDimension.EVIDENCE_CONFIDENCE),
+    }
+    selection_prefix = str(record["selection_key"])[:16]
+    for index, item in enumerate(artifact.fragments):
+        field_name = item.source_locator.split("#", 1)[0].removeprefix("/")
+        dimensions = locator_dimensions[field_name]
+        fragment_id = f"vacancy:{selection_prefix}:{index:03d}"
+        fragments.append(
+            EvidenceFragmentV1(
+                fragment_id=fragment_id,
+                artifact_ref=vacancy_ref,
+                source_kind=EvidenceSourceKind.VACANCY,
+                source_locator=item.source_locator,
+                permitted_dimensions=dimensions,
+                text=item.text,
+                text_sha256=_sha256_bytes(item.text.encode("utf-8")),
+                allowed_claims=tuple(
+                    AllowedEvidenceClaimV1(
+                        claim_code=f"vacancy_{field_name}_{dimension.value}_explicit",
+                        dimension=dimension,
+                        status=EvidenceClaimStatus.EXPLICIT,
+                        statement=item.text,
+                    )
+                    for dimension in dimensions
+                ),
+            )
+        )
+        for dimension in dimensions:
+            dimension_refs[dimension].append(fragment_id)
+
+    unknown_reasons = {
+        EvidenceDimension.FEASIBILITY: "feasibility_not_stated_in_vacancy",
+        EvidenceDimension.MANDATE_FIT: "mandate_not_stated_in_vacancy",
+        EvidenceDimension.COMPANY_FIT: (
+            "company_authority_unavailable:unresolved_company_identity"
+        ),
+        EvidenceDimension.TRANSFERABILITY: "candidate_profile_evidence_not_materialized",
+        EvidenceDimension.CAREER_VALUE: "career_value_not_stated_in_vacancy",
+        EvidenceDimension.EVIDENCE_CONFIDENCE: "evidence_confidence_not_established",
+    }
+    dimensions_payload: dict[str, DimensionEvidenceInput] = {}
+    for dimension in EvidenceDimension:
+        refs = tuple(dimension_refs.get(dimension, ()))
+        force_unknown = dimension in {
+            EvidenceDimension.COMPANY_FIT,
+            EvidenceDimension.TRANSFERABILITY,
+        }
+        if refs and not force_unknown:
+            dimensions_payload[dimension.value] = DimensionEvidenceInput(
+                state=DimensionEvidenceState.EVIDENCE_AVAILABLE,
+                evidence_refs=refs,
+            )
+            continue
+        reason = unknown_reasons[dimension]
+        fragment_id = f"unknown:{selection_prefix}:{dimension.value}"
+        fragments.append(
+            EvidenceFragmentV1(
+                fragment_id=fragment_id,
+                artifact_ref=vacancy_ref,
+                source_kind=EvidenceSourceKind.ASSESSMENT_UNKNOWN,
+                source_locator=reason,
+                permitted_dimensions=(dimension,),
+                text=reason,
+                text_sha256=_sha256_bytes(reason.encode("utf-8")),
+                allowed_claims=(
+                    AllowedEvidenceClaimV1(
+                        claim_code=f"{dimension.value}_unknown",
+                        dimension=dimension,
+                        status=EvidenceClaimStatus.UNKNOWN,
+                        statement=reason,
+                    ),
+                ),
+            )
+        )
+        dimensions_payload[dimension.value] = DimensionEvidenceInput(
+            state=DimensionEvidenceState.UNKNOWN,
+            unknown_reasons=(reason,),
+        )
+    assessment = AssessmentInputV2(
+        schema_version="2.0.0",
+        assessment_id=f"gate-b:{record['selection_key']}",
+        references=_authority_references(vacancy_ref),
+        dimensions=DecisionDimensionsInput(**dimensions_payload),
+        company_authority_status=CompanyAuthorityStatus.UNAVAILABLE,
+    )
+    return EvidenceSynthesisInputV2(
+        schema_version="2.0.0",
+        assessment_input=assessment,
+        company_authority=CompanyAuthorityUnavailableV2(
+            status="unavailable",
+            reason="unresolved_company_identity",
+        ),
+        vacancy_evidence_ref=vacancy_ref,
+        vacancy_evidence=artifact,
+        fragments=tuple(fragments),
+    )
+
+
+def _task10_v2_authority_hashes() -> dict[str, str]:
+    policy = load_evidence_synthesis_policy()
+    pricing = governed_pricing_schedule()
+    return {
+        "career_profile_sha256": _sha256_file(
+            REPO_ROOT / "config/product_search/career_profile.v2.yaml"
+        ),
+        "candidate_facts_sha256": yaml.safe_load(
+            (REPO_ROOT / "config/product_search/career_profile.v2.yaml").read_text(
+                encoding="utf-8"
+            )
+        )["authorities"]["candidate_facts_ref"]["sha256"],
+        "company_evidence_contract_sha256": _sha256_file(
+            REPO_ROOT / "config/product_search/company_evidence_contract.v1.yaml"
+        ),
+        "evidence_synthesis_policy_sha256": _sha256_file(
+            REPO_ROOT / "config/product_search/evidence_synthesis.v1.yaml"
+        ),
+        "input_schema_sha256": _sha256_json(
+            EvidenceSynthesisInputV2.model_json_schema()
+        ),
+        "model_sha256": _sha256_bytes(policy.model_id.encode("utf-8")),
+        "pricing_sha256": pricing.identity_sha256,
+        "profile_sha256": _sha256_file(
+            REPO_ROOT / "config/product_search/career_profile.v2.yaml"
+        ),
+        "provider_output_schema_sha256": provider_output_schema_v2_sha256(),
+        "search_contract_sha256": _sha256_file(
+            REPO_ROOT / "config/product_search/search_contract.v1.yaml"
+        ),
+        "semantic_contract_sha256": _sha256_file(
+            REPO_ROOT
+            / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
+        ),
+        "task10_prompt_sha256": task10_prompt_v2_sha256(policy),
+    }
+
+
+def _materialize_input_package(
+    *,
+    experiment_root: Path,
+    gate_a_root: Path,
+    selected: list[dict[str, Any]],
+    boundary: DryRunBoundary,
+) -> dict[str, Any]:
+    package_root = experiment_root / "input-package-v2"
+    if package_root.is_symlink():
+        raise GateBPreflightError("package_root_symlink")
+    authority_hashes = _task10_v2_authority_hashes()
+    manifest_records: list[dict[str, Any]] = []
+    ordered_hashes: list[str] = []
+    for ordinal, record in enumerate(selected):
+        raw_reference = str(record["raw_reference"])
+        raw_bytes = read_contained_nofollow(gate_a_root, raw_reference)
+        boundary.gate_a_read(gate_a_root / raw_reference)
+        if _sha256_bytes(raw_bytes) != record["raw_content_sha256"]:
+            raise GateBPreflightError("gate_a_raw_content_sha256_mismatch")
+        raw = json.loads(raw_bytes)
+        task_input = _build_task10_input(record, raw)
+        artifact_bytes = _canonical_bytes(
+            task_input.vacancy_evidence.model_dump(mode="json")
+        )
+        artifact_sha256 = _sha256_bytes(artifact_bytes)
+        artifact_reference = f"vacancy-artifacts/{artifact_sha256}.json"
+        _secure_package_write(
+            package_root=package_root,
+            reference=artifact_reference,
+            payload=artifact_bytes,
+            boundary=boundary,
+        )
+        input_bytes = _canonical_bytes(task_input.provider_payload())
+        input_sha256 = _sha256_bytes(input_bytes)
+        input_reference = f"task10-inputs/{input_sha256}.json"
+        _secure_package_write(
+            package_root=package_root,
+            reference=input_reference,
+            payload=input_bytes,
+            boundary=boundary,
+        )
+        ordered_hashes.append(input_sha256)
+        manifest_records.append({
+            "ordinal": ordinal,
+            "selection_key": record["selection_key"],
+            "run_id": record["run_id"],
+            "raw_reference": raw_reference,
+            "raw_content_sha256": record["raw_content_sha256"],
+            "vacancy_artifact_path": artifact_reference,
+            "vacancy_artifact_sha256": artifact_sha256,
+            "task10_input_path": input_reference,
+            "task10_input_sha256": input_sha256,
+            "company_authority_sha256": _sha256_json(
+                task_input.company_authority.model_dump(mode="json")
+            ),
+            "authority_hashes": authority_hashes,
+        })
+    manifest = {
+        "schema_version": "2.0.0",
+        "gate": "gate-b",
+        "corpus_manifest_sha256": GATE_B_CORPUS_SHA256,
+        "gate_a": {
+            "run_id": GATE_A_RUN_ID,
+            "commit": GATE_A_COMMIT,
+            "manifest_sha256": GATE_A_MANIFEST_SHA256,
+        },
+        "company_authority": {
+            "status": "unavailable",
+            "reason": "unresolved_company_identity",
+        },
+        "authorization_constraints": {
+            "provider_allowlist": ordered_hashes,
+            "call_cap": EXACT_CALL_CAP,
+            "per_call_maximum_usd": "0.01",
+            "aggregate_maximum_usd": "0.48",
+            "maximum_output_tokens": governed_pricing_schedule().max_output_tokens,
+        },
+        "records": manifest_records,
+    }
+    manifest_bytes = _canonical_bytes(manifest)
+    manifest_sha256 = _sha256_bytes(manifest_bytes)
+    manifest_path = _secure_package_write(
+        package_root=package_root,
+        reference="run-manifest.v2.json",
+        payload=manifest_bytes,
+        boundary=boundary,
+    )
+    return {
+        "status": "materialized",
+        "package_root": str(package_root),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": manifest_sha256,
+        "record_count": len(manifest_records),
+        "vacancy_artifact_count": len(
+            {record["vacancy_artifact_sha256"] for record in manifest_records}
+        ),
+        "ordered_input_sha256s": ordered_hashes,
+        "ordered_input_hashes_sha256": _sha256_json(ordered_hashes),
+        "company_authority_status": "unavailable",
+        "company_authority_reason": "unresolved_company_identity",
+    }
+
+
+def load_gate_b_run_manifest(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_corpus_sha256: str,
+) -> dict[str, Any]:
+    if path.is_symlink():
+        raise GateBPreflightError("run_manifest_symlink")
+    payload_bytes = read_contained_nofollow(path.parent, path.name)
+    if _sha256_bytes(payload_bytes) != expected_sha256:
+        raise GateBPreflightError("input_manifest_hash_mismatch")
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GateBPreflightError("input_manifest_invalid_json") from exc
+    if _canonical_bytes(payload) != payload_bytes:
+        raise GateBPreflightError("input_manifest_not_canonical")
+    records = payload.get("records")
+    constraints = payload.get("authorization_constraints")
+    if (
+        payload.get("schema_version") != "2.0.0"
+        or payload.get("gate") != "gate-b"
+        or payload.get("corpus_manifest_sha256") != expected_corpus_sha256
+        or payload.get("gate_a")
+        != {
+            "run_id": GATE_A_RUN_ID,
+            "commit": GATE_A_COMMIT,
+            "manifest_sha256": GATE_A_MANIFEST_SHA256,
+        }
+        or not isinstance(records, list)
+        or len(records) != EXACT_CALL_CAP
+        or not isinstance(constraints, dict)
+    ):
+        raise GateBPreflightError("input_manifest_contract_mismatch")
+    ordinals = [record.get("ordinal") for record in records]
+    selection_keys = [record.get("selection_key") for record in records]
+    input_hashes = [record.get("task10_input_sha256") for record in records]
+    run_ids = [record.get("run_id") for record in records]
+    if (
+        ordinals != list(range(EXACT_CALL_CAP))
+        or selection_keys != sorted(selection_keys)
+        or len(set(selection_keys)) != EXACT_CALL_CAP
+        or len(set(input_hashes)) != EXACT_CALL_CAP
+        or run_ids != [GATE_A_RUN_ID] * EXACT_CALL_CAP
+    ):
+        raise GateBPreflightError("input_manifest_order_or_duplicate")
+    for record in records:
+        for field_name in ("raw_reference", "vacancy_artifact_path", "task10_input_path"):
+            reference = record.get(field_name)
+            if (
+                not isinstance(reference, str)
+                or Path(reference).is_absolute()
+                or ".." in Path(reference).parts
+            ):
+                raise GateBPreflightError("input_manifest_mutable_path")
+        if record["task10_input_path"] != (
+            f"task10-inputs/{record['task10_input_sha256']}.json"
+        ) or record["vacancy_artifact_path"] != (
+            f"vacancy-artifacts/{record['vacancy_artifact_sha256']}.json"
+        ):
+            raise GateBPreflightError("input_manifest_content_address_mismatch")
+    if constraints != {
+        "aggregate_maximum_usd": "0.48",
+        "call_cap": EXACT_CALL_CAP,
+        "maximum_output_tokens": governed_pricing_schedule().max_output_tokens,
+        "per_call_maximum_usd": "0.01",
+        "provider_allowlist": input_hashes,
+    }:
+        raise GateBPreflightError("input_manifest_authorization_constraints")
+    return payload
+
+
+def load_gate_b_task10_input(
+    *,
+    package_root: Path,
+    record: Mapping[str, Any],
+    gate_a_root: Path,
+) -> EvidenceSynthesisInputV2:
+    input_bytes = read_contained_nofollow(
+        package_root, str(record["task10_input_path"])
+    )
+    if _sha256_bytes(input_bytes) != record["task10_input_sha256"]:
+        raise GateBPreflightError("task10_input_hash_mismatch")
+    try:
+        task_input = EvidenceSynthesisInputV2.model_validate_json(input_bytes)
+    except Exception as exc:
+        raise GateBPreflightError("task10_input_contract_mismatch") from exc
+    artifact_bytes = read_contained_nofollow(
+        package_root, str(record["vacancy_artifact_path"])
+    )
+    if (
+        _sha256_bytes(artifact_bytes) != record["vacancy_artifact_sha256"]
+        or json.loads(artifact_bytes)
+        != task_input.vacancy_evidence.model_dump(mode="json")
+    ):
+        raise GateBPreflightError("vacancy_artifact_hash_mismatch")
+    raw_bytes = read_contained_nofollow(gate_a_root, str(record["raw_reference"]))
+    if _sha256_bytes(raw_bytes) != record["raw_content_sha256"]:
+        raise GateBPreflightError("corpus_source_changed:input_loader")
+    expected = _build_task10_input(record, json.loads(raw_bytes))
+    if expected.model_dump(mode="json") != task_input.model_dump(mode="json"):
+        raise GateBPreflightError("task10_input_not_exact_source_projection")
+    return task_input
+
+
+def _record_identity(
+    corpus_sha256: str,
+    *,
+    input_manifest_sha256: str,
+    ordered_input_hashes_sha256: str,
+) -> dict[str, str]:
     policy = load_evidence_synthesis_policy()
     pricing = governed_pricing_schedule()
     semantic_prompt = build_prompt_for_version(
@@ -513,12 +1067,15 @@ def _record_identity(corpus_sha256: str) -> dict[str, str]:
     identity = {name: _sha256_file(path) for name, path in paths.items()}
     identity.update({
         "corpus_manifest_sha256": corpus_sha256,
-        "provider_output_schema_sha256": provider_output_schema_sha256(),
-        "provider_output_schema_version": OUTPUT_SCHEMA_VERSION,
+        "provider_output_schema_sha256": provider_output_schema_v2_sha256(),
+        "provider_output_schema_version": OUTPUT_SCHEMA_VERSION_V2,
         "semantic_prompt_sha256": _sha256_bytes(semantic_prompt.encode("utf-8")),
         "semantic_prompt_version": policy.semantic_prompt_version,
-        "task10_prompt_version": policy.prompt_version,
-        "task10_prompt_sha256": task10_prompt_sha256(policy),
+        "task10_prompt_version": TASK10_PROMPT_VERSION_V2,
+        "task10_prompt_sha256": task10_prompt_v2_sha256(policy),
+        "provider_adapter_version": PROVIDER_ADAPTER_VERSION_V2,
+        "input_manifest_sha256": input_manifest_sha256,
+        "ordered_input_hashes_sha256": ordered_input_hashes_sha256,
         "model_id": policy.model_id,
         "model_sha256": _sha256_bytes(policy.model_id.encode("utf-8")),
         "pricing_sha256": pricing.identity_sha256,
@@ -534,8 +1091,8 @@ def build_dry_run_preflight(
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     boundary_attempt: Any = None,
 ) -> dict[str, Any]:
-    if sample_size <= 0:
-        raise GateBPreflightError("invalid_sample_size")
+    if sample_size != EXACT_CALL_CAP:
+        raise GateBPreflightError("exact_sample_size_required:48")
     gate_a_root = gate_a_root.resolve()
     output_root = GATE_B_EXPERIMENT_ROOT
     if output_root.is_symlink():
@@ -601,6 +1158,12 @@ def build_dry_run_preflight(
             temporary.unlink(missing_ok=True)
         boundary.corpus_write(manifest_path)
     os.chmod(manifest_path, 0o600)
+    input_package = _materialize_input_package(
+        experiment_root=experiment_root,
+        gate_a_root=gate_a_root,
+        selected=selected,
+        boundary=boundary,
+    )
     gate_a_after = _gate_a_snapshot(gate_a_root, boundary)
     assert_paths_unchanged(gate_a_before, gate_a_after)
     if protected_before != _protected_metadata_snapshot():
@@ -618,7 +1181,11 @@ def build_dry_run_preflight(
         }),
     }
     max_spend = DEFAULT_MAX_COST_PER_CALL_USD * sample_size
-    identity = _record_identity(corpus_sha256)
+    identity = _record_identity(
+        corpus_sha256,
+        input_manifest_sha256=input_package["manifest_sha256"],
+        ordered_input_hashes_sha256=input_package["ordered_input_hashes_sha256"],
+    )
     identity_sha256 = _sha256_json(identity)
     return {
         "schema_version": "1.0.0",
@@ -640,6 +1207,7 @@ def build_dry_run_preflight(
             "manifest_sha256": corpus_sha256,
             "coverage": coverage,
         },
+        "inputs": input_package,
         "budget": {
             "estimated_calls": sample_size,
             "max_cost_per_call_usd": f"{DEFAULT_MAX_COST_PER_CALL_USD:.2f}",
@@ -680,6 +1248,10 @@ class GateBRunAuthorization:
     corpus_manifest_sha256: str
     experiment_root: Path
     corpus_manifest_path: Path
+    input_manifest_sha256: str
+    input_manifest_path: Path
+    package_root: Path
+    ordered_input_sha256s: tuple[str, ...]
     gate_a_root: Path
     record_count: int
     _metadata_seal_key: bytes
@@ -722,6 +1294,8 @@ def authorize_record_run(
         raise GateBPreflightError("record_identity_mismatch")
     if approval_record.get("status") != "approved":
         raise GateBPreflightError("approval_status")
+    if approval_record.get("schema_version") != "2.0.0":
+        raise GateBPreflightError("approval_schema_version")
     if approval_record.get("run_identity_sha256") != identity_sha256:
         raise GateBPreflightError("identity_mismatch")
     if not owner_capability or _sha256_bytes(owner_capability.encode("utf-8")) != (
@@ -735,6 +1309,10 @@ def authorize_record_run(
         or preflight.get("budget", {}).get("exact_call_cap") != EXACT_CALL_CAP
         or Decimal(str(preflight.get("budget", {}).get("exact_spend_cap_usd")))
         != EXACT_SPEND_CAP_USD
+        or Decimal(str(approval_record.get("max_cost_per_call_usd")))
+        != DEFAULT_MAX_COST_PER_CALL_USD
+        or str(approval_record.get("max_output_tokens"))
+        != str(governed_pricing_schedule().max_output_tokens)
     ):
         raise GateBPreflightError("exact_caps_mismatch")
     if approval_record.get("pricing_sha256") != identity.get("pricing_sha256"):
@@ -752,6 +1330,38 @@ def authorize_record_run(
     if _sha256_bytes(manifest_bytes) != expected_corpus:
         raise GateBPreflightError("corpus_manifest_changed:hash")
     corpus = json.loads(manifest_bytes)
+    inputs = preflight.get("inputs", {})
+    expected_input_manifest = str(inputs.get("manifest_sha256"))
+    expected_ordered_hashes = str(inputs.get("ordered_input_hashes_sha256"))
+    if (
+        approval_record.get("input_manifest_sha256") != expected_input_manifest
+        or approval_record.get("ordered_input_hashes_sha256")
+        != expected_ordered_hashes
+        or identity.get("input_manifest_sha256") != expected_input_manifest
+        or identity.get("ordered_input_hashes_sha256") != expected_ordered_hashes
+    ):
+        raise GateBPreflightError("input_identity_mismatch")
+    input_manifest_path = Path(str(inputs.get("manifest_path")))
+    package_root = Path(str(inputs.get("package_root")))
+    if (
+        package_root.parent.resolve(strict=True) != experiment_root.resolve(strict=True)
+        or input_manifest_path.parent.resolve(strict=True)
+        != package_root.resolve(strict=True)
+    ):
+        raise GateBPreflightError("input_manifest_root_mismatch")
+    input_manifest = load_gate_b_run_manifest(
+        input_manifest_path,
+        expected_sha256=expected_input_manifest,
+        expected_corpus_sha256=expected_corpus,
+    )
+    ordered_input_sha256s = tuple(
+        record["task10_input_sha256"] for record in input_manifest["records"]
+    )
+    if (
+        _sha256_json(ordered_input_sha256s) != expected_ordered_hashes
+        or list(ordered_input_sha256s) != inputs.get("ordered_input_sha256s")
+    ):
+        raise GateBPreflightError("input_allowlist_mismatch")
     gate_a_root = Path(str(preflight["gate_a_artifact_root"]))
     for record in corpus["records"]:
         raw = read_contained_nofollow(gate_a_root, str(record["raw_reference"]))
@@ -765,6 +1375,10 @@ def authorize_record_run(
         corpus_manifest_sha256=expected_corpus,
         experiment_root=experiment_root,
         corpus_manifest_path=manifest_path,
+        input_manifest_sha256=expected_input_manifest,
+        input_manifest_path=input_manifest_path,
+        package_root=package_root,
+        ordered_input_sha256s=ordered_input_sha256s,
         gate_a_root=gate_a_root,
         record_count=len(corpus["records"]),
         _metadata_seal_key=hashlib.sha256(
@@ -806,6 +1420,8 @@ class GateBBudgetLedger:
                 "input_hash TEXT PRIMARY KEY, reservation_id TEXT UNIQUE NOT NULL, "
                 "reserved_microusd INTEGER NOT NULL, actual_microusd INTEGER, "
                 "status TEXT NOT NULL CHECK(status IN ('reserved','success','failure')));"
+                "CREATE TABLE IF NOT EXISTS run_inputs ("
+                "ordinal INTEGER PRIMARY KEY, input_hash TEXT UNIQUE NOT NULL);"
             )
             connection.execute(
                 "INSERT OR IGNORE INTO run_budget VALUES (?, ?, ?)",
@@ -823,6 +1439,19 @@ class GateBBudgetLedger:
                 != _usd_to_micros(self.authorization.exact_spend_cap_usd)
             ):
                 raise GateBPreflightError("ledger_identity_mismatch")
+            existing_inputs = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT input_hash FROM run_inputs ORDER BY ordinal"
+                )
+            )
+            if not existing_inputs:
+                connection.executemany(
+                    "INSERT INTO run_inputs VALUES (?, ?)",
+                    enumerate(self.authorization.ordered_input_sha256s),
+                )
+            elif existing_inputs != self.authorization.ordered_input_sha256s:
+                raise GateBPreflightError("ledger_input_allowlist_mismatch")
             connection.commit()
             os.chmod(self.path, 0o600)
         finally:
@@ -833,6 +1462,10 @@ class GateBBudgetLedger:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM run_inputs WHERE input_hash = ?", (input_hash,)
+            ).fetchone() is None:
+                raise GateBPreflightError("input_not_allowlisted")
             if connection.execute(
                 "SELECT 1 FROM call_ledger WHERE input_hash = ?", (input_hash,)
             ).fetchone():
@@ -889,18 +1522,52 @@ class GateBBudgetLedger:
         finally:
             connection.close()
 
+    def retry_reserved_without_record(self, input_hash: str) -> bool:
+        """Release only a crash-left reservation after the runner saw no record.
+
+        The caller holds the run-manifest lock, so no second governed call can
+        still be publishing the same content-addressed recording.
+        """
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM call_ledger WHERE input_hash = ?", (input_hash,)
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return False
+            if row["status"] != "reserved":
+                raise GateBPreflightError("completed_call_without_record")
+            connection.execute(
+                "DELETE FROM call_ledger WHERE input_hash = ?", (input_hash,)
+            )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def snapshot(self) -> dict[str, Any]:
         connection = self._connect()
         try:
             row = connection.execute(
                 "SELECT COUNT(*) AS reserved, "
                 "SUM(CASE WHEN status != 'reserved' THEN 1 ELSE 0 END) AS completed, "
+                "COALESCE(SUM(CASE WHEN status = 'reserved' THEN reserved_microusd "
+                "ELSE 0 END), 0) AS outstanding, "
+                "COALESCE(SUM(CASE WHEN actual_microusd IS NOT NULL "
+                "THEN actual_microusd ELSE 0 END), 0) AS actual, "
                 "COALESCE(SUM(CASE WHEN actual_microusd IS NULL THEN reserved_microusd "
                 "ELSE actual_microusd END), 0) AS spend FROM call_ledger"
             ).fetchone()
             return {
                 "calls_reserved": row["reserved"],
                 "calls_completed": row["completed"] or 0,
+                "outstanding_reserved_usd": _micros_to_usd(row["outstanding"]),
+                "measured_actual_usd": _micros_to_usd(row["actual"]),
                 "spend_reserved_usd": _micros_to_usd(row["spend"]),
             }
         finally:
@@ -971,11 +1638,8 @@ def _micros_to_usd(value: int) -> str:
 def run_gate_b_record(
     *,
     authorization: GateBRunAuthorization,
-    semantic_provider: Any,
-    policy: Any,
-    input_loader: Any,
 ) -> list[Any]:
-    """Sole resumable Task 12 record entrypoint after exact owner approval."""
+    """Sole resumable record entrypoint; provider and inputs are runner-owned."""
     if not isinstance(authorization, GateBRunAuthorization):
         raise GateBPreflightError("runner_authorization_required")
     if authorization._issuer is not _AUTHORIZATION_ISSUER:
@@ -985,11 +1649,15 @@ def run_gate_b_record(
     recording_root = authorization.experiment_root / "recordings"
     if recording_root.is_symlink():
         raise GateBPreflightError("recording_root_symlink")
-    if Path(semantic_provider.store.root) != recording_root:
-        raise GateBPreflightError("recording_root_mismatch")
-    manifest_path = authorization.corpus_manifest_path
+    policy = load_evidence_synthesis_policy()
+    semantic_provider = build_live_llm_provider(
+        store_dir=recording_root,
+        model_id=policy.model_id,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    input_manifest_path = authorization.input_manifest_path
     descriptor = os.open(
-        manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        input_manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     )
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -1000,17 +1668,23 @@ def run_gate_b_record(
                 break
             chunks.append(chunk)
         manifest_bytes = b"".join(chunks)
-        if _sha256_bytes(manifest_bytes) != authorization.corpus_manifest_sha256:
-            raise GateBPreflightError("corpus_manifest_changed:runner")
-        corpus = json.loads(manifest_bytes)
-        records = corpus.get("records")
+        if _sha256_bytes(manifest_bytes) != authorization.input_manifest_sha256:
+            raise GateBPreflightError("input_manifest_changed:runner")
+        manifest = json.loads(manifest_bytes)
+        if _canonical_bytes(manifest) != manifest_bytes:
+            raise GateBPreflightError("input_manifest_not_canonical:runner")
+        records = manifest.get("records")
         if not isinstance(records, list) or len(records) != EXACT_CALL_CAP:
             raise GateBPreflightError("runner_corpus_count_mismatch")
+        if tuple(record.get("task10_input_sha256") for record in records) != (
+            authorization.ordered_input_sha256s
+        ):
+            raise GateBPreflightError("runner_input_allowlist_mismatch")
         ledger = GateBBudgetLedger(
             authorization.experiment_root / "run-ledger.sqlite3", authorization
         )
         capability = ledger.structured_capability()
-        adapter = RecordedEvidenceSynthesisProvider(
+        adapter = RecordedEvidenceSynthesisProviderV2(
             semantic_provider=semantic_provider,
             policy=policy,
             pricing=governed_pricing_schedule(),
@@ -1018,21 +1692,24 @@ def run_gate_b_record(
         )
         results: list[Any] = []
         for record in records:
-            raw = read_contained_nofollow(
-                authorization.gate_a_root, str(record["raw_reference"])
+            synthesis_input = load_gate_b_task10_input(
+                package_root=authorization.package_root,
+                record=record,
+                gate_a_root=authorization.gate_a_root,
             )
-            if _sha256_bytes(raw) != record.get("raw_content_sha256"):
-                raise GateBPreflightError("corpus_source_changed:runner")
-            synthesis_input = input_loader(record, raw)
             input_hash = synthesis_input_sha256(
                 synthesis_input.provider_payload(), provider=adapter
             )
+            if input_hash != record.get("task10_input_sha256"):
+                raise GateBPreflightError("runner_task10_input_hash_mismatch")
             recording_path = semantic_provider.store.path_for(input_hash)
             if recording_path.exists():
                 existing = semantic_provider.store.load(input_hash)
                 ledger.reconcile_existing_record(input_hash, existing, capability)
+            else:
+                ledger.retry_reserved_without_record(input_hash)
             results.append(
-                run_evidence_synthesis(
+                run_evidence_synthesis_v2(
                     synthesis_input=synthesis_input,
                     provider=adapter,
                     policy=policy,

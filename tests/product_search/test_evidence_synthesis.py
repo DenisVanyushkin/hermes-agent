@@ -318,7 +318,7 @@ def _fixture_record(
         "latency_ms": latency_ms,
         "usage": usage,
         "retry_count": 0,
-        "cost_usd": "0.000321" if failure_code is None else "0.010000",
+        "cost_usd": "0.000321" if failure_code is None else "0.000121",
         "decoding_parameters": {"temperature": 0},
         "status": "failure" if failure_code else "success",
         "failure_code": failure_code,
@@ -690,9 +690,33 @@ def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> N
     assert result.metadata.provider_id == "llm-observation"
     assert result.metadata.model_id == "openai/gpt-5-mini"
     assert result.metadata.latency_ms == 41
-    assert result.metadata.cost_usd == "0.010000"
+    assert result.metadata.cost_usd == "0.000121"
     assert result.metadata.input_sha256 == GOLDEN_INPUT_HASH
     assert result.metadata.output_sha256 == hashlib.sha256(b"").hexdigest()
+
+
+def test_task10_replay_rejects_sealed_failure_booking_reservation_as_actual(
+    tmp_path: Path,
+) -> None:
+    policy = load_evidence_synthesis_policy(POLICY)
+    store = RecordingStore(tmp_path)
+    provider = _adapter(store, policy=policy)
+    record = _fixture_record(
+        provider, _input(), raw="", failure_code="refusal", latency_ms=41
+    )
+    record["cost_usd"] = "0.010000"
+    assert provider.record_capability is not None
+    provider.record_capability.seal_record(record)
+    store.save(record)
+
+    result = run_evidence_synthesis(
+        synthesis_input=_input(),
+        provider=provider,
+        policy=policy,
+    )
+
+    assert result.deliverable is False
+    assert result.status is EvidenceSynthesisStatus.PROVIDER_METADATA_MISMATCH
 
 
 def test_governed_record_mode_records_task10_contract_and_replays_offline(

@@ -40,11 +40,14 @@ from job_intel.product_search.company_evidence import (
     EvidenceSufficiencyState,
 )
 from job_intel.product_search.evidence_synthesis import (
+    CompanyAuthorityUnavailableV2,
     EvidenceClaimStatus,
     EvidenceClaimV1,
     EvidenceDimension,
     EvidenceQuestionCandidateV1,
     EvidenceSynthesisResultV1,
+    EvidenceSynthesisInputV2,
+    EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
 )
 
@@ -659,6 +662,27 @@ def _failure(reason: str) -> DecisionResultV2:
         failure_reason=reason,
         assessment=None,
     )
+
+
+def consume_synthesis_v2_fail_closed(
+    *,
+    synthesis_input: EvidenceSynthesisInputV2,
+    synthesis_result: EvidenceSynthesisResultV2,
+) -> DecisionResultV2:
+    """Additive bridge that preserves Decision v2's immutable stage semantics.
+
+    The existing Decision v2 contract requires a resolved company identity in
+    stages 1-3.  Simplified Gate B may benchmark Task 10 without that authority,
+    but it cannot fabricate the completed stage or any downstream decision.
+    """
+    if synthesis_result.company_authority_status.value != (
+        synthesis_input.company_authority.status
+    ):
+        return _failure("synthesis_v2_company_authority_mismatch")
+    if isinstance(synthesis_input.company_authority, CompanyAuthorityUnavailableV2):
+        reason = synthesis_input.company_authority.reason.value
+        return _failure(f"company_authority_unavailable:{reason}")
+    return _failure("synthesis_v2_requires_versioned_decision_authority")
 
 
 def _validate_references(

@@ -175,6 +175,7 @@ class GovernedStructuredRequest:
     response_schema: dict[str, Any]
     governance_identity: dict[str, Any]
     forbidden_markers: tuple[str, ...] = ()
+    response_validator: Any = None
 
 
 @dataclass(frozen=True)
@@ -484,19 +485,28 @@ class RecordingStore:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
         path = self.path_for(record["input_hash"])
+        temporary = self.root / f".{path.name}.{os.getpid()}.tmp"
         payload = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True)
         try:
             descriptor = os.open(
-                path,
+                temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
         except FileExistsError as exc:
-            raise LLMProviderError("recording_exists", path.name) from exc
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
+            raise LLMProviderError("recording_write_in_progress", path.name) from exc
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise LLMProviderError("recording_exists", path.name) from exc
+            os.chmod(path, 0o600)
+        finally:
+            temporary.unlink(missing_ok=True)
         return path
 
     def load(self, input_hash: str) -> dict[str, Any]:
@@ -621,7 +631,10 @@ class LLMObservationProvider:
         raw_text = ""
         response_model: Optional[str] = None
         usage: Optional[dict[str, int]] = None
-        actual_cost = reservation_cost
+        # Reservation is only a pre-call ceiling. Until the provider returns
+        # validated usage, the measured actual cost is zero rather than the
+        # reserved maximum.
+        actual_cost = Decimal("0.000000")
         failure_code: Optional[str] = None
         failure_diagnostic: Optional[str] = None
         try:
@@ -648,7 +661,24 @@ class LLMObservationProvider:
             refusal = getattr(message, "refusal", None)
             content = getattr(message, "content", None)
             response_model = getattr(response, "model", None)
-            if refusal:
+            raw_usage = getattr(response, "usage", None)
+            try:
+                usage = capability.pricing.validate_usage(raw_usage)
+                actual_cost = capability.pricing.cost(
+                    prompt_tokens=usage["prompt_tokens"],
+                    completion_tokens=usage["completion_tokens"],
+                )
+                if actual_cost > reservation_cost:
+                    failure_code = "cost_bound_exceeded"
+                    failure_diagnostic = "reservation"
+            except LLMProviderError as exc:
+                if not refusal or raw_usage is not None:
+                    failure_code = exc.reason
+                    failure_diagnostic = "usage_validation"
+            parsed_payload: Any = None
+            if failure_code is not None:
+                pass
+            elif refusal:
                 failure_code = "refusal"
                 failure_diagnostic = "provider_refusal"
             elif not isinstance(content, str) or not content:
@@ -669,21 +699,21 @@ class LLMObservationProvider:
                     failure_diagnostic = "redaction_guard"
                 else:
                     try:
-                        json.loads(raw_text)
+                        parsed_payload = json.loads(raw_text)
                     except (json.JSONDecodeError, TypeError):
                         failure_code = "schema_invalid"
                         failure_diagnostic = "invalid_json"
-                if failure_code is None:
-                    usage = capability.pricing.validate_usage(
-                        getattr(response, "usage", None)
-                    )
-                    actual_cost = capability.pricing.cost(
-                        prompt_tokens=usage["prompt_tokens"],
-                        completion_tokens=usage["completion_tokens"],
-                    )
-                    if actual_cost > reservation_cost:
-                        failure_code = "cost_bound_exceeded"
-                        failure_diagnostic = "reservation"
+                if failure_code is None and request.response_validator is not None:
+                    try:
+                        validation_code = request.response_validator(parsed_payload)
+                    except Exception:
+                        validation_code = "result_validation_failed"
+                    if validation_code is not None:
+                        normalized_code = str(validation_code)
+                        if not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", normalized_code):
+                            normalized_code = "result_validation_failed"
+                        failure_code = normalized_code
+                        failure_diagnostic = "response_validator"
         except LLMProviderError as exc:
             failure_code = exc.reason
             failure_diagnostic = "usage_validation"

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from decimal import Decimal
 import hashlib
+import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,14 +41,20 @@ OWNER_CAPABILITY = "owner-random-fixture-capability-7c7ca978"
 
 def _approval(preflight: dict[str, Any]) -> dict[str, Any]:
     return {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "status": "approved",
         "run_identity_sha256": preflight["record_identity_sha256"],
         "capability_sha256": hashlib.sha256(OWNER_CAPABILITY.encode()).hexdigest(),
         "exact_call_cap": 48,
         "exact_spend_cap_usd": "0.48",
+        "max_cost_per_call_usd": "0.01",
         "pricing_sha256": preflight["record_identity"]["pricing_sha256"],
         "corpus_manifest_sha256": preflight["corpus"]["manifest_sha256"],
+        "input_manifest_sha256": preflight["inputs"]["manifest_sha256"],
+        "ordered_input_hashes_sha256": preflight["inputs"][
+            "ordered_input_hashes_sha256"
+        ],
+        "max_output_tokens": preflight["record_identity"]["max_output_tokens"],
     }
 
 
@@ -100,7 +107,7 @@ def test_transactional_ledger_prevents_double_reserve_and_preserves_crash_state(
     )
     ledger_path = Path(preflight["corpus"]["manifest_path"]).parent / "run-ledger.sqlite3"
     ledger = GateBBudgetLedger(ledger_path, authorization)
-    barrier_hash = "a" * 64
+    barrier_hash = authorization.ordered_input_sha256s[0]
 
     def attempt() -> str:
         try:
@@ -119,7 +126,33 @@ def test_transactional_ledger_prevents_double_reserve_and_preserves_crash_state(
     snapshot = resumed.snapshot()
     assert snapshot["calls_reserved"] == 1
     assert snapshot["spend_reserved_usd"] == "0.010000"
+    assert snapshot["outstanding_reserved_usd"] == "0.010000"
+    assert snapshot["measured_actual_usd"] == "0.000000"
     assert snapshot["calls_completed"] == 0
+
+
+def test_stale_inflight_without_record_can_retry_but_completed_call_cannot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    input_hash = authorization.ordered_input_sha256s[0]
+    first = ledger.reserve(input_hash, Decimal("0.010000"))
+
+    assert ledger.retry_reserved_without_record(input_hash) is True
+    second = ledger.reserve(input_hash, Decimal("0.010000"))
+    assert second == first
+    ledger.reconcile(second, Decimal("0.000000"), "failure")
+
+    with pytest.raises(GateBPreflightError, match="completed_call_without_record"):
+        ledger.retry_reserved_without_record(input_hash)
 
 
 def test_ledger_reconciles_crash_after_owner_sealed_record_write(
@@ -134,7 +167,7 @@ def test_ledger_reconciles_crash_after_owner_sealed_record_write(
     ledger = GateBBudgetLedger(
         authorization.experiment_root / "run-ledger.sqlite3", authorization
     )
-    input_hash = "b" * 64
+    input_hash = authorization.ordered_input_sha256s[0]
     ledger.reserve(input_hash, Decimal("0.010000"))
     capability = ledger.structured_capability()
     record = capability.seal_record(
@@ -150,6 +183,67 @@ def test_ledger_reconciles_crash_after_owner_sealed_record_write(
     snapshot = ledger.snapshot()
     assert snapshot["calls_completed"] == 1
     assert snapshot["spend_reserved_usd"] == "0.001250"
+    assert snapshot["outstanding_reserved_usd"] == "0.000000"
+    assert snapshot["measured_actual_usd"] == "0.001250"
+
+
+def test_runner_retries_stale_reservation_and_never_duplicates_completed_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    ledger.reserve(authorization.ordered_input_sha256s[0], Decimal("0.010000"))
+
+    class _Completions:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def create(self, **kwargs: Any) -> object:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps(
+                                {
+                                    "schema_version": "2.0.0",
+                                    "claims": [],
+                                    "conflicts": [],
+                                    "question_candidates": [],
+                                }
+                            ),
+                            refusal=None,
+                        )
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=10, total_tokens=20
+                ),
+                model="openai/gpt-5-mini",
+            )
+
+    completions = _Completions()
+    semantic = LLMObservationProvider(
+        store=RecordingStore(authorization.experiment_root / "recordings"),
+        mode="record",
+        transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", lambda **_: semantic)
+
+    first = run_gate_b_record(authorization=authorization)
+    second = run_gate_b_record(authorization=authorization)
+
+    assert len(first) == len(second) == 48
+    assert len(completions.calls) == 48
+    snapshot = ledger.snapshot()
+    assert snapshot["calls_completed"] == 48
 
 
 def test_direct_task10_record_without_runner_capability_never_enters_transport(
@@ -188,6 +282,12 @@ def test_nofollow_reader_rejects_traversal_absolute_and_symlink(tmp_path: Path) 
     for reference in ("../outside.json", str(outside), "link.json"):
         with pytest.raises(GateBPreflightError, match="contained_nofollow"):
             read_contained_nofollow(root, reference)
+
+    relocated = tmp_path / "relocated-root"
+    root.rename(relocated)
+    root.symlink_to(relocated, target_is_directory=True)
+    with pytest.raises(GateBPreflightError, match="root_symlink"):
+        read_contained_nofollow(root, "raw.json")
 
 
 @pytest.mark.parametrize(
@@ -232,10 +332,12 @@ def test_preflight_rejects_output_root_symlink_and_reports_measured_operations(
     evidence = result["side_effect_evidence"]
     assert evidence["gate_a_files_read"] == 2416
     assert evidence["corpus_files_created"] == 1
+    assert evidence["package_files_created"] == 97
     assert evidence["provider_attempts_denied"] == 0
     assert evidence["network_attempts_denied"] == 0
     files = [path for path in isolated.rglob("*") if path.is_file()]
-    assert files == [Path(result["corpus"]["manifest_path"])]
+    assert len(files) == 98
+    assert Path(result["corpus"]["manifest_path"]) in files
 
 
 def test_authorization_rehashes_corpus_and_rejects_replacement(
@@ -252,49 +354,5 @@ def test_authorization_rehashes_corpus_and_rejects_replacement(
         )
 
 
-def test_single_record_runner_binds_all_48_inputs_to_one_capability(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    preflight = _preflight(tmp_path, monkeypatch)
-    authorization = authorize_record_run(
-        preflight,
-        approval_record=_approval(preflight),
-        owner_capability=OWNER_CAPABILITY,
-    )
-    captured: list[object] = []
-
-    class _Adapter:
-        def __init__(self, **kwargs: Any) -> None:
-            captured.append(kwargs["record_capability"])
-
-    monkeypatch.setattr(gate_b, "RecordedEvidenceSynthesisProvider", _Adapter)
-    monkeypatch.setattr(
-        gate_b,
-        "run_evidence_synthesis",
-        lambda *, synthesis_input, provider, policy: synthesis_input,
-    )
-    monkeypatch.setattr(
-        gate_b,
-        "synthesis_input_sha256",
-        lambda payload, *, provider: hashlib.sha256(repr(payload).encode()).hexdigest(),
-    )
-    semantic = LLMObservationProvider(
-        store=RecordingStore(authorization.experiment_root / "recordings"),
-        mode="record",
-        transport=SimpleNamespace(),
-    )
-    results = run_gate_b_record(
-        authorization=authorization,
-        semantic_provider=semantic,
-        policy=load_evidence_synthesis_policy(),
-        input_loader=lambda record, raw: SimpleNamespace(
-            provider_payload=lambda: (record["selection_key"], len(raw))
-        ),
-    )
-
-    assert len(results) == 48
-    assert len(captured) == 1
-    capability = captured[0]
-    assert capability.run_identity_sha256 == authorization.run_identity_sha256
-    assert capability.exact_call_cap == 48
-    assert capability.exact_spend_cap_usd == Decimal("0.48")
+def test_single_record_runner_has_no_caller_provider_or_loader_bypass() -> None:
+    assert set(inspect.signature(run_gate_b_record).parameters) == {"authorization"}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -171,18 +172,122 @@ def test_structured_call_persists_only_sanitized_failure_codes(
         mode="record",
         transport=_Transport(_Completions(error=RuntimeError(secret))),
     )
+    events: list[tuple] = []
     with pytest.raises(LLMProviderError, match="transport_error"):
         provider.governed_structured_call(
-            request=_request(), capability=_capability([])
+            request=_request(), capability=_capability(events)
         )
+    assert events == [
+        ("reserve", "1" * 64, "0.010000"),
+        ("reconcile", "reservation-1", "0.000000", "failure"),
+    ]
     persisted = provider.store.load("1" * 64)
     serialized = json.dumps(persisted, sort_keys=True)
     assert persisted["failure_code"] == "transport_error"
     assert persisted["failure_diagnostic"] == "RuntimeError"
+    assert persisted["usage"] is None
+    assert persisted["cost_usd"] == "0.000000"
     assert persisted["raw_response_text"] == ""
     assert secret not in serialized
     assert "private.invalid" not in serialized
     assert "hermes-private://" not in serialized
+
+
+def test_refusal_without_usage_reconciles_zero_measured_cost(tmp_path: Path) -> None:
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=None, refusal="fixture refusal")
+            )
+        ],
+        usage=None,
+        model=DEFAULT_MODEL_ID,
+    )
+    provider = LLMObservationProvider(
+        store=RecordingStore(tmp_path),
+        mode="record",
+        transport=_Transport(_Completions(response=response)),
+    )
+    events: list[tuple] = []
+
+    with pytest.raises(LLMProviderError, match="refusal"):
+        provider.governed_structured_call(
+            request=_request(), capability=_capability(events)
+        )
+
+    assert events[-1] == (
+        "reconcile",
+        "reservation-1",
+        "0.000000",
+        "failure",
+    )
+    recording = provider.store.load("1" * 64)
+    assert recording["failure_code"] == "refusal"
+    assert recording["usage"] is None
+    assert recording["cost_usd"] == "0.000000"
+
+
+def test_structured_call_validates_task_payload_before_success_accounting(
+    tmp_path: Path,
+) -> None:
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=SimpleNamespace(content='{"ok":true}', refusal=None))
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=1_000, completion_tokens=500, total_tokens=1_500
+        ),
+        model=DEFAULT_MODEL_ID,
+    )
+    provider = LLMObservationProvider(
+        store=RecordingStore(tmp_path),
+        mode="record",
+        transport=_Transport(_Completions(response=response)),
+    )
+    events: list[tuple] = []
+    request = replace(
+        _request(),
+        response_validator=lambda payload: (
+            "unsupported_claim" if payload == {"ok": True} else "invalid_schema"
+        ),
+    )
+
+    with pytest.raises(LLMProviderError, match="unsupported_claim"):
+        provider.governed_structured_call(
+            request=request,
+            capability=_capability(events),
+        )
+
+    assert events == [
+        ("reserve", "1" * 64, "0.010000"),
+        ("reconcile", "reservation-1", "0.001250", "failure"),
+    ]
+    recording = provider.store.load("1" * 64)
+    assert recording["status"] == "failure"
+    assert recording["failure_code"] == "unsupported_claim"
+    assert recording["usage"] == {
+        "prompt_tokens": 1_000,
+        "completion_tokens": 500,
+        "total_tokens": 1_500,
+    }
+    assert recording["cost_usd"] == "0.001250"
+    assert recording["raw_response_text"] == ""
+
+
+def test_exclusive_record_write_has_no_partial_target_after_link_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RecordingStore(tmp_path)
+
+    def crash_before_publish(*args: object, **kwargs: object) -> None:
+        raise OSError("fixture publish crash")
+
+    monkeypatch.setattr(runtime.os, "link", crash_before_publish)
+    with pytest.raises(OSError, match="publish crash"):
+        store.save_exclusive({"input_hash": "1" * 64})
+
+    assert not store.path_for("1" * 64).exists()
+    assert list(tmp_path.glob(f".{('1' * 64)}.json.*.tmp")) == []
 
 
 def test_product_search_never_reads_private_semantic_members() -> None:

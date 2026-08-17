@@ -3,7 +3,7 @@
   "gate": "gate-b",
   "status": "ready_for_record_approval",
   "prepared_at": "2026-08-17T12:00:00+05:00",
-  "prepared_from_base": "882214bc5ac26f29ad4077366be8528086c1e653",
+  "prepared_from_base": "09bd9daabbb12711230e3c6920486fa712634997",
   "gate_a_input": {
     "commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
     "manifest_sha256": "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d",
@@ -39,6 +39,22 @@
     },
     "note": "Core and Exploration names are sampling hypotheses only; no Decision v2 selection mode has been assigned. The denominator 1314 means minimum-evidence sufficient, not qualified."
   },
+  "inputs": {
+    "status": "materialized",
+    "schema_version": "2.0.0",
+    "record_count": 48,
+    "vacancy_artifact_count": 48,
+    "company_authority_status": "unavailable",
+    "company_authority_reason": "unresolved_company_identity",
+    "manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2/run-manifest.v2.json",
+    "manifest_sha256": "4c59db15616f6b0dcb2a2708c0af13553023a9e8b07f61f88e9c6f0c18d0a362",
+    "ordered_input_hashes_sha256": "4f1739e0b35197b04f3f42b3a77cf03593b4f1ffad429ef8b6ecd2d60555a1f7",
+    "provider_allowlist_count": 48,
+    "company_identity_discovery_required": false,
+    "official_domain_claims": 0,
+    "company_facts": 0,
+    "company_citations": 0
+  },
   "budget": {
     "estimated_calls": 48,
     "exact_call_cap": 48,
@@ -56,15 +72,18 @@
     "pricing_sha256": "975559f76b1e8c6bebdbbae3011a166f3d490caf703e555cebb53e45ebc8eb3e",
     "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
     "profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
-    "provider_output_schema_sha256": "4efb390cda26c5cff7689518463e02d15847597baf3e28741591fd6b3c893a46",
-    "provider_output_schema_version": "1.0.0",
+    "provider_adapter_version": "product-search-evidence-replay/2.0",
+    "provider_output_schema_sha256": "428586420dd32c64343c5ac8d59466870319037ab84702b0c7ee1866bf5274ab",
+    "provider_output_schema_version": "2.0.0",
     "search_contract_sha256": "faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1",
     "semantic_prompt_sha256": "051c18e40d15d65c15309d217831044267bf01abb77ac5019cbb6ec29e1d29d3",
     "semantic_prompt_version": "llm-obs-1.0.0",
-    "task10_prompt_sha256": "afc29d6cb70591598b0670522f5696864d03cbd809d06a1ca51a46ceb2f79a49",
-    "task10_prompt_version": "product-search-evidence-synthesis-1.0.0"
+    "task10_prompt_sha256": "6036372aef577b91c0b36b873fb9e44c351311641424c831971f8c59b6d666aa",
+    "task10_prompt_version": "product-search-evidence-synthesis-2.0.0",
+    "input_manifest_sha256": "4c59db15616f6b0dcb2a2708c0af13553023a9e8b07f61f88e9c6f0c18d0a362",
+    "ordered_input_hashes_sha256": "4f1739e0b35197b04f3f42b3a77cf03593b4f1ffad429ef8b6ecd2d60555a1f7"
   },
-  "record_identity_sha256": "d76b2b03b2edef455b4839c823eb9d286af634e52e7e70927bdeb0586faf53cd",
+  "record_identity_sha256": "2e87fbd252d4a7f9da4acf8ccc882e90b886f4d5763f5e212ba2e77132400348",
   "approval_capability": {
     "status": "not_supplied",
     "value": null
@@ -186,7 +205,7 @@
   "candidate_hashes": {
     "decision_contract_policy_sha256": "2a3240e4d39c886c9afe11d66f67c1515b722d26d43ab7c134c78af9f2521db8",
     "decision_result_schema_sha256": "4f32b8094b75d630352326cc034db5c6a36086b97911eab13103eaf98c8fdc94",
-    "decision_v2_code_sha256": "4b372e3b16e6d20d1cca3abd1a2f84f98109d271e343ed555ee71ad640ee4b5f",
+    "decision_v2_code_sha256": "6570f1d079c30e5c827b1faf7077380b3a23e0566808c4ba20bcddc06716d3c9",
     "career_profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
     "semantic_contract_sha256": "23aee2f238b692bafe1fbc70fdf0534ae63cc21eb38673781c525b5cc05464f5",
     "evidence_synthesis_policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",

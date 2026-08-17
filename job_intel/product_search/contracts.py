@@ -91,6 +91,11 @@ class DimensionEvidenceState(str, Enum):
     UNKNOWN = "unknown"
 
 
+class CompanyAuthorityStatus(str, Enum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+
+
 class MandateRoleFamily(str, Enum):
     EXECUTIVE_PRODUCT = "executive_product"
     DIGITAL_BUSINESS = "digital_business"
@@ -220,6 +225,27 @@ class AssessmentInputV1(_StrictFrozenModel):
     assessment_id: str = Field(min_length=1)
     references: AssessmentReferences
     dimensions: DecisionDimensionsInput
+
+
+class AssessmentInputV2(_StrictFrozenModel):
+    """Additive benchmark input; v1 remains the company-bundle contract."""
+
+    schema_version: Literal["2.0.0"]
+    assessment_id: str = Field(min_length=1)
+    references: AssessmentReferences
+    dimensions: DecisionDimensionsInput
+    company_authority_status: CompanyAuthorityStatus
+
+    @model_validator(mode="after")
+    def keep_unavailable_company_authority_unknown(self) -> Self:
+        if (
+            self.company_authority_status is CompanyAuthorityStatus.UNAVAILABLE
+            and self.dimensions.company_fit.state is not DimensionEvidenceState.UNKNOWN
+        ):
+            raise ValueError(
+                "unavailable company authority requires company_fit to remain unknown"
+            )
+        return self
 
 
 class ProductDecisionFields(_StrictFrozenModel):

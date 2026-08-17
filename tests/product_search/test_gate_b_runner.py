@@ -35,8 +35,10 @@ def test_dry_run_materializes_content_addressed_corpus_and_is_idempotent(
     second = build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
 
     assert second["side_effect_evidence"]["corpus_files_created"] == 0
+    assert second["side_effect_evidence"]["package_files_created"] == 0
     comparable_second = deepcopy(second)
     comparable_second["side_effect_evidence"]["corpus_files_created"] = 1
+    comparable_second["side_effect_evidence"]["package_files_created"] = 97
     assert comparable_second == first
     assert manifest_path.read_bytes() == before[0]
     assert (manifest_path.stat().st_mode & 0o777) == 0o600
@@ -91,13 +93,20 @@ def test_record_authorization_requires_exact_identity_token_and_caps(
     preflight = build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
     capability = "owner-random-fixture-capability-90125"
     approval = {
+        "schema_version": "2.0.0",
         "status": "approved",
         "run_identity_sha256": preflight["record_identity_sha256"],
         "capability_sha256": hashlib.sha256(capability.encode()).hexdigest(),
         "exact_call_cap": 48,
         "exact_spend_cap_usd": "0.48",
+        "max_cost_per_call_usd": "0.01",
         "pricing_sha256": preflight["record_identity"]["pricing_sha256"],
         "corpus_manifest_sha256": preflight["corpus"]["manifest_sha256"],
+        "input_manifest_sha256": preflight["inputs"]["manifest_sha256"],
+        "ordered_input_hashes_sha256": preflight["inputs"][
+            "ordered_input_hashes_sha256"
+        ],
+        "max_output_tokens": preflight["record_identity"]["max_output_tokens"],
     }
 
     for supplied_token in (None, "wrong"):

@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 import re
 import time
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, TypeAlias
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -22,7 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from job_intel.product_search.company_evidence import CompanyEvidenceBundleV1
 from job_intel.product_search.contracts import (
     AssessmentInputV1,
+    AssessmentInputV2,
     CareerProfileV2,
+    CompanyAuthorityStatus,
     DimensionEvidenceState,
     ImmutableArtifactRef,
     SHA256_PATTERN,
@@ -43,6 +45,9 @@ DEFAULT_POLICY_PATH = (
     / "config/product_search/evidence_synthesis.v1.yaml"
 )
 OUTPUT_SCHEMA_VERSION = "1.0.0"
+OUTPUT_SCHEMA_VERSION_V2 = "2.0.0"
+TASK10_PROMPT_VERSION_V2 = "product-search-evidence-synthesis-2.0.0"
+PROVIDER_ADAPTER_VERSION_V2 = "product-search-evidence-replay/2.0"
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _PRIVATE_MARKERS = ("hermes-private://", "user note", "private resume")
 _TASK10_SYSTEM_PROMPT_BASE = """You synthesize bounded Product Search evidence.
@@ -339,6 +344,143 @@ class EvidenceSynthesisInputV1(_StrictFrozenModel):
         }
 
 
+class CompanyAuthorityUnavailableReasonV2(str, Enum):
+    UNRESOLVED_COMPANY_IDENTITY = "unresolved_company_identity"
+    COMPANY_EVIDENCE_UNAVAILABLE = "company_evidence_unavailable"
+    NO_ADMISSIBLE_PUBLIC_EVIDENCE = "no_admissible_public_evidence"
+
+
+class CompanyAuthorityAvailableV2(_StrictFrozenModel):
+    schema_version: Literal["2.0.0"] = "2.0.0"
+    status: Literal["available"]
+    company_evidence_contract_sha256: str = Field(pattern=SHA256_PATTERN)
+    company_evidence_bundle_sha256: str = Field(pattern=SHA256_PATTERN)
+    company_evidence_bundle: CompanyEvidenceBundleV1
+
+    @model_validator(mode="after")
+    def bind_exact_bundle_hash(self) -> Self:
+        if self.company_evidence_bundle_sha256 != self.company_evidence_bundle.content_sha256:
+            raise ValueError("available company authority bundle hash mismatch")
+        return self
+
+
+class CompanyAuthorityUnavailableV2(_StrictFrozenModel):
+    schema_version: Literal["2.0.0"] = "2.0.0"
+    status: Literal["unavailable"]
+    reason: CompanyAuthorityUnavailableReasonV2
+    company_evidence_bundle: None = None
+    official_domain_claim: None = None
+    company_facts: tuple[str, ...] = Field(default=(), max_length=0)
+    citations: tuple[str, ...] = Field(default=(), max_length=0)
+
+
+CompanyAuthorityInputV2: TypeAlias = Annotated[
+    CompanyAuthorityAvailableV2 | CompanyAuthorityUnavailableV2,
+    Field(discriminator="status"),
+]
+
+
+class EvidenceSynthesisInputV2(_StrictFrozenModel):
+    """Self-contained canonical Task 10 v2 input for the simplified benchmark."""
+
+    schema_version: Literal["2.0.0"]
+    assessment_input: AssessmentInputV2
+    company_authority: CompanyAuthorityInputV2
+    vacancy_evidence_ref: ImmutableArtifactRef
+    vacancy_evidence: VacancyEvidenceArtifactV1
+    fragments: tuple[EvidenceFragmentV1, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_authoritative_inputs(self) -> Self:
+        if self.assessment_input.company_authority_status.value != self.company_authority.status:
+            raise ValueError("assessment and company authority status mismatch")
+        vacancy_payload = self.vacancy_evidence.model_dump(mode="json")
+        if (
+            self.vacancy_evidence_ref.artifact_id != self.vacancy_evidence.artifact_id
+            or self.vacancy_evidence_ref.version != self.vacancy_evidence.artifact_version
+            or self.vacancy_evidence_ref.sha256
+            != _sha256_text(_canonical_json(vacancy_payload))
+        ):
+            raise ValueError("vacancy evidence artifact identity mismatch")
+        if self.assessment_input.references.evidence_snapshot_ref != self.vacancy_evidence_ref:
+            raise ValueError("assessment evidence snapshot must bind exact vacancy artifact")
+
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in self.fragments}
+        if len(fragments_by_id) != len(self.fragments):
+            raise ValueError("fragments must not contain duplicate fragment_id")
+        artifact_fragments = {
+            item.source_locator: item for item in self.vacancy_evidence.fragments
+        }
+        unknown_locators: dict[EvidenceDimension, set[str]] = {}
+        authorized: set[str] = set()
+        for dimension in EvidenceDimension:
+            dimension_input = getattr(self.assessment_input.dimensions, dimension.value)
+            if dimension_input.state is DimensionEvidenceState.EVIDENCE_AVAILABLE:
+                for fragment_id in dimension_input.evidence_refs:
+                    fragment = fragments_by_id.get(fragment_id)
+                    if fragment is None or dimension not in fragment.permitted_dimensions:
+                        raise ValueError(
+                            f"assessment references unavailable fragment: {fragment_id}"
+                        )
+                    authorized.add(fragment_id)
+            else:
+                unknown_locators[dimension] = set(dimension_input.unknown_reasons)
+
+        company_records = {}
+        if isinstance(self.company_authority, CompanyAuthorityAvailableV2):
+            company_records = {
+                record.evidence_id: record
+                for record in self.company_authority.company_evidence_bundle.evidence
+            }
+        elif (
+            self.assessment_input.dimensions.company_fit.state
+            is not DimensionEvidenceState.UNKNOWN
+        ):
+            raise ValueError("unavailable company authority cannot support company_fit")
+
+        for fragment in self.fragments:
+            if fragment.source_kind is EvidenceSourceKind.VACANCY:
+                if fragment.artifact_ref != self.vacancy_evidence_ref:
+                    raise ValueError("vacancy fragment weakens immutable vacancy reference")
+                artifact_fragment = artifact_fragments.get(fragment.source_locator)
+                if artifact_fragment is None or artifact_fragment.text != fragment.text:
+                    raise ValueError("vacancy fragment is unavailable or broader")
+            elif fragment.source_kind is EvidenceSourceKind.COMPANY:
+                if not isinstance(self.company_authority, CompanyAuthorityAvailableV2):
+                    raise ValueError("unavailable company authority forbids company fragments")
+                record = company_records.get(fragment.source_locator)
+                bundle = self.company_authority.company_evidence_bundle
+                expected_ref = ImmutableArtifactRef(
+                    artifact_id=bundle.bundle_id,
+                    version=bundle.schema_version,
+                    sha256=bundle.content_sha256,
+                )
+                if (
+                    fragment.artifact_ref != expected_ref
+                    or record is None
+                    or record.statement != fragment.text
+                ):
+                    raise ValueError("company fragment is unavailable or broader")
+            elif fragment.source_kind is EvidenceSourceKind.ASSESSMENT_UNKNOWN:
+                if fragment.artifact_ref != self.vacancy_evidence_ref:
+                    raise ValueError("unknown fragment weakens evidence snapshot reference")
+                if any(
+                    fragment.source_locator not in unknown_locators.get(dimension, set())
+                    for dimension in fragment.permitted_dimensions
+                ):
+                    raise ValueError("unknown fragment is not an AssessmentInput unknown reason")
+                authorized.add(fragment.fragment_id)
+            else:
+                raise ValueError("Task 10 v2 package does not embed candidate profile text")
+        unreferenced = set(fragments_by_id) - authorized
+        if unreferenced:
+            raise ValueError(f"unreferenced fragments are prohibited: {sorted(unreferenced)}")
+        return self
+
+    def provider_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
 class QuestionTemplateV1(_StrictFrozenModel):
     question_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,95}$")
     question: str = Field(min_length=1, max_length=300)
@@ -444,6 +586,21 @@ def task10_prompt_sha256(policy: EvidenceSynthesisPolicyV1) -> str:
     return _sha256_text(build_task10_prompt(policy))
 
 
+def build_task10_prompt_v2(policy: EvidenceSynthesisPolicyV1) -> str:
+    return (
+        build_task10_prompt(policy)
+        + "\n\nSimplified Gate B company-authority rules:\n"
+        + "When company_authority.status is unavailable, do not identify the employer, "
+        + "state or infer any company fact, treat a vacancy company label as authority, "
+        + "or cite company evidence. company_fit must remain explicitly unknown and may "
+        + "cite only the admitted assessment_unknown fragment for that dimension."
+    )
+
+
+def task10_prompt_v2_sha256(policy: EvidenceSynthesisPolicyV1) -> str:
+    return _sha256_text(build_task10_prompt_v2(policy))
+
+
 class EvidenceClaimV1(_StrictFrozenModel):
     claim_id: str = Field(min_length=1, max_length=160)
     dimension: EvidenceDimension
@@ -510,6 +667,25 @@ class ProviderEvidencePayloadV1(_StrictFrozenModel):
         return self
 
 
+class ProviderEvidencePayloadV2(_StrictFrozenModel):
+    schema_version: Literal["2.0.0"]
+    claims: tuple[EvidenceClaimV1, ...]
+    conflicts: tuple[EvidenceConflictV1, ...]
+    question_candidates: tuple[EvidenceQuestionCandidateV1, ...]
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> Self:
+        for field_name, id_field, records in (
+            ("claims", "claim_id", self.claims),
+            ("conflicts", "conflict_id", self.conflicts),
+            ("question_candidates", "question_id", self.question_candidates),
+        ):
+            ids = [getattr(record, id_field) for record in records]
+            if len(ids) != len(set(ids)):
+                raise ValueError(f"{field_name} must not contain duplicate ids")
+        return self
+
+
 class EvidenceSynthesisMetadataV1(_StrictFrozenModel):
     provider_id: str
     provider_version: str
@@ -543,9 +719,51 @@ class EvidenceSynthesisResultV1(_StrictFrozenModel):
         return self
 
 
+class EvidenceSynthesisMetadataV2(_StrictFrozenModel):
+    provider_id: str
+    provider_version: Literal["product-search-evidence-replay/2.0"]
+    model_id: str
+    semantic_prompt_version: str
+    prompt_version: Literal["product-search-evidence-synthesis-2.0.0"]
+    schema_version: Literal["2.0.0"]
+    latency_ms: int = Field(ge=0)
+    cost_usd: str | None = Field(default=None, pattern=r"^\d+(?:\.\d+)?$")
+    input_sha256: str = Field(pattern=SHA256_PATTERN)
+    output_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+class EvidenceSynthesisResultV2(_StrictFrozenModel):
+    schema_version: Literal["2.0.0"]
+    status: EvidenceSynthesisStatus
+    deliverable: bool
+    claims: tuple[EvidenceClaimV1, ...]
+    conflicts: tuple[EvidenceConflictV1, ...]
+    question_candidates: tuple[EvidenceQuestionCandidateV1, ...]
+    failure_reason: str | None
+    company_authority_status: CompanyAuthorityStatus
+    metadata: EvidenceSynthesisMetadataV2
+
+    @model_validator(mode="after")
+    def validate_deliverability(self) -> Self:
+        if self.status is EvidenceSynthesisStatus.DELIVERABLE:
+            if not self.deliverable or self.failure_reason is not None:
+                raise ValueError("deliverable status must be successful")
+        elif self.deliverable or self.claims or self.conflicts or self.question_candidates:
+            raise ValueError("non-deliverable result cannot expose provider synthesis")
+        if self.company_authority_status is CompanyAuthorityStatus.UNAVAILABLE and any(
+            claim.dimension is EvidenceDimension.COMPANY_FIT
+            and claim.status is not EvidenceClaimStatus.UNKNOWN
+            for claim in self.claims
+        ):
+            raise ValueError("unavailable company authority cannot emit a company fact")
+        return self
+
+
 def synthesis_input_sha256(
     input_payload: dict[str, Any], *, provider: RecordedEvidenceSynthesisProvider
 ) -> str:
+    if getattr(provider, "input_contract_version", "1.0.0") == "2.0.0":
+        return _sha256_text(_canonical_json(input_payload))
     envelope = {
         "provider_id": provider.provider_id,
         "provider_version": provider.provider_version,
@@ -563,6 +781,10 @@ def provider_output_schema_sha256() -> str:
     return _sha256_text(_canonical_json(ProviderEvidencePayloadV1.model_json_schema()))
 
 
+def provider_output_schema_v2_sha256() -> str:
+    return _sha256_text(_canonical_json(ProviderEvidencePayloadV2.model_json_schema()))
+
+
 class RecordedEvidenceSynthesisProvider:
     """Task 10 adapter over the governed Semantic record/replay transport."""
 
@@ -574,6 +796,12 @@ class RecordedEvidenceSynthesisProvider:
         pricing: GovernedPricingSchedule | None = None,
         record_capability: StructuredCallCapability | None = None,
         run_identity_sha256: str | None = None,
+        _provider_version: str | None = None,
+        _prompt_version: str | None = None,
+        _task10_prompt: str | None = None,
+        _output_payload_model: type[BaseModel] = ProviderEvidencePayloadV1,
+        _output_schema_version: str = OUTPUT_SCHEMA_VERSION,
+        _input_contract_version: str = "1.0.0",
     ) -> None:
         if not isinstance(semantic_provider, LLMObservationProvider):
             raise TypeError("governed Semantic provider must be LLMObservationProvider")
@@ -600,11 +828,14 @@ class RecordedEvidenceSynthesisProvider:
         self.semantic_provider = semantic_provider
         self.store = semantic_provider.store
         self.provider_id = semantic_provider.provider_id
-        self.provider_version = policy.provider_adapter_version
+        self.provider_version = _provider_version or policy.provider_adapter_version
         self.model_id = semantic_provider.model_id
         self.semantic_prompt_version = semantic_provider.prompt_version
-        self.prompt_version = policy.prompt_version
-        self._task10_prompt = build_task10_prompt(policy)
+        self.prompt_version = _prompt_version or policy.prompt_version
+        self._task10_prompt = _task10_prompt or build_task10_prompt(policy)
+        self.output_payload_model = _output_payload_model
+        self.output_schema_version = _output_schema_version
+        self.input_contract_version = _input_contract_version
         self.pricing = pricing
         self.record_capability = record_capability
         self.run_identity_sha256 = run_identity_sha256
@@ -632,7 +863,7 @@ class RecordedEvidenceSynthesisProvider:
             ("semantic_prompt_version", self.semantic_prompt_version),
             ("semantic_prompt_sha256", self.semantic_provider.semantic_prompt_sha256),
             ("structured_prompt_sha256", _sha256_text(self._task10_prompt)),
-            ("response_schema_sha256", provider_output_schema_sha256()),
+            ("response_schema_sha256", self.output_schema_sha256),
             ("pricing_sha256", self.pricing.identity_sha256),
             ("max_output_tokens", self.pricing.max_output_tokens),
         )
@@ -643,8 +874,8 @@ class RecordedEvidenceSynthesisProvider:
             "provider_version": self.provider_version,
             "prompt_version": self.prompt_version,
             "task10_prompt_sha256": _sha256_text(self._task10_prompt),
-            "output_schema_version": OUTPUT_SCHEMA_VERSION,
-            "output_schema_sha256": provider_output_schema_sha256(),
+            "output_schema_version": self.output_schema_version,
+            "output_schema_sha256": self.output_schema_sha256,
             "pricing_sha256": self.pricing.identity_sha256,
         }
 
@@ -682,14 +913,20 @@ class RecordedEvidenceSynthesisProvider:
             raise LLMProviderError("provider_metadata_mismatch", "latency_ms")
         if record.get("retry_count", 0) != 0:
             raise LLMProviderError("provider_metadata_mismatch", "retry_count")
-        if status == "success":
+        usage_payload = record.get("usage")
+        if usage_payload is None:
+            if status == "success" or record.get("cost_usd") != "0.000000":
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "usage/cost_usd"
+                )
+        else:
             response_model = record.get("response_model")
-            if response_model != self.model_id:
+            if response_model is not None and response_model != self.model_id:
                 raise LLMProviderError(
                     "provider_metadata_mismatch", "response_model"
                 )
             try:
-                usage = self.pricing.validate_usage(record.get("usage"))
+                usage = self.pricing.validate_usage(usage_payload)
                 cost = self.pricing.cost(
                     prompt_tokens=usage["prompt_tokens"],
                     completion_tokens=usage["completion_tokens"],
@@ -716,6 +953,13 @@ class RecordedEvidenceSynthesisProvider:
                 "usage_invalid",
                 "provider_metadata_mismatch",
                 "forbidden_response_marker",
+                "forbidden_field",
+                "invalid_schema",
+                "missing_citation",
+                "foreign_citation",
+                "unsupported_claim",
+                "incomplete_dimensions",
+                "bounds_exceeded",
             }:
                 recorded_reason = "recorded_call_failed"
             diagnostic = str(record.get("failure_diagnostic") or "")
@@ -729,15 +973,31 @@ class RecordedEvidenceSynthesisProvider:
         if self.record_capability is None:
             raise LLMProviderError("structured_capability_required")
         try:
+            response_validator = None
+            if self.input_contract_version == "2.0.0":
+                synthesis_input = EvidenceSynthesisInputV2.model_validate(input_payload)
+
+                def response_validator(payload: object) -> str | None:
+                    failure = validate_provider_payload_v2(
+                        payload,
+                        synthesis_input=synthesis_input,
+                    )
+                    return None if failure is None else failure.value
+
             result = self.semantic_provider.governed_structured_call(
                 request=GovernedStructuredRequest(
                     input_hash=input_hash,
                     system_prompt=self._task10_prompt,
                     user_payload=input_payload,
-                    schema_name="product_search_evidence_synthesis",
-                    response_schema=ProviderEvidencePayloadV1.model_json_schema(),
+                    schema_name=(
+                        "product_search_evidence_synthesis_v2"
+                        if self.output_schema_version == OUTPUT_SCHEMA_VERSION_V2
+                        else "product_search_evidence_synthesis"
+                    ),
+                    response_schema=self.output_payload_model.model_json_schema(),
                     governance_identity=self._governance_identity(),
                     forbidden_markers=_PRIVATE_MARKERS,
+                    response_validator=response_validator,
                 ),
                 capability=self.record_capability,
             )
@@ -747,6 +1007,37 @@ class RecordedEvidenceSynthesisProvider:
             return json.loads(result.raw_response_text)
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMProviderError("schema_invalid", "structured JSON invalid") from exc
+
+    @property
+    def output_schema_sha256(self) -> str:
+        return _sha256_text(
+            _canonical_json(self.output_payload_model.model_json_schema())
+        )
+
+
+class RecordedEvidenceSynthesisProviderV2(RecordedEvidenceSynthesisProvider):
+    def __init__(
+        self,
+        *,
+        semantic_provider: LLMObservationProvider,
+        policy: EvidenceSynthesisPolicyV1,
+        pricing: GovernedPricingSchedule | None = None,
+        record_capability: StructuredCallCapability | None = None,
+        run_identity_sha256: str | None = None,
+    ) -> None:
+        super().__init__(
+            semantic_provider=semantic_provider,
+            policy=policy,
+            pricing=pricing,
+            record_capability=record_capability,
+            run_identity_sha256=run_identity_sha256,
+            _provider_version=PROVIDER_ADAPTER_VERSION_V2,
+            _prompt_version=TASK10_PROMPT_VERSION_V2,
+            _task10_prompt=build_task10_prompt_v2(policy),
+            _output_payload_model=ProviderEvidencePayloadV2,
+            _output_schema_version=OUTPUT_SCHEMA_VERSION_V2,
+            _input_contract_version="2.0.0",
+        )
 
 
 def build_live_evidence_synthesis_provider(
@@ -763,6 +1054,26 @@ def build_live_evidence_synthesis_provider(
         prompt_version=policy.semantic_prompt_version,
     )
     return RecordedEvidenceSynthesisProvider(
+        semantic_provider=semantic_provider,
+        policy=policy,
+        pricing=pricing,
+        record_capability=record_capability,
+    )
+
+
+def build_live_evidence_synthesis_provider_v2(
+    *,
+    store_dir: Path | str,
+    policy: EvidenceSynthesisPolicyV1,
+    pricing: GovernedPricingSchedule,
+    record_capability: StructuredCallCapability,
+) -> RecordedEvidenceSynthesisProviderV2:
+    semantic_provider = build_live_llm_provider(
+        store_dir=store_dir,
+        model_id=policy.model_id,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    return RecordedEvidenceSynthesisProviderV2(
         semantic_provider=semantic_provider,
         policy=policy,
         pricing=pricing,
@@ -980,6 +1291,12 @@ def _status_for_provider_error(error: Exception) -> EvidenceSynthesisStatus:
             "transport_unavailable": EvidenceSynthesisStatus.PROVIDER_OUTAGE,
             "recording_missing": EvidenceSynthesisStatus.RECORDING_MISSING,
             "provider_metadata_mismatch": EvidenceSynthesisStatus.PROVIDER_METADATA_MISMATCH,
+            "forbidden_field": EvidenceSynthesisStatus.FORBIDDEN_FIELD,
+            "missing_citation": EvidenceSynthesisStatus.MISSING_CITATION,
+            "foreign_citation": EvidenceSynthesisStatus.FOREIGN_CITATION,
+            "unsupported_claim": EvidenceSynthesisStatus.UNSUPPORTED_CLAIM,
+            "incomplete_dimensions": EvidenceSynthesisStatus.INCOMPLETE_DIMENSIONS,
+            "bounds_exceeded": EvidenceSynthesisStatus.BOUNDS_EXCEEDED,
         }.get(error.reason, EvidenceSynthesisStatus.PROVIDER_ERROR)
     return EvidenceSynthesisStatus.PROVIDER_ERROR
 
@@ -1069,6 +1386,167 @@ def run_evidence_synthesis(
         question_candidates=payload.question_candidates,
         failure_reason=None,
         metadata=_metadata(
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            elapsed_ms=elapsed_ms,
+        ),
+    )
+
+
+def validate_provider_payload_v2(
+    raw_payload: object,
+    *,
+    synthesis_input: EvidenceSynthesisInputV2,
+    policy: EvidenceSynthesisPolicyV1 | None = None,
+) -> EvidenceSynthesisStatus | None:
+    policy = policy or load_evidence_synthesis_policy()
+    try:
+        payload = ProviderEvidencePayloadV2.model_validate(raw_payload)
+    except Exception:
+        return EvidenceSynthesisStatus.INVALID_SCHEMA
+    if isinstance(synthesis_input.company_authority, CompanyAuthorityUnavailableV2):
+        for claim in payload.claims:
+            if claim.dimension is EvidenceDimension.COMPANY_FIT and (
+                claim.status is not EvidenceClaimStatus.UNKNOWN
+                or any(citation.startswith("company:") for citation in claim.citations)
+            ):
+                return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+        if any(
+            any(citation.startswith("company:") for citation in item.citations)
+            for item in (*payload.conflicts, *payload.question_candidates)
+        ):
+            return EvidenceSynthesisStatus.FOREIGN_CITATION
+    return _validate_provider_payload(
+        payload,
+        synthesis_input=synthesis_input,
+        policy=policy,
+    )
+
+
+def _metadata_v2(
+    *,
+    provider: RecordedEvidenceSynthesisProviderV2,
+    input_hash: str,
+    output_hash: str,
+    elapsed_ms: int,
+) -> EvidenceSynthesisMetadataV2:
+    call_metadata = getattr(provider, "last_call_metadata", {}) or {}
+    latency = call_metadata.get("latency_ms")
+    if not isinstance(latency, int) or latency < 0:
+        latency = elapsed_ms
+    cost = call_metadata.get("cost_usd")
+    return EvidenceSynthesisMetadataV2(
+        provider_id=provider.provider_id,
+        provider_version=PROVIDER_ADAPTER_VERSION_V2,
+        model_id=provider.model_id,
+        semantic_prompt_version=provider.semantic_prompt_version,
+        prompt_version=TASK10_PROMPT_VERSION_V2,
+        schema_version=OUTPUT_SCHEMA_VERSION_V2,
+        latency_ms=latency,
+        cost_usd=None if cost is None else str(cost),
+        input_sha256=input_hash,
+        output_sha256=output_hash,
+    )
+
+
+def _failure_v2(
+    status: EvidenceSynthesisStatus,
+    *,
+    synthesis_input: EvidenceSynthesisInputV2,
+    provider: RecordedEvidenceSynthesisProviderV2,
+    input_hash: str,
+    output_hash: str,
+    elapsed_ms: int,
+) -> EvidenceSynthesisResultV2:
+    return EvidenceSynthesisResultV2(
+        schema_version=OUTPUT_SCHEMA_VERSION_V2,
+        status=status,
+        deliverable=False,
+        claims=(),
+        conflicts=(),
+        question_candidates=(),
+        failure_reason=status.value,
+        company_authority_status=synthesis_input.assessment_input.company_authority_status,
+        metadata=_metadata_v2(
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            elapsed_ms=elapsed_ms,
+        ),
+    )
+
+
+def run_evidence_synthesis_v2(
+    *,
+    synthesis_input: EvidenceSynthesisInputV2,
+    provider: RecordedEvidenceSynthesisProviderV2,
+    policy: EvidenceSynthesisPolicyV1 | None = None,
+) -> EvidenceSynthesisResultV2:
+    policy = policy or load_evidence_synthesis_policy()
+    if not isinstance(provider, RecordedEvidenceSynthesisProviderV2):
+        raise TypeError("Task 10 v2 requires its governed Semantic v2 adapter")
+    input_payload = synthesis_input.provider_payload()
+    input_hash = synthesis_input_sha256(input_payload, provider=provider)
+    started = time.monotonic()
+    if (
+        provider.provider_id != policy.provider_runtime
+        or provider.provider_version != PROVIDER_ADAPTER_VERSION_V2
+        or provider.semantic_prompt_version != policy.semantic_prompt_version
+        or provider.model_id != policy.model_id
+        or provider.prompt_version != TASK10_PROMPT_VERSION_V2
+        or provider.output_schema_sha256 != provider_output_schema_v2_sha256()
+    ):
+        return _failure_v2(
+            EvidenceSynthesisStatus.PROVIDER_METADATA_MISMATCH,
+            synthesis_input=synthesis_input,
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=_EMPTY_SHA256,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+    try:
+        raw_payload = provider.synthesize_evidence(input_payload=input_payload)
+    except Exception as error:
+        return _failure_v2(
+            _status_for_provider_error(error),
+            synthesis_input=synthesis_input,
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=_EMPTY_SHA256,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+    output_hash = _safe_output_sha256(raw_payload)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    forbidden = _find_forbidden_field(raw_payload, policy.forbidden_fields)
+    if forbidden is not None:
+        status = EvidenceSynthesisStatus.FORBIDDEN_FIELD
+    else:
+        status = validate_provider_payload_v2(
+            raw_payload,
+            synthesis_input=synthesis_input,
+            policy=policy,
+        )
+    if status is not None:
+        return _failure_v2(
+            status,
+            synthesis_input=synthesis_input,
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            elapsed_ms=elapsed_ms,
+        )
+    payload = ProviderEvidencePayloadV2.model_validate(raw_payload)
+    return EvidenceSynthesisResultV2(
+        schema_version=OUTPUT_SCHEMA_VERSION_V2,
+        status=EvidenceSynthesisStatus.DELIVERABLE,
+        deliverable=True,
+        claims=payload.claims,
+        conflicts=payload.conflicts,
+        question_candidates=payload.question_candidates,
+        failure_reason=None,
+        company_authority_status=synthesis_input.assessment_input.company_authority_status,
+        metadata=_metadata_v2(
             provider=provider,
             input_hash=input_hash,
             output_hash=output_hash,
