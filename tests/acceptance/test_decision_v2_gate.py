@@ -17,12 +17,10 @@ from job_intel.product_search.decision_v2 import DecisionResultV2
 from job_intel.product_search.evidence_synthesis import (
     EvidenceDimension,
     ProviderEvidencePayloadV1,
-    RecordedEvidenceSynthesisProvider,
     load_evidence_synthesis_policy,
 )
-from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
-    LLMObservationProvider,
-    RecordingStore,
+from job_intel.product_search.gate_b import (
+    build_dry_run_preflight,
 )
 
 
@@ -51,6 +49,13 @@ def _sha256(path: Path) -> str:
 
 def _load_summary() -> dict:
     return json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
+
+
+def _load_owner_decision_frontmatter() -> dict:
+    text = OWNER_DECISION_PATH.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    _, frontmatter, _ = text.split("---\n", 2)
+    return yaml.safe_load(frontmatter)
 
 
 def _assert_exact_gate_a_run_identity(
@@ -221,32 +226,32 @@ def test_gate_a_import_rejects_a_mixed_run_evidence_set() -> None:
         )
 
 
-def test_gate_b_fails_closed_when_task10_has_no_governed_record_adapter(
+def test_gate_b_dry_preflight_materializes_exact_corpus_without_calls(
     tmp_path: Path,
 ) -> None:
-    """Break caught: Task 10 silently accepts live mode or an arbitrary client."""
-    policy = load_evidence_synthesis_policy()
-    live_semantic_provider = LLMObservationProvider(
-        store=RecordingStore(tmp_path),
-        mode="record",
-        model_id=policy.model_id,
-        transport=object(),
-        prompt_version=policy.semantic_prompt_version,
+    """Break caught: readiness uses another corpus or attempts provider/runtime work."""
+    preflight = build_dry_run_preflight(
+        gate_a_root=GATE_A_ROOT, output_root=tmp_path
     )
-    with pytest.raises(ValueError, match="only offline Semantic replay"):
-        RecordedEvidenceSynthesisProvider(
-            semantic_provider=live_semantic_provider,
-            policy=policy,
-        )
+    summary = _load_summary()
+    assert preflight["status"] == "ready_for_record_approval"
+    assert preflight["corpus"]["manifest_sha256"] == summary["corpus"][
+        "manifest_sha256"
+    ]
+    assert preflight["corpus"]["selected_count"] == 48
+    assert preflight["budget"] == summary["budget"]
+    assert preflight["record_identity"] == summary["record_identity"]
+    assert preflight["provider"] == {"calls_attempted": 0, "network_enabled": False}
+    assert preflight["record_authorized"] is False
+    assert preflight["task_13_authorized"] is False
 
 
-def test_blocked_gate_b_package_preserves_denominators_and_no_fake_results() -> None:
-    """Break caught: a blocked readiness check is presented as a real benchmark."""
+def test_ready_gate_b_package_preserves_denominators_and_no_fake_results() -> None:
+    """Break caught: a readiness preflight is presented as a real benchmark."""
     summary = _load_summary()
     assert summary["schema_version"] == "1.0.0"
     assert summary["gate"] == "gate-b"
-    assert summary["status"] == "blocked"
-    assert summary["blocker"]["code"] == "governed_task10_record_mode_missing"
+    assert summary["status"] == "ready_for_record_approval"
     assert summary["gate_a_input"] == {
         "commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
         "manifest_sha256": GATE_A_MANIFEST_SHA256,
@@ -256,12 +261,13 @@ def test_blocked_gate_b_package_preserves_denominators_and_no_fake_results() -> 
         "minimum_evidence_sufficient": 1314,
         "minimum_evidence_is_not_qualified": True,
     }
-    assert summary["corpus"]["status"] == "not_selected"
+    assert summary["corpus"]["status"] == "materialized"
     assert summary["corpus"]["selection_denominator"] == 1314
-    assert summary["corpus"]["selected_count"] is None
+    assert summary["corpus"]["selected_count"] == 48
+    assert len(summary["corpus"]["manifest_sha256"]) == 64
     assert summary["stage_4"] == {
         "status": "not_run",
-        "reason": "governed_task10_record_mode_missing",
+        "reason": "live_benchmark_not_authorized",
         "input_denominator": None,
         "hard_gate_eligible": None,
         "fail_closed": None,
@@ -270,7 +276,7 @@ def test_blocked_gate_b_package_preserves_denominators_and_no_fake_results() -> 
     for result in summary["dimensions"].values():
         assert result == {
             "status": "not_run",
-            "reason": "governed_task10_record_mode_missing",
+            "reason": "live_benchmark_not_authorized",
             "evaluated": None,
             "outcomes": None,
         }
@@ -293,15 +299,15 @@ def test_blocked_gate_b_package_preserves_denominators_and_no_fake_results() -> 
     }
 
 
-def test_blocked_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects() -> None:
+def test_ready_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects() -> None:
     """Break caught: absent calls or audits are hidden, or a side effect is tolerated."""
     summary = _load_summary()
     assert summary["provider"] == {
-        "status": "blocked_before_call",
-        "reason": "governed_task10_record_mode_missing",
+        "status": "not_run_pending_owner_approval",
+        "reason": "live_benchmark_not_authorized",
         "operational_counters": {
             "status": "observed",
-            "reason": "blocked_before_any_provider_attempt",
+            "reason": "dry_preflight_forbids_provider_attempts",
             "calls_attempted": 0,
             "calls_succeeded": 0,
             "calls_failed": 0,
@@ -349,7 +355,7 @@ def test_blocked_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects
     }
     assert summary["side_effects"] == {
         "status": "observed",
-        "reason": "benchmark_stopped_before_provider_or_runtime_execution",
+        "reason": "dry_preflight_observed_no_forbidden_side_effects",
         "production_database_writes": 0,
         "product_store_writes": 0,
         "slack_calls": 0,
@@ -397,11 +403,16 @@ def test_owner_decision_stays_pending_and_task13_remains_blocked() -> None:
     assert summary["task_13_authorized"] is False
     assert all(value is not None for value in summary["candidate_hashes"].values())
 
-    decision_text = OWNER_DECISION_PATH.read_text(encoding="utf-8")
-    assert "Owner decision: `pending`" in decision_text
-    assert "Recommendation: `request_revision`" in decision_text
-    assert "Task 13 authorized: `false`" in decision_text
-    assert "approve" not in decision_text.casefold().replace("not approved", "")
+    decision = _load_owner_decision_frontmatter()
+    assert decision == {
+        "schema_version": "1.0.0",
+        "gate": "gate-b",
+        "owner_decision": "pending",
+        "recommendation": "request_revision",
+        "task_13_authorized": False,
+        "record_run_authorized": False,
+        "corpus_manifest_sha256": summary["corpus"]["manifest_sha256"],
+    }
 
 
 def test_candidate_hashes_are_recomputed_but_not_accepted() -> None:

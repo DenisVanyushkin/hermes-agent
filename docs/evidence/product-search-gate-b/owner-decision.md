@@ -1,12 +1,24 @@
+---
+schema_version: 1.0.0
+gate: gate-b
+owner_decision: pending
+recommendation: request_revision
+task_13_authorized: false
+record_run_authorized: false
+corpus_manifest_sha256: b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69
+---
+
 # Product Search Gate B owner decision
 
-- Owner decision: `pending`
-- Recommendation: `request_revision`
-- Task 13 authorized: `false`
-- Candidate commit evaluated for readiness: `bb366575a76122f384ff841bcc4d6c3181e03d5f`
+The requested revision is prepared, but no live benchmark has run. The
+governed Task 10 record/replay seam and a content-addressed 48-record corpus
+are ready for a separate exact run authorization. This preparation did not
+make a provider call or authorize spend.
 
-The Gate B benchmark did not run. Task 10 has an offline replay adapter but no governed record-mode adapter capable of producing the same Task 10 output schema and recording envelope. The existing Semantic live recorder produces a different `Observation` contract. Using it directly, adding an unreviewed client, or treating replay fixtures as real results would violate the Gate B boundary.
+The recommendation remains `request_revision` until the real record/replay
+benchmark, deterministic Decision v2 trace comparison, and human audit have
+produced reviewable measurements. The current machine state is `pending`.
+Passing preflight and tests is not an owner decision.
 
-The recommended revision is a separately reviewed, bounded extension of the existing Semantic provider/runtime that records Task 10 `ProviderEvidencePayloadV1` responses with the already-pinned model, prompt, schema, hash, cost, latency, and failure metadata. It must retain the current Slack-blind, no-production-state, content-addressed experiment controls. Gate B then needs to be rerun from the same immutable Gate A package.
-
-No owner action has been recorded. This recommendation does not change the decision from `pending`, does not authorize persistence or shadow work, and does not authorize Task 13.
+Task 13, persistence, shadow mode, delivery, Slack, and production runtime
+work remain unauthorized.

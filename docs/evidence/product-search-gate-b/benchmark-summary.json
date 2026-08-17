@@ -1,16 +1,9 @@
 {
   "schema_version": "1.0.0",
   "gate": "gate-b",
-  "status": "blocked",
-  "prepared_at": "2026-08-17T00:21:56+05:00",
-  "candidate_commit": "bb366575a76122f384ff841bcc4d6c3181e03d5f",
-  "blocker": {
-    "code": "governed_task10_record_mode_missing",
-    "detail": "Task 10 exposes only RecordedEvidenceSynthesisProvider, which rejects Semantic record mode; the existing live Semantic recorder emits Observation records rather than the Task 10 ProviderEvidencePayloadV1 schema and uses a different input hash envelope.",
-    "bypass_attempted": false,
-    "ad_hoc_client_added": false,
-    "synthetic_results_presented_as_benchmark": false
-  },
+  "status": "ready_for_record_approval",
+  "prepared_at": "2026-08-17T12:00:00+05:00",
+  "prepared_from_base": "882214bc5ac26f29ad4077366be8528086c1e653",
   "gate_a_input": {
     "commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
     "manifest_sha256": "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d",
@@ -21,25 +14,56 @@
     "minimum_evidence_is_not_qualified": true
   },
   "gate_b_experiment": {
-    "planned_root": "/home/hermes/.hermes/job_intel/experiments/gate-b/bb366575a76122f384ff841bcc4d6c3181e03d5f",
-    "created": false,
-    "reason": "No benchmark state was created after the governed record-mode prerequisite failed."
+    "root": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "created": true,
+    "content_addressed": true,
+    "recordings_created": false
   },
   "corpus": {
-    "status": "not_selected",
-    "reason": "governed_task10_record_mode_missing",
+    "status": "materialized",
     "selection_denominator": 1314,
-    "selected_count": null,
-    "selection_algorithm": "After a governed Task 10 record adapter exists, reconstruct corrected canonical vacancies from immutable Gate A hashes, retain only minimum-evidence records, assign deterministic source/lane/role-pattern/company/open-market/hard-block/unknown sampling strata without creating canonical Core or Exploration labels, sort each stratum by sha256(run_id + NUL + source_family + NUL + source_id + NUL + raw_content_sha256), then take the pinned per-stratum quota.",
+    "selected_count": 48,
+    "manifest_sha256": "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "selection_algorithm": "deterministic-coverage-first-stratified-round-robin-v1",
     "immutable_source_ids_preserved": true,
     "immutable_content_hashes_preserved": true,
     "strategic_watchlist_origin_available": false,
     "selection_modes_assigned": false,
-    "note": "Gate A contains Open Market acquisition evidence and no active-thesis Strategic Watchlist candidates. Core and Exploration are Decision v2 outputs, not acquisition labels. Selection stopped before materialization because a real record/replay benchmark could not follow."
+    "coverage": {
+      "companies": 37,
+      "lanes": ["americas", "apac_excluding_australia_new_zealand", "australia_new_zealand", "europe_including_uk", "gcc", "global_ats", "global_remote", "kazakhstan", "other_central_asia"],
+      "origins": ["open_market"],
+      "role_patterns": ["adjacent", "chief_product", "director", "general_manager", "head_product", "product_other", "vp_product"],
+      "sampling_case_types": ["core_hypothesis", "exploration_hypothesis", "hard_block_hypothesis", "important_unknown"],
+      "source_families": ["ashby", "duckduckgo", "greenhouse", "headhunter", "linkedin", "remoteok"]
+    },
+    "note": "Core and Exploration names are sampling hypotheses only; no Decision v2 selection mode has been assigned. The denominator 1314 means minimum-evidence sufficient, not qualified."
   },
+  "budget": {
+    "estimated_calls": 48,
+    "max_cost_per_call_usd": "0.01",
+    "maximum_spend_usd": "0.48"
+  },
+  "record_identity": {
+    "corpus_manifest_sha256": "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "decision_contract_sha256": "2a3240e4d39c886c9afe11d66f67c1515b722d26d43ab7c134c78af9f2521db8",
+    "model_id": "openai/gpt-5-mini",
+    "model_sha256": "020751dc92eb7ffd06a66f45b63322618c811e48a4553198624dfa88200dc6b2",
+    "policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
+    "profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
+    "provider_output_schema_sha256": "4efb390cda26c5cff7689518463e02d15847597baf3e28741591fd6b3c893a46",
+    "provider_output_schema_version": "1.0.0",
+    "search_contract_sha256": "faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1",
+    "semantic_prompt_sha256": "051c18e40d15d65c15309d217831044267bf01abb77ac5019cbb6ec29e1d29d3",
+    "semantic_prompt_version": "llm-obs-1.0.0",
+    "task10_prompt_sha256": "afc29d6cb70591598b0670522f5696864d03cbd809d06a1ca51a46ceb2f79a49",
+    "task10_prompt_version": "product-search-evidence-synthesis-1.0.0"
+  },
+  "approval_token_sha256": "8020e32a93ba73d5d4e25883a04f7b15957700e8d9985ccee3d556d79f7ab2c8",
+  "record_run_authorized": false,
   "stage_4": {
     "status": "not_run",
-    "reason": "governed_task10_record_mode_missing",
+    "reason": "live_benchmark_not_authorized",
     "input_denominator": null,
     "hard_gate_eligible": null,
     "fail_closed": null
@@ -47,37 +71,37 @@
   "dimensions": {
     "feasibility": {
       "status": "not_run",
-      "reason": "governed_task10_record_mode_missing",
+      "reason": "live_benchmark_not_authorized",
       "evaluated": null,
       "outcomes": null
     },
     "mandate_fit": {
       "status": "not_run",
-      "reason": "governed_task10_record_mode_missing",
+      "reason": "live_benchmark_not_authorized",
       "evaluated": null,
       "outcomes": null
     },
     "company_fit": {
       "status": "not_run",
-      "reason": "governed_task10_record_mode_missing",
+      "reason": "live_benchmark_not_authorized",
       "evaluated": null,
       "outcomes": null
     },
     "transferability": {
       "status": "not_run",
-      "reason": "governed_task10_record_mode_missing",
+      "reason": "live_benchmark_not_authorized",
       "evaluated": null,
       "outcomes": null
     },
     "career_value": {
       "status": "not_run",
-      "reason": "governed_task10_record_mode_missing",
+      "reason": "live_benchmark_not_authorized",
       "evaluated": null,
       "outcomes": null
     },
     "evidence_confidence": {
       "status": "not_run",
-      "reason": "governed_task10_record_mode_missing",
+      "reason": "live_benchmark_not_authorized",
       "evaluated": null,
       "outcomes": null
     }
@@ -100,11 +124,11 @@
     "urgent_eligible": null
   },
   "provider": {
-    "status": "blocked_before_call",
-    "reason": "governed_task10_record_mode_missing",
+    "status": "not_run_pending_owner_approval",
+    "reason": "live_benchmark_not_authorized",
     "operational_counters": {
       "status": "observed",
-      "reason": "blocked_before_any_provider_attempt",
+      "reason": "dry_preflight_forbids_provider_attempts",
       "calls_attempted": 0,
       "calls_succeeded": 0,
       "calls_failed": 0
@@ -161,7 +185,7 @@
   },
   "side_effects": {
     "status": "observed",
-    "reason": "benchmark_stopped_before_provider_or_runtime_execution",
+    "reason": "dry_preflight_observed_no_forbidden_side_effects",
     "production_database_writes": 0,
     "product_store_writes": 0,
     "slack_calls": 0,
