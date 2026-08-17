@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
+from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
@@ -28,9 +29,13 @@ from job_intel.product_search.contracts import (
     SHA256_PATTERN,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    DECODING_PARAMETERS,
     LLMObservationProvider,
     LLMProviderError,
+    NO_FALLBACK_EXTRA_BODY,
     RecordingStore,
+    allowed_response_model,
+    build_live_llm_provider,
 )
 
 
@@ -41,6 +46,13 @@ DEFAULT_POLICY_PATH = (
 OUTPUT_SCHEMA_VERSION = "1.0.0"
 _EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 _PRIVATE_MARKERS = ("hermes-private://", "user note", "private resume")
+_TASK10_SYSTEM_PROMPT_BASE = """You synthesize bounded Product Search evidence.
+Return only a JSON object matching the supplied schema. Select claims only from
+the allowed_claims attached to the supplied evidence fragments, cite every
+claim with its exact fragment_id, and use only the supplied question templates.
+Cover all six dimensions. You must not decide fit, verdict, selection mode,
+urgency, delivery, CRM state, hard gates, or company actions. Do not use any
+knowledge outside the supplied redacted input."""
 
 
 class _StrictFrozenModel(BaseModel):
@@ -406,6 +418,33 @@ def load_evidence_synthesis_policy(
     return EvidenceSynthesisPolicyV1.model_validate(payload)
 
 
+def build_task10_prompt(policy: EvidenceSynthesisPolicyV1) -> str:
+    """Build the pinned Task 10 prompt from its closed policy vocabulary."""
+    bounded_policy = {
+        "dimensions": [item.value for item in policy.dimensions],
+        "claim_statuses": [item.value for item in policy.claim_statuses],
+        "max_claims_per_dimension": policy.max_claims_per_dimension,
+        "max_conflicts": policy.max_conflicts,
+        "max_questions_total": policy.max_questions_total,
+        "max_questions_per_dimension": policy.max_questions_per_dimension,
+        "conflict_codes": list(policy.conflict_codes),
+        "question_templates": {
+            dimension.value: [item.model_dump(mode="json") for item in templates]
+            for dimension, templates in policy.question_templates.items()
+        },
+        "forbidden_fields": list(policy.forbidden_fields),
+    }
+    return (
+        _TASK10_SYSTEM_PROMPT_BASE
+        + "\n\nExact bounded Task 10 policy:\n"
+        + json.dumps(bounded_policy, ensure_ascii=False, indent=2, sort_keys=True)
+    )
+
+
+def task10_prompt_sha256(policy: EvidenceSynthesisPolicyV1) -> str:
+    return _sha256_text(build_task10_prompt(policy))
+
+
 class EvidenceClaimV1(_StrictFrozenModel):
     claim_id: str = Field(min_length=1, max_length=160)
     dimension: EvidenceDimension
@@ -520,19 +559,24 @@ def synthesis_input_sha256(
     return _sha256_text(_canonical_json(envelope))
 
 
+def provider_output_schema_sha256() -> str:
+    """Stable identity of the exact Task 10 structured-output schema."""
+    return _sha256_text(_canonical_json(ProviderEvidencePayloadV1.model_json_schema()))
+
+
 class RecordedEvidenceSynthesisProvider:
-    """Offline-only Task 10 adapter over the existing Semantic recording store."""
+    """Task 10 adapter over the governed Semantic record/replay transport."""
 
     def __init__(
         self,
         *,
         semantic_provider: LLMObservationProvider,
         policy: EvidenceSynthesisPolicyV1,
+        input_usd_per_mtok: str | None = None,
+        output_usd_per_mtok: str | None = None,
     ) -> None:
         if not isinstance(semantic_provider, LLMObservationProvider):
             raise TypeError("governed Semantic provider must be LLMObservationProvider")
-        if semantic_provider.mode != "replay":
-            raise ValueError("evidence synthesis accepts only offline Semantic replay")
         if (
             semantic_provider.provider_id != policy.provider_runtime
             or semantic_provider.prompt_version != policy.semantic_prompt_version
@@ -546,20 +590,85 @@ class RecordedEvidenceSynthesisProvider:
         self.model_id = semantic_provider.model_id
         self.semantic_prompt_version = semantic_provider.prompt_version
         self.prompt_version = policy.prompt_version
+        self._task10_prompt = build_task10_prompt(policy)
+        self._input_price = (
+            Decimal(input_usd_per_mtok) if input_usd_per_mtok is not None else None
+        )
+        self._output_price = (
+            Decimal(output_usd_per_mtok) if output_usd_per_mtok is not None else None
+        )
         self.last_call_metadata: dict[str, Any] = {}
 
     def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
         input_hash = synthesis_input_sha256(input_payload, provider=self)
+        if self.semantic_provider.mode == "record":
+            existing = self.store.path_for(input_hash)
+            if not existing.exists():
+                return self._record_call(input_hash, input_payload)
         record = self.store.load(input_hash)
-        for field, expected in (
+        return self._replay_record(
+            record, expected_input_hash=input_hash, input_payload=input_payload
+        )
+
+    def _expected_record_identity(
+        self, input_hash: str, input_payload: dict[str, Any]
+    ) -> tuple[tuple[str, Any], ...]:
+        return (
+            ("input_hash", input_hash),
+            ("input_payload_sha256", _sha256_text(_canonical_json(input_payload))),
             ("provider_id", self.provider_id),
             ("provider_version", self.provider_version),
             ("model_id", self.model_id),
             ("semantic_prompt_version", self.semantic_prompt_version),
+            ("semantic_prompt_sha256", _sha256_text(self.semantic_provider._prompt)),
             ("prompt_version", self.prompt_version),
+            ("task10_prompt_sha256", _sha256_text(self._task10_prompt)),
+            ("output_schema_version", OUTPUT_SCHEMA_VERSION),
+            ("output_schema_sha256", provider_output_schema_sha256()),
+        )
+
+    def _replay_record(
+        self,
+        record: dict[str, Any],
+        *,
+        expected_input_hash: str,
+        input_payload: dict[str, Any],
+    ) -> object:
+        for field, expected in self._expected_record_identity(
+            expected_input_hash, input_payload
         ):
             if record.get(field) != expected:
                 raise LLMProviderError("provider_metadata_mismatch", field)
+        if record.get("input") != input_payload:
+            raise LLMProviderError("provider_metadata_mismatch", "input")
+        status = record.get("status")
+        if status not in {"success", "failure"}:
+            raise LLMProviderError("provider_metadata_mismatch", "status")
+        if (status == "success") == bool(record.get("error")):
+            raise LLMProviderError("provider_metadata_mismatch", "status/error")
+        latency_ms = record.get("latency_ms")
+        if not isinstance(latency_ms, int) or latency_ms < 0:
+            raise LLMProviderError("provider_metadata_mismatch", "latency_ms")
+        if record.get("retry_count", 0) != 0:
+            raise LLMProviderError("provider_metadata_mismatch", "retry_count")
+        if status == "success":
+            response_model = record.get("response_model")
+            if not isinstance(response_model, str) or not allowed_response_model(
+                self.model_id, response_model
+            ):
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "response_model"
+                )
+            if self._usage_dict(record.get("usage")) is None:
+                raise LLMProviderError("provider_metadata_mismatch", "usage")
+            try:
+                cost = Decimal(str(record.get("cost_usd")))
+            except Exception as exc:
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "cost_usd"
+                ) from exc
+            if cost < 0:
+                raise LLMProviderError("provider_metadata_mismatch", "cost_usd")
         self.last_call_metadata = {
             "latency_ms": record.get("latency_ms", 0),
             "cost_usd": record.get("cost_usd"),
@@ -571,6 +680,7 @@ class RecordedEvidenceSynthesisProvider:
                 "refusal",
                 "timeout",
                 "provider_outage",
+                "transport_error",
                 "schema_invalid",
                 "invalid_json",
             }:
@@ -580,6 +690,123 @@ class RecordedEvidenceSynthesisProvider:
             return json.loads(record["raw_response_text"])
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMProviderError("schema_invalid", "recorded JSON is invalid") from exc
+
+    @staticmethod
+    def _usage_dict(value: object) -> dict[str, int] | None:
+        if value is None:
+            return None
+        usage = value if isinstance(value, Mapping) else {
+            "prompt_tokens": getattr(value, "prompt_tokens", None),
+            "completion_tokens": getattr(value, "completion_tokens", None),
+            "total_tokens": getattr(value, "total_tokens", None),
+        }
+        if not all(isinstance(usage.get(name), int) and usage[name] >= 0 for name in (
+            "prompt_tokens", "completion_tokens", "total_tokens"
+        )):
+            return None
+        return {name: int(usage[name]) for name in (
+            "prompt_tokens", "completion_tokens", "total_tokens"
+        )}
+
+    def _cost(self, usage: dict[str, int] | None) -> str | None:
+        if usage is None or self._input_price is None or self._output_price is None:
+            return None
+        cost = (
+            Decimal(usage["prompt_tokens"]) * self._input_price
+            + Decimal(usage["completion_tokens"]) * self._output_price
+        ) / Decimal(1_000_000)
+        return f"{cost:.6f}"
+
+    def _record_call(self, input_hash: str, input_payload: dict[str, Any]) -> object:
+        started = time.monotonic()
+        raw_text = ""
+        response_model: str | None = None
+        usage: dict[str, int] | None = None
+        error: str | None = None
+        try:
+            response = self.semantic_provider._transport.chat.completions.create(
+                model=self.model_id,
+                messages=[
+                    {"role": "system", "content": self._task10_prompt},
+                    {"role": "user", "content": _canonical_json(input_payload)},
+                ],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "product_search_evidence_synthesis",
+                        "schema": ProviderEvidencePayloadV1.model_json_schema(),
+                        "strict": True,
+                    },
+                },
+                extra_body=NO_FALLBACK_EXTRA_BODY,
+                **DECODING_PARAMETERS,
+            )
+            choice = response.choices[0]
+            message = getattr(choice, "message", None)
+            refusal = getattr(message, "refusal", None)
+            content = getattr(message, "content", None)
+            raw_text = content if isinstance(content, str) else ""
+            response_model = getattr(response, "model", None)
+            usage = self._usage_dict(getattr(response, "usage", None))
+            if refusal:
+                error = f"refusal: {refusal}"
+            elif not raw_text:
+                error = "schema_invalid: empty response"
+            elif not response_model:
+                error = "provider_metadata_mismatch: response.model missing"
+            elif not allowed_response_model(self.model_id, response_model):
+                error = f"provider_metadata_mismatch: response.model={response_model}"
+            elif usage is None or self._cost(usage) is None:
+                error = "provider_metadata_mismatch: cost_uncomputable"
+            else:
+                try:
+                    ProviderEvidencePayloadV1.model_validate_json(raw_text)
+                except Exception as exc:
+                    error = f"schema_invalid: {exc}"
+        except Exception as exc:
+            error = f"transport_error: {exc}"
+        latency_ms = int((time.monotonic() - started) * 1000)
+        record = {
+            "recording_format_version": "1.0",
+            **dict(self._expected_record_identity(input_hash, input_payload)),
+            "requested_model": self.model_id,
+            "response_model": response_model,
+            "decoding_parameters": DECODING_PARAMETERS,
+            "input": input_payload,
+            "response_hash": _sha256_text(raw_text),
+            "raw_response_text": raw_text,
+            "usage": usage,
+            "cost_usd": self._cost(usage),
+            "latency_ms": latency_ms,
+            "retry_count": 0,
+            "status": "failure" if error else "success",
+            "error": error,
+        }
+        self.store.save(record)
+        return self._replay_record(
+            record, expected_input_hash=input_hash, input_payload=input_payload
+        )
+
+
+def build_live_evidence_synthesis_provider(
+    *,
+    store_dir: Path | str,
+    policy: EvidenceSynthesisPolicyV1,
+    input_usd_per_mtok: str,
+    output_usd_per_mtok: str,
+) -> RecordedEvidenceSynthesisProvider:
+    """Build Task 10 record mode only through the Semantic spend-gated factory."""
+    semantic_provider = build_live_llm_provider(
+        store_dir=store_dir,
+        model_id=policy.model_id,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    return RecordedEvidenceSynthesisProvider(
+        semantic_provider=semantic_provider,
+        policy=policy,
+        input_usd_per_mtok=input_usd_per_mtok,
+        output_usd_per_mtok=output_usd_per_mtok,
+    )
 
 
 def _normalized_key(value: str) -> str:

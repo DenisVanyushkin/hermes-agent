@@ -26,6 +26,8 @@ from job_intel.product_search.evidence_synthesis import (
     EvidenceSynthesisInputV1,
     EvidenceSynthesisStatus,
     RecordedEvidenceSynthesisProvider,
+    build_live_evidence_synthesis_provider,
+    provider_output_schema_sha256,
     load_evidence_synthesis_policy,
     run_evidence_synthesis,
     synthesis_input_sha256,
@@ -179,6 +181,48 @@ def _golden_output() -> dict[str, Any]:
     )
 
 
+class _FakeUsage:
+    prompt_tokens = 1_000
+    completion_tokens = 2_000
+    total_tokens = 3_000
+
+
+class _FakeMessage:
+    content = json.dumps(
+        _golden_output(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    refusal = None
+
+
+class _FakeChoice:
+    message = _FakeMessage()
+
+
+class _FakeResponse:
+    choices = [_FakeChoice()]
+    usage = _FakeUsage()
+    model = DEFAULT_MODEL_ID
+
+
+class _FakeCompletions:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs: Any) -> _FakeResponse:
+        self.calls.append(kwargs)
+        return _FakeResponse()
+
+
+class _FakeChat:
+    def __init__(self) -> None:
+        self.completions = _FakeCompletions()
+
+
+class _FakeTransport:
+    def __init__(self) -> None:
+        self.chat = _FakeChat()
+
+
 class _ArbitraryProvider:
     provider_id = "semantic-contract-recording"
     provider_version = "semantic-runtime-recording/1.0"
@@ -238,18 +282,32 @@ def _run(
         store.save(
             {
                 "recording_format_version": "1.0",
+                **dict(
+                    provider._expected_record_identity(
+                        input_hash, synthesis_input.provider_payload()
+                    )
+                ),
                 "input_hash": input_hash,
                 "provider_id": provider.provider_id,
                 "provider_version": provider.provider_version,
                 "model_id": provider.model_id,
                 "semantic_prompt_version": provider.semantic_prompt_version,
                 "prompt_version": provider.prompt_version,
+                "input": synthesis_input.provider_payload(),
+                "response_model": provider.model_id,
                 "raw_response_text": raw if recorded_error is None else "",
                 "response_hash": hashlib.sha256(
                     (raw if recorded_error is None else "").encode("utf-8")
                 ).hexdigest(),
                 "latency_ms": 37,
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 100,
+                    "total_tokens": 200,
+                },
+                "retry_count": 0,
                 "cost_usd": "0.000321",
+                "status": "failure" if recorded_error else "success",
                 "error": recorded_error,
             }
         )
@@ -562,16 +620,30 @@ def test_golden_recording_replays_offline_with_exact_hashes(tmp_path: Path) -> N
     store.save(
         {
             "recording_format_version": "1.0",
+            **dict(
+                provider._expected_record_identity(
+                    GOLDEN_INPUT_HASH, _input().provider_payload()
+                )
+            ),
             "input_hash": GOLDEN_INPUT_HASH,
             "provider_id": provider.provider_id,
             "provider_version": provider.provider_version,
             "model_id": provider.model_id,
             "semantic_prompt_version": provider.semantic_prompt_version,
             "prompt_version": provider.prompt_version,
+            "input": _input().provider_payload(),
+            "response_model": provider.model_id,
             "raw_response_text": raw,
             "response_hash": GOLDEN_OUTPUT_HASH,
             "latency_ms": 37,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 100,
+                "total_tokens": 200,
+            },
+            "retry_count": 0,
             "cost_usd": "0.000321",
+            "status": "success",
             "error": None,
         }
     )
@@ -594,16 +666,30 @@ def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> N
     store.save(
         {
             "recording_format_version": "1.0",
+            **dict(
+                provider._expected_record_identity(
+                    GOLDEN_INPUT_HASH, _input().provider_payload()
+                )
+            ),
             "input_hash": GOLDEN_INPUT_HASH,
             "provider_id": provider.provider_id,
             "provider_version": provider.provider_version,
             "model_id": provider.model_id,
             "semantic_prompt_version": provider.semantic_prompt_version,
             "prompt_version": provider.prompt_version,
+            "input": _input().provider_payload(),
+            "response_model": provider.model_id,
             "raw_response_text": "",
             "response_hash": hashlib.sha256(b"").hexdigest(),
             "latency_ms": 41,
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 0,
+                "total_tokens": 100,
+            },
+            "retry_count": 0,
             "cost_usd": "0.000111",
+            "status": "failure",
             "error": "refusal: provider declined the request",
         }
     )
@@ -623,6 +709,173 @@ def test_recorded_refusal_keeps_its_explicit_failure_status(tmp_path: Path) -> N
     assert result.metadata.output_sha256 == hashlib.sha256(b"").hexdigest()
 
 
+def test_governed_record_mode_records_task10_contract_and_replays_offline(
+    tmp_path: Path,
+) -> None:
+    """Mutation caught: Task 10 cannot record, records the wrong key, or replays live."""
+    policy = load_evidence_synthesis_policy(POLICY)
+    store = RecordingStore(tmp_path)
+    transport = _FakeTransport()
+    semantic_record = LLMObservationProvider(
+        store=store,
+        mode="record",
+        model_id=DEFAULT_MODEL_ID,
+        transport=transport,
+        prompt_version=LLM_PROMPT_VERSION,
+    )
+    record_provider = RecordedEvidenceSynthesisProvider(
+        semantic_provider=semantic_record,
+        policy=policy,
+        input_usd_per_mtok="0.25",
+        output_usd_per_mtok="2.00",
+    )
+
+    recorded = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+    recorded_again = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+
+    assert recorded.status is EvidenceSynthesisStatus.DELIVERABLE
+    assert recorded_again == recorded
+    assert len(transport.chat.completions.calls) == 1
+    system_prompt = transport.chat.completions.calls[0]["messages"][0]["content"]
+    assert "Is the role remote or office-based?" in system_prompt
+    assert "What is the role's reporting line?" in system_prompt
+    input_hash = recorded.metadata.input_sha256
+    persisted = store.load(input_hash)
+    assert persisted["input_hash"] == input_hash
+    assert persisted["input_payload_sha256"] == hashlib.sha256(
+        json.dumps(
+            _input().provider_payload(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert persisted["provider_id"] == "llm-observation"
+    assert persisted["provider_version"] == "product-search-evidence-replay/1.0"
+    assert persisted["semantic_prompt_version"] == "llm-obs-1.0.0"
+    assert persisted["prompt_version"] == "product-search-evidence-synthesis-1.0.0"
+    assert persisted["task10_prompt_sha256"] == hashlib.sha256(
+        system_prompt.encode("utf-8")
+    ).hexdigest()
+    assert persisted["output_schema_version"] == "1.0.0"
+    assert persisted["output_schema_sha256"] == provider_output_schema_sha256()
+    assert persisted["response_model"] == DEFAULT_MODEL_ID
+    assert persisted["status"] == "success"
+    assert persisted["usage"] == {
+        "prompt_tokens": 1_000,
+        "completion_tokens": 2_000,
+        "total_tokens": 3_000,
+    }
+    assert persisted["cost_usd"] == "0.004250"
+
+    semantic_replay = LLMObservationProvider(
+        store=store,
+        mode="replay",
+        model_id=DEFAULT_MODEL_ID,
+        prompt_version=LLM_PROMPT_VERSION,
+    )
+    replay_provider = RecordedEvidenceSynthesisProvider(
+        semantic_provider=semantic_replay,
+        policy=policy,
+    )
+    replayed = run_evidence_synthesis(
+        synthesis_input=_input(), provider=replay_provider, policy=policy
+    )
+    assert replayed == recorded
+    assert len(transport.chat.completions.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"input_hash": "0" * 64},
+        {"input": {"tampered": True}},
+        {"output_schema_sha256": "0" * 64},
+        {"response_model": "other/model"},
+        {"status": "unknown"},
+        {"usage": None},
+        {"cost_usd": None},
+        {"raw_response_text": "{}"},
+    ],
+)
+def test_task10_replay_rejects_tampered_record_identity_or_bytes(
+    tmp_path: Path, mutation: dict[str, Any]
+) -> None:
+    policy = load_evidence_synthesis_policy(POLICY)
+    store = RecordingStore(tmp_path)
+    transport = _FakeTransport()
+    record_provider = RecordedEvidenceSynthesisProvider(
+        semantic_provider=LLMObservationProvider(
+            store=store,
+            mode="record",
+            model_id=DEFAULT_MODEL_ID,
+            transport=transport,
+            prompt_version=LLM_PROMPT_VERSION,
+        ),
+        policy=policy,
+        input_usd_per_mtok="0.25",
+        output_usd_per_mtok="2.00",
+    )
+    original = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+    path = store.path_for(original.metadata.input_sha256)
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted.update(mutation)
+    path.write_text(json.dumps(persisted), encoding="utf-8")
+
+    replay_provider = _adapter(store, policy=policy)
+    replayed = run_evidence_synthesis(
+        synthesis_input=_input(), provider=replay_provider, policy=policy
+    )
+    assert replayed.deliverable is False
+    assert replayed.status in {
+        EvidenceSynthesisStatus.PROVIDER_METADATA_MISMATCH,
+        EvidenceSynthesisStatus.PROVIDER_ERROR,
+    }
+
+
+def test_recorded_transport_failure_replays_with_same_explicit_status(
+    tmp_path: Path,
+) -> None:
+    policy = load_evidence_synthesis_policy(POLICY)
+    store = RecordingStore(tmp_path)
+    transport = _FakeTransport()
+
+    def fail(**kwargs: Any) -> None:
+        raise ConnectionError("fixture transport unavailable")
+
+    transport.chat.completions.create = fail  # type: ignore[method-assign]
+    record_provider = RecordedEvidenceSynthesisProvider(
+        semantic_provider=LLMObservationProvider(
+            store=store,
+            mode="record",
+            model_id=DEFAULT_MODEL_ID,
+            transport=transport,
+            prompt_version=LLM_PROMPT_VERSION,
+        ),
+        policy=policy,
+        input_usd_per_mtok="0.25",
+        output_usd_per_mtok="2.00",
+    )
+    recorded = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+    replayed = run_evidence_synthesis(
+        synthesis_input=_input(), provider=_adapter(store, policy=policy), policy=policy
+    )
+    persisted = store.load(recorded.metadata.input_sha256)
+
+    assert recorded.status is EvidenceSynthesisStatus.PROVIDER_OUTAGE
+    assert replayed.status is recorded.status
+    assert persisted["status"] == "failure"
+    assert persisted["error"].startswith("transport_error:")
+
+
 def test_arbitrary_provider_object_is_not_an_authorized_boundary() -> None:
     """Mutation caught: a duck-typed callable spoofs governed provider metadata."""
     with pytest.raises(TypeError, match="governed Semantic provider"):
@@ -633,20 +886,18 @@ def test_arbitrary_provider_object_is_not_an_authorized_boundary() -> None:
         )
 
 
-def test_live_semantic_provider_cannot_enter_replay_adapter() -> None:
-    """Mutation caught: governed type check accidentally admits live transport mode."""
+def test_record_factory_retains_semantic_live_spend_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation caught: Task 10 bypasses the existing Semantic owner approval gate."""
     policy = load_evidence_synthesis_policy(POLICY)
-    live_provider = LLMObservationProvider(
-        store=RecordingStore(FIXTURES / "not-used"),
-        mode="record",
-        model_id=DEFAULT_MODEL_ID,
-        transport=object(),
-        prompt_version=LLM_PROMPT_VERSION,
-    )
-    with pytest.raises(ValueError, match="only offline Semantic replay"):
-        RecordedEvidenceSynthesisProvider(
-            semantic_provider=live_provider,
+    monkeypatch.delenv("JOB_INTEL_LLM_LIVE_APPROVED", raising=False)
+    with pytest.raises(Exception, match="live_calls_not_approved"):
+        build_live_evidence_synthesis_provider(
+            store_dir=tmp_path,
             policy=policy,
+            input_usd_per_mtok="0.25",
+            output_usd_per_mtok="2.00",
         )
 
 

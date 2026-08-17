@@ -1348,6 +1348,23 @@ def test_replay_is_byte_stable_and_trace_carries_all_hashes() -> None:
     )
 
 
+def test_identical_task10_record_and_replay_results_have_identical_decision_trace() -> None:
+    """Break caught: equivalent validated Task 10 replay changes Decision v2."""
+    recorded = _synthesis()
+    replayed = EvidenceSynthesisResultV1.model_validate_json(
+        recorded.model_dump_json()
+    )
+    first = run_decision_v2(
+        _request(synthesis=recorded), policy=load_decision_policy(POLICY_PATH)
+    )
+    second = run_decision_v2(
+        _request(synthesis=replayed), policy=load_decision_policy(POLICY_PATH)
+    )
+
+    assert canonical_decision_bytes(first) == canonical_decision_bytes(second)
+    assert first.assessment.trace == second.assessment.trace
+
+
 def test_equivalent_timezone_instants_have_identical_bytes_and_trace_hash() -> None:
     """Mutation caught: equivalent offset spelling leaks into canonical hash."""
     timing_claim = _claim(
