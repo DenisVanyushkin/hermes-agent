@@ -8,6 +8,8 @@ no Slack integration or production persistence boundary.
 from __future__ import annotations
 
 from collections import defaultdict
+from contextlib import contextmanager
+import contextvars
 from dataclasses import dataclass
 from decimal import Decimal
 import fcntl
@@ -18,6 +20,8 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import sys
+import threading
 from typing import Any, Iterable, Mapping
 
 import yaml
@@ -112,6 +116,7 @@ class DryRunBoundary:
         self.corpus_files: set[str] = set()
         self.package_files: set[str] = set()
         self.denied: dict[str, int] = defaultdict(int)
+        self.slack_credentials_scrubbed = 0
 
     def gate_a_read(self, path: Path) -> None:
         self.gate_a_files.add(str(path))
@@ -149,6 +154,7 @@ class DryRunBoundary:
             "gate_a_files_read": len(self.gate_a_files),
             "corpus_files_created": len(self.corpus_files),
             "package_files_created": len(self.package_files),
+            "slack_credentials_scrubbed": self.slack_credentials_scrubbed,
             "provider_attempts_denied": self.denied["provider"],
             "network_attempts_denied": self.denied["network"],
             "slack_credential_attempts_denied": self.denied["slack_credential"],
@@ -156,6 +162,157 @@ class DryRunBoundary:
             "runtime_mutation_attempts_denied": self.denied["runtime_mutation"],
             "protected_write_attempts_denied": self.denied["protected_write"],
         }
+
+
+_DRY_RUN_POLICY: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "gate_b_dry_run_policy", default=None
+)
+_DRY_RUN_INTERNAL_IO: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "gate_b_dry_run_internal_io", default=False
+)
+_AUDIT_HOOK_LOCK = threading.Lock()
+_AUDIT_HOOK_INSTALLED = False
+_DRY_RUN_EXECUTION_LOCK = threading.Lock()
+_ACTIVE_DRY_RUN_POLICY: Any = None
+_SLACK_CREDENTIAL_ENV = ("SLACK_BOT_TOKEN", "JOB_INTEL_SLACK_BOT_TOKEN")
+
+
+def _contained_path(path: object, roots: tuple[Path, ...]) -> bool:
+    if isinstance(path, int):
+        return True
+    try:
+        candidate = Path(os.fsdecode(path))
+    except (TypeError, ValueError):
+        return False
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    candidate = Path(os.path.abspath(candidate))
+    for root in roots:
+        if candidate == root or root in candidate.parents:
+            return True
+    return False
+
+
+class _DryRunIOPolicy:
+    def __init__(
+        self,
+        *,
+        gate_a_root: Path,
+        output_root: Path,
+        boundary: DryRunBoundary,
+    ) -> None:
+        self.read_roots = (
+            Path(os.path.abspath(gate_a_root)),
+            Path(os.path.abspath(output_root)),
+            Path(os.path.abspath(REPO_ROOT)),
+        )
+        self.write_roots = (Path(os.path.abspath(output_root)),)
+        self.boundary = boundary
+
+    def deny(self, category: str, event: str) -> None:
+        self.boundary.denied[category] += 1
+        raise GateBPreflightError(f"dry_run_io_denied:{category}:{event}")
+
+    def audit(self, event: str, args: tuple[Any, ...]) -> None:
+        if _DRY_RUN_INTERNAL_IO.get():
+            return
+        if event.startswith("socket."):
+            self.deny("network", event)
+        if event in {"subprocess.Popen", "os.system", "pty.spawn"} or event.startswith(
+            ("os.exec", "os.spawn")
+        ):
+            self.deny("runtime_mutation", event)
+        if event == "sqlite3.connect":
+            database = args[0] if args else None
+            database_path = str(database).removeprefix("file:").split("?", 1)[0]
+            if not _contained_path(database_path, self.read_roots):
+                self.deny("production_write", event)
+            return
+        if event == "open":
+            path = args[0] if args else None
+            flags = args[2] if len(args) > 2 and isinstance(args[2], int) else 0
+            write = bool(
+                flags
+                & (
+                    os.O_WRONLY
+                    | os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_TRUNC
+                    | os.O_APPEND
+                )
+            )
+            if not isinstance(path, (str, bytes, os.PathLike)):
+                return
+            roots = self.write_roots if write else self.read_roots
+            if not _contained_path(path, roots):
+                self.deny("production_write" if write else "protected_read", event)
+            return
+        if event in {
+            "os.mkdir",
+            "os.chmod",
+            "os.remove",
+            "os.rename",
+            "os.link",
+            "os.symlink",
+            "os.truncate",
+        }:
+            path_args = args[:2] if event in {"os.rename", "os.link"} else args[:1]
+            for path in path_args:
+                if not isinstance(path, (str, bytes, os.PathLike)):
+                    continue
+                if not _contained_path(path, self.write_roots):
+                    self.deny("production_write", event)
+
+
+def _audit_hook(event: str, args: tuple[Any, ...]) -> None:
+    policy = _DRY_RUN_POLICY.get() or _ACTIVE_DRY_RUN_POLICY
+    if policy is not None:
+        policy.audit(event, args)
+
+
+def _ensure_audit_hook() -> None:
+    global _AUDIT_HOOK_INSTALLED
+    with _AUDIT_HOOK_LOCK:
+        if not _AUDIT_HOOK_INSTALLED:
+            sys.addaudithook(_audit_hook)
+            _AUDIT_HOOK_INSTALLED = True
+
+
+@contextmanager
+def _dry_run_io_enforcement(
+    *, gate_a_root: Path, output_root: Path, boundary: DryRunBoundary
+) -> Iterable[None]:
+    global _ACTIVE_DRY_RUN_POLICY
+    _ensure_audit_hook()
+    policy = _DryRunIOPolicy(
+        gate_a_root=gate_a_root,
+        output_root=output_root,
+        boundary=boundary,
+    )
+    with _DRY_RUN_EXECUTION_LOCK:
+        saved_credentials = {
+            name: os.environ.pop(name)
+            for name in _SLACK_CREDENTIAL_ENV
+            if name in os.environ
+        }
+        boundary.slack_credentials_scrubbed = len(saved_credentials)
+        token = _DRY_RUN_POLICY.set(policy)
+        _ACTIVE_DRY_RUN_POLICY = policy
+        try:
+            yield
+        finally:
+            _ACTIVE_DRY_RUN_POLICY = None
+            _DRY_RUN_POLICY.reset(token)
+            os.environ.update(saved_credentials)
+
+
+@contextmanager
+def _dry_run_internal_descriptor_io() -> Iterable[None]:
+    token = _DRY_RUN_INTERNAL_IO.set(True)
+    try:
+        yield
+    finally:
+        _DRY_RUN_INTERNAL_IO.reset(token)
 
 
 def _canonical_json(value: object) -> str:
@@ -174,41 +331,86 @@ def _sha256_json(value: object) -> str:
     return _sha256_bytes(_canonical_json(value).encode("utf-8"))
 
 
-def read_contained_nofollow(root: Path, reference: str) -> bytes:
-    """Read a regular file beneath root without traversal or symlink following."""
-    if root.is_symlink():
-        raise GateBPreflightError("contained_nofollow:root_symlink")
-    root = root.resolve(strict=True)
-    relative = Path(reference)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise GateBPreflightError("contained_nofollow:reference")
-    candidate = root / relative
-    try:
-        resolved_parent = candidate.parent.resolve(strict=True)
-    except OSError as exc:
-        raise GateBPreflightError("contained_nofollow:parent") from exc
-    if resolved_parent != root and root not in resolved_parent.parents:
-        raise GateBPreflightError("contained_nofollow:escape")
-    if candidate.is_symlink():
-        raise GateBPreflightError("contained_nofollow:symlink")
+def _open_directory_nofollow(path: Path) -> int:
     try:
         descriptor = os.open(
-            candidate, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
         )
     except OSError as exc:
-        raise GateBPreflightError("contained_nofollow:open") from exc
+        raise GateBPreflightError("contained_nofollow:directory") from exc
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise GateBPreflightError("contained_nofollow:not_directory")
+    return descriptor
+
+
+def _open_child_directory(
+    parent_descriptor: int, name: str, *, create: bool = False
+) -> int:
+    if not name or name in {".", ".."} or "/" in name:
+        raise GateBPreflightError("contained_nofollow:reference")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    with _dry_run_internal_descriptor_io():
+        if create:
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+            except FileExistsError:
+                pass
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise GateBPreflightError("contained_nofollow:directory") from exc
+    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise GateBPreflightError("contained_nofollow:not_directory")
+    return descriptor
+
+
+def read_contained_nofollow(root: Path, reference: str) -> bytes:
+    """Read beneath an opened root without path re-resolution or symlink following."""
+    if root.is_symlink():
+        raise GateBPreflightError("contained_nofollow:root_symlink")
+    relative = Path(reference)
+    if relative.is_absolute() or not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise GateBPreflightError("contained_nofollow:reference")
+    descriptors: list[int] = [_open_directory_nofollow(root)]
     try:
+        for part in relative.parts[:-1]:
+            descriptors.append(_open_child_directory(descriptors[-1], part))
+        with _dry_run_internal_descriptor_io():
+            try:
+                descriptor = os.open(
+                    relative.parts[-1],
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=descriptors[-1],
+                )
+            except OSError as exc:
+                raise GateBPreflightError("contained_nofollow:open") from exc
         stat_result = os.fstat(descriptor)
         if not stat.S_ISREG(stat_result.st_mode):
+            os.close(descriptor)
             raise GateBPreflightError("contained_nofollow:not_regular")
         chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
+        try:
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _gate_a_snapshot(
@@ -541,46 +743,116 @@ def _secure_package_write(
     reference: str,
     payload: bytes,
     boundary: DryRunBoundary,
+    write_kind: str = "package",
 ) -> Path:
     relative = Path(reference)
-    if relative.is_absolute() or ".." in relative.parts:
+    if relative.is_absolute() or not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
         raise GateBPreflightError("package_path_invalid")
-    package_root.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(package_root, 0o700)
     target = package_root / relative
-    current = package_root
-    for part in relative.parts[:-1]:
-        current = current / part
-        if current.is_symlink():
-            raise GateBPreflightError("package_path_symlink")
-        current.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(current, 0o700)
-    if target.exists():
-        if target.is_symlink() or read_contained_nofollow(package_root, reference) != payload:
-            raise GateBPreflightError("package_content_address_collision")
-        os.chmod(target, 0o600)
+    descriptors = [_open_directory_nofollow(package_root.parent)]
+    try:
+        descriptors.append(
+            _open_child_directory(descriptors[-1], package_root.name, create=True)
+        )
+        for part in relative.parts[:-1]:
+            descriptors.append(
+                _open_child_directory(descriptors[-1], part, create=True)
+            )
+        directory_descriptor = descriptors[-1]
+        target_name = relative.parts[-1]
+        with _dry_run_internal_descriptor_io():
+            try:
+                existing = os.open(
+                    target_name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_descriptor,
+                )
+            except FileNotFoundError:
+                existing = None
+        if existing is not None:
+            try:
+                if not stat.S_ISREG(os.fstat(existing).st_mode):
+                    raise GateBPreflightError("package_content_address_collision")
+                chunks: list[bytes] = []
+                while chunk := os.read(existing, 1024 * 1024):
+                    chunks.append(chunk)
+                if b"".join(chunks) != payload:
+                    raise GateBPreflightError("package_content_address_collision")
+                os.fchmod(existing, 0o600)
+                return target
+            finally:
+                os.close(existing)
+
+        temporary_name = f".{target_name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with _dry_run_internal_descriptor_io():
+            descriptor = os.open(
+                temporary_name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        try:
+            with _dry_run_internal_descriptor_io():
+                os.link(
+                    temporary_name,
+                    target_name,
+                    src_dir_fd=directory_descriptor,
+                    dst_dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+        except FileExistsError:
+            with _dry_run_internal_descriptor_io():
+                existing = os.open(
+                    target_name,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory_descriptor,
+                )
+            try:
+                chunks = []
+                while chunk := os.read(existing, 1024 * 1024):
+                    chunks.append(chunk)
+                if b"".join(chunks) != payload:
+                    raise GateBPreflightError("package_content_address_collision")
+            finally:
+                os.close(existing)
+        finally:
+            with _dry_run_internal_descriptor_io():
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_descriptor)
+                except FileNotFoundError:
+                    pass
+        if write_kind == "corpus":
+            boundary.corpus_write(target)
+        else:
+            boundary.package_write(target)
         return target
-    temporary = target.parent / f".{target.name}.{os.getpid()}.tmp"
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        os.write(descriptor, payload)
-        os.fsync(descriptor)
     finally:
-        os.close(descriptor)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _secure_directory_path(path: Path) -> None:
+    with _dry_run_internal_descriptor_io():
+        parent_descriptor = _open_directory_nofollow(path.parent)
     try:
-        os.link(temporary, target, follow_symlinks=False)
-    except FileExistsError:
-        if read_contained_nofollow(package_root, reference) != payload:
-            raise GateBPreflightError("package_content_address_collision")
+        descriptor = _open_child_directory(parent_descriptor, path.name, create=True)
+        try:
+            os.fchmod(descriptor, 0o700)
+        finally:
+            os.close(descriptor)
     finally:
-        temporary.unlink(missing_ok=True)
-    os.chmod(target, 0o600)
-    boundary.package_write(target)
-    return target
+        os.close(parent_descriptor)
 
 
 def _exact_field_spans(value: object, *, maximum: int) -> tuple[str, ...]:
@@ -690,6 +962,17 @@ def _build_task10_input(
         version=artifact.artifact_version,
         sha256=artifact_sha256,
     )
+    company_labels = {
+        str(value).strip().casefold()
+        for value in (record.get("company"), raw.get("company"))
+        if isinstance(value, str) and value.strip()
+    }
+    prohibited_company_hashes = tuple(dict.fromkeys(
+        _sha256_bytes(item.text.encode("utf-8"))
+        for item in artifact.fragments
+        if any(label in item.text.casefold() for label in company_labels)
+    ))
+    prohibited_company_hash_set = set(prohibited_company_hashes)
     fragments: list[EvidenceFragmentV1] = []
     dimension_refs: dict[EvidenceDimension, list[str]] = defaultdict(list)
     locator_dimensions = {
@@ -705,6 +988,8 @@ def _build_task10_input(
     }
     selection_prefix = str(record["selection_key"])[:16]
     for index, item in enumerate(artifact.fragments):
+        if _sha256_bytes(item.text.encode("utf-8")) in prohibited_company_hash_set:
+            continue
         field_name = item.source_locator.split("#", 1)[0].removeprefix("/")
         dimensions = locator_dimensions[field_name]
         fragment_id = f"vacancy:{selection_prefix}:{index:03d}"
@@ -795,6 +1080,7 @@ def _build_task10_input(
         ),
         vacancy_evidence_ref=vacancy_ref,
         vacancy_evidence=artifact,
+        prohibited_company_claim_text_sha256s=prohibited_company_hashes,
         fragments=tuple(fragments),
     )
 
@@ -844,7 +1130,7 @@ def _materialize_input_package(
     selected: list[dict[str, Any]],
     boundary: DryRunBoundary,
 ) -> dict[str, Any]:
-    package_root = experiment_root / "input-package-v2"
+    package_root = experiment_root / "input-package-v2-r2"
     if package_root.is_symlink():
         raise GateBPreflightError("package_root_symlink")
     authority_hashes = _task10_v2_authority_hashes()
@@ -1085,11 +1371,12 @@ def _record_identity(
     return identity
 
 
-def build_dry_run_preflight(
+def _build_dry_run_preflight_core(
     *,
     gate_a_root: Path,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     boundary_attempt: Any = None,
+    boundary: DryRunBoundary,
 ) -> dict[str, Any]:
     if sample_size != EXACT_CALL_CAP:
         raise GateBPreflightError("exact_sample_size_required:48")
@@ -1097,7 +1384,6 @@ def build_dry_run_preflight(
     output_root = GATE_B_EXPERIMENT_ROOT
     if output_root.is_symlink():
         raise GateBPreflightError("workspace_symlink")
-    boundary = DryRunBoundary()
     gate_a_before = _gate_a_snapshot(gate_a_root, boundary)
     protected_before = _protected_metadata_snapshot()
     if boundary_attempt is not None:
@@ -1120,44 +1406,22 @@ def build_dry_run_preflight(
         },
         "records": selected,
     }
+
+
     corpus_bytes = (
         json.dumps(corpus, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     ).encode()
     corpus_sha256 = _sha256_bytes(corpus_bytes)
     experiment_root = output_root / corpus_sha256
     manifest_path = experiment_root / "corpus-manifest.json"
-    output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(output_root, 0o700)
-    if experiment_root.is_symlink():
-        raise GateBPreflightError("workspace_symlink")
-    experiment_root.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(experiment_root, 0o700)
-    if manifest_path.exists():
-        if manifest_path.is_symlink() or read_contained_nofollow(
-            experiment_root, manifest_path.name
-        ) != corpus_bytes:
-            raise GateBPreflightError("content_address_collision")
-    else:
-        temporary = experiment_root / f".corpus.{os.getpid()}.tmp"
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-        try:
-            os.write(descriptor, corpus_bytes)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        try:
-            os.link(temporary, manifest_path, follow_symlinks=False)
-        except FileExistsError:
-            if read_contained_nofollow(experiment_root, manifest_path.name) != corpus_bytes:
-                raise GateBPreflightError("content_address_collision")
-        finally:
-            temporary.unlink(missing_ok=True)
-        boundary.corpus_write(manifest_path)
-    os.chmod(manifest_path, 0o600)
+    _secure_directory_path(output_root)
+    _secure_package_write(
+        package_root=experiment_root,
+        reference=manifest_path.name,
+        payload=corpus_bytes,
+        boundary=boundary,
+        write_kind="corpus",
+    )
     input_package = _materialize_input_package(
         experiment_root=experiment_root,
         gate_a_root=gate_a_root,
@@ -1234,6 +1498,27 @@ def build_dry_run_preflight(
             "gate_a_mutations": 0,
         },
     }
+
+
+def build_dry_run_preflight(
+    *,
+    gate_a_root: Path,
+    sample_size: int = DEFAULT_SAMPLE_SIZE,
+    boundary_attempt: Any = None,
+) -> dict[str, Any]:
+    """Run preparation inside an enforced offline, output-contained boundary."""
+    boundary = DryRunBoundary()
+    with _dry_run_io_enforcement(
+        gate_a_root=gate_a_root,
+        output_root=GATE_B_EXPERIMENT_ROOT,
+        boundary=boundary,
+    ):
+        return _build_dry_run_preflight_core(
+            gate_a_root=gate_a_root,
+            sample_size=sample_size,
+            boundary_attempt=boundary_attempt,
+            boundary=boundary,
+        )
 
 
 _AUTHORIZATION_ISSUER = object()
@@ -1398,16 +1683,87 @@ class GateBBudgetLedger:
             raise GateBPreflightError("runner_authorization_required")
         self.path = path
         self.authorization = authorization
-        if path.parent.resolve(strict=True) != authorization.experiment_root.resolve(
-            strict=True
+        if Path(os.path.abspath(path.parent)) != Path(
+            os.path.abspath(authorization.experiment_root)
         ):
             raise GateBPreflightError("ledger_path_outside_run")
+        self._root_descriptor = _open_directory_nofollow(
+            authorization.experiment_root
+        )
+        try:
+            path_stat = os.stat(
+                path.name,
+                dir_fd=self._root_descriptor,
+                follow_symlinks=False,
+            )
+            if stat.S_ISLNK(path_stat.st_mode):
+                os.close(self._root_descriptor)
+                self._root_descriptor = None
+                raise GateBPreflightError("ledger_final_symlink")
+        except FileNotFoundError:
+            pass
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            try:
+                self._ledger_descriptor = os.open(
+                    path.name, flags, dir_fd=self._root_descriptor
+                )
+            except FileNotFoundError:
+                self._ledger_descriptor = os.open(
+                    path.name,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=self._root_descriptor,
+                )
+        except OSError as exc:
+            os.close(self._root_descriptor)
+            raise GateBPreflightError("ledger_path_unsafe") from exc
+        ledger_stat = os.fstat(self._ledger_descriptor)
+        if not stat.S_ISREG(ledger_stat.st_mode):
+            self.close()
+            raise GateBPreflightError("ledger_path_unsafe")
+        self._ledger_identity = (ledger_stat.st_dev, ledger_stat.st_ino)
+        os.fchmod(self._ledger_descriptor, 0o600)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
+        database_uri = (
+            f"file:/proc/self/fd/{self._root_descriptor}/{self.path.name}?mode=rw"
+        )
+        connection = sqlite3.connect(database_uri, timeout=30, uri=True)
+        try:
+            current = os.stat(
+                self.path.name,
+                dir_fd=self._root_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            connection.close()
+            raise GateBPreflightError("ledger_path_changed") from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != self._ledger_identity
+        ):
+            connection.close()
+            raise GateBPreflightError("ledger_path_changed")
         connection.row_factory = sqlite3.Row
         return connection
+
+    def close(self) -> None:
+        ledger_descriptor = getattr(self, "_ledger_descriptor", None)
+        if ledger_descriptor is not None:
+            os.close(ledger_descriptor)
+            self._ledger_descriptor = None
+        root_descriptor = getattr(self, "_root_descriptor", None)
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+            self._root_descriptor = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except OSError:
+            pass
 
     def _initialize(self) -> None:
         connection = self._connect()
@@ -1419,7 +1775,8 @@ class GateBBudgetLedger:
                 "CREATE TABLE IF NOT EXISTS call_ledger ("
                 "input_hash TEXT PRIMARY KEY, reservation_id TEXT UNIQUE NOT NULL, "
                 "reserved_microusd INTEGER NOT NULL, actual_microusd INTEGER, "
-                "status TEXT NOT NULL CHECK(status IN ('reserved','success','failure')));"
+                "status TEXT NOT NULL CHECK(status IN "
+                "('reserved','charge_unknown','success','failure')));"
                 "CREATE TABLE IF NOT EXISTS run_inputs ("
                 "ordinal INTEGER PRIMARY KEY, input_hash TEXT UNIQUE NOT NULL);"
             )
@@ -1453,7 +1810,7 @@ class GateBBudgetLedger:
             elif existing_inputs != self.authorization.ordered_input_sha256s:
                 raise GateBPreflightError("ledger_input_allowlist_mismatch")
             connection.commit()
-            os.chmod(self.path, 0o600)
+            os.fchmod(self._ledger_descriptor, 0o600)
         finally:
             connection.close()
 
@@ -1506,7 +1863,7 @@ class GateBBudgetLedger:
                 "SELECT * FROM call_ledger WHERE reservation_id = ?",
                 (reservation_id,),
             ).fetchone()
-            if row is None or row["status"] != "reserved":
+            if row is None or row["status"] not in {"reserved", "charge_unknown"}:
                 raise GateBPreflightError("reservation_state_invalid")
             if actual_micros > row["reserved_microusd"]:
                 raise GateBPreflightError("actual_cost_exceeds_reservation")
@@ -1519,6 +1876,38 @@ class GateBBudgetLedger:
         except Exception:
             connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def mark_dispatching(self, reservation_id: str) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM call_ledger WHERE reservation_id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if row is None or row["status"] != "reserved":
+                raise GateBPreflightError("dispatch_state_invalid")
+            connection.execute(
+                "UPDATE call_ledger SET status = 'charge_unknown' "
+                "WHERE reservation_id = ?",
+                (reservation_id,),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def call_state(self, input_hash: str) -> str | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT status FROM call_ledger WHERE input_hash = ?", (input_hash,)
+            ).fetchone()
+            return None if row is None else str(row["status"])
         finally:
             connection.close()
 
@@ -1537,6 +1926,8 @@ class GateBBudgetLedger:
             if row is None:
                 connection.commit()
                 return False
+            if row["status"] == "charge_unknown":
+                raise GateBPreflightError("owner_reconciliation_required:charge_unknown")
             if row["status"] != "reserved":
                 raise GateBPreflightError("completed_call_without_record")
             connection.execute(
@@ -1555,8 +1946,10 @@ class GateBBudgetLedger:
         try:
             row = connection.execute(
                 "SELECT COUNT(*) AS reserved, "
-                "SUM(CASE WHEN status != 'reserved' THEN 1 ELSE 0 END) AS completed, "
-                "COALESCE(SUM(CASE WHEN status = 'reserved' THEN reserved_microusd "
+                "SUM(CASE WHEN status IN ('success','failure') THEN 1 ELSE 0 END) "
+                "AS completed, "
+                "COALESCE(SUM(CASE WHEN status IN ('reserved','charge_unknown') "
+                "THEN reserved_microusd "
                 "ELSE 0 END), 0) AS outstanding, "
                 "COALESCE(SUM(CASE WHEN actual_microusd IS NOT NULL "
                 "THEN actual_microusd ELSE 0 END), 0) AS actual, "
@@ -1599,7 +1992,7 @@ class GateBBudgetLedger:
             connection.close()
         if row is None:
             raise GateBPreflightError("recording_without_reservation")
-        if row["status"] == "reserved":
+        if row["status"] in {"reserved", "charge_unknown"}:
             self.reconcile(str(row["reservation_id"]), actual_cost, outcome)
             return
         if row["status"] != outcome or row["actual_microusd"] != _usd_to_micros(
@@ -1618,6 +2011,7 @@ class GateBBudgetLedger:
             exact_spend_cap_usd=self.authorization.exact_spend_cap_usd,
             metadata_seal_key=self.authorization._metadata_seal_key,
             reserve=self.reserve,
+            mark_dispatching=self.mark_dispatching,
             reconcile=self.reconcile,
         )
 
@@ -1702,8 +2096,7 @@ def run_gate_b_record(
             )
             if input_hash != record.get("task10_input_sha256"):
                 raise GateBPreflightError("runner_task10_input_hash_mismatch")
-            recording_path = semantic_provider.store.path_for(input_hash)
-            if recording_path.exists():
+            if semantic_provider.store.exists(input_hash):
                 existing = semantic_provider.store.load(input_hash)
                 ledger.reconcile_existing_record(input_hash, existing, capability)
             else:

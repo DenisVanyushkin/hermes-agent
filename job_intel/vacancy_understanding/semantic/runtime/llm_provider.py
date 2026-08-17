@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -204,6 +205,7 @@ class StructuredCallCapability:
         exact_spend_cap_usd: Decimal,
         metadata_seal_key: bytes,
         reserve: Any,
+        mark_dispatching: Any,
         reconcile: Any,
     ) -> None:
         if issuer is not _CAPABILITY_ISSUER:
@@ -216,10 +218,14 @@ class StructuredCallCapability:
             raise LLMProviderError("metadata_seal_key_invalid")
         self._metadata_seal_key = metadata_seal_key
         self._reserve = reserve
+        self._mark_dispatching = mark_dispatching
         self._reconcile = reconcile
 
     def reserve(self, input_hash: str) -> str:
         return str(self._reserve(input_hash, self.pricing.reservation_cost_usd))
+
+    def mark_dispatching(self, reservation_id: str) -> None:
+        self._mark_dispatching(reservation_id)
 
     def reconcile(
         self, reservation_id: str, actual_cost: Decimal, outcome: str
@@ -265,6 +271,7 @@ def _issue_structured_call_capability(
     exact_spend_cap_usd: Decimal,
     metadata_seal_key: bytes,
     reserve: Any,
+    mark_dispatching: Any,
     reconcile: Any,
 ) -> StructuredCallCapability:
     """Bridge an already-authorized transactional runner into the runtime."""
@@ -280,6 +287,7 @@ def _issue_structured_call_capability(
         exact_spend_cap_usd=exact_spend_cap_usd,
         metadata_seal_key=metadata_seal_key,
         reserve=reserve,
+        mark_dispatching=mark_dispatching,
         reconcile=reconcile,
     )
 
@@ -454,44 +462,109 @@ class RecordingStore:
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
+        self._root_descriptor: Optional[int] = None
+
+    def _directory_descriptor(self) -> int:
+        if self._root_descriptor is not None:
+            return self._root_descriptor
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            parent_descriptor = os.open(self.root.parent, flags)
+        except OSError as exc:
+            raise LLMProviderError("recording_root_unsafe", self.root.name) from exc
+        try:
+            try:
+                os.mkdir(self.root.name, mode=0o700, dir_fd=parent_descriptor)
+            except FileExistsError:
+                pass
+            try:
+                descriptor = os.open(
+                    self.root.name, flags, dir_fd=parent_descriptor
+                )
+            except OSError as exc:
+                raise LLMProviderError(
+                    "recording_root_unsafe", self.root.name
+                ) from exc
+        finally:
+            os.close(parent_descriptor)
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise LLMProviderError("recording_root_unsafe", self.root.name)
+        os.fchmod(descriptor, 0o700)
+        self._root_descriptor = descriptor
+        return descriptor
+
+    def close(self) -> None:
+        if self._root_descriptor is not None:
+            os.close(self._root_descriptor)
+            self._root_descriptor = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except OSError:
+            pass
 
     def path_for(self, input_hash: str) -> Path:
         return self.root / f"{input_hash}.json"
 
+    def exists(self, input_hash: str) -> bool:
+        directory_descriptor = self._directory_descriptor()
+        try:
+            file_stat = os.stat(
+                f"{input_hash}.json",
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return False
+        return stat.S_ISREG(file_stat.st_mode)
+
     def save(self, record: dict[str, Any]) -> Path:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        directory_descriptor = self._directory_descriptor()
         p = self.path_for(record["input_hash"])
-        temporary = self.root / f".{p.name}.{os.getpid()}.tmp"
+        temporary = f".{p.name}.{os.getpid()}.tmp"
         payload = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True)
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600,
+            dir_fd=directory_descriptor,
         )
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, p)
-            os.chmod(p, 0o600)
+                os.fchmod(stream.fileno(), 0o600)
+            os.replace(
+                temporary,
+                p.name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
         finally:
-            if temporary.exists():
-                temporary.unlink()
+            try:
+                os.unlink(temporary, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
         return p
 
     def save_exclusive(self, record: dict[str, Any]) -> Path:
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        directory_descriptor = self._directory_descriptor()
         path = self.path_for(record["input_hash"])
-        temporary = self.root / f".{path.name}.{os.getpid()}.tmp"
+        temporary = f".{path.name}.{os.getpid()}.tmp"
         payload = json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True)
         try:
             descriptor = os.open(
                 temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
+                dir_fd=directory_descriptor,
             )
         except FileExistsError as exc:
             raise LLMProviderError("recording_write_in_progress", path.name) from exc
@@ -500,23 +573,37 @@ class RecordingStore:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
+                os.fchmod(stream.fileno(), 0o600)
             try:
-                os.link(temporary, path, follow_symlinks=False)
+                os.link(
+                    temporary,
+                    path.name,
+                    src_dir_fd=directory_descriptor,
+                    dst_dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
             except FileExistsError as exc:
                 raise LLMProviderError("recording_exists", path.name) from exc
-            os.chmod(path, 0o600)
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                os.unlink(temporary, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
         return path
 
     def load(self, input_hash: str) -> dict[str, Any]:
         p = self.path_for(input_hash)
-        if not p.exists():
-            raise LLMProviderError("recording_missing", input_hash)
+        directory_descriptor = self._directory_descriptor()
         try:
-            descriptor = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(
+                p.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_descriptor,
+            )
             with os.fdopen(descriptor, encoding="utf-8") as stream:
                 record = json.load(stream)
+        except FileNotFoundError as exc:
+            raise LLMProviderError("recording_missing", input_hash) from exc
         except json.JSONDecodeError as exc:
             raise LLMProviderError("recording_corrupt", f"{p.name}: {exc}") from exc
         if record.get("recording_format_version") != RECORDING_FORMAT_VERSION:
@@ -618,7 +705,7 @@ class LLMObservationProvider:
             capability.run_identity_sha256
         ):
             raise LLMProviderError("structured_capability_identity_mismatch")
-        if self.store.path_for(request.input_hash).exists():
+        if self.store.exists(request.input_hash):
             raise LLMProviderError("recording_exists", request.input_hash)
         serialized_input = _canonical(request.user_payload)
         folded_input = serialized_input.casefold()
@@ -627,6 +714,9 @@ class LLMObservationProvider:
 
         reservation_cost = capability.pricing.reservation_cost_usd
         reservation_id = capability.reserve(request.input_hash)
+        # Persist the conservative charge-unknown state before entering the
+        # provider. A crash after this point can never be retried implicitly.
+        capability.mark_dispatching(reservation_id)
         started = time.monotonic()
         raw_text = ""
         response_model: Optional[str] = None
@@ -807,8 +897,7 @@ class LLMObservationProvider:
         # every earlier case derived from the first response. A successful
         # recording for this exact input/model/prompt is therefore reused;
         # only failed recordings are retried live.
-        existing_path = self.store.path_for(ih)
-        if existing_path.exists():
+        if self.store.exists(ih):
             record = self.store.load(ih)
             if (not record.get("error")
                     and record.get("model_id") == self.model_id

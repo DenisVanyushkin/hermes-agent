@@ -388,6 +388,7 @@ class EvidenceSynthesisInputV2(_StrictFrozenModel):
     company_authority: CompanyAuthorityInputV2
     vacancy_evidence_ref: ImmutableArtifactRef
     vacancy_evidence: VacancyEvidenceArtifactV1
+    prohibited_company_claim_text_sha256s: tuple[str, ...]
     fragments: tuple[EvidenceFragmentV1, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -411,6 +412,13 @@ class EvidenceSynthesisInputV2(_StrictFrozenModel):
         artifact_fragments = {
             item.source_locator: item for item in self.vacancy_evidence.fragments
         }
+        prohibited_hashes = set(self.prohibited_company_claim_text_sha256s)
+        if len(prohibited_hashes) != len(
+            self.prohibited_company_claim_text_sha256s
+        ) or not prohibited_hashes.issubset(
+            {_sha256_text(item.text) for item in self.vacancy_evidence.fragments}
+        ):
+            raise ValueError("prohibited company claim hashes are not exact artifact text")
         unknown_locators: dict[EvidenceDimension, set[str]] = {}
         authorized: set[str] = set()
         for dimension in EvidenceDimension:
@@ -445,6 +453,13 @@ class EvidenceSynthesisInputV2(_StrictFrozenModel):
                 artifact_fragment = artifact_fragments.get(fragment.source_locator)
                 if artifact_fragment is None or artifact_fragment.text != fragment.text:
                     raise ValueError("vacancy fragment is unavailable or broader")
+                if (
+                    isinstance(self.company_authority, CompanyAuthorityUnavailableV2)
+                    and fragment.text_sha256 in prohibited_hashes
+                ):
+                    raise ValueError(
+                        "unavailable company authority forbids company-bearing claims"
+                    )
             elif fragment.source_kind is EvidenceSourceKind.COMPANY:
                 if not isinstance(self.company_authority, CompanyAuthorityAvailableV2):
                     raise ValueError("unavailable company authority forbids company fragments")
@@ -1406,7 +1421,12 @@ def validate_provider_payload_v2(
     except Exception:
         return EvidenceSynthesisStatus.INVALID_SCHEMA
     if isinstance(synthesis_input.company_authority, CompanyAuthorityUnavailableV2):
+        prohibited_hashes = set(
+            synthesis_input.prohibited_company_claim_text_sha256s
+        )
         for claim in payload.claims:
+            if _sha256_text(claim.statement) in prohibited_hashes:
+                return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
             if claim.dimension is EvidenceDimension.COMPANY_FIT and (
                 claim.status is not EvidenceClaimStatus.UNKNOWN
                 or any(citation.startswith("company:") for citation in claim.citations)

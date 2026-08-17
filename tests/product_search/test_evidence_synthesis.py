@@ -206,6 +206,7 @@ def _record_capability():
         exact_spend_cap_usd=Decimal("0.48"),
         metadata_seal_key=b"fixture-owner-bound-seal-key",
         reserve=lambda input_hash, amount: f"reservation:{input_hash}",
+        mark_dispatching=lambda reservation_id: None,
         reconcile=lambda reservation_id, actual_cost, outcome: None,
     )
 

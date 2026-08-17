@@ -6,7 +6,10 @@ from decimal import Decimal
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
+import socket
+import subprocess
 from types import SimpleNamespace
 from typing import Any
 
@@ -105,7 +108,9 @@ def test_transactional_ledger_prevents_double_reserve_and_preserves_crash_state(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
-    ledger_path = Path(preflight["corpus"]["manifest_path"]).parent / "run-ledger.sqlite3"
+    ledger_path = (
+        Path(preflight["corpus"]["manifest_path"]).parent / "run-ledger.sqlite3"
+    )
     ledger = GateBBudgetLedger(ledger_path, authorization)
     barrier_hash = authorization.ordered_input_sha256s[0]
 
@@ -155,6 +160,47 @@ def test_stale_inflight_without_record_can_retry_but_completed_call_cannot(
         ledger.retry_reserved_without_record(input_hash)
 
 
+def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+
+    class _CrashingCompletions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs: Any) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise SystemExit("fixture crash after dispatch")
+            raise AssertionError("ambiguous call must not be retried")
+
+    completions = _CrashingCompletions()
+    semantic = LLMObservationProvider(
+        store=RecordingStore(authorization.experiment_root / "recordings"),
+        mode="record",
+        transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+    )
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", lambda **_: semantic)
+
+    with pytest.raises(SystemExit, match="after dispatch"):
+        run_gate_b_record(authorization=authorization)
+
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    input_hash = authorization.ordered_input_sha256s[0]
+    assert ledger.call_state(input_hash) == "charge_unknown"
+    with pytest.raises(GateBPreflightError, match="owner_reconciliation_required"):
+        run_gate_b_record(authorization=authorization)
+    assert completions.calls == 1
+
+
 def test_ledger_reconciles_crash_after_owner_sealed_record_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,13 +216,11 @@ def test_ledger_reconciles_crash_after_owner_sealed_record_write(
     input_hash = authorization.ordered_input_sha256s[0]
     ledger.reserve(input_hash, Decimal("0.010000"))
     capability = ledger.structured_capability()
-    record = capability.seal_record(
-        {
-            "input_hash": input_hash,
-            "status": "success",
-            "cost_usd": "0.001250",
-        }
-    )
+    record = capability.seal_record({
+        "input_hash": input_hash,
+        "status": "success",
+        "cost_usd": "0.001250",
+    })
 
     ledger.reconcile_existing_record(input_hash, record, capability)
 
@@ -211,14 +255,12 @@ def test_runner_retries_stale_reservation_and_never_duplicates_completed_calls(
                 choices=[
                     SimpleNamespace(
                         message=SimpleNamespace(
-                            content=json.dumps(
-                                {
-                                    "schema_version": "2.0.0",
-                                    "claims": [],
-                                    "conflicts": [],
-                                    "question_candidates": [],
-                                }
-                            ),
+                            content=json.dumps({
+                                "schema_version": "2.0.0",
+                                "claims": [],
+                                "conflicts": [],
+                                "question_candidates": [],
+                            }),
                             refusal=None,
                         )
                     )
@@ -290,6 +332,106 @@ def test_nofollow_reader_rejects_traversal_absolute_and_symlink(tmp_path: Path) 
         read_contained_nofollow(root, "raw.json")
 
 
+def test_ledger_rejects_final_symlink_without_mutating_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    external = tmp_path / "external.sqlite3"
+    external.write_bytes(b"")
+    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
+    ledger_path.symlink_to(external)
+
+    with pytest.raises(GateBPreflightError, match="ledger.*symlink"):
+        GateBBudgetLedger(ledger_path, authorization)
+
+    assert external.read_bytes() == b""
+
+
+def test_ledger_detects_final_path_swap_before_any_database_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "experiment", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
+    external = tmp_path / "swapped-target.sqlite3"
+    external.write_bytes(b"")
+    original_connect = gate_b.sqlite3.connect
+    swapped = False
+
+    def swap_then_connect(database: object, *args: object, **kwargs: object) -> object:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            ledger_path.unlink(missing_ok=True)
+            ledger_path.symlink_to(external)
+        return original_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(gate_b.sqlite3, "connect", swap_then_connect)
+    with pytest.raises(GateBPreflightError, match="ledger_path_changed"):
+        GateBBudgetLedger(ledger_path, authorization)
+    assert external.read_bytes() == b""
+
+
+def test_recording_store_remains_anchored_after_root_path_swap(tmp_path: Path) -> None:
+    root = tmp_path / "recordings"
+    store = RecordingStore(root)
+    first_hash = "1" * 64
+    second_hash = "2" * 64
+    store.save_exclusive({"input_hash": first_hash})
+    relocated = tmp_path / "recordings-relocated"
+    root.rename(relocated)
+    outside = tmp_path / "outside-recordings"
+    outside.mkdir()
+    root.symlink_to(outside, target_is_directory=True)
+
+    store.save_exclusive({"input_hash": second_hash})
+
+    assert (relocated / f"{second_hash}.json").is_file()
+    assert not (outside / f"{second_hash}.json").exists()
+
+
+def test_package_publish_remains_anchored_after_subdirectory_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package_root = tmp_path / "package"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    relocated = tmp_path / "vacancy-artifacts-relocated"
+    payload = b'{"fixture":true}'
+    original_link = gate_b.os.link
+    swapped = False
+
+    def swap_then_link(source: object, target: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            artifact_dir = package_root / "vacancy-artifacts"
+            artifact_dir.rename(relocated)
+            artifact_dir.symlink_to(outside, target_is_directory=True)
+            (outside / Path(str(source)).name).write_bytes(payload)
+        original_link(source, target, **kwargs)
+
+    monkeypatch.setattr(gate_b.os, "link", swap_then_link)
+    gate_b._secure_package_write(
+        package_root=package_root,
+        reference="vacancy-artifacts/fixture.json",
+        payload=payload,
+        boundary=gate_b.DryRunBoundary(),
+    )
+
+    assert (relocated / "fixture.json").read_bytes() == payload
+    assert not (outside / "fixture.json").exists()
+
+
 @pytest.mark.parametrize(
     "operation",
     [
@@ -313,6 +455,55 @@ def test_real_dry_preflight_denies_injected_forbidden_boundaries(
 
     with pytest.raises(GateBPreflightError, match=f"dry_run_forbidden:{operation}"):
         build_dry_run_preflight(gate_a_root=GATE_A_ROOT, boundary_attempt=attempt)
+
+
+@pytest.mark.parametrize(
+    "operation", ["socket", "subprocess", "outside_write", "thread_write"]
+)
+def test_dry_preflight_blocks_forbidden_io_at_the_actual_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    output_root = tmp_path / "allowed-output"
+    outside = tmp_path / "outside.txt"
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", output_root)
+
+    def attempt(_: object) -> None:
+        if operation == "socket":
+            with socket.socket():
+                pass
+        elif operation == "subprocess":
+            subprocess.run(["true"], check=True)
+        elif operation == "thread_write":
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(outside.write_text, "forbidden", encoding="utf-8").result()
+        else:
+            outside.write_text("forbidden", encoding="utf-8")
+
+    with pytest.raises(GateBPreflightError, match="dry_run_io_denied"):
+        build_dry_run_preflight(gate_a_root=GATE_A_ROOT, boundary_attempt=attempt)
+    outside.unlink(missing_ok=True)
+
+
+def test_dry_preflight_scrubs_slack_credentials_inside_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", tmp_path / "output")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "fixture-secret-must-not-be-visible")
+    observed: list[str | None] = []
+
+    def attempt(_: object) -> None:
+        observed.append(os.getenv("SLACK_BOT_TOKEN"))
+
+    result = build_dry_run_preflight(
+        gate_a_root=GATE_A_ROOT,
+        boundary_attempt=attempt,
+    )
+
+    assert observed == [None]
+    assert result["side_effect_evidence"]["slack_credentials_scrubbed"] == 1
+    assert os.environ["SLACK_BOT_TOKEN"] == "fixture-secret-must-not-be-visible"
 
 
 def test_preflight_rejects_output_root_symlink_and_reports_measured_operations(

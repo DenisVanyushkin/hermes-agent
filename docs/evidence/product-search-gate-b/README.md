@@ -24,6 +24,10 @@ pin the exact pricing schedule and 2,000-token output limit, validate provider
 usage, recompute cost, use owner-bound metadata HMACs, and persist only closed
 failure codes plus sanitized diagnostics. Replay has no transport and rejects
 tampered identity, bytes, usage, cost, latency, retry, or decoding metadata.
+The ledger distinguishes a safe pre-dispatch `reserved` state from a
+post-dispatch `charge_unknown` state. A crash in the latter state cannot
+automatically retry a possibly charged call: only owner-governed reconciliation
+or replay of an already sealed record can close it.
 
 ## Exact Gate A input and corpus
 
@@ -45,14 +49,19 @@ Open Market origin, hard-block and important-unknown hypotheses, and likely
 Core/Exploration sampling hypotheses. Those hypotheses are sampling strata,
 not Decision v2 outputs. Gate A contains no Strategic Watchlist evidence.
 
-The additive input package is
-`input-package-v2/run-manifest.v2.json` beneath that exact corpus root. Its
-SHA-256 is `4c59db15616f6b0dcb2a2708c0af13553023a9e8b07f61f88e9c6f0c18d0a362`;
+The additive hardened input package is
+`input-package-v2-r2/run-manifest.v2.json` beneath that exact corpus root. Its
+SHA-256 is `9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987`;
 it orders 48 unique Task 10 v2 input hashes and 48 content-addressed vacancy
 artifacts. The ordered allowlist digest is
-`4f1739e0b35197b04f3f42b3a77cf03593b4f1ffad429ef8b6ecd2d60555a1f7`.
+`32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a`.
 Every admitted vacancy fragment is an exact bounded substring of the pinned
-raw artifact. Company labels and URLs are not provider authority.
+raw artifact. Exact fragments containing the unavailable company label are
+retained in the vacancy artifact for provenance but excluded from the provider
+allowlist; their text hashes are sealed in each input and rejected as claims in
+every dimension. The exclusion set is a required v2 field, so omitting it
+cannot silently restore permissive behavior. Company labels and URLs are not
+provider authority.
 
 ## Record authorization boundary
 
@@ -71,16 +80,31 @@ failed exactly 12 tests: the v2 authority union and Assessment contract were
 absent, no 48-input package/validator existed, the allowlist was not bound, and
 the public runner still accepted a provider and loader. After the minimal v2
 path was added, the same file passed all 12 tests.
-Two follow-up path mutations brought that file to 14 passing tests; the final
-adjacent Product Search, governed-call, and acceptance verification passed 415
-tests. Additional RED/GREEN self-review covered schema-before-success,
-measured-cost accounting, atomic record publication, stale-reservation retry,
-completed-call replay without duplication, and mixed-run/root-symlink rejection.
+Two follow-up path mutations brought that file to 14 passing tests. Independent
+review then produced four Important and two Minor findings. The fix-round REDs
+were: one failure for an ambiguous post-dispatch crash; three failures for
+cross-dimension company claims, package materialization, and v2 schema identity;
+eight failures for actual I/O denial and ledger/recording/package symlink or
+path-swap safety; one failure showing the stale approval-env test entered
+provider construction; and one self-review failure for a child-thread boundary
+bypass. No provider API key was present and no provider call completed.
 
-The fresh dry preflight ran with Slack token variables removed. Its instrumented
-boundary measured 2,416 Gate A file reads, zero provider/network/Slack-
-credential attempts, and zero production/protected/runtime writes; immutable
-before/after snapshots matched. The first Task 12B run created only the 97
+The final focused fix suite passed 99 tests, the complete Product Search plus
+governed-call and Decision/acquisition acceptance verification passed 428
+tests, and the isolated acceptance/replay gates passed 12 tests. Ruff lint was
+clean for all eight changed Python files; the two dedicated Gate B test files
+are Ruff-formatted. The Product Search scope guard, whitespace check, and
+redaction scan passed.
+
+The fresh dry preflight ran with Slack token variables removed. A process audit
+hook enforced the boundary at actual file, SQLite, socket, subprocess, exec,
+link, rename, and mutation operations; tests prove direct socket, subprocess,
+and outside-root writes are denied without relying on voluntary counters. It
+measured 2,416 Gate A file reads, zero provider/network/Slack-credential
+attempts, and zero production/protected/runtime writes; immutable before/after
+snapshots matched. Descriptor-relative `O_NOFOLLOW` traversal and atomic
+publication anchor the corpus, package, recording store, and ledger against
+symlink and path-swap races. The first Task 12B run created only the 97
 approved package files beneath the canonical corpus root; its repeat creates
 zero files. No production database/store/outbox/profile/
 cache, systemd unit, scraper, source configuration, protected source, or Gate A

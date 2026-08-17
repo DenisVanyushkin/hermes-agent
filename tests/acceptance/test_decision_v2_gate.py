@@ -17,7 +17,7 @@ from job_intel.product_search.acquisition_probe import (
 from job_intel.product_search.decision_v2 import DecisionResultV2
 from job_intel.product_search.evidence_synthesis import (
     EvidenceDimension,
-    ProviderEvidencePayloadV1,
+    ProviderEvidencePayloadV2,
     load_evidence_synthesis_policy,
 )
 from job_intel.product_search.gate_b import (
@@ -355,7 +355,7 @@ def test_ready_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects()
     }
     assert summary["side_effects"] == {
         "status": "observed",
-        "reason": "dry_preflight_observed_no_forbidden_side_effects",
+        "reason": "dry_preflight_enforced_no_forbidden_side_effects",
         "production_database_writes": 0,
         "product_store_writes": 0,
         "slack_calls": 0,
@@ -446,6 +446,6 @@ def test_candidate_hashes_are_recomputed_but_not_accepted() -> None:
         "evidence_synthesis_policy_sha256": _sha256(
             REPO_ROOT / "config/product_search/evidence_synthesis.v1.yaml"
         ),
-        "provider_output_schema_sha256": schema_hash(ProviderEvidencePayloadV1),
+        "provider_output_schema_sha256": schema_hash(ProviderEvidencePayloadV2),
     }
     assert summary["owner_decision"] == "pending"

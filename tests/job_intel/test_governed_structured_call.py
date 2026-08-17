@@ -77,6 +77,9 @@ def _capability(events: list[tuple]) -> object:
     ) -> None:
         events.append(("reconcile", reservation_id, str(actual_cost), outcome))
 
+    def mark_dispatching(reservation_id: str) -> None:
+        events.append(("dispatch", reservation_id))
+
     return _issue_structured_call_capability(
         run_identity_sha256="2" * 64,
         pricing=_pricing(),
@@ -84,6 +87,7 @@ def _capability(events: list[tuple]) -> object:
         exact_spend_cap_usd=Decimal("0.48"),
         metadata_seal_key=b"fixture-owner-bound-seal-key",
         reserve=reserve,
+        mark_dispatching=mark_dispatching,
         reconcile=reconcile,
     )
 
@@ -121,6 +125,7 @@ def test_public_structured_call_owns_transport_usage_cost_and_atomic_record(
     assert completions.calls[0]["max_tokens"] == 2_000
     assert events == [
         ("reserve", "1" * 64, "0.010000"),
+        ("dispatch", "reservation-1"),
         ("reconcile", "reservation-1", "0.001250", "success"),
     ]
     recording = provider.store.load("1" * 64)
@@ -179,6 +184,7 @@ def test_structured_call_persists_only_sanitized_failure_codes(
         )
     assert events == [
         ("reserve", "1" * 64, "0.010000"),
+        ("dispatch", "reservation-1"),
         ("reconcile", "reservation-1", "0.000000", "failure"),
     ]
     persisted = provider.store.load("1" * 64)
@@ -260,6 +266,7 @@ def test_structured_call_validates_task_payload_before_success_accounting(
 
     assert events == [
         ("reserve", "1" * 64, "0.010000"),
+        ("dispatch", "reservation-1"),
         ("reconcile", "reservation-1", "0.001250", "failure"),
     ]
     recording = provider.store.load("1" * 64)

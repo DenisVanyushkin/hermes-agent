@@ -46,9 +46,9 @@
     "vacancy_artifact_count": 48,
     "company_authority_status": "unavailable",
     "company_authority_reason": "unresolved_company_identity",
-    "manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2/run-manifest.v2.json",
-    "manifest_sha256": "4c59db15616f6b0dcb2a2708c0af13553023a9e8b07f61f88e9c6f0c18d0a362",
-    "ordered_input_hashes_sha256": "4f1739e0b35197b04f3f42b3a77cf03593b4f1ffad429ef8b6ecd2d60555a1f7",
+    "manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r2/run-manifest.v2.json",
+    "manifest_sha256": "9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987",
+    "ordered_input_hashes_sha256": "32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a",
     "provider_allowlist_count": 48,
     "company_identity_discovery_required": false,
     "official_domain_claims": 0,
@@ -80,10 +80,10 @@
     "semantic_prompt_version": "llm-obs-1.0.0",
     "task10_prompt_sha256": "6036372aef577b91c0b36b873fb9e44c351311641424c831971f8c59b6d666aa",
     "task10_prompt_version": "product-search-evidence-synthesis-2.0.0",
-    "input_manifest_sha256": "4c59db15616f6b0dcb2a2708c0af13553023a9e8b07f61f88e9c6f0c18d0a362",
-    "ordered_input_hashes_sha256": "4f1739e0b35197b04f3f42b3a77cf03593b4f1ffad429ef8b6ecd2d60555a1f7"
+    "input_manifest_sha256": "9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987",
+    "ordered_input_hashes_sha256": "32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a"
   },
-  "record_identity_sha256": "2e87fbd252d4a7f9da4acf8ccc882e90b886f4d5763f5e212ba2e77132400348",
+  "record_identity_sha256": "503f0cabc6496330da03be82346cdbe431fa8e07af250f43d98da5b1474f5066",
   "approval_capability": {
     "status": "not_supplied",
     "value": null
@@ -209,11 +209,11 @@
     "career_profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
     "semantic_contract_sha256": "23aee2f238b692bafe1fbc70fdf0534ae63cc21eb38673781c525b5cc05464f5",
     "evidence_synthesis_policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
-    "provider_output_schema_sha256": "4efb390cda26c5cff7689518463e02d15847597baf3e28741591fd6b3c893a46"
+    "provider_output_schema_sha256": "428586420dd32c64343c5ac8d59466870319037ab84702b0c7ee1866bf5274ab"
   },
   "side_effects": {
     "status": "observed",
-    "reason": "dry_preflight_observed_no_forbidden_side_effects",
+    "reason": "dry_preflight_enforced_no_forbidden_side_effects",
     "production_database_writes": 0,
     "product_store_writes": 0,
     "slack_calls": 0,

@@ -21,6 +21,12 @@ content-addressed 48-record input allowlist are ready for a separate exact run
 authorization. No owner capability was supplied; this preparation did not make
 a provider call or authorize spend.
 
+Any future post-dispatch crash without a sealed record enters
+`charge_unknown`; the runner must stop and require explicit owner-governed
+reconciliation because an automatic retry could duplicate a charged call.
+Pre-dispatch reservations remain safely retryable, and owner-sealed records
+remain replayable without a provider call.
+
 The recommendation remains `request_revision` until the real record/replay
 benchmark, deterministic Decision v2 trace comparison, and human audit have
 produced reviewable measurements. The current machine state is `pending`.

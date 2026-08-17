@@ -18,6 +18,7 @@ import job_intel.product_search.evidence_synthesis as synthesis
 import job_intel.product_search.gate_b as gate_b
 from job_intel.product_search.gate_b import GateBPreflightError
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    LIVE_APPROVAL_ENV,
     LLMProviderError,
 )
 
@@ -178,6 +179,10 @@ def test_dry_preflight_materializes_48_truthful_v2_inputs_in_canonical_order(
     )
 
     package_root = Path(package["package_root"])
+    corpus = json.loads(Path(preflight["corpus"]["manifest_path"]).read_text())
+    company_by_selection = {
+        item["selection_key"]: item["company"] for item in corpus["records"]
+    }
     seen_artifacts: set[str] = set()
     for record in manifest["records"]:
         task_input = gate_b.load_gate_b_task10_input(
@@ -210,8 +215,33 @@ def test_dry_preflight_materializes_48_truthful_v2_inputs_in_canonical_order(
         assert all(
             fragment["source_kind"] != "company" for fragment in dumped["fragments"]
         )
+        company_label = company_by_selection[record["selection_key"]].casefold()
+        company_bearing_hashes = {
+            _sha256(fragment.text.encode())
+            for fragment in task_input.vacancy_evidence.fragments
+            if company_label in fragment.text.casefold()
+        }
+        assert set(task_input.prohibited_company_claim_text_sha256s) == (
+            company_bearing_hashes
+        )
+        assert all(
+            fragment.text_sha256 not in company_bearing_hashes
+            for fragment in task_input.fragments
+            if fragment.source_kind.value == "vacancy"
+        )
         seen_artifacts.add(record["vacancy_artifact_sha256"])
     assert len(seen_artifacts) == 48
+
+
+def test_v2_input_requires_explicit_company_claim_exclusion_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_input = _load_first_input(_preflight(tmp_path, monkeypatch))
+    payload = task_input.model_dump(mode="json")
+    payload.pop("prohibited_company_claim_text_sha256s")
+
+    with pytest.raises(ValidationError, match="prohibited_company_claim_text_sha256s"):
+        synthesis.EvidenceSynthesisInputV2.model_validate(payload)
 
 
 def test_gate_b_input_package_rejects_any_non_exact_call_cap(
@@ -251,6 +281,104 @@ def test_v2_validator_rejects_invented_company_claims_and_unavailable_citations(
         synthesis.EvidenceSynthesisStatus.FOREIGN_CITATION,
         synthesis.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM,
     }
+
+
+def test_v2_validator_rejects_company_bearing_claim_in_non_company_dimension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task_input = _load_first_input(_preflight(tmp_path, monkeypatch))
+    company_artifact_fragment = next(
+        fragment
+        for fragment in task_input.vacancy_evidence.fragments
+        if "wolt" in fragment.text.casefold()
+    )
+    company_hash = _sha256(company_artifact_fragment.text.encode())
+    existing = next(
+        (
+            fragment
+            for fragment in task_input.fragments
+            if fragment.source_locator == company_artifact_fragment.source_locator
+            and synthesis.EvidenceDimension.MANDATE_FIT in fragment.permitted_dimensions
+        ),
+        None,
+    )
+    company_fragment = existing or synthesis.EvidenceFragmentV1(
+        fragment_id="vacancy:company-bearing-mandate-mutation",
+        artifact_ref=task_input.vacancy_evidence_ref,
+        source_kind="vacancy",
+        source_locator=company_artifact_fragment.source_locator,
+        permitted_dimensions=("mandate_fit",),
+        text=company_artifact_fragment.text,
+        text_sha256=company_hash,
+        allowed_claims=(
+            synthesis.AllowedEvidenceClaimV1(
+                claim_code="vacancy_description_mandate_fit_explicit",
+                dimension="mandate_fit",
+                status="explicit",
+                statement=company_artifact_fragment.text,
+            ),
+        ),
+    )
+    unsafe_input = task_input.model_copy(deep=True)
+    if existing is None:
+        object.__setattr__(
+            unsafe_input,
+            "fragments",
+            (*unsafe_input.fragments, company_fragment),
+        )
+    object.__setattr__(
+        unsafe_input,
+        "prohibited_company_claim_text_sha256s",
+        (company_hash,),
+    )
+
+    claims: list[dict[str, object]] = []
+    for dimension in synthesis.EvidenceDimension:
+        fragment = (
+            company_fragment
+            if dimension is synthesis.EvidenceDimension.MANDATE_FIT
+            else next(
+                item
+                for item in unsafe_input.fragments
+                if any(claim.dimension is dimension for claim in item.allowed_claims)
+            )
+        )
+        allowed = next(
+            claim for claim in fragment.allowed_claims if claim.dimension is dimension
+        )
+        claims.append({
+            "claim_id": f"claim:{dimension.value}",
+            "dimension": dimension.value,
+            "status": allowed.status.value,
+            "claim_code": allowed.claim_code,
+            "statement": allowed.statement,
+            "citations": [fragment.fragment_id],
+        })
+    payload = {
+        "schema_version": "2.0.0",
+        "claims": claims,
+        "conflicts": [],
+        "question_candidates": [],
+    }
+
+    assert (
+        synthesis.validate_provider_payload_v2(
+            payload,
+            synthesis_input=unsafe_input,
+        )
+        is synthesis.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    )
+
+
+def test_readiness_summary_uses_v2_provider_schema_hash_consistently() -> None:
+    summary_path = (
+        Path(gate_b.__file__).resolve().parents[2]
+        / "docs/evidence/product-search-gate-b/benchmark-summary.json"
+    )
+    summary = json.loads(summary_path.read_text())
+    expected = "428586420dd32c64343c5ac8d59466870319037ab84702b0c7ee1866bf5274ab"
+    assert summary["record_identity"]["provider_output_schema_sha256"] == expected
+    assert summary["candidate_hashes"]["provider_output_schema_sha256"] == expected
 
 
 def test_decision_adapter_never_elevates_unavailable_company_authority(
@@ -399,7 +527,7 @@ def test_single_public_record_runner_owns_live_factory_and_input_loader(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
-    os.environ.pop("HERMES_STEP_5A_LIVE_LLM_APPROVED", None)
+    monkeypatch.delenv(LIVE_APPROVAL_ENV, raising=False)
     with pytest.raises(LLMProviderError, match="live_calls_not_approved"):
         gate_b.run_gate_b_record(authorization=authorization)
     assert not (authorization.experiment_root / "run-ledger.sqlite3").exists()
