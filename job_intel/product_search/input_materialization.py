@@ -4,9 +4,10 @@ from __future__ import annotations
 from enum import Enum
 import hashlib
 import ipaddress
+import json
 import re
 from typing import Annotated, Literal
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from urllib.parse import SplitResult, unquote_to_bytes, urlsplit, urlunsplit
 
 import idna
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -39,15 +40,56 @@ class DiscoveryRootClass(str, Enum):
     AGGREGATOR = "aggregator"
 
 
+class SourceFamily(str, Enum):
+    GREENHOUSE = "greenhouse"
+    LEVER = "lever"
+    ASHBY = "ashby"
+    SMARTRECRUITERS = "smartrecruiters"
+    TEAMTAILOR = "teamtailor"
+    RECRUITEE = "recruitee"
+    PERSONIO = "personio"
+    LINKEDIN = "linkedin"
+    HEADHUNTER = "headhunter"
+    REMOTEOK = "remoteok"
+    DUCKDUCKGO = "duckduckgo"
+    COMPANY_WEBSITE = "company_website"
+
+
+class ExtractionRule(str, Enum):
+    ANCHOR_REL_OFFICIAL = "anchor_rel_official"
+
+
+_SOURCE_POLICY = {
+    SourceFamily.GREENHOUSE: (DiscoveryRootClass.OFFICIAL_ATS, ("greenhouse.io",)),
+    SourceFamily.LEVER: (DiscoveryRootClass.OFFICIAL_ATS, ("lever.co",)),
+    SourceFamily.ASHBY: (DiscoveryRootClass.OFFICIAL_ATS, ("ashbyhq.com",)),
+    SourceFamily.SMARTRECRUITERS: (DiscoveryRootClass.OFFICIAL_ATS, ("smartrecruiters.com",)),
+    SourceFamily.TEAMTAILOR: (DiscoveryRootClass.OFFICIAL_ATS, ("teamtailor.com",)),
+    SourceFamily.RECRUITEE: (DiscoveryRootClass.OFFICIAL_ATS, ("recruitee.com",)),
+    SourceFamily.PERSONIO: (DiscoveryRootClass.OFFICIAL_ATS, ("personio.com",)),
+    SourceFamily.LINKEDIN: (DiscoveryRootClass.AGGREGATOR, ("linkedin.com",)),
+    SourceFamily.HEADHUNTER: (DiscoveryRootClass.AGGREGATOR, ("hh.ru", "hh.kz")),
+    SourceFamily.REMOTEOK: (DiscoveryRootClass.AGGREGATOR, ("remoteok.com",)),
+    SourceFamily.DUCKDUCKGO: (DiscoveryRootClass.AGGREGATOR, ("duckduckgo.com",)),
+}
+
+
 _ATS_AGGREGATOR_HOSTS = frozenset({
-    "boards.greenhouse.io", "job-boards.greenhouse.io", "jobs.lever.co",
-    "jobs.ashbyhq.com", "linkedin.com", "www.linkedin.com", "hh.kz", "hh.ru",
-    "remoteok.com", "www.remoteok.com",
+    "greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com",
+    "teamtailor.com", "recruitee.com", "personio.com", "linkedin.com",
+    "hh.kz", "hh.ru", "remoteok.com", "duckduckgo.com",
 })
-_SENSITIVE_QUERY = re.compile(
-    r"(?:access[_-]?token|api[_-]?key|auth|authorization|credential|jwt|password|secret|session|signature|signed|sig)", re.I
+_SENSITIVE_QUERY_NAMES = frozenset({
+    "token", "access_token", "api_key", "auth", "authorization", "credential",
+    "jwt", "password", "secret", "session", "signature", "signed", "sig",
+    "x_amz_credential", "x_amz_signature", "x_amz_security_token",
+    "x_goog_credential", "x_goog_signature", "google_access_id",
+    "aws_access_key_id", "awsaccesskeyid", "policy", "key_pair_id", "expires",
+})
+_TOKEN_VALUE = re.compile(
+    r"(?:eyJ[A-Za-z0-9_-]{8,}\.|Bearer\s|(?:token|api[_-]?key|signature|secret|password)=|[A-Za-z0-9_-]{32,})",
+    re.I,
 )
-_TOKEN_VALUE = re.compile(r"(?:eyJ[A-Za-z0-9_-]{8,}\.|Bearer\s|[A-Za-z0-9_-]{32,})")
 
 
 def _canonical_uri(uri: str) -> tuple[str, str]:
@@ -61,8 +103,18 @@ def _canonical_uri(uri: str) -> tuple[str, str]:
     if parsed.username is not None or parsed.password is not None or "#" in uri:
         raise ValueError("URI must not contain credentials or fragment")
     for component in parsed.query.split("&") if parsed.query else ():
+        if ";" in component:
+            raise ValueError("alternate query separators are prohibited")
         name, _, value = component.partition("=")
-        if _SENSITIVE_QUERY.search(name) or _TOKEN_VALUE.search(value):
+        if re.search(r"%(?![0-9A-Fa-f]{2})", name + value):
+            raise ValueError("malformed percent escape in query")
+        try:
+            decoded_name = unquote_to_bytes(name.replace("+", " ")).decode("utf-8", "strict")
+            decoded_value = unquote_to_bytes(value.replace("+", " ")).decode("utf-8", "strict")
+        except UnicodeError as exc:
+            raise ValueError("query is not valid UTF-8") from exc
+        normalized_name = re.sub(r"[-.]", "_", decoded_name.casefold())
+        if normalized_name in _SENSITIVE_QUERY_NAMES or _TOKEN_VALUE.search(decoded_value):
             raise ValueError("credential-like query data is prohibited")
     if port not in (None, 443):
         raise ValueError("non-default HTTPS port is prohibited")
@@ -99,6 +151,7 @@ class SourcePlan(_ClosedModel):
     schema_version: Literal["1.0.0"] = "1.0.0"
     selection_key: str = Field(pattern=SHA256)
     company_label: str = Field(min_length=1)
+    source_family: SourceFamily
     root_class: DiscoveryRootClass
     discovery_roots: tuple[str] = Field(min_length=1, max_length=1)
     max_requests: Literal[3] = 3
@@ -110,6 +163,22 @@ class SourcePlan(_ClosedModel):
         _canonical_uri(value[0])
         return value
 
+    @model_validator(mode="after")
+    def validate_source_authority(self) -> "SourcePlan":
+        _, host = _canonical_uri(self.discovery_roots[0])
+        if self.source_family is SourceFamily.COMPANY_WEBSITE:
+            expected_class = DiscoveryRootClass.OFFICIAL_COMPANY
+        else:
+            expected_class, service_domains = _SOURCE_POLICY[self.source_family]
+            if not any(
+                host == domain or host.endswith("." + domain)
+                for domain in service_domains
+            ):
+                raise ValueError("source family does not match governed service domain")
+        if self.root_class is not expected_class:
+            raise ValueError("root class must be derived from source family")
+        return self
+
 
 class RequestReceipt(_ClosedModel):
     uri: str
@@ -117,7 +186,7 @@ class RequestReceipt(_ClosedModel):
     content_type: str = Field(min_length=1, max_length=200)
     content_bytes: int = Field(ge=0)
     content_sha256: str = Field(pattern=SHA256)
-    captured_response_text: str = Field(max_length=1_000_000)
+    capture_artifact_sha256: str = Field(pattern=SHA256)
     redirect_to: str | None
 
     @field_validator("uri")
@@ -135,9 +204,8 @@ class RequestReceipt(_ClosedModel):
 
     @model_validator(mode="after")
     def validate_redirect_semantics(self) -> "RequestReceipt":
-        encoded = self.captured_response_text.encode("utf-8")
-        if len(encoded) != self.content_bytes or hashlib.sha256(encoded).hexdigest() != self.content_sha256:
-            raise ValueError("captured response bytes do not match size/hash")
+        if self.capture_artifact_sha256 != self.content_sha256:
+            raise ValueError("capture artifact must match response content hash")
         is_redirect = self.status in {301, 302, 303, 307, 308}
         if is_redirect != (self.redirect_to is not None):
             raise ValueError("redirect status and target must agree")
@@ -147,10 +215,14 @@ class RequestReceipt(_ClosedModel):
 class OfficialLinkReceipt(_ClosedModel):
     uri: str
     relation: OfficialLinkRelation
+    extraction_rule: ExtractionRule
     source_request_uri: str
     evidence_sha256: str = Field(pattern=SHA256)
+    capture_artifact_sha256: str = Field(pattern=SHA256)
     extraction_fragment: str = Field(min_length=1, max_length=4096)
     extraction_sha256: str = Field(pattern=SHA256)
+    byte_start: int = Field(ge=0)
+    byte_end: int = Field(gt=0)
 
     @field_validator("uri", "source_request_uri")
     @classmethod
@@ -164,6 +236,24 @@ class OfficialLinkReceipt(_ClosedModel):
             raise ValueError("extraction fragment hash mismatch")
         if self.uri not in self.extraction_fragment:
             raise ValueError("official link does not occur in extraction fragment")
+        if self.byte_end - self.byte_start != len(self.extraction_fragment.encode()):
+            raise ValueError("extraction byte range does not match fragment")
+        folded = self.extraction_fragment.casefold()
+        markers = (
+            "hermes-private://", "private resume", "candidate profile", "bearer ",
+            "access_token", "api_key", "token=", "password=", "secret=",
+        )
+        if any(marker in folded for marker in markers):
+            raise ValueError("extraction fragment contains prohibited marker")
+        if self.extraction_rule is ExtractionRule.ANCHOR_REL_OFFICIAL:
+            required = (
+                re.search(r"<a\b", self.extraction_fragment, re.I),
+                re.search(r"\bhref=[\"']" + re.escape(self.uri) + r"[\"']", self.extraction_fragment, re.I),
+                re.search(r"\brel=[\"']official[\"']", self.extraction_fragment, re.I),
+                re.search(r"\bdata-relation=[\"']" + re.escape(self.relation.value) + r"[\"']", self.extraction_fragment, re.I),
+            )
+            if not all(required):
+                raise ValueError("fragment does not satisfy official anchor rule")
         return self
 
 
@@ -172,6 +262,20 @@ class DiscoveryReceipt(_ClosedModel):
     root_uri: str
     requests: tuple[RequestReceipt, ...] = Field(max_length=3)
     explicit_official_links: tuple[OfficialLinkReceipt, ...]
+    identity_sha256: str = Field(pattern=SHA256)
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_identity(cls, value: object) -> object:
+        if isinstance(value, dict):
+            payload = dict(value)
+            unsigned = {key: item for key, item in payload.items() if key != "identity_sha256"}
+            expected = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            if "identity_sha256" in payload and payload["identity_sha256"] != expected:
+                raise ValueError("discovery receipt identity mismatch")
+            payload["identity_sha256"] = expected
+            return payload
+        return value
 
     @field_validator("root_uri")
     @classmethod
@@ -195,6 +299,11 @@ class DiscoveryReceipt(_ClosedModel):
                 raise ValueError("non-redirect response cannot have a successor")
         if redirects > 2:
             raise ValueError("redirect cap exceeded")
+        requests = {(item.uri, item.content_sha256): item for item in self.requests}
+        for link in self.explicit_official_links:
+            request = requests.get((link.source_request_uri, link.evidence_sha256))
+            if request is None or link.capture_artifact_sha256 != request.capture_artifact_sha256:
+                raise ValueError("extraction proof does not match capture artifact")
         return self
 
 
@@ -206,7 +315,11 @@ class AdmittedOfficialDomain(_ClosedModel):
     root_class: DiscoveryRootClass
     source_request_uri: str
     relation: OfficialLinkRelation
+    extraction_rule: ExtractionRule
+    capture_artifact_sha256: str = Field(pattern=SHA256)
     extraction_sha256: str = Field(pattern=SHA256)
+    byte_start: int = Field(ge=0)
+    byte_end: int = Field(gt=0)
     domain: str
     canonical_uri: str
     evidence_display_uri: str
@@ -229,6 +342,8 @@ class AdmittedIdentityOutcome(_ClosedModel):
     schema_version: Literal["1.0.0"] = "1.0.0"
     status: Literal["admitted"] = "admitted"
     source_plan: SourcePlan
+    discovery_receipt: DiscoveryReceipt
+    receipt_sha256: str = Field(pattern=SHA256)
     authority: AdmittedOfficialDomain
 
     @model_validator(mode="after")
@@ -238,8 +353,23 @@ class AdmittedIdentityOutcome(_ClosedModel):
             or self.authority.company_label != self.source_plan.company_label
             or self.authority.exact_root_uri != self.source_plan.discovery_roots[0]
             or self.authority.root_class is not self.source_plan.root_class
+            or self.receipt_sha256 != self.discovery_receipt.identity_sha256
         ):
             raise ValueError("admitted authority does not match source plan")
+        links = [
+            link for link in self.discovery_receipt.explicit_official_links
+            if link.source_request_uri == self.authority.source_request_uri
+            and link.relation is self.authority.relation
+            and link.extraction_rule is self.authority.extraction_rule
+            and link.capture_artifact_sha256 == self.authority.capture_artifact_sha256
+            and link.evidence_sha256 == self.authority.evidence_sha256
+            and link.extraction_sha256 == self.authority.extraction_sha256
+            and link.byte_start == self.authority.byte_start
+            and link.byte_end == self.authority.byte_end
+            and _canonical_uri(link.uri)[1] == self.authority.domain
+        ]
+        if len(links) != 1:
+            raise ValueError("admitted authority evidence binding is invalid")
         return self
 
 
@@ -260,10 +390,16 @@ DiscoveryOutcome = Annotated[
 ]
 
 
-def build_source_plan(*, selection_key: str, company_label: str, vacancy_uri: str, root_class: DiscoveryRootClass) -> SourcePlan:
+def build_source_plan(*, selection_key: str, company_label: str, vacancy_uri: str, source_family: SourceFamily) -> SourcePlan:
+    root_class = (
+        DiscoveryRootClass.OFFICIAL_COMPANY
+        if source_family is SourceFamily.COMPANY_WEBSITE
+        else _SOURCE_POLICY[source_family][0]
+    )
     return SourcePlan(
         selection_key=selection_key,
         company_label=company_label,
+        source_family=source_family,
         root_class=root_class,
         discovery_roots=(vacancy_uri,),
     )
@@ -283,10 +419,13 @@ def admit_official_domain(
     candidates: dict[str, OfficialLinkReceipt] = {}
     for link in receipt.explicit_official_links:
         request = captured.get((link.source_request_uri, link.evidence_sha256))
-        if request is None or link.extraction_fragment not in request.captured_response_text:
+        if request is None:
             continue
         canonical_uri, domain = _canonical_uri(link.uri)
-        if domain == root_domain or domain in _ATS_AGGREGATOR_HOSTS:
+        is_service = any(domain == item or domain.endswith("." + item) for item in _ATS_AGGREGATOR_HOSTS)
+        if is_service or (
+            domain == root_domain and plan.root_class is not DiscoveryRootClass.OFFICIAL_COMPANY
+        ):
             continue
         candidates.setdefault(domain, link)
     if not candidates:
@@ -297,6 +436,8 @@ def admit_official_domain(
     canonical_uri, _ = _canonical_uri(link.uri)
     return AdmittedIdentityOutcome(
         source_plan=plan,
+        discovery_receipt=receipt,
+        receipt_sha256=receipt.identity_sha256,
         authority=AdmittedOfficialDomain(
             selection_key=plan.selection_key,
             company_label=plan.company_label,
@@ -304,7 +445,11 @@ def admit_official_domain(
             root_class=plan.root_class,
             source_request_uri=link.source_request_uri,
             relation=link.relation,
+            extraction_rule=link.extraction_rule,
+            capture_artifact_sha256=link.capture_artifact_sha256,
             extraction_sha256=link.extraction_sha256,
+            byte_start=link.byte_start,
+            byte_end=link.byte_end,
             domain=domain,
             canonical_uri=canonical_uri,
             evidence_display_uri=link.uri,
