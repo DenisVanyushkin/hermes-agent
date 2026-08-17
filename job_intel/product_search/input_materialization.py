@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import stat
 from typing import Annotated, Any, Literal, Self
+from types import MappingProxyType
 import unicodedata
 from urllib.parse import (
     SplitResult,
@@ -36,6 +37,23 @@ from pydantic import model_validator
 
 SHA256 = r"^[0-9a-f]{64}$"
 GATE_A_RUN_ID = "gate-a-20260816T141344Z"
+PINNED_GATE_A_COMMIT = "65d60daae16093a9a7e34a11a159e2f789dd14dd"
+PINNED_GATE_A_MANIFEST_SHA256 = (
+    "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d"
+)
+PINNED_GATE_B_CORPUS_SHA256 = (
+    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
+)
+PINNED_GATE_B_CORPUS_RECORD_COUNT = 48
+CANONICAL_GATE_A_ROOT = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-a/"
+    "65d60daae16093a9a7e34a11a159e2f789dd14dd"
+)
+CANONICAL_GATE_B_CORPUS_ROOT = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-b/"
+    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
+)
+SOURCE_AUTHORITY_POLICY_VERSION = "1.0.0"
 _MAX_ARTIFACT_BYTES = 1_000_000
 
 
@@ -85,35 +103,70 @@ class ExtractionRule(str, Enum):
     HTML_ANCHOR_TEXT_V1 = "html_anchor_text_v1"
 
 
-_ATS_HOSTS = frozenset({
-    "greenhouse.io",
-    "lever.co",
-    "ashbyhq.com",
-    "smartrecruiters.com",
-    "teamtailor.com",
-    "recruitee.com",
-    "personio.com",
-})
-_AGGREGATOR_HOSTS = frozenset({
-    "linkedin.com",
-    "hh.kz",
-    "hh.ru",
-    "remoteok.com",
-    "remotive.com",
-    "duckduckgo.com",
-    "indeed.com",
-    "indeed.ca",
-    "seek.com",
-    "glassdoor.com",
-    "glassdoor.sg",
-    "glassdoor.com.au",
-    "glassdoor.com.hk",
-    "bayt.com",
-    "ziprecruiter.com",
-    "careervira.com",
-    "builtin.com",
-    "talentup.io",
-    "plane.com",
+class _RootAuthorityMode(str, Enum):
+    OFFICIAL_COMPANY = "official_company"
+    EXTERNAL_OFFICIAL_LINK_ONLY = "external_official_link_only"
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceFamilyAuthority:
+    root_class: DiscoveryRootClass
+    root_authority_mode: _RootAuthorityMode
+
+
+_SOURCE_FAMILY_AUTHORITY_V1 = MappingProxyType({
+    SourceFamily.GREENHOUSE: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.LEVER: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.ASHBY: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.SMARTRECRUITERS: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.TEAMTAILOR: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.RECRUITEE: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.PERSONIO: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_ATS,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.LINKEDIN: _SourceFamilyAuthority(
+        DiscoveryRootClass.AGGREGATOR,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.HEADHUNTER: _SourceFamilyAuthority(
+        DiscoveryRootClass.AGGREGATOR,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.REMOTEOK: _SourceFamilyAuthority(
+        DiscoveryRootClass.AGGREGATOR,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.REMOTIVE: _SourceFamilyAuthority(
+        DiscoveryRootClass.AGGREGATOR,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.DUCKDUCKGO: _SourceFamilyAuthority(
+        DiscoveryRootClass.UNVERIFIED_PUBLIC_RESULT,
+        _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY,
+    ),
+    SourceFamily.COMPANY_WEBSITE: _SourceFamilyAuthority(
+        DiscoveryRootClass.OFFICIAL_COMPANY,
+        _RootAuthorityMode.OFFICIAL_COMPANY,
+    ),
 })
 _PUBLIC_QUERY_NAMES = frozenset({
     "q",
@@ -302,17 +355,23 @@ def _canonical_uri(uri: str) -> tuple[str, str]:
     return canonical, ascii_host
 
 
-def _is_service_domain(domain: str, domains: frozenset[str]) -> bool:
-    return any(domain == item or domain.endswith("." + item) for item in domains)
+def _source_family_authority(
+    source_family: SourceFamily,
+) -> _SourceFamilyAuthority:
+    if set(_SOURCE_FAMILY_AUTHORITY_V1) != set(SourceFamily):
+        raise ValueError("source-family authority policy is not total")
+    try:
+        return _SOURCE_FAMILY_AUTHORITY_V1[source_family]
+    except KeyError as exc:
+        raise ValueError("source family has no governed authority policy") from exc
 
 
-def _classify_root(uri: str) -> DiscoveryRootClass:
-    _, domain = _canonical_uri(uri)
-    if _is_service_domain(domain, _ATS_HOSTS):
-        return DiscoveryRootClass.OFFICIAL_ATS
-    if _is_service_domain(domain, _AGGREGATOR_HOSTS):
-        return DiscoveryRootClass.AGGREGATOR
-    return DiscoveryRootClass.UNVERIFIED_PUBLIC_RESULT
+def _registrable_scope(domain: str) -> str:
+    """Return a conservative registrable scope without a network PSL lookup."""
+    labels = domain.split(".")
+    if len(labels) < 2:
+        raise ValueError("registrable domain scope is unavailable")
+    return ".".join(labels[-2:])
 
 
 def _seal_model_identity(model: BaseModel) -> None:
@@ -331,23 +390,81 @@ def _identity(model: BaseModel) -> str:
     return value
 
 
-def _read_contained_nofollow(
+@dataclass(frozen=True, slots=True)
+class _DirectoryProof:
+    device: int
+    inode: int
+    mode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ArtifactProof:
+    device: int
+    inode: int
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+    directory_chain: tuple[_DirectoryProof, ...]
+
+
+def _directory_proofs(descriptors: Sequence[int]) -> tuple[_DirectoryProof, ...]:
+    return tuple(
+        _DirectoryProof(
+            device=file_stat.st_dev,
+            inode=file_stat.st_ino,
+            mode=file_stat.st_mode,
+        )
+        for file_stat in (os.fstat(descriptor) for descriptor in descriptors)
+    )
+
+
+def _open_directory_nofollow(path: Path | str) -> tuple[int, list[int]]:
+    root = Path(path)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        if root.is_absolute():
+            current = os.open(os.sep, directory_flags | nofollow)
+            parts = root.parts[1:]
+        else:
+            current = os.open(".", directory_flags | nofollow)
+            parts = root.parts
+        descriptors.append(current)
+        for part in parts:
+            if part in {"", ".", ".."}:
+                raise ValueError("artifact root is not a canonical contained path")
+            current = os.open(part, directory_flags | nofollow, dir_fd=current)
+            descriptors.append(current)
+        return current, descriptors
+    except (OSError, ValueError):
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+
+
+def _read_contained_nofollow_with_proof(
     root: Path | str,
     reference: str,
     *,
     label: str,
     maximum_bytes: int = _MAX_ARTIFACT_BYTES,
-) -> bytes:
+) -> tuple[bytes, _ArtifactProof]:
     relative = Path(reference)
-    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+    if (
+        relative.is_absolute()
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
         raise ValueError(f"{label} reference is not contained")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[int] = []
     file_descriptor: int | None = None
     try:
-        current = os.open(os.fspath(root), directory_flags | nofollow)
-        descriptors.append(current)
+        current, descriptors = _open_directory_nofollow(root)
         for part in relative.parts[:-1]:
             current = os.open(part, directory_flags | nofollow, dir_fd=current)
             descriptors.append(current)
@@ -356,15 +473,46 @@ def _read_contained_nofollow(
             os.O_RDONLY | nofollow,
             dir_fd=current,
         )
-        file_stat = os.fstat(file_descriptor)
-        if not stat.S_ISREG(file_stat.st_mode):
+        directories_before = _directory_proofs(descriptors)
+        before = os.fstat(file_descriptor)
+        if not stat.S_ISREG(before.st_mode):
             raise ValueError(f"{label} is not a regular file")
         chunks: list[bytes] = []
         total = 0
         while True:
             chunk = os.read(file_descriptor, min(1024 * 1024, maximum_bytes + 1))
             if not chunk:
-                return b"".join(chunks)
+                payload = b"".join(chunks)
+                after = os.fstat(file_descriptor)
+                directories_after = _directory_proofs(descriptors)
+                if (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mode,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                ) != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mode,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                ):
+                    raise ValueError(f"{label} changed during no-follow read")
+                if directories_before != directories_after:
+                    raise ValueError(f"{label} path changed during no-follow read")
+                return payload, _ArtifactProof(
+                    device=after.st_dev,
+                    inode=after.st_ino,
+                    mode=after.st_mode,
+                    size=after.st_size,
+                    mtime_ns=after.st_mtime_ns,
+                    ctime_ns=after.st_ctime_ns,
+                    sha256=_sha256_bytes(payload),
+                    directory_chain=directories_after,
+                )
             total += len(chunk)
             if total > maximum_bytes:
                 raise ValueError(f"{label} exceeds the byte limit")
@@ -378,6 +526,22 @@ def _read_contained_nofollow(
             os.close(file_descriptor)
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _read_contained_nofollow(
+    root: Path | str,
+    reference: str,
+    *,
+    label: str,
+    maximum_bytes: int = _MAX_ARTIFACT_BYTES,
+) -> bytes:
+    payload, _ = _read_contained_nofollow_with_proof(
+        root,
+        reference,
+        label=label,
+        maximum_bytes=maximum_bytes,
+    )
+    return payload
 
 
 def _gate_a_canonical_url(raw: str) -> str:
@@ -411,6 +575,9 @@ def _gate_a_canonical_url(raw: str) -> str:
 class PinnedGateACorpusRow(_ClosedModel):
     schema_version: Literal["1.0.0"] = "1.0.0"
     corpus_manifest_sha256: str = Field(pattern=SHA256)
+    corpus_row_index: int = Field(ge=0)
+    gate_a_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    gate_a_manifest_sha256: str = Field(pattern=SHA256)
     run_id: Literal["gate-a-20260816T141344Z"]
     selection_key: str = Field(pattern=SHA256)
     canonical_identity_sha256: str = Field(pattern=SHA256)
@@ -432,8 +599,15 @@ class PinnedGateACorpusRow(_ClosedModel):
 
     @model_validator(mode="after")
     def validate_pinned_identity(self) -> Self:
-        if self.source_family is SourceFamily.COMPANY_WEBSITE:
-            raise ValueError("company_website is not a Gate A acquisition source")
+        if self.corpus_manifest_sha256 != PINNED_GATE_B_CORPUS_SHA256:
+            raise ValueError("row is not bound to the pinned Gate B corpus")
+        if self.gate_a_commit != PINNED_GATE_A_COMMIT:
+            raise ValueError("row is not bound to the pinned Gate A commit")
+        if self.gate_a_manifest_sha256 != PINNED_GATE_A_MANIFEST_SHA256:
+            raise ValueError("row is not bound to the pinned Gate A manifest")
+        if _sha256_bytes(self.vacancy_uri.encode()) != (self.canonical_identity_sha256):
+            raise ValueError("pinned Gate A canonical vacancy identity mismatch")
+        _source_family_authority(self.source_family)
         expected_selection = _sha256_json({
             "run_id": self.run_id,
             "source_family": self.source_family.value,
@@ -446,23 +620,60 @@ class PinnedGateACorpusRow(_ClosedModel):
         return self
 
 
-def load_pinned_gate_a_row(
+@dataclass(frozen=True, slots=True)
+class _LoadedGateAuthority:
+    row: PinnedGateACorpusRow
+    corpus_manifest_proof: _ArtifactProof
+    gate_a_manifest_proof: _ArtifactProof
+    raw_artifact_proof: _ArtifactProof
+
+
+def _top_level_yaml_scalar(payload: bytes, name: str) -> str:
+    try:
+        text = payload.decode("utf-8", "strict")
+    except UnicodeError as exc:
+        raise ValueError("Gate A manifest is not valid UTF-8") from exc
+    matches = re.findall(
+        rf"(?m)^{re.escape(name)}:[ \t]*([^\s#]+)[ \t]*$",
+        text,
+    )
+    if len(matches) != 1:
+        raise ValueError(f"Gate A manifest {name} is unavailable")
+    return matches[0]
+
+
+def _load_canonical_gate_authority_once(
     *,
-    corpus_root: Path | str,
-    expected_corpus_sha256: str,
-    gate_a_root: Path | str,
     selection_key: str,
-) -> PinnedGateACorpusRow:
-    """Load one row from the hash-pinned corpus and revalidate its Gate A bytes."""
-    if not re.fullmatch(SHA256[1:-1], expected_corpus_sha256):
-        raise ValueError("expected corpus manifest sha256 is invalid")
-    manifest_bytes = _read_contained_nofollow(
-        corpus_root,
+) -> _LoadedGateAuthority:
+    if not re.fullmatch(SHA256[1:-1], selection_key):
+        raise ValueError("selection key is invalid")
+    gate_a_manifest_bytes, gate_a_manifest_proof = _read_contained_nofollow_with_proof(
+        CANONICAL_GATE_A_ROOT,
+        "manifest.yaml",
+        label="pinned Gate A manifest",
+        maximum_bytes=64 * 1024,
+    )
+    if gate_a_manifest_proof.sha256 != PINNED_GATE_A_MANIFEST_SHA256:
+        raise ValueError("pinned Gate A manifest sha256 mismatch")
+    if (
+        _top_level_yaml_scalar(gate_a_manifest_bytes, "schema_version") != "1.0.0"
+        or _top_level_yaml_scalar(gate_a_manifest_bytes, "gate") != "gate-a"
+    ):
+        raise ValueError("pinned Gate A manifest identity mismatch")
+    if _top_level_yaml_scalar(gate_a_manifest_bytes, "commit") != PINNED_GATE_A_COMMIT:
+        raise ValueError("pinned Gate A commit mismatch")
+    if _top_level_yaml_scalar(gate_a_manifest_bytes, "root") != os.fspath(
+        CANONICAL_GATE_A_ROOT
+    ):
+        raise ValueError("pinned Gate A manifest root mismatch")
+    manifest_bytes, corpus_manifest_proof = _read_contained_nofollow_with_proof(
+        CANONICAL_GATE_B_CORPUS_ROOT,
         "corpus-manifest.json",
         label="corpus manifest",
         maximum_bytes=4 * 1024 * 1024,
     )
-    if _sha256_bytes(manifest_bytes) != expected_corpus_sha256:
+    if corpus_manifest_proof.sha256 != PINNED_GATE_B_CORPUS_SHA256:
         raise ValueError("corpus manifest sha256 mismatch")
     try:
         manifest = json.loads(manifest_bytes)
@@ -470,22 +681,46 @@ def load_pinned_gate_a_row(
         raise ValueError("corpus manifest is not valid UTF-8 JSON") from exc
     if not isinstance(manifest, dict) or manifest.get("schema_version") != "1.0.0":
         raise ValueError("corpus manifest schema is not v1")
-    if (
+    gate_a_identity = manifest.get("gate_a")
+    if not isinstance(gate_a_identity, dict) or (
         manifest.get("gate") != "gate-b"
-        or manifest.get("gate_a", {}).get("run_id") != GATE_A_RUN_ID
+        or gate_a_identity.get("run_id") != GATE_A_RUN_ID
+        or gate_a_identity.get("commit") != PINNED_GATE_A_COMMIT
+        or gate_a_identity.get("manifest_sha256") != PINNED_GATE_A_MANIFEST_SHA256
     ):
         raise ValueError("corpus manifest Gate A identity mismatch")
     records = manifest.get("records")
-    if not isinstance(records, list):
+    selection = manifest.get("selection")
+    if (
+        not isinstance(records, list)
+        or len(records) != PINNED_GATE_B_CORPUS_RECORD_COUNT
+        or not isinstance(selection, dict)
+        or selection.get("sample_size") != PINNED_GATE_B_CORPUS_RECORD_COUNT
+    ):
         raise ValueError("corpus manifest records are invalid")
-    matches = [
-        record
+    if any(
+        not isinstance(record, dict) or record.get("run_id") != GATE_A_RUN_ID
         for record in records
-        if isinstance(record, dict) and record.get("selection_key") == selection_key
+    ):
+        raise ValueError("corpus manifest contains a mixed Gate A run")
+    selection_keys = [record.get("selection_key") for record in records]
+    if (
+        any(
+            not isinstance(key, str) or not re.fullmatch(SHA256[1:-1], key)
+            for key in selection_keys
+        )
+        or len(set(selection_keys)) != len(selection_keys)
+        or selection_keys != sorted(selection_keys)
+    ):
+        raise ValueError("corpus manifest is not in canonical order")
+    matches = [
+        (index, record)
+        for index, record in enumerate(records)
+        if record.get("selection_key") == selection_key
     ]
     if len(matches) != 1:
         raise ValueError("pinned Gate A row selection is not unique")
-    record = matches[0]
+    corpus_row_index, record = matches[0]
     raw_sha256 = record.get("raw_content_sha256")
     raw_reference = record.get("raw_reference")
     if (
@@ -494,12 +729,12 @@ def load_pinned_gate_a_row(
         or raw_reference != f"raw-evidence/{raw_sha256}.json"
     ):
         raise ValueError("pinned Gate A row raw artifact identity mismatch")
-    raw_bytes = _read_contained_nofollow(
-        gate_a_root,
+    raw_bytes, raw_artifact_proof = _read_contained_nofollow_with_proof(
+        CANONICAL_GATE_A_ROOT,
         raw_reference,
         label="pinned Gate A raw artifact",
     )
-    if _sha256_bytes(raw_bytes) != raw_sha256:
+    if raw_artifact_proof.sha256 != raw_sha256:
         raise ValueError("pinned Gate A raw artifact sha256 mismatch")
     try:
         raw = json.loads(raw_bytes)
@@ -524,22 +759,47 @@ def load_pinned_gate_a_row(
     canonical_uri, _ = _canonical_uri(gate_a_uri)
     if canonical_uri != gate_a_uri:
         raise ValueError("pinned Gate A row vacancy URI is not canonical")
-    return PinnedGateACorpusRow(
-        corpus_manifest_sha256=expected_corpus_sha256,
-        run_id=record.get("run_id"),
-        selection_key=record.get("selection_key"),
-        canonical_identity_sha256=record.get("canonical_identity_sha256"),
-        source_family=record.get("source_family"),
-        source_id=record.get("source_id"),
-        query_id=record.get("query_id"),
-        raw_content_sha256=raw_sha256,
-        company_label=record.get("company"),
-        vacancy_uri=canonical_uri,
+    return _LoadedGateAuthority(
+        row=PinnedGateACorpusRow(
+            corpus_manifest_sha256=PINNED_GATE_B_CORPUS_SHA256,
+            corpus_row_index=corpus_row_index,
+            gate_a_commit=PINNED_GATE_A_COMMIT,
+            gate_a_manifest_sha256=PINNED_GATE_A_MANIFEST_SHA256,
+            run_id=record.get("run_id"),
+            selection_key=record.get("selection_key"),
+            canonical_identity_sha256=record.get("canonical_identity_sha256"),
+            source_family=record.get("source_family"),
+            source_id=record.get("source_id"),
+            query_id=record.get("query_id"),
+            raw_content_sha256=raw_sha256,
+            company_label=record.get("company"),
+            vacancy_uri=canonical_uri,
+        ),
+        corpus_manifest_proof=corpus_manifest_proof,
+        gate_a_manifest_proof=gate_a_manifest_proof,
+        raw_artifact_proof=raw_artifact_proof,
     )
+
+
+def _load_canonical_gate_authority(
+    *,
+    selection_key: str,
+) -> _LoadedGateAuthority:
+    first = _load_canonical_gate_authority_once(selection_key=selection_key)
+    second = _load_canonical_gate_authority_once(selection_key=selection_key)
+    if first != second:
+        raise ValueError("canonical Gate A authority changed during validation")
+    return first
+
+
+def load_pinned_gate_a_row(*, selection_key: str) -> PinnedGateACorpusRow:
+    """Return an audit DTO reloaded only from the exact canonical evidence chain."""
+    return _load_canonical_gate_authority(selection_key=selection_key).row
 
 
 class SourcePlan(_ClosedModel):
     schema_version: Literal["1.0.0"] = "1.0.0"
+    authority_policy_version: Literal["1.0.0"] = "1.0.0"
     pinned_row: PinnedGateACorpusRow
     root_class: DiscoveryRootClass
     discovery_roots: tuple[str, ...] = Field(min_length=1, max_length=1)
@@ -555,21 +815,30 @@ class SourcePlan(_ClosedModel):
 
     @model_validator(mode="after")
     def validate_source_authority(self) -> Self:
+        if self.authority_policy_version != SOURCE_AUTHORITY_POLICY_VERSION:
+            raise ValueError("source-family authority policy version mismatch")
         expected_root = self.pinned_row.vacancy_uri
         if self.discovery_roots != (expected_root,):
             raise ValueError("source root must come from the pinned Gate A row")
-        if self.root_class is not _classify_root(expected_root):
-            raise ValueError("root class must be derived from the pinned vacancy host")
+        policy = _source_family_authority(self.pinned_row.source_family)
+        if self.root_class is not policy.root_class:
+            raise ValueError("root class must be derived from the source-family policy")
         _seal_model_identity(self)
         return self
 
 
-def build_source_plan(pinned_row: PinnedGateACorpusRow) -> SourcePlan:
+def _build_source_plan(pinned_row: PinnedGateACorpusRow) -> SourcePlan:
+    policy = _source_family_authority(pinned_row.source_family)
     return SourcePlan(
         pinned_row=pinned_row,
-        root_class=_classify_root(pinned_row.vacancy_uri),
+        root_class=policy.root_class,
         discovery_roots=(pinned_row.vacancy_uri,),
     )
+
+
+def build_source_plan(*, selection_key: str) -> SourcePlan:
+    authority = _load_canonical_gate_authority(selection_key=selection_key)
+    return _build_source_plan(authority.row)
 
 
 class RequestReceipt(_ClosedModel):
@@ -825,11 +1094,24 @@ class DiscoveryReceipt(_ClosedModel):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class _CaptureArtifactProof:
+    request_uri: str
+    capture_artifact_sha256: str
+    artifact: _ArtifactProof
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedReceiptArtifacts:
+    receipt: DiscoveryReceipt
+    capture_proofs: tuple[_CaptureArtifactProof, ...]
+
+
 def _read_capture_artifact(
     request: RequestReceipt,
     artifacts_root: Path | str,
-) -> bytes:
-    payload = _read_contained_nofollow(
+) -> tuple[bytes, _CaptureArtifactProof]:
+    payload, artifact_proof = _read_contained_nofollow_with_proof(
         artifacts_root,
         request.capture_artifact_sha256,
         label="capture artifact",
@@ -839,16 +1121,22 @@ def _read_capture_artifact(
         raise ValueError("capture artifact byte length mismatch")
     if _sha256_bytes(payload) != request.capture_artifact_sha256:
         raise ValueError("capture artifact sha256 mismatch")
-    return payload
+    return payload, _CaptureArtifactProof(
+        request_uri=request.uri,
+        capture_artifact_sha256=request.capture_artifact_sha256,
+        artifact=artifact_proof,
+    )
 
 
 def _links_from_artifacts(
     requests: Sequence[RequestReceipt],
     artifacts_root: Path | str,
-) -> tuple[OfficialLinkReceipt, ...]:
+) -> tuple[tuple[OfficialLinkReceipt, ...], tuple[_CaptureArtifactProof, ...]]:
     links: list[OfficialLinkReceipt] = []
+    proofs: list[_CaptureArtifactProof] = []
     for request in requests:
-        payload = _read_capture_artifact(request, artifacts_root)
+        payload, proof = _read_capture_artifact(request, artifacts_root)
+        proofs.append(proof)
         media_type = request.content_type.partition(";")[0].strip().casefold()
         if request.status != 200 or media_type != "text/html":
             continue
@@ -869,17 +1157,23 @@ def _links_from_artifacts(
                     byte_end=parsed.byte_end,
                 )
             )
-    return tuple(links)
+    return tuple(links), tuple(proofs)
 
 
 def _verify_receipt_artifacts(
     receipt: DiscoveryReceipt,
     artifacts_root: Path | str,
-) -> DiscoveryReceipt:
-    parsed_links = _links_from_artifacts(receipt.requests, artifacts_root)
+) -> _VerifiedReceiptArtifacts:
+    parsed_links, capture_proofs = _links_from_artifacts(
+        receipt.requests,
+        artifacts_root,
+    )
     if parsed_links != receipt.explicit_official_links:
         raise ValueError("receipt does not match parsed artifact extraction proof")
-    return receipt
+    return _VerifiedReceiptArtifacts(
+        receipt=receipt,
+        capture_proofs=capture_proofs,
+    )
 
 
 def build_discovery_receipt(
@@ -889,7 +1183,7 @@ def build_discovery_receipt(
     artifacts_root: Path | str,
 ) -> DiscoveryReceipt:
     request_tuple = tuple(requests)
-    links = _links_from_artifacts(request_tuple, artifacts_root)
+    links, _ = _links_from_artifacts(request_tuple, artifacts_root)
     return _verify_receipt_artifacts(
         DiscoveryReceipt(
             root_uri=root_uri,
@@ -897,7 +1191,7 @@ def build_discovery_receipt(
             explicit_official_links=links,
         ),
         artifacts_root,
-    )
+    ).receipt
 
 
 def load_discovery_receipt(
@@ -911,7 +1205,7 @@ def load_discovery_receipt(
         receipt = DiscoveryReceipt.model_validate_json(payload)
     else:
         raise TypeError("discovery receipt must be a mapping or JSON bytes")
-    return _verify_receipt_artifacts(receipt, artifacts_root)
+    return _verify_receipt_artifacts(receipt, artifacts_root).receipt
 
 
 class AdmittedOfficialDomain(_ClosedModel):
@@ -1014,46 +1308,44 @@ def _unresolved(reason: MaterializationReason) -> UnresolvedIdentityOutcome:
 
 def _validate_trusted_plan(
     plan: SourcePlan,
-    pinned_row: PinnedGateACorpusRow,
+    authority: _LoadedGateAuthority,
 ) -> None:
-    if plan.pinned_row != pinned_row:
-        raise ValueError("source plan does not match the trusted pinned Gate A row")
-    if plan.discovery_roots != (pinned_row.vacancy_uri,):
-        raise ValueError(
-            "source plan root does not match the trusted pinned Gate A row"
-        )
+    if plan != _build_source_plan(authority.row):
+        raise ValueError("source plan does not match canonical Gate A authority")
 
 
-def admit_official_domain(
-    plan: SourcePlan,
+def _admit_official_domain(
+    authority: _LoadedGateAuthority,
     receipt: DiscoveryReceipt,
-    *,
-    pinned_row: PinnedGateACorpusRow,
-    artifacts_root: Path | str,
 ) -> AdmittedIdentityOutcome | UnresolvedIdentityOutcome:
-    _validate_trusted_plan(plan, pinned_row)
-    receipt = _verify_receipt_artifacts(receipt, artifacts_root)
+    pinned_row = authority.row
+    plan = _build_source_plan(pinned_row)
     if receipt.root_uri != plan.discovery_roots[0]:
         return _unresolved(MaterializationReason.UNRESOLVED_COMPANY_IDENTITY)
     captured = {
         (request.uri, request.content_sha256): request for request in receipt.requests
     }
     _, root_domain = _canonical_uri(receipt.root_uri)
+    source_policy = _source_family_authority(pinned_row.source_family)
     candidates: dict[str, OfficialLinkReceipt] = {}
+    rejected_self_promotion = False
     for link in receipt.explicit_official_links:
         request = captured.get((link.source_request_uri, link.evidence_sha256))
         if request is None:
             continue
         canonical_uri, domain = _canonical_uri(link.uri)
         del canonical_uri
-        is_service = _is_service_domain(domain, _ATS_HOSTS | _AGGREGATOR_HOSTS)
-        if is_service or (
-            domain == root_domain
-            and plan.root_class is not DiscoveryRootClass.OFFICIAL_COMPANY
+        if (
+            source_policy.root_authority_mode
+            is _RootAuthorityMode.EXTERNAL_OFFICIAL_LINK_ONLY
+            and _registrable_scope(domain) == _registrable_scope(root_domain)
         ):
+            rejected_self_promotion = True
             continue
         candidates.setdefault(domain, link)
     if not candidates:
+        if rejected_self_promotion:
+            return _unresolved(MaterializationReason.SOURCE_NOT_ADMISSIBLE)
         return _unresolved(MaterializationReason.UNRESOLVED_COMPANY_IDENTITY)
     if len(candidates) != 1:
         return _unresolved(MaterializationReason.AMBIGUOUS_COMPANY_IDENTITY)
@@ -1086,10 +1378,26 @@ def admit_official_domain(
     )
 
 
+def admit_official_domain(
+    receipt: DiscoveryReceipt,
+    *,
+    selection_key: str,
+    artifacts_root: Path | str,
+) -> AdmittedIdentityOutcome | UnresolvedIdentityOutcome:
+    authority = _load_canonical_gate_authority(selection_key=selection_key)
+    verified_receipt = _verify_receipt_artifacts(receipt, artifacts_root)
+    outcome = _admit_official_domain(authority, verified_receipt.receipt)
+    authority_after = _load_canonical_gate_authority(selection_key=selection_key)
+    receipt_after = _verify_receipt_artifacts(receipt, artifacts_root)
+    if authority_after != authority or receipt_after != verified_receipt:
+        raise ValueError("admission authority changed during validation")
+    return outcome
+
+
 def load_discovery_outcome(
     payload: Mapping[str, Any] | str | bytes,
     *,
-    pinned_row: PinnedGateACorpusRow,
+    selection_key: str,
     artifacts_root: Path | str,
 ) -> AdmittedIdentityOutcome | UnresolvedIdentityOutcome:
     adapter = TypeAdapter(DiscoveryOutcome)
@@ -1101,15 +1409,17 @@ def load_discovery_outcome(
         raise TypeError("discovery outcome must be a mapping or JSON bytes")
     if isinstance(outcome, UnresolvedIdentityOutcome):
         return outcome
-    _validate_trusted_plan(outcome.source_plan, pinned_row)
+    authority = _load_canonical_gate_authority(selection_key=selection_key)
+    if outcome.source_plan.pinned_row.selection_key != selection_key:
+        raise ValueError("serialized outcome selection is not canonical")
+    _validate_trusted_plan(outcome.source_plan, authority)
     verified_receipt = _verify_receipt_artifacts(
         outcome.discovery_receipt,
         artifacts_root,
     )
     expected = admit_official_domain(
-        outcome.source_plan,
-        verified_receipt,
-        pinned_row=pinned_row,
+        verified_receipt.receipt,
+        selection_key=selection_key,
         artifacts_root=artifacts_root,
     )
     if expected != outcome:
