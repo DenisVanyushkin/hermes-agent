@@ -13,6 +13,8 @@ from datetime import datetime, time, timezone
 from fitness.club_config import default_club_id, load_club_rules
 from fitness.digest import render_schedule
 from fitness.invictus_client import BookingRejected, InvictusClient, SessionDead
+from fitness.auth import LoginError, MissingPhoneNumber
+from fitness.models import CLUB_TZ
 from fitness.rules import RuleStore, WatchRule
 from tools.registry import registry
 
@@ -223,6 +225,30 @@ def fitness_watch_remove(rule_id: str) -> str:
 # импортируется, и тулсет не появляется ни в одной платформе. Тесты этого не
 # ловят: они импортируют модуль напрямую, минуя дискавери.
 
+def fitness_login_request(phone_number: str | None = None, person_name: str | None = None) -> str:
+    """Запросить SMS-код Invictus. phone_number — только чтобы сменить номер."""
+    try:
+        number = _client().request_otp(phone_number)
+    except MissingPhoneNumber:
+        return "Нужен номер телефона аккаунта Invictus — продиктуй его."
+    except LoginError as exc:
+        return f"⚠️ Не удалось запросить код: {exc}"
+    who = f"{person_name}, " if person_name else ""
+    return f"{who}код отправлен по SMS на номер …{number[-4:]}. Продиктуй его — я введу."
+
+
+def fitness_login_confirm(code: str) -> str:
+    """Подтвердить код из SMS и сохранить сессию Invictus."""
+    try:
+        session = _client().login(code)
+    except MissingPhoneNumber:
+        return "Сначала запроси код: fitness_login_request."
+    except LoginError as exc:
+        return f"Код не подошёл ({exc}). Запроси новый через fitness_login_request."
+    local = session.expires_at.astimezone(CLUB_TZ).strftime("%d.%m %H:%M")
+    return f"✅ Готово. Сессия Invictus активна до {local} (клубное время)."
+
+
 registry.register(
     name="fitness_schedule",
     toolset=TOOLSET,
@@ -357,6 +383,42 @@ registry.register(
     max_result_size_chars=8000,
 )
 
+registry.register(
+    name="fitness_login_request",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_login_request",
+        "Запросить SMS-код для входа в Invictus. phone_number укажи только чтобы "
+        "залогинить другой номер; person_name — имя для обращения в ответе",
+        _obj(
+            {
+                "phone_number": {"type": "string", "description": "Номер аккаунта (только для смены)"},
+                "person_name": {"type": "string", "description": "Имя для обращения"},
+            }
+        ),
+    ),
+    handler=lambda args, **kw: fitness_login_request(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
+registry.register(
+    name="fitness_login_confirm",
+    toolset=TOOLSET,
+    schema=_schema(
+        "fitness_login_confirm",
+        "Подтвердить вход в Invictus кодом из SMS (после fitness_login_request)",
+        _obj({"code": {"type": "string", "description": "Код из SMS"}}, ["code"]),
+    ),
+    handler=lambda args, **kw: fitness_login_confirm(**(args or {})),
+    requires_env=[],
+    is_async=False,
+    emoji=_EMOJI,
+    max_result_size_chars=8000,
+)
+
 REGISTERED_NAMES.extend(
     [
         "fitness_schedule",
@@ -366,5 +428,7 @@ REGISTERED_NAMES.extend(
         "fitness_watch_add",
         "fitness_watch_list",
         "fitness_watch_remove",
+        "fitness_login_request",
+        "fitness_login_confirm",
     ]
 )

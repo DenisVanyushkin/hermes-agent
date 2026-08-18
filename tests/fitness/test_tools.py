@@ -162,3 +162,75 @@ def test_watch_list_and_remove_roundtrip(monkeypatch, tmp_path):
 def test_watch_remove_reports_unknown_rule(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     assert "не найдено" in fitness_tool.fitness_watch_remove(rule_id="nope").lower()
+
+
+# --- headless-логин --------------------------------------------------------
+
+from datetime import datetime, timezone
+
+from fitness.auth import LoginError, MissingPhoneNumber
+
+
+def test_login_request_asks_for_number_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class FakeClient:
+        def request_otp(self, phone_number=None):
+            raise MissingPhoneNumber("нет номера")
+
+    monkeypatch.setattr(fitness_tool, "_client", lambda: FakeClient())
+    out = fitness_tool.fitness_login_request()
+    assert "номер" in out.lower()
+
+
+def test_login_request_returns_masked_number(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class FakeClient:
+        def request_otp(self, phone_number=None):
+            return "77011102626"
+
+    monkeypatch.setattr(fitness_tool, "_client", lambda: FakeClient())
+    out = fitness_tool.fitness_login_request(person_name="Амина")
+    assert "2626" in out
+    assert "Амина" in out
+    assert "77011102626" not in out  # номер маскируется
+
+
+def test_login_confirm_reports_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from fitness.session import Session
+
+    class FakeClient:
+        def login(self, code):
+            return Session(
+                access_token="a", refresh_token="r",
+                expires_at=datetime(2026, 8, 19, 17, 47, tzinfo=timezone.utc),
+                device_headers={"x-device-id": "d"},
+            )
+
+    monkeypatch.setattr(fitness_tool, "_client", lambda: FakeClient())
+    out = fitness_tool.fitness_login_confirm("9797")
+    assert "активна" in out.lower()
+
+
+def test_login_confirm_reports_bad_code(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class FakeClient:
+        def login(self, code):
+            raise LoginError("Неверный код")
+
+    monkeypatch.setattr(fitness_tool, "_client", lambda: FakeClient())
+    out = fitness_tool.fitness_login_confirm("0000")
+    assert "не подошёл" in out.lower()
+
+
+def test_login_tools_are_registered():
+    assert {"fitness_login_request", "fitness_login_confirm"} <= set(
+        fitness_tool.REGISTERED_NAMES
+    )
+
+
+def test_login_tools_are_in_role_map():
+    assert {"fitness_login_request", "fitness_login_confirm"} <= set(_map_tools())

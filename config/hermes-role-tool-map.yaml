@@ -139,6 +139,8 @@ categories:
       - fitness_watch_add
       - fitness_watch_list
       - fitness_watch_remove
+      - fitness_login_request
+      - fitness_login_confirm
   image_generation:
     description: >-
       Image generation and editing via the unified image_generate tool
