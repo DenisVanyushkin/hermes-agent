@@ -321,3 +321,48 @@ def test_client_has_no_login_method():
 
 def test_tokens_are_redacted_in_repr(home):
     assert TOKEN not in repr(_client(FakeTransport([])))
+
+
+# --- headless-логин -------------------------------------------------------
+
+from fitness.auth import LoginError, MissingPhoneNumber
+from fitness import auth as fitness_auth
+
+
+def test_request_otp_posts_login_with_device_headers_and_body(home):
+    fitness_auth.set_phone_number("77011102626")
+    transport = FakeTransport([(200, "ok")])
+
+    number = _client(transport).request_otp()
+
+    assert number == "77011102626"
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/api/login")
+    assert call["body"] == {
+        "phoneNumber": "77011102626",
+        "otpMethod": "sms",
+        "language": "en",
+    }
+    assert "x-device-id" in call["headers"]
+    assert call["headers"]["x-platform"] == "ios"
+
+
+def test_request_otp_without_number_raises_missing_phone(home):
+    transport = FakeTransport([(200, "ok")])
+    with pytest.raises(MissingPhoneNumber):
+        _client(transport).request_otp()
+    assert transport.calls == []  # в сеть не ходили
+
+
+def test_request_otp_with_explicit_number_persists_it(home):
+    transport = FakeTransport([(200, "ok")])
+    _client(transport).request_otp("77770000000")
+    assert fitness_auth.load_or_create_device()["phone_number"] == "77770000000"
+
+
+def test_request_otp_raises_login_error_on_non_2xx(home):
+    fitness_auth.set_phone_number("77011102626")
+    transport = FakeTransport([(401, {"err": {"ru": "Неизвестный номер"}})])
+    with pytest.raises(LoginError, match="Неизвестный номер"):
+        _client(transport).request_otp()
