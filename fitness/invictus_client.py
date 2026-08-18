@@ -354,6 +354,36 @@ class InvictusClient:
             raise LoginError(_err_ru(payload) or f"login {status}")
         return number
 
+    def login(self, code: str) -> Session:
+        """POST /api/checkSms — код из SMS в обмен на пару токенов.
+
+        Собирает Session с фейковыми device-заголовками и чистыми dead-флагами,
+        сохраняет в session.json. Не вызывает /api/refresh (не жжёт свежую пару).
+        """
+        device = load_or_create_device()
+        number = device.get("phone_number")
+        if not number:
+            raise MissingPhoneNumber("нет номера телефона аккаунта Invictus")
+        url = self._base_url.rstrip("/") + ENDPOINTS["check_sms"]
+        headers = device_headers(device["device_id"])
+        body = {FIELDS["phone_number"]: number, FIELDS["sms_code"]: code}
+        status, payload = self._transport.request("POST", url, headers=headers, body=body)
+        if not 200 <= status < 300:
+            raise LoginError(_err_ru(payload) or f"checkSms {status}")
+        access = payload[FIELDS["access_token"]]
+        expires_at = access_token_expiry(access) or (
+            self._now() + timedelta(hours=FALLBACK_TOKEN_TTL_HOURS)
+        )
+        session = Session(
+            access_token=access,
+            refresh_token=payload[FIELDS["refresh_token"]],
+            expires_at=expires_at,
+            device_headers=headers,
+            captured_at=self._now(),
+        )
+        self._sessions.save(session)
+        return session
+
     def _call(self, method: str, endpoint: str, *, query: dict | None = None, body=None):
         session = self._ensure_live_session()
         url = self._base_url.rstrip("/") + ENDPOINTS[endpoint]

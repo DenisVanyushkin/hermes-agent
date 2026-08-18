@@ -313,10 +313,13 @@ def test_missing_session_is_refused(tmp_path, monkeypatch):
         _client(FakeTransport([])).schedule(date(2026, 8, 12))
 
 
-def test_client_has_no_login_method():
-    # Сессию подписывает человек на ресепшне: попытка перелогина ломает привязку.
-    assert not hasattr(InvictusClient, "login")
-    assert not hasattr(InvictusClient, "authenticate")
+def test_headless_login_never_calls_refresh(home):
+    # Перелогин теперь есть (headless, фейковый device-id), но /api/refresh он не
+    # трогает: ротация сожгла бы свежую пару прямо из-под нас.
+    fitness_auth.set_phone_number("77011102626")
+    transport = FakeTransport([(200, {"accessToken": TOKEN, "refreshToken": "r"})])
+    _client(transport).login("9797")
+    assert all("/api/refresh" not in c["url"] for c in transport.calls)
 
 
 def test_tokens_are_redacted_in_repr(home):
@@ -366,3 +369,42 @@ def test_request_otp_raises_login_error_on_non_2xx(home):
     transport = FakeTransport([(401, {"err": {"ru": "Неизвестный номер"}})])
     with pytest.raises(LoginError, match="Неизвестный номер"):
         _client(transport).request_otp()
+
+
+def test_login_saves_session_from_checksms(home):
+    fitness_auth.set_phone_number("77011102626")
+    transport = FakeTransport([(200, {"accessToken": TOKEN, "refreshToken": "newref"})])
+
+    session = _client(transport).login("9797")
+
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/api/checkSms")
+    assert call["body"] == {"phoneNumber": "77011102626", "smsCode": "9797"}
+
+    saved = SessionStore().load()
+    assert saved.access_token == TOKEN
+    assert saved.refresh_token == "newref"
+    assert saved.dead_since is None
+    assert saved.death_reason is None
+    assert saved.device_headers["x-device-id"]  # фейковый device-id проставлен
+    from fitness.session import access_token_expiry
+    assert saved.expires_at == access_token_expiry(TOKEN)
+    assert session.access_token == TOKEN
+
+
+def test_login_without_number_raises_missing_phone(home):
+    transport = FakeTransport([(200, {"accessToken": TOKEN, "refreshToken": "r"})])
+    with pytest.raises(MissingPhoneNumber):
+        _client(transport).login("9797")
+    assert transport.calls == []
+
+
+def test_login_bad_code_raises_and_keeps_existing_session(home):
+    # home-фикстура уже сохранила рабочую сессию (_save). Плохой код её не портит.
+    fitness_auth.set_phone_number("77011102626")
+    before = SessionStore().load().access_token
+    transport = FakeTransport([(400, {"err": {"ru": "Неверный код"}})])
+    with pytest.raises(LoginError, match="Неверный код"):
+        _client(transport).login("0000")
+    assert SessionStore().load().access_token == before
