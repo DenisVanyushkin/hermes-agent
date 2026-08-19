@@ -47,6 +47,8 @@
     "company_authority_status": "unavailable",
     "company_authority_reason": "unresolved_company_identity",
     "manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r2/run-manifest.v2.json",
+    "next_manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r3/run-manifest.v2.json",
+    "next_manifest_materialized": false,
     "manifest_sha256": "9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987",
     "ordered_input_hashes_sha256": "32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a",
     "provider_allowlist_count": 48,
@@ -71,6 +73,7 @@
     "policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
     "pricing_sha256": "975559f76b1e8c6bebdbbae3011a166f3d490caf703e555cebb53e45ebc8eb3e",
     "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
+    "record_state_protocol_version": "gate-b-record-state-r3",
     "profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
     "provider_adapter_version": "product-search-evidence-replay/2.0",
     "provider_output_schema_sha256": "428586420dd32c64343c5ac8d59466870319037ab84702b0c7ee1866bf5274ab",
@@ -83,7 +86,7 @@
     "input_manifest_sha256": "9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987",
     "ordered_input_hashes_sha256": "32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a"
   },
-  "record_identity_sha256": "503f0cabc6496330da03be82346cdbe431fa8e07af250f43d98da5b1474f5066",
+  "record_identity_sha256": "2d05c09a4fea98b9fc8de93cc0afe5994cfa02988ada7ea4a673f91be9cfeb1f",
   "approval_capability": {
     "status": "not_supplied",
     "value": null

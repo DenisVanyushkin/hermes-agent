@@ -49,12 +49,16 @@ Open Market origin, hard-block and important-unknown hypotheses, and likely
 Core/Exploration sampling hypotheses. Those hypotheses are sampling strata,
 not Decision v2 outputs. Gate A contains no Strategic Watchlist evidence.
 
-The additive hardened input package is
+The last live materialized hardened input package remains
 `input-package-v2-r2/run-manifest.v2.json` beneath that exact corpus root. Its
 SHA-256 is `9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987`;
 it orders 48 unique Task 10 v2 input hashes and 48 content-addressed vacancy
 artifacts. The ordered allowlist digest is
 `32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a`.
+The next dry preflight materializes the byte-exact inputs under
+`input-package-v2-r3`; this task did not mutate the live experiment root. The
+r3 record-state identity supersedes r1/r2 package and test-only ledger state;
+those artifacts are never migrated into an authorized r3 journal.
 Every admitted vacancy fragment is an exact bounded substring of the pinned
 raw artifact. Exact fragments containing the unavailable company label are
 retained in the vacancy artifact for provenance but excluded from the provider
