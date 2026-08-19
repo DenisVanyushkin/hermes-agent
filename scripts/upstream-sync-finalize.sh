@@ -24,7 +24,7 @@ set -euo pipefail
 # Result written to finalize-result.json in the same dir.
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-STATE_DIR="${HERMES_SYNC_STATE_DIR:-$HERMES_HOME/sandboxes/docker/default/home/.hermes/state/upstream-sync}"
+STATE_DIR="${HERMES_SYNC_STATE_DIR:-$HERMES_HOME/state/upstream-sync}"
 SCRIPTS_DIR="${HERMES_SCRIPTS_DIR:-$HERMES_HOME/scripts}"
 REPO="${HERMES_REPO:-$HERMES_HOME/hermes-agent}"
 HERMES_ENV_FILE="${HERMES_ENV_FILE:-$HERMES_HOME/.env}"

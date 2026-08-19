@@ -41,7 +41,7 @@ from upstream_sync_policy import decide_features, needs_operator, number_feature
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 DEFAULT_STATE = os.environ.get(
     "HERMES_SYNC_STATE_DIR",
-    str(HERMES_HOME / "sandboxes/docker/default/home/.hermes/state/upstream-sync"),
+    str(HERMES_HOME / "state/upstream-sync"),
 )
 DEFAULT_PREFLIGHT = os.environ.get(
     "HERMES_SYNC_PREFLIGHT_CMD",

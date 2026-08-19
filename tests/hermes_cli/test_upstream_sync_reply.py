@@ -119,7 +119,7 @@ class TestDefaultStateDir:
         monkeypatch.delenv("HERMES_SYNC_STATE_DIR", raising=False)
         monkeypatch.setenv("HERMES_HOME", "/home/hermes/.hermes")
         assert default_upstream_sync_state_dir() == Path(
-            "/home/hermes/.hermes/sandboxes/docker/default/home/.hermes/state/upstream-sync"
+            "/home/hermes/.hermes/state/upstream-sync"
         )
 
 

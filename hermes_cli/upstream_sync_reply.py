@@ -148,21 +148,23 @@ def record_operator_decisions(state_dir: Path | str, decisions: dict, source: di
             "requested": requested, "reason": reason}
 
 
-_SANDBOX_STATE_SUFFIX = "sandboxes/docker/default/home/.hermes/state/upstream-sync"
+_STATE_SUFFIX = "state/upstream-sync"
 
 
 def default_upstream_sync_state_dir() -> Path:
     """Resolve the host-side upstream-sync state dir.
 
     Mirrors upstream-sync-finalize.sh: honor ``HERMES_SYNC_STATE_DIR`` when set,
-    else derive from ``HERMES_HOME`` (the sandbox `/root` is bind-mounted from
-    ``$HERMES_HOME/sandboxes/docker/default/home``).
+    else derive from ``HERMES_HOME``. The state deliberately sits outside the
+    sandbox mirror: that tree is provisioned as root, and a chmod there
+    recalculates the POSIX ACL mask and voids the traverse grant the host user
+    needs -- which killed the sync cron on 2026-08-18.
     """
     override = os.getenv("HERMES_SYNC_STATE_DIR")
     if override:
         return Path(override)
     hermes_home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
-    return hermes_home / _SANDBOX_STATE_SUFFIX
+    return hermes_home / _STATE_SUFFIX
 
 
 def _normalize_platform(value) -> "str | None":

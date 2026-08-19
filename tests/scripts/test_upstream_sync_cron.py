@@ -253,3 +253,41 @@ class TestArmedTriageGate:
         assert proc.returncode == 0, proc.stderr
         req = json.loads((state / "finalize-request.json").read_text())
         assert req["action"] == "sync"
+
+
+class TestStateDirOutsideSandbox:
+    """The live state must not sit under the sandbox mirror.
+
+    ``$HERMES_HOME/sandboxes/docker/default/home`` is provisioned as root; a
+    chmod there recalculates the POSIX ACL mask and silently voids the
+    ``user:hermes:--x`` traverse grant, so the host-owned cron dies on mkdir
+    before it does any work (2026-08-18). Nothing in the sync path runs in the
+    sandbox any more, so no default may point into it.
+    """
+
+    def _scripts(self):
+        root = Path(__file__).resolve().parents[2] / "scripts"
+        names = [
+            "upstream_sync_cron.py",
+            "preflight-local-customizations-update.sh",
+            "upstream-sync-finalize.sh",
+            "upstream-sync-rollback.sh",
+            "upstream-sync-smoketest.sh",
+        ]
+        return [root / n for n in names]
+
+    def test_no_script_defaults_into_the_sandbox_mirror(self):
+        offenders = [
+            p.name
+            for p in self._scripts()
+            if "sandboxes/docker/default" in p.read_text(encoding="utf-8")
+        ]
+        assert offenders == []
+
+    def test_every_script_defaults_to_the_host_state_dir(self):
+        missing = [
+            p.name
+            for p in self._scripts()
+            if "state/upstream-sync" not in p.read_text(encoding="utf-8")
+        ]
+        assert missing == []
