@@ -78,10 +78,11 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
         "echo '1 failed, 5 passed in 2.00s'\n"
     )
     tests_stub.chmod(0o755)
-    for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py", "upstream_sync_policy.py",
-                   "upstream_sync_apply.py", "upstream_sync_llm.py", "upstream_sync_slack.py",
-                   "upstream_sync_triage.py"):
-        (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
+    # Copied by pattern, not by name: a hand-kept list silently omits every new
+    # helper, and the finalizer then fails at runtime with ModuleNotFoundError
+    # inside a subprocess - far from the line that forgot to add it.
+    for helper in sorted((REPO_ROOT / "scripts").glob("upstream_sync_*.py")):
+        (scripts / helper.name).write_text(helper.read_text())
     return scripts, calls
 
 

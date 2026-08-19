@@ -250,3 +250,91 @@ class TestMechanicalResolutionValidatesItsOutput:
 
         assert remaining == 1
         assert "<<<<<<<" in new_text
+
+
+class TestTheFinalizerReportsInvariantsDistinctly:
+    """A structural refusal must not read like a red test gate.
+
+    The two demand opposite responses. A red gate can legitimately mean the
+    tests are stale, which is what the triage flow offers to patch. A tripped
+    invariant means the merge itself lost something - patching tests there
+    would delete the finding along with the code it was pointing at, which is
+    exactly the trap of 2026-08-19.
+    """
+
+    FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
+
+    def _script(self) -> str:
+        return self.FINALIZE.read_text(encoding="utf-8")
+
+    def test_the_commit_stage_recognises_the_invariant_exit(self):
+        assert "invariants_failed" in self._script()
+
+    def test_the_report_names_the_findings_file_not_just_a_log_tail(self):
+        script = self._script()
+        stage = script[script.index("FAILED_STAGE=commit"):]
+        assert "invariants" in stage.split("land_merge")[0]
+
+    def test_it_does_not_offer_the_triage_vocabulary(self):
+        """`apply fix` patches tests; it cannot help here and would hide the loss."""
+        script = self._script()
+        stage = script[script.index("FAILED_STAGE=commit"):].split("land_merge")[0]
+        assert "apply fix" not in stage
+
+
+class TestFindingsRenderer:
+    """The operator's only explanation of a structural refusal.
+
+    Kept out of the finalizer as a real module: as a shell heredoc it was one
+    quoting mistake away from turning that explanation into a shell error.
+    """
+
+    def _mod(self):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import upstream_sync_findings
+        return upstream_sync_findings
+
+    def test_reads_the_findings_out_of_a_detail_log(self):
+        m = self._mod()
+        log = (
+            "some git noise\n"
+            '{"status": "committed", "merge_sha": "abc"}\n'
+            '{"status": "invariants_failed", "findings": '
+            '[{"path": "a.py", "kind": "unparseable", "line": 7}]}\n'
+        )
+
+        assert m.findings_from_log(log) == [{"path": "a.py", "kind": "unparseable", "line": 7}]
+
+    def test_takes_the_last_payload_when_a_run_retried(self):
+        m = self._mod()
+        log = (
+            '{"status": "invariants_failed", "findings": [{"path": "old.py", "kind": "unparseable"}]}\n'
+            '{"status": "invariants_failed", "findings": [{"path": "new.py", "kind": "unparseable"}]}\n'
+        )
+
+        assert m.findings_from_log(log)[0]["path"] == "new.py"
+
+    def test_survives_a_log_with_no_payload(self):
+        m = self._mod()
+
+        assert m.findings_from_log("just git output\n") == []
+
+    def test_renders_a_symbol_finding_by_name(self):
+        m = self._mod()
+
+        out = m.render([{"path": "gateway/run.py", "kind": "lost_definition", "symbol": "_stale_guard_tick"}])
+
+        assert out == "- gateway/run.py: lost_definition (_stale_guard_tick)"
+
+    def test_renders_a_parse_finding_by_line(self):
+        m = self._mod()
+
+        out = m.render([{"path": "cfg.py", "kind": "unparseable", "line": 7}])
+
+        assert out == "- cfg.py: unparseable (line 7)"
+
+    def test_says_so_when_there_is_nothing_to_render(self):
+        """Silence here would read as "no problem found", which is never true."""
+        m = self._mod()
+
+        assert "finalize-detail.log" in m.render([])

@@ -571,6 +571,20 @@ apply_decisions() {
   set -e
   if [ "$rc" -ne 0 ]; then
     FAILED_STAGE=commit
+    # A structural refusal is its own outcome, not a generic commit failure, and
+    # it must not read like a red test gate. That one can legitimately mean the
+    # tests went stale, which is what the triage flow offers to patch. Here the
+    # merge itself lost something: patching tests would bury the finding along
+    # with the code it points at (2026-08-19).
+    if grep -q "invariants_failed" "$DETAIL_LOG"; then
+      FAILED_STAGE=invariants
+      findings="$(python3 "$SCRIPTS_DIR/upstream_sync_findings.py" "$DETAIL_LOG" 2>/dev/null || true)"
+      write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.
+${findings:-(see finalize-detail.log)}
+
+Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case re-run with HERMES_SYNC_SKIP_INVARIANTS=1."
+      exit 0
+    fi
     write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"
     exit 0
   fi
