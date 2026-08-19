@@ -22,6 +22,13 @@ from typing import Callable
 from fitness.club_config import default_club_id
 from fitness.models import CLUB_TZ, Booking, ClassSlot
 from fitness.session import Session, SessionStore, access_token_expiry
+from fitness.auth import (
+    LoginError,
+    MissingPhoneNumber,
+    device_headers,
+    load_or_create_device,
+    set_phone_number,
+)
 
 BASE_URL = "https://entryx.io"  # F1, подтверждено захватом
 
@@ -32,6 +39,8 @@ ENDPOINTS = {
     "cancel": "/api/eventDeleteParticipant",         # POST, F7 — именно POST, не DELETE
     "waitlist": "/api/addParticipantToWaitlist",     # PUT,  F8 — именно PUT
     "refresh": "/api/refresh",                       # POST, F2
+    "login": "/api/login",         # POST — запрос SMS-кода
+    "check_sms": "/api/checkSms",  # POST — подтверждение кода, выдаёт токены
 }
 
 # Тело book/cancel/waitlist одинаковое: {"eventId": "<id события>"}.
@@ -55,6 +64,10 @@ FIELDS = {
     "event_id": "eventId",  # тело book/cancel/waitlist
     "access_token": "accessToken",
     "refresh_token": "refreshToken",
+    "phone_number": "phoneNumber",  # тело login/checkSms
+    "otp_method": "otpMethod",
+    "sms_code": "smsCode",          # тело checkSms
+    "language": "language",
     "bookings_root": "records",  # /api/users/me/bookings-info
     "booking_id": "_id",
     "booking_title": "title",
@@ -119,6 +132,15 @@ class UrllibTransport:
             except json.JSONDecodeError:
                 payload = {"raw": raw.decode("utf-8", "replace")}
             return exc.code, payload
+
+
+def _err_ru(payload) -> str | None:
+    """Человекочитаемое сообщение сервера: {"err": {"ru": "..."}}."""
+    if isinstance(payload, dict):
+        err = payload.get("err")
+        if isinstance(err, dict):
+            return err.get("ru")
+    return None
 
 
 def _parse_dt(value) -> datetime:
@@ -304,6 +326,63 @@ class InvictusClient:
         if class_id in present:
             raise BookingRejected("unverified", "отмена не подтвердилась перечитом")
         return None
+
+    def request_otp(self, phone_number: str | None = None) -> str:
+        """POST /api/login — сервер шлёт SMS с кодом на номер аккаунта.
+
+        Телефон/прокси не нужны: device-id фейковый и стабильный (auth), SMS
+        уходит на номер, код диктует пользователь (см. login()).
+        """
+        device = load_or_create_device()
+        if phone_number:
+            set_phone_number(phone_number)
+            number = phone_number
+        else:
+            number = device.get("phone_number")
+        if not number:
+            raise MissingPhoneNumber("нет номера телефона аккаунта Invictus")
+        url = self._base_url.rstrip("/") + ENDPOINTS["login"]
+        body = {
+            FIELDS["phone_number"]: number,
+            FIELDS["otp_method"]: "sms",
+            FIELDS["language"]: "en",
+        }
+        status, payload = self._transport.request(
+            "POST", url, headers=device_headers(device["device_id"]), body=body
+        )
+        if not 200 <= status < 300:
+            raise LoginError(_err_ru(payload) or f"login {status}")
+        return number
+
+    def login(self, code: str) -> Session:
+        """POST /api/checkSms — код из SMS в обмен на пару токенов.
+
+        Собирает Session с фейковыми device-заголовками и чистыми dead-флагами,
+        сохраняет в session.json. Не вызывает /api/refresh (не жжёт свежую пару).
+        """
+        device = load_or_create_device()
+        number = device.get("phone_number")
+        if not number:
+            raise MissingPhoneNumber("нет номера телефона аккаунта Invictus")
+        url = self._base_url.rstrip("/") + ENDPOINTS["check_sms"]
+        headers = device_headers(device["device_id"])
+        body = {FIELDS["phone_number"]: number, FIELDS["sms_code"]: code}
+        status, payload = self._transport.request("POST", url, headers=headers, body=body)
+        if not 200 <= status < 300:
+            raise LoginError(_err_ru(payload) or f"checkSms {status}")
+        access = payload[FIELDS["access_token"]]
+        expires_at = access_token_expiry(access) or (
+            self._now() + timedelta(hours=FALLBACK_TOKEN_TTL_HOURS)
+        )
+        session = Session(
+            access_token=access,
+            refresh_token=payload[FIELDS["refresh_token"]],
+            expires_at=expires_at,
+            device_headers=headers,
+            captured_at=self._now(),
+        )
+        self._sessions.save(session)
+        return session
 
     def _call(self, method: str, endpoint: str, *, query: dict | None = None, body=None):
         session = self._ensure_live_session()
