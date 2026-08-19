@@ -49,6 +49,17 @@ def test_roles_other_than_user_and_assistant_are_skipped():
     assert "видно" in ctx
 
 
+def test_tool_rows_do_not_crow_dialogue_out_of_recent_window():
+    history = [
+        {"role": "assistant", "content": "полный согласованный план"},
+        *({"role": "tool", "content": f"tool-{index}"} for index in range(8)),
+    ]
+
+    ctx = _context(history)
+
+    assert ctx == "assistant: полный согласованный план"
+
+
 def test_structured_content_is_flattened():
     ctx = _context([{"role": "user", "content": [{"text": "часть один"}, {"text": "часть два"}]}])
 

@@ -1,10 +1,10 @@
 """Tests for Telegram topic/thread routing fallbacks.
 
-Supergroup forum topics route with ``message_thread_id``. Hermes-created
-private DM topic lanes are different: live Telegram testing showed they only
-stay in the expected lane when sends include both the private topic
-``message_thread_id`` and a ``reply_to_message_id`` anchor to the triggering
-user message. If either anchor is unavailable or rejected, the adapter must
+Supergroup forum topics route with ``message_thread_id``. Live replies in
+private DM topic lanes use the private topic ``message_thread_id`` plus a
+``reply_to_message_id`` anchor to the triggering user message. Synthetic sends
+that have an explicit Bot API DM-topic route use ``direct_messages_topic_id``
+instead. If an anchor-based route is unavailable or rejected, the adapter must
 avoid retrying with a partial topic route that can render outside the lane.
 """
 
@@ -361,14 +361,14 @@ async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegra
 
 
 @pytest.mark.asyncio
-async def test_created_private_topic_thread_not_found_fails_without_root_fallback():
-    """Created private-topic sends must not retry into All Messages on stale thread IDs."""
+async def test_created_private_dm_topic_uses_direct_messages_topic_id():
+    """Hermes-created private DM topics must not silently route to General."""
     adapter = _make_adapter()
     call_log = []
 
     async def mock_send_message(**kwargs):
         call_log.append(dict(kwargs))
-        raise FakeBadRequest("Message thread not found")
+        return SimpleNamespace(message_id=270454)
 
     adapter._bot = SimpleNamespace(send_message=mock_send_message)
 
@@ -376,15 +376,17 @@ async def test_created_private_topic_thread_not_found_fails_without_root_fallbac
         chat_id="123",
         content="created topic message",
         metadata={
-            "thread_id": "32343",
+            "direct_messages_topic_id": "32343",
             "telegram_dm_topic_created_for_send": True,
         },
     )
 
-    assert result.success is False
-    assert "thread not found" in str(result.error).lower()
+    assert result.success is True
     assert len(call_log) == 1
-    assert call_log[0]["message_thread_id"] == 32343
+    assert call_log[0]["direct_messages_topic_id"] == 32343
+    # The legacy field is intentionally cleared. PTB receives it as None and
+    # omits it from the Bot API request.
+    assert call_log[0]["message_thread_id"] is None
 
 
 @pytest.mark.asyncio

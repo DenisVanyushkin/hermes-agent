@@ -75,7 +75,7 @@ async def test_forwarded_voice_note_is_transcribed(tmp_path):
             history=[],
         )
 
-    mock_transcribe.assert_called_once_with(path)
+    mock_transcribe.assert_called_once_with(path, None, "gateway")
     assert "забери Таю в пять" in result
     assert "audio file attachment" not in result.lower()
 
@@ -155,5 +155,5 @@ async def test_recorded_voice_note_still_transcribed(tmp_path):
             history=[],
         )
 
-    mock_transcribe.assert_called_once_with(path)
+    mock_transcribe.assert_called_once_with(path, None, "gateway")
     assert "привет" in result

@@ -20,7 +20,7 @@ MEMORY_SCHEMA = "upstream-sync-decisions/v1"
 
 # Single-sourced from scripts/preflight-local-customizations-update.sh — keep identical.
 SECURITY_RE = re.compile(
-    r"(security|auth|secret|pairing|allowlist|file-safety|control-plane|HMAC|hmac|insecure)",
+    r"(security|auth|secret|credential|approval|pairing|allowlist|file-safety|file_safety|control-plane|HMAC|hmac|insecure)",
     re.IGNORECASE,
 )
 

@@ -32,6 +32,16 @@ Rules:
   a missing description is a documentation gap, never a `blocked` safety case;
 - a description that merely repeats the file name, restates the diff mechanically, or
   contains a leaked role banner ("Hermes role: ...") counts as missing;
+- the packet field `changes_completeness` carries a deterministic check of the same
+  rule. When its `status` is `incomplete_after_repair`, the system already spent its
+  own repair budget asking the engineer for those descriptions and failed: do NOT
+  report `undescribed_changed_file` for the paths listed there, and do not request
+  rework on that ground -- the gap is disclosed to the operator at the commit gate
+  instead. Review the code itself from the diff as usual. When `status` is
+  `incomplete` without the `_after_repair` suffix, treat it as a normal finding;
+- when the packet declares `changes_truncated: N`, N further change entries exist but
+  were cut for size. That is truncation, not an undescribed file: never report those
+  as `undescribed_changed_file`;
 - when the request approves a plan the agent proposed itself ("do everything you
   suggested", "вот сделай всё что ты предлагаешь" and the like), every item of that plan must be
   accounted for in the response: done, deliberately not done with a reason, or done

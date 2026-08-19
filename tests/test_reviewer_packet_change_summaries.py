@@ -74,3 +74,35 @@ def test_the_engineer_payload_the_reviewer_sees_carries_the_descriptions():
     })
 
     assert payload["changes"][0]["summary"] == "вернул строку"
+
+
+def test_nine_changed_files_all_reach_the_reviewer():
+    # Потолок в восемь записей делал полноту недостижимой: девятый файл не имел
+    # шанса получить описание, что бы инженер ни написал.
+    from hermes_cli.pipeline_reviewer_packet import _sanitize_engineer_output_payload
+
+    payload = {
+        "status": "succeeded",
+        "changes": [
+            {"path": f"file_{index}.py", "summary": f"Правка номер {index}."}
+            for index in range(9)
+        ],
+    }
+    sanitized = _sanitize_engineer_output_payload(payload)
+    assert len(sanitized["changes"]) == 9
+    assert "changes_truncated" not in sanitized
+
+
+def test_truncation_is_declared_and_not_silent():
+    from hermes_cli.pipeline_reviewer_packet import _sanitize_engineer_output_payload
+
+    payload = {
+        "status": "succeeded",
+        "changes": [
+            {"path": f"file_{index}.py", "summary": f"Правка номер {index}."}
+            for index in range(70)
+        ],
+    }
+    sanitized = _sanitize_engineer_output_payload(payload)
+    assert len(sanitized["changes"]) == 64
+    assert sanitized["changes_truncated"] == 6

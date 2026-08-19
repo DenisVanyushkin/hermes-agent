@@ -211,14 +211,15 @@ async def test_disabled_native_adapter_does_not_shadow_relay(tmp_path, monkeypat
 
 
 class StaleTopicAdapter:
-    def __init__(self):
+    def __init__(self, stale_error="Bad Request: message thread not found"):
         self.calls = []
         self.ensure_dm_topic_calls = []
+        self.stale_error = stale_error
 
     async def send(self, chat_id, content, metadata=None):
         self.calls.append({"chat_id": chat_id, "content": content, "metadata": dict(metadata or {})})
         if len(self.calls) == 1:
-            return SendResult(success=False, error="Bad Request: message thread not found")
+            return SendResult(success=False, error=self.stale_error)
         return SendResult(success=True, message_id="fresh-message")
 
     async def ensure_dm_topic(self, chat_id, topic_name, force_create=False):
@@ -275,6 +276,44 @@ async def test_explicit_telegram_private_thread_uses_reply_fallback_with_anchor(
                 "telegram_dm_topic_reply_fallback": True,
             },
         }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stale_error",
+    [
+        "Bad Request: message thread not found",
+        "Bad Request: direct messages topic not found",
+    ],
+)
+async def test_named_private_topic_refresh_preserves_forum_topic_routing(
+    tmp_path,
+    monkeypatch,
+    stale_error,
+):
+    """A stale named private forum topic is recreated and retried by thread id."""
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    adapter = StaleTopicAdapter(stale_error=stale_error)
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.TELEGRAM: adapter})
+    target = DeliveryTarget.parse("telegram:722341991:Nightly digest")
+
+    result = await router._deliver_to_platform(target, "hello", metadata=None)
+
+    assert result.success is True
+    assert adapter.ensure_dm_topic_calls == [
+        {"chat_id": "722341991", "topic_name": "Nightly digest", "force_create": False},
+        {"chat_id": "722341991", "topic_name": "Nightly digest", "force_create": True},
+    ]
+    assert [call["metadata"] for call in adapter.calls] == [
+        {
+            "thread_id": "32343",
+            "telegram_dm_topic_created_for_send": True,
+        },
+        {
+            "thread_id": "38064",
+            "telegram_dm_topic_created_for_send": True,
+        },
     ]
 
 

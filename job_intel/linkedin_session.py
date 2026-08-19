@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -19,6 +20,9 @@ from pathlib import Path
 
 CHROMIUM_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 SESSION_COOKIE = "li_at"
+
+# Имена профилей Chrome: Default и «Profile N».
+_PROFILE_NAME = re.compile(r"Profile \d+")
 
 SESSION_OK = "session_ok"
 SESSION_MISSING = "session_missing_cookie"
@@ -67,18 +71,110 @@ def read_cookie_inventory(cookie_db: Path, *, host_filter: str = "linkedin") -> 
     ]
 
 
-def resolve_profile_dir(user_data_dir: Path) -> Path:
-    """Каталог профиля Chrome, который используется на самом деле.
+def _cookie_db_state(profile_dir: Path) -> str:
+    """`present`, `absent` или `unreadable` для куки-базы профиля.
 
-    Вход в аккаунт Google внутри браузера заставляет Chrome завести второй
-    профиль, и сессия LinkedIn оказывается в нём, а не в Default. Жёстко
-    прочитанный Default тогда пуст, и «сессии нет» — вывод, сделанный по
-    чужому профилю. Наблюдалось 2026-08-09: `Profile 1` держал li_at,
-    `Default` не держал ничего, а браузер показывал живую ленту.
-
-    Имя берётся из `Local State`; нечитаемый файл или несуществующий каталог
-    означают возврат к Default, но не молчаливую подмену другим профилем.
+    `Path.exists()` здесь не годится: при отказе в правах он возвращает False,
+    а не ошибку, из-за чего профиль отсеивался ещё до попытки чтения и список
+    нечитаемых оставался пустым — отчёт выглядел полным, будучи неполным.
+    Каталоги профилей имеют права drwx------ browser:browser, так что под
+    любым другим пользователем это происходит всегда.
     """
+    try:
+        (profile_dir / "Cookies").stat()
+    except PermissionError:
+        return "unreadable"
+    except OSError:
+        return "absent"
+    return "present"
+
+
+def _profile_candidates(user_data_dir: Path) -> tuple[list[Path], list[str]]:
+    """Каталоги профилей с куки-базой и имена тех, что прочитать не удалось.
+
+    Порядок устойчив: Default первым, остальные по алфавиту.
+    """
+    candidates: list[Path] = []
+    unreadable: list[str] = []
+
+    def classify(directory: Path) -> None:
+        state = _cookie_db_state(directory)
+        if state == "present":
+            candidates.append(directory)
+        elif state == "unreadable":
+            unreadable.append(directory.name)
+
+    try:
+        names = sorted(entry.name for entry in user_data_dir.iterdir())
+    except OSError:
+        names = []
+
+    # Перебираются только каталоги с именами профилей Chrome. Рядом лежат
+    # посторонние записи вроде SingletonSocket — симлинка в недоступную цель,
+    # на котором `is_dir()` кидает PermissionError. Прежний сплошной перебор
+    # обрывался на нём целиком и возвращал пустой список, из-за чего профиль
+    # с сессией не доходил до проверки, а отчёт сообщал, что нечитаемых
+    # профилей нет — не посмотрев ни одного.
+    ordered = ["Default"] + [n for n in names if _PROFILE_NAME.fullmatch(n)]
+    seen: set[str] = set()
+    for name in ordered:
+        if name in seen:
+            continue
+        seen.add(name)
+        directory = user_data_dir / name
+        try:
+            if not directory.is_dir():
+                continue
+        except OSError:
+            unreadable.append(name)
+            continue
+        classify(directory)
+    return candidates, unreadable
+
+
+@dataclass(frozen=True)
+class ProfileResolution:
+    """Каталог профиля и то, как он был выбран.
+
+    Причина и список нечитаемых профилей — часть ответа, а не служебная
+    деталь: `session_missing_cookie`, полученное после того, как профиль с
+    сессией не удалось прочитать, есть факт о правах доступа, а не о сессии.
+    """
+
+    path: Path
+    reason: str
+    unreadable: tuple[str, ...] = ()
+
+
+def resolve_profile(user_data_dir: Path) -> ProfileResolution:
+    """Каталог профиля Chrome, в котором лежит сессия LinkedIn.
+
+    Отвечает на вопрос «где сессия», а не «что браузер открыл последним».
+    Разница стоила ложной тревоги 2026-08-12: ночной перезапуск десктопа
+    открыл Default, `last_used` переключился туда, и замер ушёл в профиль с
+    одиннадцатью анонимными куками — при живой сессии в соседнем каталоге.
+    Причина второго профиля — вход в аккаунт Google внутри браузера: Chrome
+    заводит под него отдельный профиль, и логин LinkedIn ложится туда.
+
+    Порядок: профиль с сессионной кукой, затем `last_used`, затем Default.
+    Каждая ступень — возврат к менее точному ответу, но не молчаливая
+    подмена: вызывающий получает каталог и печатает его имя в отчёте.
+    """
+    candidates, unreadable = _profile_candidates(user_data_dir)
+    for candidate in candidates:
+        try:
+            inventory = read_cookie_inventory(candidate / "Cookies")
+        except Exception:
+            # Каталог профиля имеет права drwx------ browser:browser, поэтому
+            # под другим пользователем чтение падает. Пропустить молча —
+            # значит выдать «сессии тут нет» вместо «не смог посмотреть»:
+            # резолвер от hermes отвечал Default, от root — Profile 1, на
+            # одних и тех же данных.
+            unreadable.append(candidate.name)
+            continue
+        if any(record.name == SESSION_COOKIE for record in inventory):
+            return ProfileResolution(candidate, "session_cookie", tuple(unreadable))
+
     state_path = user_data_dir / "Local State"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -88,8 +184,13 @@ def resolve_profile_dir(user_data_dir: Path) -> Path:
     if last_used:
         candidate = user_data_dir / last_used
         if candidate.is_dir():
-            return candidate
-    return user_data_dir / "Default"
+            return ProfileResolution(candidate, "last_used", tuple(unreadable))
+    return ProfileResolution(user_data_dir / "Default", "default", tuple(unreadable))
+
+
+def resolve_profile_dir(user_data_dir: Path) -> Path:
+    """Тонкая обёртка для вызывающих, которым нужен только каталог."""
+    return resolve_profile(user_data_dir).path
 
 
 def session_state_from_cookies(inventory: Sequence[CookieRecord], *, now: datetime) -> str:
@@ -196,6 +297,12 @@ def resolve_session_state(*, cookie_state: str, page_state: str) -> SessionVerdi
         return SessionVerdict(SESSION_OK, mismatch)
     if page_state in (CHALLENGE_HARD, CHALLENGE_EMAIL_OTP):
         return SessionVerdict(page_state)
+    if page_state == SESSION_MISSING:
+        # Страница прямо показывает гостя или логин-форму. Живая кука,
+        # найденная в другом профиле, этого не отменяет: поиск пойдёт в том
+        # контексте, который открыт в браузере. Без этого правила ночной
+        # перезапуск в Default отчитывался бы как здоровая сессия.
+        return SessionVerdict(SESSION_MISSING)
     if cookie_state == SESSION_MISSING:
         return SessionVerdict(SESSION_MISSING)
     # Кука жива, логин-стены и челленджа нет, а разметку опознать не удалось.
@@ -203,3 +310,35 @@ def resolve_session_state(*, cookie_state: str, page_state: str) -> SessionVerdi
     # 2026-08-10 отказался работать при полностью живой авторизации: LinkedIn
     # сменил разметку, и «страницу не узнал» было прочитано как «сессии нет».
     return SessionVerdict(SESSION_OK, page_unrecognised=True)
+
+
+def main(argv: "Sequence[str] | None" = None) -> int:
+    """Печатает имя каталога профиля, в котором лежит сессия LinkedIn.
+
+    Нужен запускалке десктопа: она на bash и умеет читать только строку.
+    Печатается имя, а не путь — Chromium принимает --profile-directory
+    именно в таком виде.
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Профиль Chrome с сессией LinkedIn")
+    parser.add_argument("--user-data-dir", required=True, type=Path)
+    args = parser.parse_args(argv)
+    resolution = resolve_profile(args.user_data_dir)
+    if resolution.unreadable:
+        # В stderr, чтобы stdout остался пригодным для подстановки в аргумент.
+        print(
+            "предупреждение: не удалось прочитать профили: "
+            + ", ".join(resolution.unreadable)
+            + " — выбор мог быть сделан по неполным данным",
+            file=sys.stderr,
+        )
+    print(resolution.path.name)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

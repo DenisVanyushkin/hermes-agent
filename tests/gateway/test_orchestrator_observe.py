@@ -24,6 +24,7 @@ def test_gateway_autonomous_builds_plan_before_controller_and_uses_execution_rep
 
     def _controller(**kwargs):
         captured["snapshot"] = kwargs["state_snapshot"]
+        captured["helper_execution_context"] = kwargs["helper_execution_context"]
         return controller_module.PipelineExecutionControllerResult(
             status="executed",
             execution_allowed=True,
@@ -64,6 +65,17 @@ def test_gateway_autonomous_builds_plan_before_controller_and_uses_execution_rep
         }
     }
     with caplog.at_level(logging.INFO, logger="gateway.autonomous.test"):
+        engineering_task_context = {
+            "schema_version": "engineering_task_envelope.v1",
+            "resolution_status": "resolved",
+            "source_kind": "approved_plan",
+            "task_text": "# Plan for engineer\ncomplete task",
+            "operator_instruction": "let the engineer execute",
+            "source_session_id": "sess-autonomous",
+            "source_message_id": "42",
+            "task_sha256": "a" * 64,
+            "task_chars": 33,
+        }
         report = orchestrator.observe_gateway_turn(
             config=config,
             user_message="implement through autonomous pipeline",
@@ -71,15 +83,28 @@ def test_gateway_autonomous_builds_plan_before_controller_and_uses_execution_rep
             platform="telegram",
             chat_id="chat-autonomous",
             router_decision=decision,
+            engineering_task_context=engineering_task_context,
             logger=logging.getLogger("gateway.autonomous.test"),
         )
 
     assert report is not None
     assert captured["snapshot"].status == "planned"
     assert captured["snapshot"].execution_mode == "autonomous"
+    assert (
+        captured["helper_execution_context"]["engineering_task_context"]
+        == engineering_task_context
+    )
     payload = json.loads(next(record.message for record in caplog.records if "pipeline_orchestrator_observe_report" in record.message).split("pipeline_orchestrator_observe ", 1)[1])
     assert payload["pipeline_preflight"]["reason_code"] == "allowed"
     assert payload["pipeline_plan_mode"] == "autonomous"
+    assert payload["engineering_task"] == {
+        "resolution_status": "resolved",
+        "source_kind": "approved_plan",
+        "task_chars": 33,
+        "task_sha256_prefix": "a" * 16,
+    }
+    assert "# Plan for engineer" not in json.dumps(payload, sort_keys=True)
+    assert "let the engineer execute" not in json.dumps(payload, sort_keys=True)
     assert payload["pipeline_execution_report"] == {**executed_report, "execution_mode": "autonomous"}
     assert "observe_plan_only" not in json.dumps(payload["pipeline_execution_report"])
 

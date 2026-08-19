@@ -60,6 +60,25 @@ Invalid structured output is handled through failure policy and pipeline retries
 
 The pipeline, not the subagents, decides whether another iteration is allowed.
 
+## Engineering task continuation contract
+
+The gateway resolves an engineering task before autonomous execution and passes a typed `EngineeringTaskEnvelope` to the engineering helper. The envelope separates the immutable task from the current operator instruction and records its source, same-session identity, character count, and SHA-256 hash.
+
+- A new concrete engineering request uses the normal enriched inbound message as its task so reply and attachment context remain available.
+- A short execution continuation, such as an approval to let the engineer proceed, must resolve to one unambiguous approved plan in canonical history for the current session.
+- Pipeline routing and execution authorization are separate decisions: an LLM router may select the engineering pipeline, but it cannot authorize reuse of a prior plan. Continuation authorization uses anchored deterministic actor/action grammar and fails closed for questions, conditionals, and negated execution instructions.
+- For typed history, `not_ready`, `blocked`, and `draft` metadata are authoritative rejection states. For existing and newly generated untyped history, an explicit current continuation may approve the latest plan-shaped assistant response to a plan request unless that response contains explicit not-ready or do-not-execute language. A contradictory ready marker never overrides an execution prohibition in the plan text.
+- Generic `conversation_context` remains bounded auxiliary context for other flows. It is not an executable engineering task store.
+- Slack `reply_to_text` identifies the thread parent and remains transport context. It must never replace the approved task or the raw operator instruction.
+
+Approved tasks are preserved byte-for-byte and may be at most 32 KiB. The resolver and helper fail closed before provider construction when the plan is missing, ambiguous, cross-session, oversized, or fails length/hash validation. No truncation fallback is allowed.
+
+The resolved task remains the immutable `original_task` across engineer, reviewer, peer-discussion, escalation, and rework iterations. Reviewer packet hashes are computed from that full original task, not from a display-truncated summary.
+
+The current operator instruction is added to model prompts as a separately labelled context block. Qualifiers such as `do not commit` or `do not deploy` therefore remain visible without changing the approved task text or its hash.
+
+Observability may expose only `resolution_status`, `source_kind`, `task_chars`, and the first 16 characters of `task_sha256`. Full task text and the operator instruction must not be written to logs, reports, or metrics.
+
 ## Required limits
 
 The reference pipeline requires explicit limits:

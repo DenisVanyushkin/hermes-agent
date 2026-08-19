@@ -48,7 +48,11 @@ def test_export_snippet_shape():
     # continuation lines in the snapshot (issue #71296).
     assert "unset" in snippet
     assert "${!HERMES_SESSION_*}" in snippet
-    assert "${!HERMES_CRON_AUTO_DELIVER_*}" in snippet
+    # The whole HERMES_CRON_ namespace, not just AUTO_DELIVER: the snippet
+    # broadened to the prefix glob so per-run cron audience/session vars
+    # cannot leak into the shared snapshot. The broad glob covers the
+    # narrow one; asserting the narrow literal here went stale.
+    assert "${!HERMES_CRON_*}" in snippet
     assert "HERMES_UI_SESSION_ID" in snippet
     assert "grep -vE" not in snippet
     assert '"$__hermes_snap_tmp"' in snippet

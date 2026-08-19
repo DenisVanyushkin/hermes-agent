@@ -87,3 +87,24 @@ def test_printed_tunnel_hint_matches_the_actual_bind_address() -> None:
     assert "${NOVNC_BIND}:${NOVNC_PORT}" in body
     hint = body[body.index("Connect securely via SSH tunnel"):]
     assert "-L ${NOVNC_PORT}:${NOVNC_BIND}:${NOVNC_PORT}" in hint
+
+
+def test_linkedin_opens_the_profile_that_holds_the_session() -> None:
+    """--profile-directory был зашит в Default, а сессия LinkedIn живёт в
+    Profile 1. Ночной перезапуск 2026-08-12 открыл Default и показал
+    разлогиненный LinkedIn — симптом, неотличимый от потери сессии."""
+    body = _body()
+    assert "PROFILE_DIRECTORY" in body
+    assert '--profile-directory="${PROFILE_DIRECTORY}"' in body
+    # Ярлык на рабочем столе тоже: иначе иконка открывает Default, пока
+    # автоматика ходит в профиль с сессией.
+    assert "--profile-directory=${PROFILE_DIRECTORY} --new-window https://www.linkedin.com/" in body
+    # Профиль hh к этому не относится и остаётся на Default.
+    assert body.count("--profile-directory=Default") == 1
+
+
+def test_profile_resolution_falls_back_to_default() -> None:
+    """Резолвер может не отработать — тогда поведение прежнее, а не пустая
+    строка в аргументе Chromium."""
+    body = _body()
+    assert 'PROFILE_DIRECTORY="Default"' in body

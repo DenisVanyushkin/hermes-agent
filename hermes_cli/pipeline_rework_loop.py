@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import re
@@ -35,6 +35,7 @@ from hermes_cli.pipeline_report import (
     _runner_result_is_reportable,
     build_pipeline_execution_report,
 )
+from hermes_cli.pipeline_packet_completeness import evaluate_packet_completeness
 from hermes_cli.pipeline_reviewer_packet import build_reviewer_packet
 from hermes_cli.pipeline_reviewer_packet import MACHINE_CAPTURED_TEST_STATUSES
 from hermes_cli.pipeline_session import PipelineSession
@@ -101,6 +102,7 @@ class ReworkLoopIterationRecord:
     reviewer_evaluation_status: str
     reviewer_blockers: list[str]
     loop_limit_snapshot: dict[str, Any]
+    reviewer_findings: list[dict[str, str]] = field(default_factory=list)
 
     def to_safe_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +114,7 @@ class ReworkLoopIterationRecord:
             "engineer_evaluation_status": self.engineer_evaluation_status,
             "reviewer_evaluation_status": self.reviewer_evaluation_status,
             "reviewer_blockers": list(self.reviewer_blockers),
+            "reviewer_findings": [dict(item) for item in self.reviewer_findings],
             "loop_limit_snapshot": dict(self.loop_limit_snapshot),
         }
 
@@ -189,6 +192,7 @@ def execute_bounded_rework_loop(
     runtime_factory: Any,
     runner: SubagentRunner,
     user_message: str,
+    operator_instruction: str | None = None,
     repo_path: str | None = None,
     test_summary: Any = None,
     allow_completion_after_review: bool = False,
@@ -249,6 +253,8 @@ def execute_bounded_rework_loop(
     current_ops_plan: list[dict[str, Any]] = []
     ops_render_blockers: list[str] = []
     invalid_output_retries_used = 0
+    packet_repair_retries_used = 0
+    packet_repair_history: list[dict[str, Any]] = []
     test_rework_iterations_used = 0
     peer_round_used = False
     decisive_subagent = REVIEWER_SUBAGENT_ID
@@ -268,6 +274,7 @@ def execute_bounded_rework_loop(
         }
         engineer_message = _compose_engineer_message(
             original_task=user_message,
+            operator_instruction=operator_instruction,
             appended_rework_context=appended_rework_context,
             prior_changes_diff=_working_tree_diff(repo_path) if appended_rework_context else None,
         )
@@ -372,7 +379,8 @@ def execute_bounded_rework_loop(
                     test_summary=current_test_summary,
                     engineer_evaluation_status=_step_evaluation_status(current_snapshot.planned_steps[0]),
                     tracked_diff=_working_tree_diff(repo_path, max_chars=40000, since_ref="HEAD"),
-                )
+                ),
+                original_task_hash=_stable_text_hash(user_message),
             )
         material_changes_present = bool(git_result.material_changes_present) if git_result is not None else False
         test_blocked_reason = current_test_summary.get("blocked_reason")
@@ -417,6 +425,10 @@ def execute_bounded_rework_loop(
         engineer_fail_closed_reason = _engineer_fail_closed_reason(
             current_snapshot,
             material_changes_present=material_changes_present,
+            no_material_changes_confirmed=bool(
+                git_result is not None
+                and git_result.status == "no_material_changes"
+            ),
         )
         if engineer_fail_closed_reason is not None:
             # git-primary: a material diff already returned None above, so we only
@@ -494,6 +506,7 @@ def execute_bounded_rework_loop(
                     accumulated_subagent_runs=accumulated_subagent_runs,
                     current_snapshot=current_snapshot,
                     original_task=user_message,
+                    operator_instruction=operator_instruction,
                     active_reviewer_blockers=active_reviewer_blockers,
                     trigger="reviewer_maintains_blocker_after_max_peer_round",
                     reason="reviewer maintained blocker after allowed peer disagreement round",
@@ -640,6 +653,7 @@ def execute_bounded_rework_loop(
                 )
             reviewer_message = _compose_peer_reviewer_message(
                 original_task=user_message,
+                operator_instruction=operator_instruction,
                 peer_message=peer_message,
             )
             # The peer round can approve and finalize without ever reaching the main
@@ -819,6 +833,7 @@ def execute_bounded_rework_loop(
                 accumulated_subagent_runs=accumulated_subagent_runs,
                 current_snapshot=current_snapshot,
                 original_task=user_message,
+                operator_instruction=operator_instruction,
                 active_reviewer_blockers=reviewer_blockers,
                 trigger="reviewer_maintains_blocker_after_peer_round",
                 reason="reviewer maintained blocker after allowed peer disagreement round",
@@ -975,6 +990,45 @@ def execute_bounded_rework_loop(
                 test_summary=current_test_summary,
             )
 
+        # Полнота пакета вычислима, поэтому её не отдают ревьюеру: находка
+        # `undescribed_changed_file` стоила раунда из трёх, и три прогона подряд
+        # умерли на ней при зелёных тестах. Свой бюджет, свой счётчик.
+        # Невалидный конверт не содержит `changes` вообще, и требовать от него
+        # описаний -- значит жечь прогоны на недостижимом: для этого случая есть
+        # max_invalid_output_retries и путь fail-closed.
+        engineer_output_valid = bool(
+            (current_reviewer_packet.get("safe_packet") or {}).get("engineer_output_valid")
+        )
+        if git_result is not None and material_changes_present and engineer_output_valid:
+            completeness = evaluate_packet_completeness(
+                changed_files=list(git_result.changed_files or []),
+                changes=(engineer_output or {}).get("changes"),
+            )
+            completeness_payload = completeness.to_safe_dict()
+            completeness_payload["repair_attempts"] = packet_repair_retries_used
+            if completeness.status == "incomplete":
+                if packet_repair_retries_used < loop_policy.max_packet_repair_retries:
+                    packet_repair_retries_used += 1
+                    packet_repair_history.append(
+                        {
+                            "attempt": packet_repair_retries_used,
+                            "undescribed_paths": list(completeness.undescribed_paths),
+                        }
+                    )
+                    appended_rework_context.append(
+                        _build_packet_repair_context(
+                            undescribed_paths=list(completeness.undescribed_paths),
+                            attempt=packet_repair_retries_used,
+                        )
+                    )
+                    continue
+                # Бюджет исчерпан -- пакет всё равно уходит ревьюеру. Блокировать
+                # прогон из-за отсутствующего описания значило бы выбросить
+                # проверенную работу ради метаданных.
+                completeness_payload["status"] = "incomplete_after_repair"
+            current_reviewer_packet = dict(current_reviewer_packet)
+            current_reviewer_packet["changes_completeness"] = completeness_payload
+
         reviewer_fuse = evaluate_pipeline_reviewer_execution_fuse(
             config=config,
             session=session,
@@ -1004,6 +1058,7 @@ def execute_bounded_rework_loop(
 
         reviewer_message = _compose_reviewer_message(
             original_task=user_message,
+            operator_instruction=operator_instruction,
             engineer_message=engineer_message,
             appended_rework_context=appended_rework_context,
         )
@@ -1152,6 +1207,7 @@ def execute_bounded_rework_loop(
                 reviewer_evaluation_status=reviewer_status,
                 reviewer_blockers=reviewer_blockers,
                 loop_limit_snapshot=dict(loop_snapshot),
+                reviewer_findings=_extract_reviewer_findings_detailed(reviewer_structured_output),
             )
         )
 
@@ -1671,6 +1727,7 @@ def _execute_model_escalation_if_allowed(
     accumulated_subagent_runs: list[dict[str, Any]],
     current_snapshot: Any,
     original_task: str,
+    operator_instruction: str | None,
     active_reviewer_blockers: list[str],
     trigger: str,
     reason: str,
@@ -1694,6 +1751,7 @@ def _execute_model_escalation_if_allowed(
         runtime_context=runtime_context,
         current_snapshot=current_snapshot,
         original_task=original_task,
+        operator_instruction=operator_instruction,
         active_reviewer_blockers=active_reviewer_blockers,
         trigger=trigger,
         reason=reason,
@@ -1734,6 +1792,7 @@ def _run_escalated_reviewer(
     runtime_context: ControlledRuntimeContext,
     current_snapshot: Any,
     original_task: str,
+    operator_instruction: str | None,
     active_reviewer_blockers: list[str],
     trigger: str,
     reason: str,
@@ -1762,7 +1821,10 @@ def _run_escalated_reviewer(
         real_provider_client_factory=runtime_context.real_provider_client_factory,
     )
     escalation_message = _compose_escalation_message(
-        original_task=original_task, reviewer_blockers=active_reviewer_blockers, reason=reason
+        original_task=original_task,
+        operator_instruction=operator_instruction,
+        reviewer_blockers=active_reviewer_blockers,
+        reason=reason,
     )
     if ops_review_block:
         escalation_message = "\n\n".join([escalation_message, ops_review_block])
@@ -1994,6 +2056,8 @@ def _blocked_loop_result(
                 blocked_reason=blocked_reason,
                 test_summary=test_summary,
                 reviewer_packet=reviewer_packet,
+                iteration_history=iteration_history,
+                appended_rework_context=appended_rework_context,
             ),
             reviewer_packet=reviewer_packet,
             git_gate=git_gate,
@@ -2078,11 +2142,90 @@ def _blocked_next_step_ru(blocked_reason: str | None, capability_hints: list | N
     return _GENERIC_NEXT_STEP_RU
 
 
+def _packet_repair_history_from_context(
+    appended_rework_context: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Починки уже лежат в контексте доработки -- отдельно их не протаскиваем."""
+    history: list[dict[str, Any]] = []
+    for item in list(appended_rework_context or []):
+        if isinstance(item, dict) and item.get("kind") == "packet_completeness_repair":
+            history.append(
+                {
+                    "attempt": item.get("attempt"),
+                    "undescribed_paths": list(item.get("undescribed_paths") or []),
+                }
+            )
+    return history
+
+
+def _plural_remarks_ru(count: int) -> str:
+    tail = count % 10
+    hundred = count % 100
+    if tail == 1 and hundred != 11:
+        return "замечание"
+    if tail in {2, 3, 4} and hundred not in {12, 13, 14}:
+        return "замечания"
+    return "замечаний"
+
+
+def render_round_chronology(
+    *,
+    iteration_history: list[Any],
+    packet_repair_history: list[dict[str, Any]],
+    rounds_exhausted: bool,
+) -> list[str]:
+    """История прогона целиком: что нашли, что сняли, что осталось.
+
+    Раньше оператор видел только последний раунд, поэтому прогон, начавшийся с
+    настоящей ошибки и доехавший до формальных остатков, выглядел как смерть
+    от бумажки.
+    """
+    if not iteration_history and not packet_repair_history:
+        return []
+
+    lines = ["━━ Как шла работа ━━"]
+    previous_keys: set[tuple[str, str]] | None = None
+    for record in iteration_history:
+        findings = list(getattr(record, "reviewer_findings", []) or [])
+        keys = {(str(item.get("code") or ""), str(item.get("summary") or "")) for item in findings}
+        index = getattr(record, "iteration_index", 0)
+        status = str(getattr(record, "reviewer_evaluation_status", "") or "")
+        if not findings and status in {"approved", "succeeded"}:
+            lines.append(f"Раунд {index} · одобрено")
+            previous_keys = keys
+            continue
+        header = (
+            f"Раунд {index} · ревьюер: доработка — "
+            f"{len(findings)} {_plural_remarks_ru(len(findings))}"
+        )
+        if previous_keys is not None:
+            cleared = len(previous_keys - keys)
+            header = f"{header} (снято {cleared})"
+        lines.append(header)
+        for item in findings:
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                lines.append(f"  • {summary}")
+        previous_keys = keys
+
+    for repair in packet_repair_history:
+        paths = ", ".join(str(item) for item in repair.get("undescribed_paths") or [])
+        lines.append(
+            f"Починка пакета ×{repair.get('attempt')} (раунд не тратится): {paths}"
+        )
+
+    if rounds_exhausted:
+        lines.append("→ раунды исчерпаны")
+    return lines
+
+
 def _blocked_final_response_text(
     *,
     blocked_reason: str | None,
     test_summary: dict[str, Any] | None,
     reviewer_packet: dict[str, Any],
+    iteration_history: list[Any] | None = None,
+    appended_rework_context: list[dict[str, Any]] | None = None,
 ) -> str | None:
     git_gate_reasons = {
         "baseline_dirty",
@@ -2301,6 +2444,20 @@ def _blocked_final_response_text(
         lines.extend(["", "━━ Покрытие ops-каталога ━━"])
         lines.extend(hint_lines(capability_hints))
 
+    chronology = render_round_chronology(
+        iteration_history=list(iteration_history or []),
+        packet_repair_history=_packet_repair_history_from_context(appended_rework_context),
+        rounds_exhausted=blocked_reason
+        in {
+            "review_loop_limit_exceeded",
+            "rework_exhausted_after_ordinary_reviewer_findings",
+            "rework_exhausted_after_missing_test_evidence",
+        },
+    )
+    if chronology:
+        lines.append("")
+        lines.extend(chronology)
+
     lines.extend(
         ["", "━━ Дальше ━━", f"- {_blocked_next_step_ru(blocked_reason, capability_hints)}"]
     )
@@ -2393,6 +2550,8 @@ def _completion_allowed_final_response_text(
     review_iterations_completed: int = 0,
     model_escalations_used: int = 0,
     ops_block: str = "",
+    iteration_history: list[Any] | None = None,
+    appended_rework_context: list[dict[str, Any]] | None = None,
 ) -> str:
     # A run with no material repo changes is an investigation/Q&A, not a code
     # change waiting at the commit gate -- the commit-gate framing is misleading
@@ -2481,6 +2640,15 @@ def _completion_allowed_final_response_text(
         lines.append(f"Раунды доработки: {review_iterations_completed}")
     if model_escalations_used > 0:
         lines.append("Эскалация модели: да — инженер переведён на усиленную модель после упорных провалов")
+
+    chronology = render_round_chronology(
+        iteration_history=list(iteration_history or []),
+        packet_repair_history=_packet_repair_history_from_context(appended_rework_context),
+        rounds_exhausted=False,
+    )
+    if chronology:
+        lines.append("")
+        lines.extend(chronology)
 
     lines.extend(
         [
@@ -2582,12 +2750,16 @@ def _finalize_loop_result(
             review_iterations_completed=review_iterations_completed,
             model_escalations_used=model_escalations_used,
             ops_block=ops_block,
+            iteration_history=iteration_history,
+            appended_rework_context=appended_rework_context,
         )
         if gate_reached
         else _blocked_final_response_text(
             blocked_reason=blocked_reason,
             test_summary=test_summary,
             reviewer_packet=reviewer_packet,
+            iteration_history=iteration_history,
+            appended_rework_context=appended_rework_context,
         )
     )
     if gate_reached:
@@ -3425,12 +3597,18 @@ def _absent_reviewer_packet() -> dict[str, Any]:
     }
 
 
-def _reviewer_packet_metadata(*, packet: Any) -> dict[str, Any]:
+def _reviewer_packet_metadata(
+    *,
+    packet: Any,
+    original_task_hash: str | None = None,
+) -> dict[str, Any]:
     safe_packet = packet.to_safe_dict()
     task_summary = safe_packet.get("task_summary")
     if task_summary:
         safe_packet["task_summary"] = "[redacted]"
-        safe_packet["task_summary_hash"] = _stable_text_hash(str(task_summary))
+        safe_packet["task_summary_hash"] = (
+            original_task_hash or _stable_text_hash(str(task_summary))
+        )
     return {
         "present": True,
         "packet_status": safe_packet.get("packet_status"),
@@ -3480,6 +3658,23 @@ def _extract_reviewer_findings(reviewer_structured_output: dict[str, Any]) -> li
         if summary:
             findings.append(summary)
     return findings
+
+
+def _extract_reviewer_findings_detailed(reviewer_structured_output: dict[str, Any]) -> list[dict[str, str]]:
+    """Находки с кодом -- иначе раунды не сопоставить между собой.
+
+    `_extract_reviewer_findings` отдаёт только текст резюме, и хронология не
+    может отличить «то же замечание висит третий раунд» от «пришло новое».
+    """
+    detailed: list[dict[str, str]] = []
+    for item in list(reviewer_structured_output.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        summary = _safe_test_text(item.get("summary"))
+        if not summary:
+            continue
+        detailed.append({"code": str(item.get("code") or ""), "summary": summary})
+    return detailed
 
 
 _ORDINARY_REVIEWER_BLOCK_STATUSES = {"blocked", "needs_review", "needs_escalation"}
@@ -3592,10 +3787,28 @@ def _working_tree_diff(repo_path: str | None, *, max_chars: int = 4000, since_re
     return text
 
 
-def _compose_engineer_message(*, original_task: str, appended_rework_context: list[dict[str, Any]], prior_changes_diff: str | None = None) -> str:
-    if not appended_rework_context:
-        return original_task
+def _operator_instruction_block(operator_instruction: str | None) -> str | None:
+    if not isinstance(operator_instruction, str) or not operator_instruction.strip():
+        return None
+    return (
+        "Current operator instruction (context only; it does not replace the "
+        "approved task):\n" + operator_instruction
+    )
+
+
+def _compose_engineer_message(
+    *,
+    original_task: str,
+    appended_rework_context: list[dict[str, Any]],
+    prior_changes_diff: str | None = None,
+    operator_instruction: str | None = None,
+) -> str:
     parts = [original_task]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    if not appended_rework_context:
+        return "\n\n".join(parts)
     if prior_changes_diff:
         parts.append(
             "Your prior uncommitted changes (already applied on disk — build on "
@@ -3609,24 +3822,36 @@ def _compose_engineer_message(*, original_task: str, appended_rework_context: li
 def _compose_reviewer_message(
     *,
     original_task: str,
+    operator_instruction: str | None = None,
     engineer_message: str,
     appended_rework_context: list[dict[str, Any]],
 ) -> str:
-    parts = [original_task, "Engineer candidate follows.", engineer_message]
+    parts = [original_task]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    parts.extend(["Engineer candidate follows.", engineer_message])
     if appended_rework_context:
         parts.extend(_serialize_rework_context(item) for item in appended_rework_context)
     return "\n\n".join(parts)
 
 
-def _compose_peer_reviewer_message(*, original_task: str, peer_message: dict[str, Any]) -> str:
+def _compose_peer_reviewer_message(
+    *,
+    original_task: str,
+    peer_message: dict[str, Any],
+    operator_instruction: str | None = None,
+) -> str:
     summary = _mapping_value((peer_message.get("content") or {}), "summary") or "Engineer submitted a disagreement summary."
     arguments = list((peer_message.get("content") or {}).get("arguments") or [])
     evidence = list((peer_message.get("content") or {}).get("evidence") or [])
     parts = [
         original_task,
-        "Peer discussion follow-up.",
-        f"Summary: {summary}",
     ]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    parts.extend(["Peer discussion follow-up.", f"Summary: {summary}"])
     if arguments:
         parts.append("Arguments: " + "; ".join(str(item) for item in arguments))
     if evidence:
@@ -3634,15 +3859,25 @@ def _compose_peer_reviewer_message(*, original_task: str, peer_message: dict[str
     return "\n\n".join(parts)
 
 
-def _compose_escalation_message(*, original_task: str, reviewer_blockers: list[str], reason: str) -> str:
-    return "\n\n".join(
+def _compose_escalation_message(
+    *,
+    original_task: str,
+    reviewer_blockers: list[str],
+    reason: str,
+    operator_instruction: str | None = None,
+) -> str:
+    parts = [original_task]
+    operator_block = _operator_instruction_block(operator_instruction)
+    if operator_block:
+        parts.append(operator_block)
+    parts.extend(
         [
-            original_task,
             "Escalated reviewer arbitration requested.",
             f"Escalation reason: {reason}",
             "Reviewer blockers: " + "; ".join(reviewer_blockers or ["none"]),
         ]
     )
+    return "\n\n".join(parts)
 
 
 def _safe_execution_report_payload(execution_report: Any) -> dict[str, Any] | None:
@@ -3671,6 +3906,28 @@ def _build_format_retry_context(*, reason: str, attempt: int) -> dict[str, Any]:
             "either status=blocked with concrete `blockers` explaining what stopped "
             "you (missing access, contradictory requirement, ambiguous scope), or "
             "status=succeeded if there was genuinely nothing to change."
+        ),
+    }
+
+
+def _build_packet_repair_context(*, undescribed_paths: list[str], attempt: int) -> dict[str, Any]:
+    listed = ", ".join(undescribed_paths)
+    return {
+        "source": "controlled_execution_contract",
+        "kind": "packet_completeness_repair",
+        "attempt": attempt,
+        "undescribed_paths": list(undescribed_paths),
+        "instruction": (
+            "Your changes are on disk and are NOT lost -- do NOT redo the work and "
+            "do NOT revert anything. The reviewer packet is incomplete: these changed "
+            f"files have no usable description: {listed}. Re-emit your "
+            "StructuredOutputEnvelope with a `changes` entry for EACH of those paths, "
+            "each with a non-empty `summary` saying what changed there and why. The "
+            "operator is shown exactly these descriptions when asked to approve the "
+            "commit, so an undescribed file means approving a change nobody explained. "
+            "Avoid the words token/secret/password/credential/env and diff markers in "
+            "the summary: the packet sanitizer drops such lines entirely and your "
+            "description would arrive empty."
         ),
     }
 
@@ -4072,7 +4329,12 @@ def _is_retryable_test_reason(reason: str | None) -> bool:
     return reason in _RETRYABLE_TEST_REASONS
 
 
-def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_present: bool = False) -> str | None:
+def _engineer_fail_closed_reason(
+    state_snapshot: Any,
+    *,
+    material_changes_present: bool = False,
+    no_material_changes_confirmed: bool = False,
+) -> str | None:
     planned_steps = list(getattr(state_snapshot, "planned_steps", []) or [])
     if not planned_steps:
         return "engineer_result_missing"
@@ -4102,6 +4364,21 @@ def _engineer_fail_closed_reason(state_snapshot: Any, *, material_changes_presen
         return None
     if evaluation_status != REVIEWER_APPROVAL_STATUS:
         if material_changes_present:
+            return None
+        if (
+            no_material_changes_confirmed
+            and evaluation_status == "needs_review"
+            and structured_output.get("validation_status") == "valid"
+            and structured_output.get("status") == "succeeded"
+            and structured_output.get("requires_review") is True
+            and structured_output.get("next_action") == "review"
+        ):
+            # The engineer may conservatively request review even after a
+            # read-only inspection. Once the host-side git gate has proved that
+            # HEAD and the working tree are unchanged, there is no candidate
+            # delta for a reviewer to inspect. Treat the successful result as a
+            # completed read-only run; genuine blocked/failed envelopes and
+            # runs without a conclusive git snapshot still fail closed.
             return None
         # A schema-valid envelope that self-reports it cannot proceed (blocked /
         # needs_review / needs_escalation) is not the same failure as a malformed

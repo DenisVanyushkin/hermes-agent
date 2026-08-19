@@ -51,6 +51,7 @@ def observe_gateway_turn(
     selected_model: str | None = None,
     logger: logging.Logger | None = None,
     conversation_context: str | None = None,
+    engineering_task_context: dict[str, Any] | None = None,
     db: SessionDB | None = None,
 ) -> OrchestratorObserveReport | None:
     del selected_provider, selected_model
@@ -121,6 +122,7 @@ def observe_gateway_turn(
             pipeline_preflight_payload=_routing_failed_preflight_payload(router_decision),
             pipeline_execution_controller_payload=pipeline_execution_controller.to_safe_dict(),
             pipeline_execution_report_payload=pipeline_execution_report_payload,
+            engineering_task_context=engineering_task_context,
         )
         return report
     pipeline_plan_payload = _build_pipeline_plan_payload(
@@ -147,6 +149,10 @@ def observe_gateway_turn(
         )
         if conversation_context:
             helper_execution_context["conversation_context"] = conversation_context
+        if engineering_task_context is not None:
+            helper_execution_context["engineering_task_context"] = dict(
+                engineering_task_context
+            )
         allow_test_execution = True
         allow_registered_helper_selection = True
     pipeline_execution_controller = evaluate_pipeline_execution_controller(
@@ -242,6 +248,7 @@ def observe_gateway_turn(
         pipeline_preflight_payload=pipeline_preflight.to_safe_dict(),
         pipeline_execution_controller_payload=pipeline_execution_controller.to_safe_dict(),
         pipeline_execution_report_payload=pipeline_execution_report_payload,
+        engineering_task_context=engineering_task_context,
     )
     return report
 
@@ -532,6 +539,37 @@ def _hash_user_message(user_message: str) -> str:
     return _session_hash_user_message(user_message)
 
 
+def _safe_engineering_task_metadata(
+    engineering_task_context: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return bounded task provenance without logging task or operator text."""
+    if not isinstance(engineering_task_context, dict):
+        return None
+
+    task_chars = engineering_task_context.get("task_chars")
+    if isinstance(task_chars, bool) or not isinstance(task_chars, int) or task_chars < 0:
+        task_chars = None
+
+    task_sha256 = engineering_task_context.get("task_sha256")
+    task_sha256_prefix = (
+        task_sha256[:16]
+        if isinstance(task_sha256, str) and len(task_sha256) == 64
+        else None
+    )
+    resolution_status = engineering_task_context.get("resolution_status")
+    if resolution_status not in {"resolved", "blocked", "unresolved"}:
+        resolution_status = "unresolved"
+    source_kind = engineering_task_context.get("source_kind")
+    if source_kind not in {"direct_request", "approved_plan"}:
+        source_kind = "unknown"
+    return {
+        "resolution_status": resolution_status,
+        "source_kind": source_kind,
+        "task_chars": task_chars,
+        "task_sha256_prefix": task_sha256_prefix,
+    }
+
+
 def _log_observe_report(
     *,
     gateway_logger: logging.Logger,
@@ -542,6 +580,7 @@ def _log_observe_report(
     pipeline_preflight_payload: dict[str, Any],
     pipeline_execution_controller_payload: dict[str, Any],
     pipeline_execution_report_payload: dict[str, Any],
+    engineering_task_context: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "event": "pipeline_orchestrator_observe_report",
@@ -569,6 +608,9 @@ def _log_observe_report(
         "pipeline_execution_report": pipeline_execution_report_payload,
         "pipeline_preflight": pipeline_preflight_payload,
         "pipeline_execution_controller": pipeline_execution_controller_payload,
+        "engineering_task": _safe_engineering_task_metadata(
+            engineering_task_context
+        ),
     }
     payload.update(pipeline_plan_payload)
     gateway_logger.info(

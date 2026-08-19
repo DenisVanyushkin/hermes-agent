@@ -17,7 +17,7 @@ from urllib.request import urlopen
 from job_intel.linkedin_session import (
     CookieRecord,
     read_cookie_inventory,
-    resolve_profile_dir,
+    resolve_profile,
     session_state_from_cookies,
 )
 
@@ -63,6 +63,8 @@ def build_report(
     now: datetime,
     netns: str | None = None,
     profile_dir: str | None = None,
+    profile_reason: str | None = None,
+    unreadable_profiles: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "checked_at": now.isoformat(),
@@ -77,6 +79,11 @@ def build_report(
         # сессия ложится в него. Состояние, прочитанное из чужого
         # профиля, — не факт о сессии, поэтому каталог называется.
         "profile_dir": profile_dir,
+        # Как выбран профиль и что прочитать не удалось: состояние,
+        # полученное после нечитаемого профиля с сессией, — факт о
+        # правах доступа, а не о сессии.
+        "profile_reason": profile_reason,
+        "unreadable_profiles": list(unreadable_profiles),
         "session_state": session_state_from_cookies(inventory, now=now),
         "cookies": [
             {
@@ -108,15 +115,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="вывести отчёт как JSON")
     args = parser.parse_args(argv)
 
-    profile_dir = resolve_profile_dir(args.profile)
-    cookie_db = profile_dir / "Cookies"
+    resolution = resolve_profile(args.profile)
+    cookie_db = resolution.path / "Cookies"
     inventory = read_cookie_inventory(cookie_db) if cookie_db.exists() else []
     report = build_report(
         exit_ip=probe_exit_ip(),
         inventory=inventory,
         now=datetime.now(timezone.utc),
         netns=current_netns(),
-        profile_dir=profile_dir.name,
+        profile_dir=resolution.path.name,
+        profile_reason=resolution.reason,
+        unreadable_profiles=resolution.unreadable,
     )
     print(json.dumps(report, indent=2) if args.json else render_report(report))
     return 0

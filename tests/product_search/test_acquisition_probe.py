@@ -9,6 +9,7 @@ from job_intel.product_search.acquisition_probe import (
     ProbeSourceBlocked,
     SourceIsolation,
     build_isolated_probe_environment,
+    build_snapshot_queries,
     expand_queries,
     resolve_public_sources,
     run_probe,
@@ -31,6 +32,22 @@ def test_query_expansion_is_deterministic_and_preserves_cell_family_identity() -
     assert len({query.query_id for query in first}) == len(first)
     assert all(query.cell_id and query.source_family and query.query for query in first)
     assert [query.query_id for query in first] == sorted(query.query_id for query in first)
+
+
+def test_ats_snapshot_expansion_runs_each_available_family_once() -> None:
+    queries = build_snapshot_queries()
+
+    assert {query.source_family for query in queries} == {
+        "ashby",
+        "greenhouse",
+        "lever",
+        "personio",
+        "recruitee",
+        "smartrecruiters",
+        "teamtailor",
+    }
+    assert len(queries) == 7
+    assert {query.cell_id for query in queries} == {"ats_global_snapshot"}
 
 
 def test_probe_writes_content_addressed_evidence_and_deduplicates_canonical_urls(tmp_path: Path) -> None:
@@ -190,7 +207,20 @@ def test_output_path_allows_only_direct_gate_a_commit_root() -> None:
 def test_probe_registry_exposes_only_existing_public_scraper_interfaces() -> None:
     sources = resolve_public_sources()
 
-    assert set(sources) == {"linkedin", "headhunter", "duckduckgo", "remoteok", "remotive"}
+    assert set(sources) == {
+        "ashby",
+        "duckduckgo",
+        "greenhouse",
+        "headhunter",
+        "lever",
+        "linkedin",
+        "personio",
+        "recruitee",
+        "remoteok",
+        "remotive",
+        "smartrecruiters",
+        "teamtailor",
+    }
     assert all(callable(source) for source in sources.values())
 
 
@@ -244,6 +274,52 @@ def test_isolated_environment_overrides_ambient_production_paths(tmp_path: Path)
         if key.startswith("JOB_INTEL_") and key.endswith(("_PATH", "_DIR")):
             assert not value.startswith("/var/lib/job-intel/state")
             assert not value.startswith("/var/lib/browser-desktop")
+
+
+def test_owner_approved_shared_profiles_require_experiment_local_backups(tmp_path: Path) -> None:
+    root = tmp_path / "gate-a" / ("a" * 40)
+    linkedin_backup = root / "browser-profile-backup/linkedin"
+    headhunter_backup = root / "browser-profile-backup/headhunter"
+    linkedin_backup.mkdir(parents=True)
+    headhunter_backup.mkdir(parents=True)
+    manifest = {
+        "root": str(root),
+        "paths": {
+            "experiment.sqlite3": str(root / "experiment.sqlite3"),
+            "browser-profile": str(root / "browser-profile"),
+            "cache": str(root / "cache"),
+            "logs": str(root / "logs"),
+            "tmp": str(root / "tmp"),
+        },
+        "python": {"executable_path": str(root / "python-runtime/venv/bin/python")},
+        "source_isolation": {
+            "linkedin": {
+                "mode": "exclusive_lock",
+                "path": str(root / "locks/linkedin-profile.lock"),
+                "shared_profile_path": "/var/lib/browser-desktop/profiles/linkedin",
+                "backup_path": str(linkedin_backup),
+            },
+            "headhunter": {
+                "mode": "exclusive_lock",
+                "path": str(root / "locks/headhunter-profile.lock"),
+                "shared_profile_path": "/var/lib/browser-desktop/profiles/hh",
+                "backup_path": str(headhunter_backup),
+            },
+        },
+    }
+
+    environment = build_isolated_probe_environment(manifest)
+
+    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"] == (
+        "/var/lib/browser-desktop/profiles/linkedin"
+    )
+    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_HH"] == (
+        "/var/lib/browser-desktop/profiles/hh"
+    )
+
+    headhunter_backup.rmdir()
+    with __import__("pytest").raises(ValueError, match="shared profile backup"):
+        build_isolated_probe_environment(manifest)
 
 
 def test_probe_records_unexpected_source_failure_without_aborting_run(tmp_path: Path) -> None:

@@ -300,3 +300,192 @@ def test_recognised_feed_does_not_raise_the_drift_flag() -> None:
 
     assert verdict.state == SESSION_OK
     assert verdict.page_unrecognised is False
+
+
+# --- Профиль ищется по сессии, а не по last_used ------------------------
+
+
+def _profile_with(tmp_path: Path, name: str, cookies: list[tuple[str, str, int, int]]) -> Path:
+    directory = tmp_path / name
+    directory.mkdir(parents=True, exist_ok=True)
+    _make_cookie_db(directory / "Cookies", cookies)
+    return directory
+
+
+def test_profile_holding_the_session_wins_over_last_used(tmp_path: Path) -> None:
+    """Ночной перезапуск десктопа 2026-08-12 открыл Default, last_used
+    переключился туда, и резолвер увёл замер в профиль с одиннадцатью
+    анонимными куками — при живой сессии в соседнем каталоге. Вопрос, на
+    который надо отвечать, — «где лежит сессия», а не «что браузер открыл
+    последним»."""
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    _profile_with(tmp_path, "Default", [(".linkedin.com", "bcookie", future, 1)])
+    _profile_with(tmp_path, "Profile 1", [(".www.linkedin.com", "li_at", future, 1)])
+    (tmp_path / "Local State").write_text(
+        _json.dumps({"profile": {"last_used": "Default"}}), encoding="utf-8"
+    )
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Profile 1"
+
+
+def test_last_used_is_the_fallback_when_no_profile_holds_a_session(tmp_path: Path) -> None:
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    _profile_with(tmp_path, "Default", [(".linkedin.com", "bcookie", future, 1)])
+    _profile_with(tmp_path, "Profile 1", [(".linkedin.com", "lidc", future, 1)])
+    (tmp_path / "Local State").write_text(
+        _json.dumps({"profile": {"last_used": "Profile 1"}}), encoding="utf-8"
+    )
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Profile 1"
+
+
+def test_default_is_the_last_resort(tmp_path: Path) -> None:
+    (tmp_path / "Default").mkdir()
+
+    assert resolve_profile_dir(tmp_path) == tmp_path / "Default"
+
+
+def test_guest_page_beats_a_session_found_in_another_profile() -> None:
+    """Страница прямо показывает гостя, а кука нашлась в другом профиле.
+    Поиск пойдёт в том контексте, который открыт в браузере, поэтому живая
+    кука на диске этого не отменяет. Без этого правила ночной перезапуск в
+    Default отчитывался бы как здоровая сессия."""
+    verdict = resolve_session_state(cookie_state=SESSION_OK, page_state=SESSION_MISSING)
+
+    assert verdict.state == SESSION_MISSING
+
+
+def test_module_prints_the_resolved_profile_name(tmp_path: Path) -> None:
+    """Запускалка десктопа — bash, и ей нужен ответ строкой. Печатается имя
+    каталога, а не путь: Chromium принимает --profile-directory именно так."""
+    import subprocess, sys
+
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Profile 1").mkdir()
+    _make_cookie_db(tmp_path / "Profile 1" / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+
+    out = subprocess.run(
+        [sys.executable, "-m", "job_intel.linkedin_session", "--user-data-dir", str(tmp_path)],
+        capture_output=True, text=True, check=True,
+    )
+
+    assert out.stdout.strip() == "Profile 1"
+
+
+# --- Нечитаемый профиль не равен профилю без сессии ----------------------
+
+from job_intel.linkedin_session import resolve_profile
+
+
+def test_unreadable_profile_is_reported_not_swallowed(tmp_path: Path) -> None:
+    """Каталог Profile 1 имеет права drwx------ browser:browser. Под другим
+    пользователем чтение падает, и `except: continue` превращал «не смог
+    посмотреть» в «сессии тут нет»: резолвер от hermes отвечал Default, от
+    root — Profile 1, на одних и тех же данных."""
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Default").mkdir()
+    _make_cookie_db(tmp_path / "Default" / "Cookies", [(".linkedin.com", "bcookie", future, 1)])
+    locked = tmp_path / "Profile 1"
+    locked.mkdir()
+    _make_cookie_db(locked / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+    (locked / "Cookies").chmod(0o000)
+
+    try:
+        resolution = resolve_profile(tmp_path)
+    finally:
+        (locked / "Cookies").chmod(0o600)
+
+    assert "Profile 1" in resolution.unreadable
+
+
+def test_resolution_names_the_reason(tmp_path: Path) -> None:
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Profile 1").mkdir()
+    _make_cookie_db(tmp_path / "Profile 1" / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+
+    resolution = resolve_profile(tmp_path)
+
+    assert resolution.reason == "session_cookie"
+    assert resolution.path == tmp_path / "Profile 1"
+    assert resolution.unreadable == ()
+
+
+def test_fallback_to_default_names_itself(tmp_path: Path) -> None:
+    (tmp_path / "Default").mkdir()
+
+    resolution = resolve_profile(tmp_path)
+
+    assert resolution.reason == "default"
+
+
+def test_profile_dir_without_read_permission_is_reported(tmp_path: Path) -> None:
+    """Каталог Profile 1 имеет права drwx------ browser:browser. Path.exists()
+    при отказе в правах возвращает False, а не ошибку, поэтому профиль
+    отсеивался ещё до попытки чтения: список нечитаемых оставался пустым, и
+    отчёт выглядел полным, будучи неполным."""
+    import os
+
+    if os.geteuid() == 0:
+        import pytest
+
+        pytest.skip("root читает что угодно, права здесь ничего не значат")
+
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Default").mkdir()
+    _make_cookie_db(tmp_path / "Default" / "Cookies", [(".linkedin.com", "bcookie", future, 1)])
+    locked = tmp_path / "Profile 1"
+    locked.mkdir()
+    _make_cookie_db(locked / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+    locked.chmod(0o000)
+
+    try:
+        resolution = resolve_profile(tmp_path)
+    finally:
+        locked.chmod(0o700)
+
+    assert "Profile 1" in resolution.unreadable
+    assert resolution.reason != "session_cookie"
+
+
+def test_one_unreadable_entry_does_not_blank_the_whole_scan(tmp_path: Path) -> None:
+    """В каталоге профиля лежит SingletonSocket — симлинк, чей stat падает с
+    PermissionError. Перебор со сплошным `except OSError` обнулял на нём весь
+    список, и Profile 1 не доходил до проверки: отчёт сообщал, что нечитаемых
+    профилей нет, хотя не посмотрел ни одного."""
+    import os
+
+    if os.geteuid() == 0:
+        import pytest
+
+        pytest.skip("root читает что угодно")
+
+    future = _chromium_stamp(datetime(2027, 1, 1, tzinfo=timezone.utc))
+    (tmp_path / "Default").mkdir()
+    _make_cookie_db(tmp_path / "Default" / "Cookies", [(".linkedin.com", "bcookie", future, 1)])
+    good = tmp_path / "Profile 1"
+    good.mkdir()
+    _make_cookie_db(good / "Cookies", [(".www.linkedin.com", "li_at", future, 1)])
+
+    hostile = tmp_path / "SingletonSocket"
+    hostile.mkdir()
+    hostile.chmod(0o000)
+
+    try:
+        resolution = resolve_profile(tmp_path)
+    finally:
+        hostile.chmod(0o700)
+
+    assert resolution.path == good
+    assert resolution.reason == "session_cookie"
+
+
+def test_only_chrome_profile_names_are_scanned(tmp_path: Path) -> None:
+    """Посторонние записи в каталоге не профили и в список нечитаемых
+    попадать не должны — иначе он забивается шумом и перестаёт читаться."""
+    (tmp_path / "Default").mkdir()
+    (tmp_path / "BrowserMetrics").mkdir()
+    (tmp_path / "CaptchaProviders").mkdir()
+
+    resolution = resolve_profile(tmp_path)
+
+    assert resolution.unreadable == ()

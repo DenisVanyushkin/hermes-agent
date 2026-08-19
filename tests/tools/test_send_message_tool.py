@@ -275,6 +275,12 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_ntfy_topic_target_is_explicit(self):
+        chat_id, thread_id, is_explicit = _parse_target_ref("ntfy", "alerts-channel")
+
+        assert chat_id == "alerts-channel"
+        assert thread_id is None
+        assert is_explicit is True
 
     def test_ntfy_topic_target_bypasses_channel_directory(self):
         ntfy_platform = Platform("ntfy")
@@ -864,6 +870,9 @@ class TestParseTargetRef:
 
     def test_explicit_targets_round_trip_chat_and_thread(self):
         cases = [
+            # Telegram private DM topic by name. Cron jobs persist this exact
+            # form so the live adapter can create/reuse the Bot API topic.
+            ("telegram", "79564752:Погода Алматы", "79564752", "Погода Алматы"),
             # Discord: snowflake, optional :thread, surrounding whitespace
             ("discord", "-1001234567890:17585", "-1001234567890", "17585"),
             ("discord", "1003724596514", "1003724596514", None),

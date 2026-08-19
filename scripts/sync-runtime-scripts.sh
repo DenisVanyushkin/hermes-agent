@@ -30,6 +30,14 @@ for pattern in "${runtime_sources[@]}"; do
   done
 done
 
+# The bounded idea-signal collector resolves its registry beside the synced
+# script at runtime. Keep config and code in the same atomic sync operation.
+IDEA_REGISTRY_SRC="$REPO/config/idea_sources.yaml"
+if [ -f "$IDEA_REGISTRY_SRC" ]; then
+  install -m 644 "$IDEA_REGISTRY_SRC" "$TARGET_DIR/idea_sources.yaml"
+  printf 'Synced idea-signal registry to %s\n' "$TARGET_DIR/idea_sources.yaml"
+fi
+
 printf 'Synced %s runtime script(s) to %s
 ' "$copied" "$TARGET_DIR"
 

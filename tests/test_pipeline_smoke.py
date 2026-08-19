@@ -10,7 +10,15 @@ import pytest
 from hermes_cli import pipeline_smoke
 
 
-REPO_ROOT = Path("/home/hermes/.hermes/hermes-agent")
+# Два разных смысла, которые раньше были одной константой.
+# SPEC_ROOT -- дерево, в котором лежит сам тест: config/ и prompts/ берутся
+# отсюда, иначе прогон в git-worktree копирует боевые спеки и проверяет чужое
+# дерево вместо правок рядом с собой.
+SPEC_ROOT = Path(__file__).resolve().parents[1]
+# REPO_ROOT -- дерево, у которого есть venv. Worktree его не наследует, поэтому
+# для реальных pytest-прогонов берём локальный venv, если он есть, иначе
+# основной чекаут.
+REPO_ROOT = SPEC_ROOT if (SPEC_ROOT / "venv").exists() else Path("/home/hermes/.hermes/hermes-agent")
 PYTHON = REPO_ROOT / "venv/bin/python"
 
 

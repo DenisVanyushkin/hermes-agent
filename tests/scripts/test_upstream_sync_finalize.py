@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,7 +53,13 @@ def _make_repo(tmp_path: Path) -> Path:
 
 
 def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
-    """Fake SCRIPTS_DIR whose scripts record invocations instead of acting."""
+    """Fake SCRIPTS_DIR whose scripts record invocations instead of acting.
+
+    ``run-fork-tests.sh`` prints one fixed pytest-like log, so the baseline and
+    post-merge runs compare equal and the apply-merge test gate passes unless a
+    test overrides the stub. The two Python helpers are the real ones: the gate
+    and the decision memory are pure functions worth exercising for real.
+    """
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     calls = tmp_path / "calls.log"
@@ -63,6 +71,17 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
         p = scripts / name
         p.write_text(f'#!/usr/bin/env bash\necho "{name} $@" >> "{calls}"\nexit 0\n')
         p.chmod(0o755)
+    tests_stub = scripts / "run-fork-tests.sh"
+    tests_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+        "echo '1 failed, 5 passed in 2.00s'\n"
+    )
+    tests_stub.chmod(0o755)
+    for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py", "upstream_sync_policy.py",
+                   "upstream_sync_apply.py", "upstream_sync_llm.py", "upstream_sync_slack.py",
+                   "upstream_sync_triage.py"):
+        (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
     return scripts, calls
 
 
@@ -75,6 +94,11 @@ def _run_finalize(repo, state, scripts, extra_env=None, path_prepend=None):
             "HERMES_REPO": str(repo),
             # Keep the ACL self-heal inert in the test sandbox.
             "SUDO_ASKPASS": "/bin/false",
+            # apply-decisions runs the python helpers with this interpreter and
+            # must never reach a model or Slack from a test.
+            "HERMES_PYTHON": sys.executable,
+            "HERMES_SYNC_RESOLVER_CMD": env.get("HERMES_SYNC_RESOLVER_CMD", "false"),
+            "HERMES_SYNC_SLACK_CMD": env.get("HERMES_SYNC_SLACK_CMD", "true"),
         }
     )
     if extra_env:
@@ -501,3 +525,1152 @@ class TestActionAliasKeepsOldRequestsWorking:
         _request(state, "rebase", _git(repo, "rev-parse", "HEAD"))
         _run_finalize(repo, state, scripts)
         assert "sync-local-customizations.sh" in calls.read_text()
+
+
+# ---------------------------------------------------------------------------
+# apply-merge — ingesting a merge the sandboxed agent built in a scratch clone
+# ---------------------------------------------------------------------------
+#
+# The live checkout is bind-mounted :ro into sandboxes (config.yaml), so the
+# Mode B agent cannot create a backup ref or commit a merge in it — the
+# 2026-08-12 apply died on exactly that. It now merges in a writable
+# ``git clone --shared`` under the state dir and hands the host the resulting
+# SHA; the host re-derives trust from the commit's parents rather than taking
+# the agent's word, then fast-forwards.
+
+
+def _make_divergent_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """Repo on ``local/customizations`` plus a divergent ``up`` branch.
+
+    Returns (repo, local_head, upstream_head) — the two sides a Mode B merge
+    is expected to join.
+    """
+    repo = _make_repo(tmp_path)
+    local_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-qb", "up", "HEAD~1")
+    (repo / "g.txt").write_text("upstream\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "upstream work")
+    upstream_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "local/customizations")
+    return repo, local_head, upstream_head
+
+
+def _scratch_merge(repo: Path, state: Path, base: str, other: str, name="scratch") -> str:
+    """Clone *repo* into the state dir, merge *other* into *base*, return the SHA."""
+    scratch = state / name
+    subprocess.run(
+        ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+        check=True,
+        capture_output=True,
+    )
+    _git(scratch, "config", "user.email", "t@t")
+    _git(scratch, "config", "user.name", "t")
+    _git(scratch, "checkout", "-q", "--detach", base)
+    _git(scratch, "-c", "rerere.enabled=false", "merge", "--no-edit", "-q", other)
+    return _git(scratch, "rev-parse", "HEAD")
+
+
+def _apply_request(state: Path, *, upstream_sha, merge_sha, scratch_repo="scratch"):
+    (state / "finalize-request.json").write_text(
+        json.dumps(
+            {
+                "action": "apply-merge",
+                "upstream_sha": upstream_sha,
+                "backup_ref": "",
+                "merge_sha": merge_sha,
+                "scratch_repo": scratch_repo,
+            }
+        )
+    )
+
+
+class TestApplyMergeFromScratchClone:
+    def test_merge_parented_on_head_and_upstream_is_fast_forwarded(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        # The live branch actually advanced to the agent's merge...
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "local/customizations"
+        # ...the host made the backup ref itself (the agent cannot), ...
+        assert res["backup_ref"]
+        assert _git(repo, "rev-parse", res["backup_ref"]) == local_head
+        # ...and the post-update tail ran (scripts, push, restart) — not the
+        # full sync, which would gate the push on the newer upstream tip.
+        logged = calls.read_text()
+        assert f"sync-local-customizations.sh --post-update-only {local_head}" in logged
+        assert "upstream-sync-smoketest.sh" in logged
+
+    def test_merge_not_parented_on_live_head_is_refused(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        stale_base = _git(repo, "rev-parse", "HEAD~1")
+        merge_sha = _scratch_merge(repo, state, stale_base, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "parent" in res["detail"]
+        # Untouched: the branch did not move, nothing was pushed, and no
+        # rollback fired (there is nothing to roll back from).
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "rollback" not in calls.read_text()
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_merge_of_the_wrong_upstream_point_is_refused(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        # A second upstream-ish commit the operator never saw or decided on.
+        _git(repo, "checkout", "-q", "up")
+        (repo / "h.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "later upstream work")
+        later = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+
+        merge_sha = _scratch_merge(repo, state, local_head, later)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        # The request still claims the approved head; the commit says otherwise.
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "parent" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    @pytest.mark.parametrize("name", ["../escape", "/etc", "nested/dir", ""])
+    def test_scratch_repo_outside_the_state_dir_is_refused(self, tmp_path, state, name):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(
+            state,
+            upstream_sha=upstream_head,
+            merge_sha=merge_sha,
+            scratch_repo=name,
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "scratch_repo" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_unfetchable_scratch_repo_leaves_the_repo_untouched(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(
+            state,
+            upstream_sha=upstream_head,
+            merge_sha="0" * 40,
+            scratch_repo="never-created",
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "rollback" not in calls.read_text()
+
+
+class TestScratchCloneIsAdoptedBeforeReading:
+    """The scratch clone is made INSIDE the sandbox: root-owned, and its
+    ``objects/info/alternates`` names the sandbox mount
+    ``/workspace/live-hermes``, which does not exist on the host. On
+    2026-08-15 both would have killed the fetch (``dubious ownership``,
+    ``unable to normalize alternate object path``). The finalizer must make
+    the clone its own before reading it: chown via sudo, and point the
+    alternates at its own object store.
+    """
+
+    def test_alternates_naming_the_sandbox_mount_are_repointed(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        alternates = state / "scratch" / ".git" / "objects" / "info" / "alternates"
+        # What the sandbox leaves behind: a path that only exists in the container.
+        alternates.write_text("/workspace/live-hermes/.git/objects\n")
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        # A --shared clone owns only the merge commit; every parent, tree and
+        # blob is borrowed through that alternate. Serving the fetch at all is
+        # therefore proof the path was repointed at a store that exists here —
+        # a stronger check than reading the file back, which is impossible
+        # anyway: the finalizer deletes the clone once the apply succeeds.
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert (repo / "g.txt").read_text() == "upstream\n"   # borrowed blob arrived
+        detail = (state / "finalize-detail.log").read_text()
+        assert "unable to normalize alternate object path" not in detail, detail
+
+    def test_clone_ownership_is_normalized_with_sudo(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        # A sudo shim: records the request, performs nothing (the test user
+        # already owns the clone, so nothing needs to change for the fetch).
+        shim = tmp_path / "shim"
+        shim.mkdir()
+        sudo_log = tmp_path / "sudo.log"
+        (shim / "sudo").write_text(
+            f'#!/usr/bin/env bash\necho "$@" >> "{sudo_log}"\nexit 0\n'
+        )
+        (shim / "sudo").chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts, path_prepend=str(shim))
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        logged = sudo_log.read_text() if sudo_log.exists() else ""
+        assert "chown -R" in logged and str(state / "scratch") in logged, logged
+
+
+class TestApplyMergeIsGatedOnForkTests:
+    """A plausible-looking resolution of a merge-both conflict can still be
+    wrong, and the smoketest only proves the tree imports. The agent's merge is
+    run through the fork's own tests before it becomes the live branch, exactly
+    as the automatic merge is in the sync script.
+    """
+
+    def _breaking_tests_stub(self, scripts: Path) -> None:
+        # Reports one extra failure whenever the checked-out tree is the merge
+        # (it contains g.txt, which only the upstream side adds).
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            'if [ -f "$1/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
+            "echo '2 failed, 4 passed in 2.00s'\n"
+        )
+
+    def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_tests_stub(scripts)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert "test_broken_by_merge" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head          # not landed
+        assert (state / "pending.json").exists()                      # decision kept
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+        assert not calls.exists() or "rollback" not in calls.read_text()
+        # The temporary test-gate worktree was removed.
+        assert len(_git(repo, "worktree", "list").splitlines()) == 1
+
+    def test_pre_existing_failures_do_not_block(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)   # same known failure before and after
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+
+    def test_an_unreadable_test_run_refuses_to_land(self, tmp_path, state):
+        """No summary line means the run was killed, not clean — the gate must
+        not read that as "no new failures" (the sync script draws the same
+        distinction via exit code 2)."""
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\necho 'collecting ...'\nexit 137\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+
+class TestHostRecordsDecisionsIntoMemory:
+    """Recording the operator's decisions used to be the agent's last step, but
+    its session dies with the gateway restart the smoketest triggers — on
+    2026-08-12 the memory had to be rebuilt by hand. The host holds the archived
+    pending file and outlives the restart, so the host records.
+    """
+
+    def test_successful_apply_records_the_decision(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip", "base"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        memory = json.loads((state / "decision-memory.json").read_text())
+        assert len(memory["entries"]) == 1
+        entry = memory["entries"][0]
+        assert entry["decision"] == "merge-both"
+        assert entry["files"] == ["g.txt"]
+        assert entry["apply_count"] == 1
+
+    def test_failed_apply_leaves_memory_alone(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        stale_base = _git(repo, "rev-parse", "HEAD~1")
+        merge_sha = _scratch_merge(repo, state, stale_base, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "failed"
+        assert not (state / "decision-memory.json").exists()
+
+
+class TestHugeDetailLogStillProducesAResult:
+    """The detail was passed to python as an argv element, and Linux caps a
+    single argument at 128 KiB. Two full fork-test runs blow past that, so the
+    apply died with "Argument list too long" AFTER the merge had landed, been
+    pushed and smoke-tested — leaving the decision unarchived, the memory
+    unrecorded, and no result for anyone polling (2026-08-15). The truncation
+    to 4000 chars already happened inside python, i.e. the oversized value only
+    ever existed to be thrown away.
+    """
+
+    def test_a_result_is_written_when_the_log_exceeds_the_argv_limit(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        # 300 KiB of output from the publish step — well past MAX_ARG_STRLEN.
+        (scripts / "sync-local-customizations.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "sync-local-customizations.sh $@" >> "{calls}"\n'
+            "python3 -c \"print('x' * 300000)\"\n"
+            "exit 0\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr
+        assert len(res["detail"]) <= 4000
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        # The whole log is still on disk next to the result.
+        assert (state / "finalize-detail.log").stat().st_size > 200000
+
+    def test_the_decision_is_still_consumed_when_the_log_is_huge(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "upstream-sync-smoketest.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "upstream-sync-smoketest.sh $@" >> "{calls}"\n'
+            "python3 -c \"print('y' * 300000)\"\n"
+            "exit 0\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        assert not (state / "pending.json").exists()
+        assert len(list(state.glob("pending.json.applied-*"))) == 1
+        memory = json.loads((state / "decision-memory.json").read_text())
+        assert memory["entries"][0]["decision"] == "merge-both"
+
+
+class TestAnAlreadyAppliedMergeIsNotAFailure:
+    """A second request for a merge that is already the branch tip means a
+    duplicate hand-off, not a mismatch. Reporting it as a parent-mismatch
+    failure overwrote the real outcome of the run that had just landed it
+    (2026-08-15) — the operator was told the apply failed while it was live.
+    """
+
+    def test_a_duplicate_request_reports_already_applied_without_touching_anything(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        # First apply: lands normally.
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        _run_finalize(repo, state, scripts)
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        calls.unlink()
+
+        # The duplicate, arriving after the fact.
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr
+        assert "already applied" in res["detail"].lower()
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        # No second publish, no second gateway restart, no rollback.
+        assert not calls.exists() or calls.read_text().strip() == "", calls.read_text()
+
+
+def _decisions_request(state: Path):
+    (state / "finalize-request.json").write_text(json.dumps({"action": "apply-decisions"}))
+
+
+def _slack_recorder(tmp_path: Path) -> tuple[Path, Path]:
+    """A HERMES_SYNC_SLACK_CMD that appends every payload to a log and prints a ts."""
+    log = tmp_path / "slack.jsonl"
+    cmd = tmp_path / "slack.sh"
+    cmd.write_text(f'#!/usr/bin/env bash\ncat >> "{log}"; echo >> "{log}"\necho 1786.100\n')
+    cmd.chmod(0o755)
+    return cmd, log
+
+
+def _resolver(tmp_path: Path, body: str) -> str:
+    r = tmp_path / "resolver.py"
+    r.write_text(body)
+    return f"{sys.executable} {r}"
+
+
+class TestApplyDecisions:
+    """The host applies a decided pending.json end to end: clone, mechanical +
+    model resolution, commit, gate, land, publish, archive, memory, and a
+    summary in the Slack thread the report lives in. No sandbox, no agent."""
+
+    def _pending(self, state, world, decision="merge-both", files=("f.txt",), thread="1786.001"):
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1", "status": "auto_apply",
+            "local_head": world[1], "upstream_head": world[2],
+            "slack_channel": "C0TEST", "slack_thread_ts": thread,
+            "features": [{"id": "F1", "status": "decided", "source": "policy", "decision": decision,
+                          "files": list(files), "local_subjects": ["tip"]}],
+        }))
+
+    def _conflicting_repo(self, tmp_path):
+        repo = _make_repo(tmp_path)                       # f.txt = "two" at tip, "one" at base
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "f.txt").write_text("three\n")           # both sides changed line 1 → conflict
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        return repo, local_head, upstream_head
+
+    def test_decided_pending_is_applied_end_to_end_and_reported_in_thread(self, tmp_path, state):
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        scripts, calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\nh=json.load(sys.stdin)\nsys.stdout.write('two\\nthree\\n')\n")
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert res["action"] == "apply-decisions"
+        head = _git(repo, "rev-parse", "HEAD")
+        parents = _git(repo, "rev-list", "--parents", "-n1", head).split()[1:]
+        assert parents == [local_head, upstream_head]
+        assert (repo / "f.txt").read_text() == "two\nthree\n"
+        assert res["backup_ref"] and _git(repo, "rev-parse", res["backup_ref"]) == local_head
+        logged = calls.read_text()
+        assert f"sync-local-customizations.sh --post-update-only {local_head}" in logged
+        assert "upstream-sync-smoketest.sh" in logged
+        # decision consumed + memory recorded
+        assert not (state / "pending.json").exists()
+        assert list(state.glob("pending.json.applied-*"))
+        assert json.loads((state / "decision-memory.json").read_text())["entries"]
+        # the summary went to the report's thread
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and posts[-1]["channel"] == "C0TEST" and posts[-1]["thread_ts"] == "1786.001"
+        assert "applied" in posts[-1]["text"].lower()
+        assert "f.txt" in posts[-1]["text"]
+        # the clone is gone on success
+        assert not (state / "scratch").exists()
+
+    def test_unresolvable_hunk_fails_at_resolve_keeps_clone_and_reports(self, tmp_path, state):
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        scripts, calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        leaky = _resolver(tmp_path, "import sys\nsys.stdout.write('<<<<<<< leaked\\n')\n")
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": leaky, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "resolve"
+        assert _git(repo, "rev-parse", "HEAD") == local_head          # untouched
+        assert (state / "pending.json").exists()                      # still armed
+        assert (state / "scratch" / "f.txt").exists()                 # clone preserved
+        assert "<<<<<<< " in (state / "scratch" / "f.txt").read_text()
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and "f.txt" in posts[-1]["text"] and "scratch" in posts[-1]["text"]
+        assert posts[-1]["thread_ts"] == "1786.001"
+
+    def test_new_security_conflict_asks_instead_of_applying(self, tmp_path, state):
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        # after the gate: both sides touch a security-named file → policy asks
+        _git(repo, "checkout", "-q", "up")
+        (repo / "auth_gate.py").write_text("upstream\n")
+        _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "upstream auth")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        (repo / "auth_gate.py").write_text("local\n")
+        _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "local auth")
+        world = (repo, _git(repo, "rev-parse", "HEAD"), upstream_head)
+        self._pending(state, world, decision="keep-local")
+        scripts, calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={"HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "awaiting_decision", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == world[1]
+        pending = json.loads((state / "pending.json").read_text())
+        assert pending["status"] == "awaiting_decision"
+        asked = [f for f in pending["features"] if f["files"] == ["auth_gate.py"]]
+        assert asked and asked[0]["decision"] is None
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and "auth_gate.py" in posts[-1]["text"] and posts[-1]["thread_ts"] == "1786.001"
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_resume_after_a_manual_fix_skips_prepare(self, tmp_path, state):
+        """A human fixed the preserved clone by hand and re-requests: prepare must
+        not wipe their work — the clone is taken as is when it holds no markers."""
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        scripts, calls = _stub_scripts(tmp_path)
+        leaky = _resolver(tmp_path, "import sys\nsys.stdout.write('<<<<<<< leaked\\n')\n")
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env={"HERMES_SYNC_RESOLVER_CMD": leaky})
+        assert _result(state)["failed_stage"] == "resolve"
+        # the human resolves in the preserved clone
+        (state / "scratch" / "f.txt").write_text("by hand\n")
+        _git(state / "scratch", "add", "f.txt")
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={"HERMES_SYNC_RESOLVER_CMD": leaky})
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert (repo / "f.txt").read_text() == "by hand\n"
+
+
+# ---------------------------------------------------------------------------
+# rerere must not resolve an upstream merge from rebase-era recordings
+# ---------------------------------------------------------------------------
+
+
+class TestMergesDisableRerere:
+    """``rerere.enabled=true`` lives in this repo's own config and
+    ``.git/rr-cache`` holds hundreds of resolutions recorded back when the sync
+    was a rebase — where "ours" and "theirs" are inverted relative to a merge.
+    Replaying those into a merge resolves conflicts backwards and silently, so
+    every merge that can conflict must opt out explicitly.
+
+    The upstream merge runs in a throwaway *worktree*, which shares ``.git``
+    with the live repo — so it inherits both the setting and the recordings.
+    (A ``clone --shared``, by contrast, gets a fresh config and an empty
+    rr-cache and is safe by construction.)
+    """
+
+    def _conflictable_merges(self, text: str) -> list[str]:
+        out = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if " merge " not in f" {stripped} ":
+                continue
+            # Not merges: these neither create a commit nor touch the worktree.
+            if any(
+                token in stripped
+                for token in (
+                    "merge-base",
+                    "merge-tree",
+                    "merge --abort",
+                    "merge --ff-only",
+                    "--no-merges",
+                )
+            ):
+                continue
+            # Prose: an echo that merely names the command for the operator.
+            if stripped.startswith("echo "):
+                continue
+            if not re.search(r"git\s+(-[cC]\s+\S+\s+)*merge\b", stripped):
+                continue
+            out.append(stripped)
+        return out
+
+    def test_sync_script_merges_opt_out_of_rerere(self):
+        text = SYNC.read_text()
+        merges = self._conflictable_merges(text)
+        assert merges, "expected to find real merge invocations in the sync script"
+        offenders = [m for m in merges if "rerere.enabled=false" not in m]
+        assert not offenders, (
+            "these merges can consult rebase-era rerere recordings and resolve "
+            f"backwards: {offenders}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The ACL self-heal must never walk outside the sandbox home
+# ---------------------------------------------------------------------------
+
+
+class TestAclHealStaysInsideHome:
+    """On 2026-07-20 the heal's parent walk planted ``u:hermes:--x`` on ``/tmp``
+    and blocked writes there for everyone. That was patched by making the heal
+    run *less often* (only when access is actually broken) — the walk itself
+    could still climb out of the sandbox home whenever it did run.
+
+    An overridden ``HERMES_SYNC_STATE_DIR`` outside ``$HOME`` is a test or dev
+    setup, never the production handoff dir; the heal declines to touch shared
+    parents there instead of relying on never being triggered.
+    """
+
+    def _sudo_stub(self, tmp_path: Path) -> tuple[Path, Path]:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        log = tmp_path / "sudo.log"
+        stub = bin_dir / "sudo"
+        stub.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{log}"\nexit 0\n')
+        stub.chmod(0o755)
+        return bin_dir, log
+
+    def _run_heal_only(self, tmp_path, state, home, scripts):
+        """Run the finalizer with no request pending: the heal runs, then it
+        exits on the missing request file without writing anything."""
+        bin_dir, log = self._sudo_stub(tmp_path)
+        state.chmod(0o500)  # not writable -> heal condition is met
+        try:
+            proc = subprocess.run(
+                ["bash", str(FINALIZE)],
+                env={
+                    **os.environ,
+                    "HOME": str(home),
+                    "HERMES_SYNC_STATE_DIR": str(state),
+                    "HERMES_SCRIPTS_DIR": str(scripts),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                },
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            state.chmod(0o700)
+        return proc, log
+
+    def test_state_dir_outside_home_is_not_walked(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        state = tmp_path / "outside" / "state"
+        state.mkdir(parents=True)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        proc, log = self._run_heal_only(tmp_path, state, home, scripts)
+
+        assert proc.returncode == 0, proc.stderr
+        calls = log.read_text() if log.exists() else ""
+        assert "setfacl" not in calls, (
+            f"the heal climbed out of the sandbox home: {calls}"
+        )
+
+    def test_state_dir_inside_home_is_still_healed(self, tmp_path):
+        home = tmp_path / "home"
+        state = home / ".hermes" / "state" / "upstream-sync"
+        state.mkdir(parents=True)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        proc, log = self._run_heal_only(tmp_path, state, home, scripts)
+
+        assert proc.returncode == 0, proc.stderr
+        calls = log.read_text() if log.exists() else ""
+        assert "setfacl" in calls, "the production handoff dir must still self-heal"
+        # ...and never above the home it belongs to.
+        assert f"{tmp_path}\n" not in calls
+
+
+# ---------------------------------------------------------------------------
+# The applied merge must join the point the operator actually decided about
+# ---------------------------------------------------------------------------
+
+
+class TestApplyMergeHonoursTheGatedUpstreamPoint:
+    """``upstream_sha`` in the request is the agent's claim. ``pending.json``
+    is the record written at gate time, before the operator answered — so when
+    the two disagree, the request is applying a decision to a point the
+    operator never saw. Upstream keeps moving while the operator sleeps on it
+    (10 commits arrived during the 2026-08-12 gate alone), and new commits can
+    change the conflict set the decision was made against.
+    """
+
+    def _pending(self, state: Path, upstream_head: str):
+        (state / "pending.json").write_text(
+            json.dumps(
+                {
+                    "schema": "upstream-sync-pending/v1",
+                    "upstream_head": upstream_head,
+                    "features": [{"id": "F1", "decision": "merge-both"}],
+                }
+            )
+        )
+
+    def test_merge_against_an_undecided_upstream_point_is_refused(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "h.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream moved on")
+        later = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+
+        # The operator was gated on `upstream_head`; the agent merged `later`
+        # and says so honestly — the parents match its own claim.
+        self._pending(state, upstream_head)
+        merge_sha = _scratch_merge(repo, state, local_head, later)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=later, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "pending" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+        # The decision survives for a re-gate.
+        assert (state / "pending.json").exists()
+
+    def test_merge_against_the_gated_point_proceeds(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        self._pending(state, upstream_head)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert "sync-local-customizations.sh" in calls.read_text()
+
+
+# ---------------------------------------------------------------------------
+# A consumed decision is archived, not destroyed
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedPendingIsArchived:
+    """Recording the operator's decision into memory is the *last* step of
+    Mode B, but the host cleared ``pending.json`` the moment the apply
+    succeeded — so the input for that step was gone before it ran. On
+    2026-08-12 the decision was lost exactly that way and had to be
+    reconstructed by hand.
+
+    Archiving instead of deleting keeps the retrigger protection (the file is
+    no longer named ``pending.json``) while leaving the record to record from.
+    """
+
+    def test_successful_apply_archives_the_decision(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(
+            json.dumps(
+                {
+                    "schema": "upstream-sync-pending/v1",
+                    "upstream_head": upstream_head,
+                    "features": [{"id": "F1", "decision": "merge-both"}],
+                }
+            )
+        )
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        # Consumed: a stray reply or the next scheduled sync finds nothing armed.
+        assert not (state / "pending.json").exists()
+        # ...but still recordable.
+        archived = list(state.glob("pending.json.applied-*"))
+        assert len(archived) == 1, archived
+        kept = json.loads(archived[0].read_text())
+        assert kept["features"][0]["decision"] == "merge-both"
+        assert kept["upstream_head"] == upstream_head
+
+
+# ---------------------------------------------------------------------------
+# The documented Mode B recipe, walked end to end against a read-only source
+# ---------------------------------------------------------------------------
+
+
+class TestModeBRecipeAgainstReadOnlyCheckout:
+    """Mode B exists for one case: a real conflict the operator has decided.
+    This walks the recipe the skill documents — clone --shared a checkout the
+    agent cannot write, resolve there, hand the host a SHA — and asserts the
+    read-only constraint that makes the detour necessary in the first place.
+    """
+
+    @staticmethod
+    def _chmod_tree(root: Path, writable: bool):
+        mode_dir = 0o755 if writable else 0o555
+        mode_file = 0o644 if writable else 0o444
+        for path in sorted(root.rglob("*"), reverse=True):
+            path.chmod(mode_dir if path.is_dir() else mode_file)
+        root.chmod(mode_dir)
+
+    def test_conflict_resolved_in_a_clone_lands_on_the_live_branch(
+        self, tmp_path, state
+    ):
+        repo = _make_repo(tmp_path)
+        # Both sides edit the same line — a genuine textual conflict.
+        (repo / "f.txt").write_text("local change\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "local edit")
+        local_head = _git(repo, "rev-parse", "HEAD")
+
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "f.txt").write_text("upstream change\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+
+        scratch = state / "scratch"
+        self._chmod_tree(repo, writable=False)
+        try:
+            # The constraint the whole detour exists for: the agent cannot make
+            # a backup ref or commit in the live checkout.
+            failed = subprocess.run(
+                ["git", "-C", str(repo), "branch", "backup/attempt"],
+                capture_output=True,
+                text=True,
+            )
+            assert failed.returncode != 0, "expected the read-only checkout to refuse"
+
+            subprocess.run(
+                ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+                check=True,
+                capture_output=True,
+            )
+            _git(scratch, "config", "user.email", "t@t")
+            _git(scratch, "config", "user.name", "t")
+            _git(scratch, "checkout", "-q", "--detach", local_head)
+            conflicted = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "rerere.enabled=false",
+                    "-c",
+                    "merge.conflictStyle=zdiff3",
+                    "merge",
+                    "--no-edit",
+                    upstream_head,
+                ],
+                cwd=scratch,
+                capture_output=True,
+                text=True,
+            )
+            assert conflicted.returncode != 0, "expected a conflict to resolve"
+            # merge-both: keep both sides, the operator's decision.
+            (scratch / "f.txt").write_text("local change\nupstream change\n")
+            _git(scratch, "add", "f.txt")
+            _git(scratch, "-c", "rerere.enabled=false", "commit", "--no-edit", "-q")
+            merge_sha = _git(scratch, "rev-parse", "HEAD")
+        finally:
+            self._chmod_tree(repo, writable=True)
+
+        scripts, calls = _stub_scripts(tmp_path)
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert (repo / "f.txt").read_text() == "local change\nupstream change\n"
+        assert _git(repo, "rev-parse", res["backup_ref"]) == local_head
+        assert "upstream-sync-smoketest.sh" in calls.read_text()
+        # The clone is disposable and the host cleans it up on success.
+        assert not scratch.exists()
+
+
+# ---------------------------------------------------------------------------
+# A red test gate is triaged, not swallowed
+# ---------------------------------------------------------------------------
+
+
+class TestRedGateIsTriagedAndProposedToTheOperator:
+    """The gate blocking a merge is the beginning of the work, not the end of
+    it. Until now a red gate left the operator a log tail and a preserved clone
+    and every occurrence — roughly every second or third sync — cost a manual
+    session. The host now keeps the evidence, diagnoses, and proposes a test
+    patch the operator can accept with one word. It never applies it itself: a
+    red fork test is equally likely to mean the merge dropped local behaviour,
+    and automation that edits the test in that case deletes the only alarm.
+    """
+
+    def _world(self, tmp_path, state, thread="1786.001"):
+        """A conflicting repo that also carries a fork test file to patch."""
+        repo = _make_repo(tmp_path)
+        (repo / "tests").mkdir()
+        (repo / "tests" / "new.py").write_text(
+            "from mod import f\n\n\ndef test_broken_by_merge():\n    assert f() == 1\n")
+        (repo / "mod.py").write_text("def f():\n    return 1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "fork test")
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~2")
+        (repo / "f.txt").write_text("three\n")
+        (repo / "g.txt").write_text("upstream only\n")   # marks a merged tree
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1", "status": "auto_apply",
+            "local_head": local_head, "upstream_head": upstream_head,
+            "slack_channel": "C0TEST", "slack_thread_ts": thread,
+            "features": [{"id": "F1", "status": "decided", "source": "policy",
+                          "decision": "merge-both", "files": ["f.txt"], "local_subjects": ["tip"]}],
+        }))
+        return repo, local_head, upstream_head
+
+    def _breaking_stub(self, scripts: Path) -> None:
+        """Red on a merged tree (g.txt is upstream-only) while the fork test
+        still calls the OLD signature — which is exactly what the proposed patch
+        changes, so the second run goes green for the real reason rather than
+        for a sentinel we planted."""
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            'if [ -f "$1/g.txt" ] && grep -q "f() ==" "$1/tests/new.py"; then\n'
+            "  echo '____ test_broken_by_merge ____'\n"
+            "  echo 'E   TypeError: f() missing 1 required positional argument'\n"
+            "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"
+            "fi\n"
+            "echo '2 failed, 4 passed in 2.00s'\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+    PATCH = ("from mod import f\n\n\ndef test_broken_by_merge():\n"
+             "    assert f(1) == 1\n    assert f(1) is not None\n")
+
+    def _triage_cmd(self, tmp_path, verdict="test_outdated", patch=None):
+        p = tmp_path / "triage_model.py"
+        answer = {"verdict": verdict, "explanation": "upstream gave f() a required argument.",
+                  "assertion_delta": "same assertion, new call signature",
+                  "patch": self.PATCH if patch is None else patch}
+        p.write_text("import json,sys\nsys.stdin.read()\n"
+                     f"sys.stdout.write(json.dumps({answer!r}))\n")
+        return f"{sys.executable} {p}"
+
+    def _env(self, tmp_path, slack_cmd, **extra):
+        ok = tmp_path / "pytest_ok.sh"
+        ok.write_text("#!/usr/bin/env bash\nexit 0\n")
+        ok.chmod(0o755)
+        resolver = _resolver(tmp_path, "import sys\nsys.stdin.read()\nsys.stdout.write('two\\nthree\\n')\n")
+        env = {"HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd),
+               "HERMES_SYNC_TRIAGE_CMD": self._triage_cmd(tmp_path),
+               "HERMES_SYNC_TRIAGE_PYTEST_CMD": str(ok)}
+        env.update(extra)
+        return env
+
+    def test_a_red_gate_keeps_its_evidence_and_arms_a_proposal(self, tmp_path, state):
+        repo, local_head, upstream_head = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr + res.get("detail", "")
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head          # not landed
+
+        # The two runs are kept side by side — until now both were mktemp'd and
+        # deleted, so the only trace of WHY the gate blocked was a log tail.
+        assert (state / "gate-baseline.log").exists()
+        assert "test_broken_by_merge" in (state / "gate-post.log").read_text()
+        failures = json.loads((state / "gate-failures.json").read_text())
+        assert failures["new_failures"] == ["tests/new.py::test_broken_by_merge"]
+        assert failures["before"] == local_head
+
+        triage = json.loads((state / "gate-triage.json").read_text())
+        assert triage["status"] == "awaiting_triage"
+        assert triage["merge_sha"] == failures["merge_sha"]
+        prop = triage["proposals"][0]
+        assert prop["test_file"] == "tests/new.py"
+        assert prop["verdict"] == "test_outdated"
+        assert prop["patch"] == self.PATCH
+
+        # The operator sees the proposal, in the report's thread, with the exact
+        # words that will actually be parsed.
+        posts = [json.loads(l) for l in slack_log.read_text().splitlines() if l.strip()]
+        assert posts and posts[-1]["thread_ts"] == "1786.001"
+        assert "apply fix" in posts[-1]["text"] and "keep test" in posts[-1]["text"]
+        assert "tests/new.py" in posts[-1]["text"]
+
+        # Nothing was applied and the clone survives for either answer.
+        assert (state / "scratch" / ".git").exists()
+        assert (state / "pending.json").exists()
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
+
+    def test_apply_fix_amends_the_merge_reruns_the_gate_and_lands(self, tmp_path, state):
+        repo, local_head, upstream_head = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+        assert _result(state)["failed_stage"] == "test-gate"
+        first_merge = json.loads((state / "gate-triage.json").read_text())["merge_sha"]
+
+        # The operator answers "apply fix"; the patched test now passes.
+        sys.path.insert(0, str(REPO_ROOT))
+        from hermes_cli.upstream_sync_reply import record_triage_decision
+        out = record_triage_decision(state, "apply_fix", {"platform": "slack", "chat_id": "C0TEST",
+                                                          "thread_id": "1786.001"})
+        assert out["requested"] is True
+
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        assert res["action"] == "apply-triage-fixes"
+        head = _git(repo, "rev-parse", "HEAD")
+        assert head != local_head and head != first_merge          # amended, then landed
+        # The amend preserved the parents the host insists on...
+        parents = _git(repo, "rev-list", "--parents", "-n1", head).split()[1:]
+        assert parents == [local_head, upstream_head]
+        # ...and the patch itself is in the landed tree.
+        assert (repo / "tests" / "new.py").read_text() == self.PATCH
+        assert f"sync-local-customizations.sh --post-update-only {local_head}" in calls.read_text()
+        assert json.loads((state / "gate-triage.json").read_text())["status"] == "applied"
+
+    def test_a_still_red_gate_after_the_fix_is_not_triaged_again(self, tmp_path, state):
+        """One attempt. A second proposal on top of a failed one is the loop
+        where automation quietly rewrites tests until they pass."""
+        repo, local_head, _ = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+        first = json.loads((state / "gate-triage.json").read_text())["created_at"]
+
+        sys.path.insert(0, str(REPO_ROOT))
+        from hermes_cli.upstream_sync_reply import record_triage_decision
+        record_triage_decision(state, "apply_fix", {})
+        # The proposed patch does not actually fix anything here (the stub keys
+        # off a different file), so the gate stays red on the second run.
+        triage = json.loads((state / "gate-triage.json").read_text())
+        triage["proposals"][0]["patch"] = "def test_broken_by_merge():\n    assert f() == 1\n"
+        (state / "gate-triage.json").write_text(json.dumps(triage))
+
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        triage = json.loads((state / "gate-triage.json").read_text())
+        assert triage["status"] == "exhausted"
+        assert triage["created_at"] == first                       # not re-triaged
+        assert (state / "scratch" / ".git").exists()               # clone kept for the human
+
+    def test_a_patch_for_a_non_test_file_is_refused_at_apply_time(self, tmp_path, state):
+        """The proposal is validated when it is made, but the state file is
+        plain JSON on disk: the applier re-checks rather than trusting it."""
+        repo, local_head, _ = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        triage = json.loads((state / "gate-triage.json").read_text())
+        triage["proposals"][0]["test_file"] = "mod.py"          # tampered after validation
+        triage["status"] = "applying"
+        (state / "gate-triage.json").write_text(json.dumps(triage))
+        (state / "finalize-request.json").write_text(json.dumps({"action": "apply-triage-fixes"}))
+
+        proc = _run_finalize(repo, state, scripts, extra_env=self._env(tmp_path, slack_cmd))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert "test file" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert (repo / "mod.py").read_text() == "def f():\n    return 1\n"
+
+    def test_a_triage_that_falls_over_does_not_change_the_gate_outcome(self, tmp_path, state):
+        repo, local_head, _ = self._world(tmp_path, state)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_stub(scripts)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts,
+                             extra_env=self._env(tmp_path, slack_cmd, HERMES_SYNC_TRIAGE_CMD="false"))
+
+        res = _result(state)
+        assert res["status"] == "failed", proc.stderr
+        assert res["failed_stage"] == "test-gate"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        # Still a diagnosis file naming the failing test, still no patch.
+        triage = json.loads((state / "gate-triage.json").read_text())
+        assert triage["proposals"][0]["verdict"] == "unsure"
+        assert not triage["proposals"][0]["patch"]

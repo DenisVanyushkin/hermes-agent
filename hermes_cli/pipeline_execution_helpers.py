@@ -110,8 +110,32 @@ def execute_engineering_review_helper(
     test_summary: Any = None,
     allow_completion_after_review: bool = False,
     controlled_runtime_context: Any = None,
+    engineering_task_context: Any = None,
     **_kwargs: Any,
 ) -> Any:
+    from hermes_cli.engineering_task_context import (
+        is_engineering_execution_continuation,
+        validate_engineering_task_context,
+    )
+
+    resolved_user_message = user_message
+    resolved_operator_instruction: str | None = None
+    if engineering_task_context is not None:
+        envelope, task_context_error = validate_engineering_task_context(
+            engineering_task_context
+        )
+        if task_context_error is not None or envelope is None:
+            return _blocked_helper_payload(
+                task_context_error or "engineering_task_context_invalid"
+            )
+        if envelope.source_session_id != str(getattr(session, "session_id", "") or ""):
+            return _blocked_helper_payload("engineering_task_session_mismatch")
+        if envelope.source_kind in {"approved_plan", "external_reference"}:
+            resolved_user_message = envelope.task_text or ""
+            resolved_operator_instruction = envelope.operator_instruction
+    elif is_engineering_execution_continuation(user_message):
+        return _blocked_helper_payload("engineering_task_context_missing")
+
     execution_mode = str((((config or {}).get('pipelines') or {}).get('execution') or {}).get('mode') or '').strip().lower()
     if execution_mode == "autonomous":
         blocked_reason = _controlled_manual_blocked_reason(controlled_runtime_context)
@@ -126,7 +150,8 @@ def execute_engineering_review_helper(
             loaded_specs=loaded_specs,
             runtime_factory=runtime_factory,
             runner=runner,
-            user_message=user_message,
+            user_message=resolved_user_message,
+            operator_instruction=resolved_operator_instruction,
             repo_path=repo_path,
             test_summary=test_summary,
             allow_completion_after_review=allow_completion_after_review,

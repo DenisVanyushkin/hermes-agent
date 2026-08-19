@@ -198,7 +198,7 @@ def classify(path: str) -> str:
         return "deployment / job-intel"
     if re.match(r"^(tests/|docs/|\.github/|website/|docs/reports/)", path):
         return "docs / tests / release"
-    if re.search(r"(security|auth|secret|pairing|allowlist|file-safety|control-plane|HMAC|hmac|insecure)", path, re.I):
+    if re.search(r"(security|auth|secret|credential|approval|pairing|allowlist|file-safety|file_safety|control-plane|HMAC|hmac|insecure)", path, re.I):
         return "security-sensitive"
     return "other"
 
@@ -224,7 +224,7 @@ critical_patterns = {
     "gateway / delivery": re.compile(r"^(gateway/|docker-compose\.yml$|hermes_cli/config\.py$|cli\.py$)"),
     "job-intel / deploy": re.compile(r"^(job_intel/|deploy/|scripts/|docs/job-intel|docs/.*job-intel)"),
     "agent / tool plumbing": re.compile(r"^(agent/|toolsets\.py$|tools/|run_agent\.py$|model_tools\.py$|hermes_state\.py$)"),
-    "security / auth": re.compile(r"(security|auth|secret|pairing|allowlist|file-safety|control-plane|HMAC|hmac|insecure)", re.I),
+    "security / auth": re.compile(r"(security|auth|secret|credential|approval|pairing|allowlist|file-safety|file_safety|control-plane|HMAC|hmac|insecure)", re.I),
 }
 
 risk_flags: list[str] = []
