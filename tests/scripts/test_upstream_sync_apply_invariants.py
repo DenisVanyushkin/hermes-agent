@@ -182,3 +182,71 @@ class TestOverride:
 
         assert out["status"] == "committed"
         assert out["invariants_skipped"] is True
+
+
+class TestMechanicalResolutionValidatesItsOutput:
+    """merge-both is a text concatenation, so it can produce invalid code.
+
+    On 2026-08-19 it did: the two sides of the block shared a single closing
+    brace that lived outside it - in ours it closed "pipelines", in theirs
+    "session" - and one closer cannot serve two bodies. The resolver reported
+    the hunk as closed and moved on.
+    """
+
+    FIXTURES = REPO_ROOT / "tests" / "fixtures" / "upstream_sync"
+
+    def _zdiff3(self, ours: str, base: str, theirs: str) -> str:
+        return (
+            "<<<<<<< HEAD\n" + ours + "||||||| base\n" + base + "=======\n" + theirs + ">>>>>>> upstream\n"
+        )
+
+    def test_a_concatenation_that_does_not_parse_is_not_resolved(self):
+        from scripts.upstream_sync_apply import resolve_merge_both_text
+
+        block = self._zdiff3(
+            ours='    "pipelines": {\n        "execution": {},\n',
+            base="",
+            theirs='    "session": {\n        "on": True,\n',
+        )
+        text = "CONFIG = {\n" + block + "    },\n}\n"
+
+        new_text, resolved, remaining = resolve_merge_both_text(text, path="cfg.py")
+
+        assert (resolved, remaining) == (0, 1)
+        assert new_text == text          # markers kept for a human
+
+    def test_a_concatenation_that_parses_is_resolved_as_before(self):
+        from scripts.upstream_sync_apply import resolve_merge_both_text
+
+        # Distinct bodies on purpose: a line shared by both sides is left for a
+        # human by an older rule, which would mask what this test checks.
+        block = self._zdiff3(ours="def a():\n    return 1\n", base="", theirs="def b():\n    return 2\n")
+
+        new_text, resolved, remaining = resolve_merge_both_text(block, path="mod.py")
+
+        assert (resolved, remaining) == (1, 0)
+        assert "def a():" in new_text and "def b():" in new_text
+        assert "<<<<<<<" not in new_text
+
+    def test_non_python_paths_are_not_parsed(self):
+        """A Markdown merge must not be judged by a Python parser."""
+        from scripts.upstream_sync_apply import resolve_merge_both_text
+
+        block = self._zdiff3(ours="# local heading\n", base="", theirs="# upstream heading\n")
+
+        _, resolved, remaining = resolve_merge_both_text(block, path="docs/x.md")
+
+        assert (resolved, remaining) == (1, 0)
+
+    def test_the_real_incident_block_is_left_for_a_human(self):
+        from scripts.upstream_sync_apply import resolve_merge_both_text
+
+        raw = (self.FIXTURES / "config_defaults_shared_closer.conflict").read_text(encoding="utf-8")
+        # The saved fixture is a plain (non-zdiff3) block; give it a base section
+        # so the mechanical resolver treats it as a both-added hunk.
+        zdiff3 = raw.replace("=======\n", "||||||| base\n=======\n", 1)
+
+        new_text, resolved, remaining = resolve_merge_both_text(zdiff3, path="hermes_cli/config_defaults.py")
+
+        assert remaining == 1
+        assert "<<<<<<<" in new_text

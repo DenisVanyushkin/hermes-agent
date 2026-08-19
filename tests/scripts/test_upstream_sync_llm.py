@@ -206,3 +206,74 @@ class TestResolveLlmSubcommand:
         assert "marker" in out["unresolved"][0]["reason"].lower()
         text = (world["state"] / "scratch" / "n.py").read_text()
         assert "<<<<<<< " in text and ">>>>>>> " in text     # untouched, still conflicted
+
+
+class TestAsymmetricBlocksBypassTheModel:
+    """A wildly lopsided block is a bad question, not a hard one.
+
+    On 2026-08-19 git produced a block of 211 lines ours against 1 line theirs.
+    The real disagreement was a single signature; the other 209 lines were a
+    local feature that happened to sit above it with no anchor of its own. Asked
+    to merge "211 lines against 1", the model returned the merged signature and
+    dropped the rest - a defensible answer to the question it was shown.
+    """
+
+    FIXTURE = REPO_ROOT / "tests" / "fixtures" / "upstream_sync" / "gateway_run_asymmetric.conflict"
+
+    def _spy(self):
+        calls = []
+
+        def call_model(payload):
+            calls.append(payload)
+            return "resolved\n"
+
+        return calls, call_model
+
+    def test_the_real_incident_block_is_never_sent(self):
+        calls, call_model = self._spy()
+        text = self.FIXTURE.read_text(encoding="utf-8").replace("=======\n", "||||||| base\n=======\n", 1)
+
+        _, report = llm.resolve_text(text, path="gateway/run.py", decision="merge-both",
+                                     call_model=call_model)
+
+        assert calls == []
+        assert report["failed"] == 1
+
+    def test_the_refusal_says_what_the_real_disagreement_is(self):
+        """The operator needs the shape, not just a refusal."""
+        _, call_model = self._spy()
+        text = self.FIXTURE.read_text(encoding="utf-8").replace("=======\n", "||||||| base\n=======\n", 1)
+
+        _, report = llm.resolve_text(text, path="gateway/run.py", decision="merge-both",
+                                     call_model=call_model)
+
+        joined = " ".join(report["errors"])
+        assert "211" in joined and "1" in joined
+
+    def test_an_ordinary_block_still_goes_to_the_model(self):
+        calls, call_model = self._spy()
+        text = _block("local line\n", "base line\n", "upstream line\n")
+
+        llm.resolve_text(text, path="x.py", decision="merge-both", call_model=call_model)
+
+        assert len(calls) == 1
+
+    def test_a_large_but_balanced_block_still_goes_to_the_model(self):
+        """Size alone is not the problem; lopsidedness is."""
+        calls, call_model = self._spy()
+        big = "".join(f"line {i}\n" for i in range(200))
+        text = _block(big, "", big.replace("line", "other"))
+
+        llm.resolve_text(text, path="x.py", decision="merge-both", call_model=call_model)
+
+        assert len(calls) == 1
+
+    def test_the_threshold_is_configurable(self, monkeypatch):
+        """A wedged sync must be unblockable without a code change."""
+        calls, call_model = self._spy()
+        monkeypatch.setenv("HERMES_SYNC_MAX_BLOCK_SKEW", "100000")
+        text = self.FIXTURE.read_text(encoding="utf-8").replace("=======\n", "||||||| base\n=======\n", 1)
+
+        llm.resolve_text(text, path="gateway/run.py", decision="merge-both", call_model=call_model)
+
+        assert len(calls) == 1

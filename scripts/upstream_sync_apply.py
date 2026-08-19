@@ -29,6 +29,7 @@ main rather than upstream at all (2026-08-15).
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as _dt
 import json
 import os
@@ -208,12 +209,19 @@ def _mechanical_resolution(ours: list, base: list, theirs: list):
     return None
 
 
-def resolve_merge_both_text(text: str) -> tuple:
+def resolve_merge_both_text(text: str, path: str | None = None) -> tuple:
     """Return (new_text, resolved_hunks, remaining_hunks).
 
     Rewrites only the zdiff3 blocks whose resolution is mechanical (see
     _mechanical_resolution); everything else keeps its markers for the agent.
     A block without a ``|||||||`` base section is not zdiff3 and is left alone.
+
+    "Mechanical" means a text concatenation, which is not the same as a correct
+    one: on 2026-08-19 both sides of a block shared the single closing brace
+    that followed it, so joining the two bodies left one closer for two dicts
+    and the module stopped parsing. When ``path`` names a Python file the
+    result is therefore parsed, and a resolution that does not parse is rolled
+    back whole-file and handed to a human rather than reported as closed.
     """
     lines = text.splitlines(keepends=True)
     out: list = []
@@ -255,7 +263,15 @@ def resolve_merge_both_text(text: str) -> tuple:
             out.extend(resolution)
             resolved += 1
         i = j + 1
-    return "".join(out), resolved, remaining
+    new_text = "".join(out)
+    if resolved and path and path.endswith(".py"):
+        try:
+            ast.parse(new_text)
+        except SyntaxError:
+            # Whole-file rollback, matching the model resolver: a half-applied
+            # file is harder to reason about than one that still has markers.
+            return text, 0, resolved + remaining
+    return new_text, resolved, remaining
 
 
 def has_conflict_markers(text: str) -> bool:
@@ -375,7 +391,7 @@ def cmd_prepare(args) -> int:
                     {"path": path, "resolved_hunks": 0, "remaining_hunks": 1})
                 continue
             text = file_path.read_text(encoding="utf-8", errors="surrogateescape")
-            new_text, resolved, remaining = resolve_merge_both_text(text)
+            new_text, resolved, remaining = resolve_merge_both_text(text, path=path)
             if resolved:
                 file_path.write_text(new_text, encoding="utf-8", errors="surrogateescape")
             if remaining == 0:

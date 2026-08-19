@@ -189,6 +189,48 @@ def default_call_model(payload: dict) -> str:
 
 # --------------------------------------------------------------------------- resolve
 
+# A block this lopsided is a bad question rather than a hard one. On 2026-08-19
+# git produced 211 lines ours against 1 line theirs: the actual disagreement was
+# one signature, and the other 209 lines were a local feature that happened to
+# sit above it with no anchor of its own. The model answered the question it was
+# shown and dropped the rest. Conservative on purpose - the trade is a rare
+# operator interruption against a lost apply cycle.
+def _line_count(side) -> int:
+    if isinstance(side, str):
+        return len(side.splitlines())
+    return len(side)
+
+
+def _skew_limits() -> tuple:
+    return (
+        int(os.environ.get("HERMES_SYNC_MAX_BLOCK_LINES", "100")),
+        int(os.environ.get("HERMES_SYNC_MAX_BLOCK_SKEW", "10")),
+    )
+
+
+def _too_lopsided(ours, theirs):
+    """Return an explanation when the block should go to a human, else None.
+
+    Measured in lines: the sides arrive as text, and character counts make a
+    block of long lines look lopsided when it is not.
+    """
+    max_lines, max_skew = _skew_limits()
+    n_ours, n_theirs = _line_count(ours), _line_count(theirs)
+    big, small = max(n_ours, n_theirs), min(n_ours, n_theirs)
+    if big + small < max_lines:
+        return None
+    if small and big / small < max_skew:
+        return None
+    if not small and big < max_lines:
+        return None
+    return (
+        f"block too lopsided for the resolver: {n_ours} lines ours against "
+        f"{n_theirs} lines theirs. The real disagreement is the smaller side; "
+        f"the rest is unrelated code the merge dragged into this block. Resolve it "
+        f"by hand, or raise HERMES_SYNC_MAX_BLOCK_SKEW to send it anyway."
+    )
+
+
 def resolve_text(text: str, *, path: str, decision: str, local_subjects=None, upstream_head: str = "",
                  call_model=None, max_attempts: int = 2) -> tuple:
     """Resolve every conflict block in ``text``. Returns (new_text, report).
@@ -206,6 +248,12 @@ def resolve_text(text: str, *, path: str, decision: str, local_subjects=None, up
         before, after = _context(segments, idx)
         prev_error = None
         answer = None
+        lopsided = _too_lopsided(block["ours"], block["theirs"])
+        if lopsided:
+            report["failed"] += 1
+            report["errors"].append(f"hunk {idx + 1}: {lopsided}")
+            resolutions.append(None)
+            continue
         for attempt in range(1, max_attempts + 1):
             payload = {"path": path, "decision": decision, "before": before, "after": after,
                        "ours": block["ours"], "base": block["base"], "theirs": block["theirs"],
