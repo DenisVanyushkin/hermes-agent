@@ -30,6 +30,14 @@ for pattern in "${runtime_sources[@]}"; do
   done
 done
 
+# Shared helpers keep their subdirectory: the synced scripts source them as
+# "$SCRIPT_DIR/lib/...", so flattening them by basename would leave the runtime
+# copy sourcing a path that does not exist -- invisible until the next cron run.
+for src in "$REPO"/scripts/lib/*.sh; do
+  install -D -m 755 "$src" "$TARGET_DIR/lib/$(basename "$src")"
+  copied=$((copied + 1))
+done
+
 # The bounded idea-signal collector resolves its registry beside the synced
 # script at runtime. Keep config and code in the same atomic sync operation.
 IDEA_REGISTRY_SRC="$REPO/config/idea_sources.yaml"
