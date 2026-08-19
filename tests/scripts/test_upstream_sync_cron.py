@@ -266,15 +266,20 @@ class TestStateDirOutsideSandbox:
     """
 
     def _scripts(self):
-        root = Path(__file__).resolve().parents[2] / "scripts"
-        names = [
-            "upstream_sync_cron.py",
-            "preflight-local-customizations-update.sh",
-            "upstream-sync-finalize.sh",
-            "upstream-sync-rollback.sh",
-            "upstream-sync-smoketest.sh",
+        root = Path(__file__).resolve().parents[2]
+        rel = [
+            "scripts/upstream_sync_cron.py",
+            "scripts/preflight-local-customizations-update.sh",
+            "scripts/upstream-sync-finalize.sh",
+            "scripts/upstream-sync-rollback.sh",
+            "scripts/upstream-sync-smoketest.sh",
+            # The systemd path unit is the finalizer's only trigger. It lives
+            # outside scripts/, so a path move that skips it leaves the watcher
+            # staring at an empty directory while requests pile up unseen --
+            # exactly what swallowed the 2026-08-19 apply.
+            "deploy/systemd/upstream-sync-finalize.path",
         ]
-        return [root / n for n in names]
+        return [root / r for r in rel]
 
     def test_no_script_defaults_into_the_sandbox_mirror(self):
         offenders = [
