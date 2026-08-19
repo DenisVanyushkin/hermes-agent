@@ -36,7 +36,10 @@ local_commits_file="$tmpdir/local_commits.txt"
 local_files_file="$tmpdir/local_files.txt"
 
 # Refresh upstream before comparing so the report describes the latest remote state.
-git -C "$REPO" fetch --prune "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" >/dev/null
+# Retried: GitHub 429s this host's fetches at random, and losing that coin flip
+# used to cost the whole three-day cycle.
+source "$SCRIPT_DIR/lib/git-retry.sh"
+git_fetch_retry "$REPO" "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
 HEAD="$(git -C "$REPO" rev-parse HEAD)"
 UPSTREAM_HEAD="$(git -C "$REPO" rev-parse "$UPSTREAM_REF")"

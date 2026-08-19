@@ -47,6 +47,8 @@ else
   REPO="$HOME/.hermes/hermes-agent"
 fi
 
+source "$SCRIPT_DIR/lib/git-retry.sh"
+
 BRANCH="${HERMES_LOCAL_BRANCH:-local/customizations}"
 UPSTREAM_REMOTE="${HERMES_UPSTREAM_REMOTE:-origin}"
 UPSTREAM_BRANCH="${HERMES_UPSTREAM_BRANCH:-main}"
@@ -532,7 +534,7 @@ integrate_personal_remote
 
 BASE_BEFORE="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF" 2>/dev/null || true)"
 
-git -C "$REPO" fetch --prune "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" >/dev/null
+git_fetch_retry "$REPO" "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
 BASE_AFTER="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF")"
 if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" HEAD; then
