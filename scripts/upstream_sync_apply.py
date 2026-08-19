@@ -393,6 +393,48 @@ def cmd_prepare(args) -> int:
 
 # --------------------------------------------------------------------------- handoff
 
+def _invariant_report(scratch: Path, prep: dict):
+    """Structural checks over the resolved tree, before it becomes a commit.
+
+    Parsing is cheap enough to run over everything the merge touches. The
+    definition diff is not - it needs both parents of every file - so it runs
+    only where both sides actually edited the same file. Nowhere else can a
+    resolver drop code: a file taken wholesale from one side cannot lose any.
+    """
+    from upstream_sync_invariants import check_merge
+
+    local_base, upstream_head = prep["local_base"], prep["upstream_head"]
+    base = git(scratch, "merge-base", local_base, upstream_head).stdout.strip()
+
+    def _names(*args) -> set:
+        out = git(scratch, "diff", "--name-only", *args).stdout.split("\n")
+        return {n for n in out if n}
+
+    touched = _names(local_base)
+    both_sides = _names(base, local_base) & _names(base, upstream_head)
+
+    def _blob(rev, path):
+        proc = git(scratch, "show", f"{rev}:{path}", check=False)
+        return proc.stdout if proc.returncode == 0 else ""
+
+    def read_result(path):
+        f = scratch / path
+        return f.read_text(encoding="utf-8", errors="surrogateescape") if f.is_file() else ""
+
+    # A path missing from the result is a delete/modify conflict, which prepare
+    # reports on its own; flagging every symbol in it here would only add noise.
+    paths = sorted(p for p in touched if (scratch / p).is_file())
+    parse_only = [p for p in paths if p not in both_sides]
+    full = [p for p in paths if p in both_sides]
+
+    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p), read_result)
+    report.findings.extend(
+        f for f in check_merge(parse_only, lambda p: "", lambda p: "", read_result).findings
+        if f.kind == "unparseable"
+    )
+    return report
+
+
 def _commit_merge(args) -> tuple:
     """Shared by commit and handoff: refuse unresolved/moved, commit, verify parents.
 
@@ -424,6 +466,19 @@ def _commit_merge(args) -> tuple:
     if live_head != prep["local_base"]:
         return EXIT_LIVE_MOVED, {"status": "live_moved", "local_base": prep["local_base"], "live_head": live_head,
                                  "hint": "the live branch moved since prepare; run prepare again and redo the resolution"}
+
+    # Structural gate. Deliberately before the commit: a merge that fails here
+    # is not a merge anyone should be able to hand off, and leaving the clone
+    # untouched is what makes the repair a plain edit rather than a rewrite.
+    skipped = os.environ.get("HERMES_SYNC_SKIP_INVARIANTS") == "1"
+    if not skipped:
+        report = _invariant_report(scratch, prep)
+        if not report.ok:
+            payload = {"status": "invariants_failed", **report.as_dict()}
+            payload["hint"] = ("nothing was committed and the clone is preserved; fix the "
+                               "resolution there, or set HERMES_SYNC_SKIP_INVARIANTS=1 if every "
+                               "finding is intended")
+            return EXIT_UNRESOLVED, payload
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
     amend = bool(getattr(args, "amend", False))
@@ -458,8 +513,15 @@ def _commit_merge(args) -> tuple:
                                  "reason": f"merge parents {parents} are not (local_base, upstream_head) — "
                                            "run prepare again"}
     prep["merge_sha"] = merge_sha
+    if skipped:
+        # Recorded on the merge record, not only in this reply: whoever reads
+        # the result later must see that the structural gate did not run.
+        prep["invariants_skipped"] = True
     _write_json(prep_path, prep)
-    return EXIT_OK, {"status": "committed", "merge_sha": merge_sha, "prep": prep}
+    payload = {"status": "committed", "merge_sha": merge_sha, "prep": prep}
+    if skipped:
+        payload["invariants_skipped"] = True
+    return EXIT_OK, payload
 
 
 def cmd_commit(args) -> int:

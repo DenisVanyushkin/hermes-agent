@@ -1,0 +1,184 @@
+"""commit/handoff must refuse a structurally broken resolution.
+
+The checks live in _commit_merge because every path reaches it: plain commit,
+handoff, and the --amend used to fold a hand repair into the merge. A separate
+verify step would be bypassed by calling handoff directly, and --amend would
+skip it entirely - which is precisely the route a human takes after a red gate,
+when a second mistake is most likely.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+APPLY = REPO_ROOT / "scripts" / "upstream_sync_apply.py"
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _run(cmd: str, state: Path, live: Path, *extra: str, env=None) -> subprocess.CompletedProcess:
+    import os
+    full_env = dict(os.environ)
+    full_env.update(env or {})
+    return subprocess.run(
+        [sys.executable, str(APPLY), cmd, "--state", str(state), "--live", str(live), *extra],
+        capture_output=True, text=True, timeout=120, env=full_env,
+    )
+
+
+def _out(proc: subprocess.CompletedProcess) -> dict:
+    assert proc.stdout.strip(), proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+MODULE_BASE = '''def kept():
+    return 1
+
+
+def local_only():
+    return 2
+'''
+
+
+@pytest.fixture()
+def pyworld(tmp_path: Path):
+    """A live checkout and an upstream commit that both edit the same module."""
+    live = tmp_path / "live"
+    live.mkdir()
+    _git(live, "init", "-q", "-b", "local/customizations")
+    _git(live, "config", "user.email", "t@t")
+    _git(live, "config", "user.name", "t")
+    (live / "mod.py").write_text(MODULE_BASE)
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "base")
+    base = _git(live, "rev-parse", "HEAD")
+
+    (live / "mod.py").write_text(MODULE_BASE.replace("return 1", "return 100"))
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "local change")
+    local_head = _git(live, "rev-parse", "HEAD")
+
+    _git(live, "checkout", "-qb", "up", base)
+    (live / "mod.py").write_text(MODULE_BASE.replace("return 1", "return 999"))
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "upstream change")
+    upstream_head = _git(live, "rev-parse", "HEAD")
+    _git(live, "checkout", "-q", "local/customizations")
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "pending.json").write_text(json.dumps({
+        "schema": "upstream-sync-pending/v1",
+        "status": "awaiting_decision",
+        "local_head": local_head,
+        "upstream_head": upstream_head,
+        "features": [{"id": "F1", "decision": "keep-local", "files": ["mod.py"],
+                      "local_subjects": ["local change"]}],
+    }))
+    return {"live": live, "state": state, "local_head": local_head,
+            "upstream_head": upstream_head}
+
+
+def _prepared(pyworld):
+    proc = _run("prepare", pyworld["state"], pyworld["live"])
+    assert _out(proc)["status"] == "ready", proc.stdout
+    return pyworld["state"] / "scratch"
+
+
+class TestCommitRefusesBrokenResolutions:
+    def test_unparseable_result_blocks_the_commit(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+
+        proc = _run("commit", pyworld["state"], pyworld["live"])
+        out = _out(proc)
+
+        assert proc.returncode != 0
+        assert out["status"] == "invariants_failed"
+        assert [f["kind"] for f in out["findings"]] == ["unparseable"]
+
+    def test_no_commit_object_is_created_when_invariants_fail(self, pyworld):
+        scratch = _prepared(pyworld)
+        before = _git(scratch, "rev-parse", "HEAD")
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+
+        _run("commit", pyworld["state"], pyworld["live"])
+
+        assert _git(scratch, "rev-parse", "HEAD") == before
+
+    def test_a_dropped_definition_blocks_the_commit(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")   # local_only gone
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert [f["symbol"] for f in out["findings"]] == ["local_only"]
+
+    def test_a_sound_resolution_still_commits(self, pyworld):
+        _prepared(pyworld)
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "committed"
+        assert out["merge_sha"]
+
+    def test_the_scratch_clone_survives_for_repair(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+
+        _run("commit", pyworld["state"], pyworld["live"])
+
+        assert (scratch / ".git").is_dir()
+        assert (scratch / "mod.py").exists()
+
+
+class TestAmendIsCheckedToo:
+    def test_amend_cannot_smuggle_a_broken_file_into_the_merge(self, pyworld):
+        scratch = _prepared(pyworld)
+        assert _out(_run("commit", pyworld["state"], pyworld["live"]))["status"] == "committed"
+
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"], "--amend"))
+
+        assert out["status"] == "invariants_failed"
+
+
+class TestHandoffIsCheckedToo:
+    def test_handoff_writes_no_request_when_invariants_fail(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("handoff", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert not (pyworld["state"] / "finalize-request.json").exists()
+
+
+class TestOverride:
+    def test_the_escape_hatch_commits_and_says_so(self, pyworld):
+        """A legitimate mass deletion must not wedge the pipeline forever."""
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"],
+                        env={"HERMES_SYNC_SKIP_INVARIANTS": "1"}))
+
+        assert out["status"] == "committed"
+        assert out["invariants_skipped"] is True
