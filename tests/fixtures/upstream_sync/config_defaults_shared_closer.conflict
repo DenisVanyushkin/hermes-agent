@@ -1,0 +1,85 @@
+"""Default configuration data for Hermes Agent.
+
+Pure-data leaf module: DEFAULT_CONFIG and OPTIONAL_ENV_VARS, extracted
+verbatim from hermes_cli/config.py. Must not import from hermes_cli.config.
+"""
+
+DEFAULT_CONFIG = {
+    "model": "",
+    "providers": {},
+    "fallback_providers": [],
+    "credential_pool_strategies": {},
+    "toolsets": ["hermes-cli"],
+    # SQLite journal mode used by every Hermes database opener. WAL is the
+    # normal default; set DELETE for weak-fsync/shared filesystems where WAL is
+    # not crash-safe (for example macOS virtiofs, NFS, or SMB).
+    "database": {
+        "journal_mode": "wal",
+        # Optional WAL sizing pragmas, applied when set to integers.
+        # None = SQLite defaults (autocheckpoint 1000 pages, no size limit).
+        "wal_autocheckpoint": None,
+        "journal_size_limit": None,
+    },
+    # Soft file-descriptor limit for long-running Hermes server processes.
+    # Clamped to the OS hard limit; 0/false/null disables the adjustment.
+    "runtime": {
+        "nofile_soft_limit": 4096,
+    },
+    # Global active chat session cap across CLI, TUI/dashboard, and messaging.
+    # None/0 = unbounded.
+    "max_concurrent_sessions": None,
+    # Soft LRU cap on in-memory TUI/desktop/dashboard sessions. When more than
+    # this many are live, the gateway evicts the least-recently-active DETACHED
+    # sessions (no live client) so accumulated agents don't pile up under memory
+    # pressure. Reopening one re-resumes it from disk. 0/null disables.
+    "max_live_sessions": 16,
+<<<<<<< HEAD
+    "review_gate": {
+        "mode": "observe",
+        "reviewer_tier": "code_review",
+    },
+    # "Full" engineering execution uses the autonomous runtime. Each run is
+    # isolated in a worktree and commit, push, and restart remain separately
+    # approval-gated by the engineering pipeline contract.
+    "pipelines": {
+        "enabled": True,
+        "orchestrator": {
+            "mode": "autonomous",
+        },
+        "router": {
+            "mode": "autonomous",
+            "strategy": "llm",
+            "llm": {
+                # Source-of-truth default: route through the dedicated router
+                # model and fail closed unless an operator explicitly chooses
+                # a deterministic fallback policy.
+                "provider": "openai-codex",
+                "model": "gpt-5.4-mini",
+                "timeout_seconds": 10,
+                "fallback_strategy": "fail_closed",
+                "min_confidence": 0.70,
+            },
+        },
+        "execution": {
+            "mode": "autonomous",
+            "enable_gateway_execution_controller": True,
+            "allow_real_provider_execution": True,
+            "allow_pipelines": ["engineering_review_pipeline", "recruiter_decision_support_pipeline"],
+            "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+            "allow_actual_subagent_invocation": True,
+            "allow_actual_reviewer_invocation": True,
+            "allow_actual_rework_loop": True,
+            "min_router_confidence": 0.90,
+        },
+=======
+    "session": {
+        # Per-terminal `hermes -c`: each CLI session drops a breadcrumb file
+        # under $HERMES_HOME/terminal-sessions/<terminal-id>, and a bare
+        # -c/--continue resumes THIS terminal's session (tmux pane, kitty
+        # window, wezterm pane, plain tty, ...) instead of the globally
+        # most-recent one. Set false to restore the old latest-session
+        # behavior everywhere.
+        "terminal_continue": True,
+>>>>>>> 2507bc649f
+    },
+}
