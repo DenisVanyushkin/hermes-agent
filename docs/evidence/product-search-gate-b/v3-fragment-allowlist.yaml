@@ -1,0 +1,1201 @@
+schema_version: "3.0.0"
+gate_a_run_id: gate-a-20260816T141344Z
+gate_b_corpus_sha256: b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69
+entries:
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#015
+    text_sha256: 43a49851263858237b7826461c3b1e9e3fae3e5000771fc70d80ea2978d08204
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#016
+    text_sha256: 28ce7c44056bda6fb34a17350f1a5fb68798f8dff5666647b3418b29bbaf590c
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#017
+    text_sha256: 32cb8cee4465c8c01759c44f78cba98c5e84cd4af6b1d3d7a5e9d6c43e56e931
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#018
+    text_sha256: 998f425ae2faa9bcf76bd6e9d4d1cebdb40c50fdb3faf55de354f05357e36efb
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#019
+    text_sha256: abe3d78c05423f8de7be8348d291aa4983438eeaa0755105f425e666dbe6ca5c
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#029
+    text_sha256: 5e66a7cf9d81dcf16a9ff3fe286b464d471ac7252f3dcc124a7eb453631781fe
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#030
+    text_sha256: 79f0e4e113ea1c5ad939f4b301d5ce979d760d4cc305e7b1365f860710b4b2b1
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#031
+    text_sha256: 3b4b8e53b281868793b2c294464bab77e77992bc25e44b6f9ef4ab8b3e22a2f0
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#032
+    text_sha256: 9d37d2793efd6ac448217b0ae623ffeac0fef0e8e788eb9a100c407cd657343a
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#033
+    text_sha256: ff964f878f4366a13e9be5b1b3a69544c74fb0f56635f7eedce6bb83d5170ac2
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#034
+    text_sha256: 5464318518ac361b4b43a5acab0aef6ab7d3bcdcf02393f4820efbd2bba800d1
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#035
+    text_sha256: e0cd70dbc6c95bc6a7644393b947b31750a82a70009a807b1688374f04ef5513
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#036
+    text_sha256: 3ccc7110f706f464d5185940a52deb9ddffbaa73288c5b8b4f5d5831b8127499
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#037
+    text_sha256: 64f2ddfa7d8e33802c5f35b6675586d8e888765a3817bc7ccb1a592e65696a89
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#038
+    text_sha256: 5405b47e2de64723b071ae7c04437d32bd2e3bef21119147b389d9b4b9a3afea
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#039
+    text_sha256: fec7e4d9ce3fd9329905c12e45adc8b5c0e5c7199f6eb00b9ca357e29fac52a0
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#040
+    text_sha256: 75317d1f103e1fc76b85b0758f802b42d950ef90d085c5f27bbc784910f16cab
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#041
+    text_sha256: 318655cea4bd2096fbfad433d7c019bac40750d1a456fc34d366df41fcc77197
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00326bfef350c6ab67898d8f0ec31012e84d3aa649815175e56cb9202e504c07
+    vacancy_artifact_sha256: c3a1ea7062415544b470f7ffee319281b281f6a8f0f03cb555884fbb975d9dfb
+    source_locator: /description#042
+    text_sha256: 81b09c319ad300b34cee9b60a590ba2121d42b6dcd42195e4812d57286cb17bf
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#012
+    text_sha256: 1eb917a0f247fce5a767bc7fb9981d5547bcfbc0a75b31dab393b04ccbb87b6d
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#013
+    text_sha256: 6bcdaee75e2952598a3b4cc74044bbc50c63d14874a19950aca62b70ccfdc9b1
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#014
+    text_sha256: cefa4f02f46add8ce87012da46e8b12ecc568728da3de0970fa2852d4efaf453
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#015
+    text_sha256: c30923ae7c25b45dc22e9f9e793d8bed746190af954a513f7f833e982e7fb1d0
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#016
+    text_sha256: 8c038e82f06e24ab9cff0c04dd2d9057cbd231a706ec107868a07ff4a4386edb
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#017
+    text_sha256: 0cf008ae3e7be4b09f56e61ec04a66f0a9227f21b97e2b5b8a61d93e3a93bcb8
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#018
+    text_sha256: c2f7cde4d3d6b64a8503c25b55d52bdfa7fe10301cb97fb9665595820fbdc9bc
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#023
+    text_sha256: d72654d2e084194095667e527c7ddfcb88101a389489b0a67685f767abe2a8e1
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#024
+    text_sha256: e2bb7d806e973090ce2ece976dd50ff48fabf80142df313ef98b9fb44d3719f9
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 00cc7767f235275a5513f9fd1d7740fecb28b9bc242d9c74923a48d78e8c5bf9
+    vacancy_artifact_sha256: b0b86c6b80415c86544e3ceee44ed9ebf54ecb5d852e743f818f6e5d4b1abe5e
+    source_locator: /description#025
+    text_sha256: 54c7f0dd9fe515432a59d1af06a4744d3aebb3b9e2a98acfb16c9708bf946cd4
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#022
+    text_sha256: 2df7544b8db2f90dd5d68e6b6aae92fb79cbca56e93542b7567f0fa65d850e75
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#023
+    text_sha256: 1bdb88bd03bec8fda04c1f19fa5b9f01019acdb76afb96053b85bd64318c08e4
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#024
+    text_sha256: 94eca1c12e6b9945d80e536215fddb259f51c62a9ce52011e6e6863d99229ade
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#025
+    text_sha256: 33480ee7150bf3879bb46e7ab99e718dc5d4dd3ba857b9f734bc885d10f403b0
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#026
+    text_sha256: 5a95a18126b6943f3df473a8597f95a430b460645dd8a80f2b0632b74f3b7d57
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#027
+    text_sha256: de5c1974b2e1e0afe9f7286c406520cf99c5e71a559f4e4149ca391793f06af4
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#028
+    text_sha256: 6c8c3c8538c7347913cdc97ad100ff1b89bff135a1e942d3a29bda47bcd04eaf
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#029
+    text_sha256: cdd605601fcd238f508704f78aa95de7b00f8ae8cbe344ba0c6f235df4b9f5f2
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#030
+    text_sha256: b884acf6b91812512b8aee4882da27cbc0c9479d2e54900eaa736f1ad4dd0814
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#031
+    text_sha256: 45789a6015140563e7a5d21e474eca13689ad601572fd2b80c37c45b62ae36d3
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#032
+    text_sha256: 193891a3deda6944da5a2c608571ef1679785884309b97e974e22133ba37da26
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#033
+    text_sha256: 43035858599e8373a7f47dd39b630614218720f0ec1f831281846c297946a588
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#034
+    text_sha256: 62f18277cddd79772f740f5bb8493c941beb09eaa1e3ae965ff30d7b53427dd9
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#035
+    text_sha256: a5e0af26b68e362e1ff472eec6715c59713b6f2636f93017cddfa17e3e7395c4
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#036
+    text_sha256: 9892183774c68f8728d11b05d3202ad36914bfa5a4306dfa05cd1e5ba3891a83
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#037
+    text_sha256: 28ecefcd639bc1c3a752cd3dec84de3bfc2e4868d8d40fd8e63d7259f8f6acde
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#038
+    text_sha256: 83a0abf2f0e8126723a87449bb68a4b23a796fa844d01b62baa5d7d77c22a8b1
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#039
+    text_sha256: 5724e180cd03442ef171ddbbf09ded4f2b2f710dd63d5eca4573cb0a5f60849f
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 013d0d80bb83dbd9680d0bd8f79e96ad3f7ac87dee394f4db158169aaf4b97b2
+    vacancy_artifact_sha256: f5d882ab419113b54668dc71f70c448f858f983c9b56a9205a18b29cebdc706d
+    source_locator: /description#040
+    text_sha256: d5abc2e0d75f5aa281b9525bd06004a4a867ae7785504b46fcb09b671d06e0f4
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#015
+    text_sha256: 98ee024f198bd90484485e902f456734b0ce36226e3fa4f2655c3e18b68834df
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#016
+    text_sha256: 63b30bab19781e98b1f8e87b6c00ce0f910bb279b5ddaa33d9eb5b3dd52ae65c
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#017
+    text_sha256: e88b29275ab33950f747bb658617ee77fddcd0a98167e4526120c0ea9a5dbc57
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#018
+    text_sha256: 59fdecc26f457635e84586f3164d20d7a76979c909270eec1089341637f092ae
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#019
+    text_sha256: e2132182ada5f66f4f097383eab1f190df2a64fdf184d900236c5cf0d159d7d7
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#020
+    text_sha256: e9ba4422a3f3c1b67561263141d7c2fec1caff798dfb8519c740c1f1f61d5da2
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#021
+    text_sha256: 28f1acd67e7dd30856af73ae1c206230f4624a8179cc4ac008a023aa34640c10
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#022
+    text_sha256: 8046958b12a9fbe2ef9e12f91fd33727fe8a2ee1dd4f77e97d9db2dac9c7e1e3
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#023
+    text_sha256: 2cebb1336d300673d127eea58797ae9abfacce6827dab894fad399aad6d06a75
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#024
+    text_sha256: 128e9dfb02d987475e5de7a302fc995402d3a039f0127e1acf08681415c7af71
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#025
+    text_sha256: 0ca423e5af56b54bbd7b1803cea6bcf5c605d3bbdb7679ff125cf1603c452f0f
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#026
+    text_sha256: df42cde668ca8e19a30eacae107b64a680392dcf5d96815fdac5f5802a267955
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#027
+    text_sha256: d55cb7521d68bff0fa3521327f3152bbd876fb8becba660e2df62af3659163e6
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#028
+    text_sha256: 2d32d6c80e4f5ac0bdd4820debe5d0e077d978ea5969b7879f43b85709a7f73d
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#029
+    text_sha256: a3a75cc89256429a0f1067d4f2c8f55a10de5e894cf3384770947ec8d3ce7626
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#030
+    text_sha256: 2b2289680495659de1ddbad959cd5828c41324179b1a741d27e12bd77b63b06e
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#031
+    text_sha256: 9acdfc3bf4bb6e4e1599b645c92adc29a7f02600b7a04b3c1546762354138062
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#032
+    text_sha256: 144cd7e4feb70a8b04a730766c71fdc8aef122d6077206e8a4bf324a32e9cd9a
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#033
+    text_sha256: 98c9d167e16dc6ae822ca0ac69f026827a7821fa361f7e4d71f2a7125e96fd0e
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#034
+    text_sha256: ae4190b519ff0051323be4f92eddb101fa2f74b709a7c1b59524dc0019b57de8
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#035
+    text_sha256: 5415de021541de49a8c485691d5d6a96da47700a50a6d8fd3ef47f532521a6bd
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#036
+    text_sha256: f21fe7139a9a415e4ac8eea9b258c4e720769cea7d97b0ab1c26e96e26fcc352
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#037
+    text_sha256: b81b468978df78a2f6d6f4f939a229ad9829209ed394121f7610f165eec10964
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#038
+    text_sha256: 84f0a133591e79f9b37e4617ff7bd5a2ab31cec6155b90cfae792b7378e8664d
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#039
+    text_sha256: df8cd5966b51b9d3f6ddccdecf0a2a377b00e0aa07986fb33f37fe602a805efd
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#040
+    text_sha256: afb0f465fbc494e33a60356f2601b8263436af2b03a62d4b6a54fb51e4c94929
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#041
+    text_sha256: ba7605cef986ceffa82a79a1d0ea354a33f98483b4b828738dfb25bca010b34f
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#042
+    text_sha256: c6ee82873377c646b489c722d5dfee42e13a1407eee4b79a0bed5eeb8d37f06d
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#043
+    text_sha256: 7ad7aa27712dc30ee04368fcc781d71151cce020481e64392a058bf77a5de0ec
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#044
+    text_sha256: bd0b2feef95f95c50053c19924748b0962da4e23e4d74023ccaeaf54161127eb
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#045
+    text_sha256: 62d62223c21d84c5e85be6732a9c110669fede866b278e790bdeb2d38f7cf198
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#046
+    text_sha256: 33d52ed53ee3656af1207ad14767dc636a7f7e86f0debd12304ab80ee040274e
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#047
+    text_sha256: 7cff8680d462cf6da705ec81793043f8a06c4090246bcaecab24883871fe2ef8
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#048
+    text_sha256: 6db2685c7a965c99ba8e780da482ccfe93b220ea83c319efd71f8c05028e40d6
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#049
+    text_sha256: c680afb7a098f9df44d651d9a3741ed55954c4adc9f76875480d91625f5c755c
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#050
+    text_sha256: e3b2ba6da9ba5a8ee38823f7a7d48981b8fda90450fcc57965f8e98f78543d48
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#051
+    text_sha256: d4b5b18f499e5f342fc69d4db15a3782c5980c88c22f6748134692dea791d6a5
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#052
+    text_sha256: c2aefc3904ad37393bab511837f5030cbac2afd4f3f3e062403f35f95aa8f21b
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#053
+    text_sha256: 9442f85b5423f9d5b2ee23c5adaa2795aedcd07acae9eadf7909956c24cc53d7
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#054
+    text_sha256: e70e81328132cb999a6ea1dc87c4020cc0e80345f6b8ef2fd0fa149b491e2205
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 01467ae849e569a43c0182d2a2e9ca4ca5241b846ec6b8fc08deac02aa0a95ac
+    vacancy_artifact_sha256: 48d891a615a2110d5b5a1533fc6011e91eb7102fe51aa1ad6ee48f9819cfda31
+    source_locator: /description#055
+    text_sha256: ce5ce928ee78d312fecdf62eba9c37b3989dc9a5a8b4dfe0d32eb248f5ce9ce2
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#015
+    text_sha256: 065b568e4ba8d8f8eda0d4f93bd990fef79f441011243cbe888ebaa089f6475f
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#016
+    text_sha256: 125851252c059ca35a844336fd44af956796bfc0cf8d2b6914b6b987fa0addf6
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#017
+    text_sha256: 99163d02f6d6f8e4dd2e5f8e3ce8a41631db2810620cec6706e06224acb07d7f
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#018
+    text_sha256: d48abdd7afcd1f51e3e4c654cb52cb1da24bb2023619b4ac0b43995b57680874
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#019
+    text_sha256: 5e6fe53e8901c636437b9f932cba3e6f521a4e848b7c45a31930b08d2a2c0995
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#020
+    text_sha256: 65edbfbf3448b3a4d116274710a037ce9dd0986863ecd60341ae8c05cd9ddf76
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#021
+    text_sha256: 059a9ddb61b5de3d6bc9d64ec9eb3557b425c236ac6ad06f521830a0201a66c8
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#022
+    text_sha256: 310c6421cf4bb5abcb419d4c4d8e60ce3b5293fb9237fd53b31cfcf11d79af28
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#023
+    text_sha256: 95f215b3531415990941e0868b1d9a4713e0296b92dd70330cab1d37a983018d
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#024
+    text_sha256: a3ce13e035a28100cfd694e27697b7b11e86df3ca261afedbcff8ee994c905f5
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#025
+    text_sha256: 17365df77d2019bdb9abe23728be46c29a2f649cdb4b9edb3c779d13df70d6de
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#026
+    text_sha256: e730337781d6a06ebbe9459a89f7b212144f1c01403691e57ff93a00320210f2
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#027
+    text_sha256: 028a2da532dda4d37ee14de3fe55a21df18563361d8d76b1a1e8485515d25603
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#028
+    text_sha256: 881a62d4a0bcf9fab5f0a9faf51e67732e9342c50bed5fb03afce70a8843f899
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#029
+    text_sha256: 0c2340bd5052606b896db72e504cbc15f85b563c2fd7a7eee8b43ffa86815b62
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0653ac668ed766fff69d44959d385ea619de3a8188326af4b87fd06595c5f6a9
+    vacancy_artifact_sha256: 0859ffa27e19abdd0149f35349ddc56d6b14724047c116c83a649096e71309af
+    source_locator: /description#030
+    text_sha256: 005c48951d1adc10276209e2bc01de263c86beab6e265e7ff7639f5bb2558eda
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#016
+    text_sha256: 6b4e1109f0bd19f895606b9bd83e612f72cdad372f8fad67400cf2b044267133
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#017
+    text_sha256: f4d34b6df04e91e71522b250ac215ac80b9a38e91b655a7015d7c077365aa2ef
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#018
+    text_sha256: fdf3b38972f54a5a63553a5fa5ffcabc76c64b0c930fe93aab2fafdd8ea1aa0d
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#019
+    text_sha256: a3f9d2b05b05784860ecdcab4e9d98e37cbd1d7f7d3a5459615c68f42a633e40
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#020
+    text_sha256: 930f4ade6d50b0b52377b5895564360935c9bdd8accdbedb6604e5a05eaedb18
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#021
+    text_sha256: 92222a8491f4f1f1482897f2e4cd3ac7ae53ce74ebfcac608078e7905e29f8aa
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#022
+    text_sha256: 2dcac96df55a0766262bc6de0acc476886dfb81272a41e4fe152a20966d1d5bb
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#023
+    text_sha256: 1fd3bad2b722af7fd1527cfb40844a4e5d11fa12e004a70c57dd06c5e76d49b2
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#024
+    text_sha256: afe509235c6d230573ee425a6871dfca9a249b822f98dd6e6aaf1bc00309ae9b
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#025
+    text_sha256: c5769b55e71c918d9c949b85f770f38db399d9cb1b17582e9eeb5e5e14482799
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#026
+    text_sha256: 2e18b10dbacc675b582ea91316d8663bd6ff7d8138054099e49ece2617bb1238
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#027
+    text_sha256: f95b34d5448400d5f243d7a94d855b8fda7386282a1b1eb0a3bf529fa4a18d7b
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#028
+    text_sha256: 6cdc921f941d1f906a66d6c27bae531362cc170b4f201482ecdf764c426c1e2f
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#029
+    text_sha256: 2aeae5668f6433a78f1340b5659595e5f3469fdbf598736a756474c7246948e2
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#030
+    text_sha256: c32f69c8aa27da134d78968ac58826bf2e64e616287769b6ccb3acbe64a2c718
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#031
+    text_sha256: 5cfa994fdcf812854f654e558d2e8353ba74ce45a7a273b166baa8321b289b81
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#032
+    text_sha256: e62e7fbc4e067979f84dc0a1e7383543f2060018abe62cd56ffd08820fed8668
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#033
+    text_sha256: 860ff81f994b6c25e7289bb1336a718d8f4649fd654667d7485a397699871584
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#034
+    text_sha256: 3bbdeed3e477e487979bd38da28ad534684bc9424ebc33795a415318e5af7743
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#035
+    text_sha256: 06e73e472bbace9c8e19c7d1ebb385ecf5809b14b25502924c73c4ed453ec7cd
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#036
+    text_sha256: 1839de05674b581cad2d750f6173adaf41eb3b050794a273eba8c9c462b1f867
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#037
+    text_sha256: 099e659bbcb0331af59afbf65c35e59d5dbdb0e61797e66dd63d30125fc4d6b1
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#038
+    text_sha256: 33acc33f171a656cf94d5ce429f20c0ca574fa6a269bc84e694c1cb018eb2262
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#039
+    text_sha256: b500dad794bd0a3dce8cd4a1cff0d46e14db83b94b1e9c224c8b697f328feb56
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0ba1d5f04bf876cbc6eacabfedabc78cc508129cc5fe61f86ff226b30e00e106
+    vacancy_artifact_sha256: 502ec7e12c79dabb5d954b96c7fd9070c72caeb3dc33d6dbb9fb6ec4e5d535ad
+    source_locator: /description#040
+    text_sha256: 017f8b8bd24a8bb11fd71007e0341474dad8ed2b05b5f33bcf1a9e1373f80e00
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#010
+    text_sha256: ba5905ba5101826b08aa3a0d6a52bbd998d63170469cfd16c8e2dc375ffc1755
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#011
+    text_sha256: 6b85270a8c904151d2709c5dd68ce8c37f4a002967bee520293d4ed4fd5498df
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#012
+    text_sha256: ccd5574ce1dc041dc07af789007ff5a7f5ee96456a25bf46d16e38091bcfbe74
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#013
+    text_sha256: 01c37cfc4ea45a7066772ba1002e5244e55374ae5ecdf73f126c030b24f9db17
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#014
+    text_sha256: 720b60cb88c7ff32a2fc3ac1415d19f2b50bfc4ee16cf7a44df42a3373bd00d6
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#015
+    text_sha256: 849daf70a383629dca71d72dc577e8ca1dffc7e6214b96143bc60b3c3254f6bc
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#016
+    text_sha256: f14bd5f77736402876e6162fb040b7bab161700dedce788b62cf912e5ba3f883
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#017
+    text_sha256: b149ea8366260e30ed1b3d67290f7fa063b4b46145888c10fcb2b3a5f75059b0
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#018
+    text_sha256: 5a396983f57b9223ee98fffe7547b4e938c44494e77441d605c076d2471c2043
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#019
+    text_sha256: efa7a256c247404f34c1b7b0e9d662bf8622f18194fdf85fc319c2822718c669
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#020
+    text_sha256: 91cb9ac55c68ba7cdb9048ce0f263bf8bea9d80f8e264431248a94274c4eb453
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#021
+    text_sha256: 1438c06cb724b0f3e60e73dac57ff904a620396811cff83e96be7ba8b0fb4b8e
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#022
+    text_sha256: 960f06316137a570362d1d9334a427e15bf971bd4751b0149b6b69977a86788e
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#023
+    text_sha256: 623a6c8db28deefbf2a618d7e8e7e1dca5fd7946db5be7e1d114ffc8b7486033
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#024
+    text_sha256: 8b4346a81f065ea4f16cbcd21182dd2b1514ce89630eabf798acb83de1d6b02f
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#025
+    text_sha256: 01978aebd5dde1d89f347c71fe976ffc4b9311609cf0341c607f52fdcae8ab27
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 0f7ed214d8e4fd3c5779df8c83a3c3a855d10cf96c94d75f69dbbb8081a40d30
+    vacancy_artifact_sha256: 57690b380ff7560c2c639bc233470606021135c9816301a3164c9f87ef71cd85
+    source_locator: /description#026
+    text_sha256: cafa8190277ed00e73336b054e9783de26dea9486bc9b47c39ba322ccf074d08
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#017
+    text_sha256: b62f4334c7b43fbf710aca88a253f62952de3347392f333031184ce6ade3e092
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#018
+    text_sha256: 9b7a88dadf85ec989e00a8ee0ac9466d256f88bc157c696b4feb408d945e73cb
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#019
+    text_sha256: 8ec03ce87fda80c82149212ac8716a7e64653aa6ee8ad8f3db035af210ce551c
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#020
+    text_sha256: 6af87be34cd2aabbfe2de011315111d835385d65d3b5ab4a39eac98056d2ddc3
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#021
+    text_sha256: 46733941062d28ffd6b3db6aa6972af438e838fa89936298a39f49876f881d98
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#022
+    text_sha256: 4954345d239f6fba84b1fe71bbc2bc30e1fd2ca112085f7ad8f5c758870109be
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#023
+    text_sha256: 2a11429718584ec423a29575304c3ed3bff87b7fba89e031ace1d4b77285c74d
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#024
+    text_sha256: 4d4c09b00597d72710d9eb4b69b8660461382b238274c75ab2973d760f7103cc
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#025
+    text_sha256: 7dae637549f4826837298f5c6e6422ec835bd34fee772688ee24a0886913e739
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#026
+    text_sha256: 22c04c5c83ef970184a02969d3be4ba2e0aeb49257027304af2c725ee486e8b7
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#027
+    text_sha256: 4fcb91d8ab07e278ebd4685f48dfdcbbf56946c1b4c62d11ea4aec4f46b8bac7
+    decision: allow_role_responsibility
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#028
+    text_sha256: 81c49e2a3ffc520dccb5c7aa18861764da918ff132fa5af7445a5607d57d6037
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#029
+    text_sha256: 2953b7d152a4d4d8bbe72e33ba23946f804f644472ebaea119295c75a3b0014f
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#030
+    text_sha256: 3108947a9786c1c07f33b0ddf5872064af43d520cd466ed49cbc96f06aa3c2a8
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#031
+    text_sha256: 3f56a27a9b2bf12403443e51c50addf884c73916a8672c9e2488770dc166b4bb
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#032
+    text_sha256: 0dd97ce419b26e45a58ac5a5247cccbc1227e5dd84a466828f46a0d233a6aab1
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#033
+    text_sha256: 7df9518df41365837519f349795472abe23574dd950d301c7d28187e66c34f9c
+    decision: exclude_company_fact
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#034
+    text_sha256: a94399afb534fd452848771ecf896d209a9526f335bd09830416bdd89f238306
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#035
+    text_sha256: ad0cb2c92553f22cb300ad1f6098e13b4cd919dd2efcb0043d056e94fbaf1f7f
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#036
+    text_sha256: 809c504efef127012c2827d2bee06ffd1a5f9161c38718fd76e7504e80b6daa4
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#037
+    text_sha256: 6dcad3103222d8655f38f09fd36907a0ee11362579d5f17993ec15bdf1c328b2
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#038
+    text_sha256: 6799a1ea3d624c6d03086c793799c768d2e8efb429545a312d6f94b8101c6201
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#039
+    text_sha256: 188d231d32f69ec3fa19cbd1715cf136d0a6da5096f403ac7d5d5188dc9d6327
+    decision: allow_role_requirement
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"
+  - selection_key: 3eadd5c0807aca9c44390e03c88d7816c7ab12e575e1c2d18035984a47773fc1
+    vacancy_artifact_sha256: 7efb3f3190043f652f015cf6ce2d915c24eef2f9cd6f66898d8e3919a2805139
+    source_locator: /description#040
+    text_sha256: 1133b0249a414cb405db7294f12991ad556e99cf9231a7e7adfeaade693fe524
+    decision: exclude_ambiguous
+    reviewer_role: independent_gate_b_evidence_reviewer
+    reviewed_at: "2026-08-20T13:14:52Z"

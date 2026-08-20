@@ -1545,6 +1545,72 @@ def validate_provider_payload_v2(
     )
 
 
+def validate_provider_payload_v3(
+    raw_payload: object,
+    *,
+    synthesis_input: EvidenceSynthesisInputV2,
+    reviewed_description_claims: Mapping[tuple[str, str], str],
+    policy: EvidenceSynthesisPolicyV1 | None = None,
+) -> EvidenceSynthesisStatus | None:
+    """Bind every v3 description citation to an exact allowed review decision."""
+    v2_status = validate_provider_payload_v2(
+        raw_payload,
+        synthesis_input=synthesis_input,
+        policy=policy,
+    )
+    if v2_status is not None:
+        return v2_status
+    try:
+        payload = ProviderEvidencePayloadV2.model_validate(raw_payload)
+    except Exception:
+        return EvidenceSynthesisStatus.INVALID_SCHEMA
+    fragments_by_id = {
+        fragment.fragment_id: fragment for fragment in synthesis_input.fragments
+    }
+    prohibited_hashes = set(synthesis_input.prohibited_company_claim_text_sha256s)
+    allowed_decisions = {
+        "allow_role_responsibility",
+        "allow_role_requirement",
+    }
+
+    def validate_citation(
+        citation: str,
+        *,
+        statement: str | None = None,
+    ) -> EvidenceSynthesisStatus | None:
+        fragment = fragments_by_id.get(citation)
+        if fragment is None:
+            return EvidenceSynthesisStatus.MISSING_CITATION
+        if fragment.source_kind is not EvidenceSourceKind.VACANCY:
+            return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+        if statement is not None and statement != fragment.text:
+            return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+        if fragment.text_sha256 in prohibited_hashes:
+            return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+        if fragment.source_locator.startswith("/description#") and (
+            reviewed_description_claims.get(
+                (fragment.source_locator, fragment.text_sha256)
+            )
+            not in allowed_decisions
+        ):
+            return EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+        return None
+
+    for claim in payload.claims:
+        if claim.status is EvidenceClaimStatus.UNKNOWN:
+            continue
+        for citation in claim.citations:
+            status = validate_citation(citation, statement=claim.statement)
+            if status is not None:
+                return status
+    for item in (*payload.conflicts, *payload.question_candidates):
+        for citation in item.citations:
+            status = validate_citation(citation)
+            if status is not None:
+                return status
+    return None
+
+
 def _metadata_v2(
     *,
     provider: RecordedEvidenceSynthesisProviderV2,

@@ -11,3 +11,23 @@ maximum_terminal_unknown: 5
 minimum_manual_triage_accuracy: "0.80"
 company_authority_when_missing: unavailable
 company_claims_when_unavailable: forbidden
+company_fact_deny_patterns:
+  - '\bwe\b'
+  - '\bour\b'
+  - '\bour company\b'
+  - '\bthe company\b'
+  - '\bglobal leader\b'
+  - '\bmarket leader\b'
+  - '\bplatform\b'
+  - '\bcustomers?\b'
+  - '\bclients?\b'
+  - '\brevenue\b'
+  - '\bmerchant volume\b'
+  - '\bmarket share\b'
+  - '\bfunding\b'
+  - '\bseries [a-z]\b'
+  - '\bemployees?\b'
+  - '\boffices?\b'
+  - '\bexpansion\b'
+  - '\bfastest[- ]growing\b'
+description_claim_admission: reviewed_hash_allowlist_only

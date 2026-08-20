@@ -26,6 +26,26 @@ DEFAULT_GATE_B_BENCHMARK_POLICY_V3_PATH = (
 _ORDERED_CALL_CAP = 48
 _PER_CALL_MAXIMUM_USD = Decimal("0.01")
 _AGGREGATE_MAXIMUM_USD = Decimal("0.48")
+_COMPANY_FACT_DENY_PATTERNS = (
+    r"\bwe\b",
+    r"\bour\b",
+    r"\bour company\b",
+    r"\bthe company\b",
+    r"\bglobal leader\b",
+    r"\bmarket leader\b",
+    r"\bplatform\b",
+    r"\bcustomers?\b",
+    r"\bclients?\b",
+    r"\brevenue\b",
+    r"\bmerchant volume\b",
+    r"\bmarket share\b",
+    r"\bfunding\b",
+    r"\bseries [a-z]\b",
+    r"\bemployees?\b",
+    r"\boffices?\b",
+    r"\bexpansion\b",
+    r"\bfastest[- ]growing\b",
+)
 
 
 class _StrictFrozenModel(BaseModel):
@@ -111,6 +131,15 @@ class GateBBenchmarkPolicyV3(_StrictFrozenModel):
     minimum_manual_triage_accuracy: Literal["0.80"]
     company_authority_when_missing: Literal["unavailable"]
     company_claims_when_unavailable: Literal["forbidden"]
+    company_fact_deny_patterns: tuple[str, ...]
+    description_claim_admission: Literal["reviewed_hash_allowlist_only"]
+
+    @field_validator("company_fact_deny_patterns", mode="before")
+    @classmethod
+    def normalize_yaml_deny_patterns(cls, value: object) -> tuple[str, ...] | object:
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return tuple(value)
+        return value
 
     @field_validator("per_call_maximum_usd")
     @classmethod
@@ -124,6 +153,17 @@ class GateBBenchmarkPolicyV3(_StrictFrozenModel):
     def validate_aggregate_cost(cls, value: Decimal) -> Decimal:
         if value != _AGGREGATE_MAXIMUM_USD:
             raise ValueError("aggregate_maximum_usd must be exactly 0.48")
+        return value
+
+    @field_validator("company_fact_deny_patterns")
+    @classmethod
+    def validate_company_fact_deny_patterns(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if value != _COMPANY_FACT_DENY_PATTERNS:
+            raise ValueError(
+                "company_fact_deny_patterns must match the reviewed v3 policy"
+            )
         return value
 
     @property
