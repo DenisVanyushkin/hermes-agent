@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,23 @@ def test_v3_manifest_and_launch_identity_require_utc_timestamps() -> None:
             issued_at=non_utc,
             package_manifest_sha256="a" * 64,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("per_call_maximum_usd", 0.01),
+        ("aggregate_maximum_usd", 0.48),
+    ],
+)
+def test_v3_policy_model_rejects_coercible_float_costs(
+    field: str, value: float
+) -> None:
+    payload = yaml.safe_load(POLICY_PATH.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    payload["per_call_maximum_usd"] = Decimal("0.01")
+    payload["aggregate_maximum_usd"] = Decimal("0.48")
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        GateBBenchmarkPolicyV3.model_validate(payload)

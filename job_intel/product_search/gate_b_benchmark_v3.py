@@ -29,7 +29,7 @@ _AGGREGATE_MAXIMUM_USD = Decimal("0.48")
 
 
 class _StrictFrozenModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
 class GateBCallStateV3(str, Enum):
@@ -194,4 +194,11 @@ def load_gate_b_benchmark_policy_v3(
         payload = yaml.safe_load(Path(path_or_payload).read_bytes())
     if not isinstance(payload, Mapping):
         raise ValueError("Gate B benchmark policy v3 must be a mapping")
-    return GateBBenchmarkPolicyV3.model_validate(payload)
+    normalized = dict(payload)
+    for field_name, expected in (
+        ("per_call_maximum_usd", _PER_CALL_MAXIMUM_USD),
+        ("aggregate_maximum_usd", _AGGREGATE_MAXIMUM_USD),
+    ):
+        if normalized.get(field_name) == str(expected):
+            normalized[field_name] = expected
+    return GateBBenchmarkPolicyV3.model_validate(normalized)
