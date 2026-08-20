@@ -17,10 +17,6 @@ import job_intel.product_search.decision_v2 as decision_v2
 import job_intel.product_search.evidence_synthesis as synthesis
 import job_intel.product_search.gate_b as gate_b
 from job_intel.product_search.gate_b import GateBPreflightError
-from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
-    LIVE_APPROVAL_ENV,
-    LLMProviderError,
-)
 
 
 GATE_A_ROOT = Path(
@@ -66,6 +62,12 @@ def _approval(preflight: dict[str, Any]) -> dict[str, Any]:
         ],
         "max_output_tokens": preflight["record_identity"]["max_output_tokens"],
     }
+
+
+def _claim_test_runner(authorization: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    witness = gate_b.export_gate_b_launch_witness_request(authorization)
+    monkeypatch.setattr(gate_b, "_read_privileged_launch_witness", lambda: witness)
+    gate_b._claim_privileged_launch(authorization)
 
 
 def _load_first_input(preflight: dict[str, Any]) -> object:
@@ -490,6 +492,7 @@ def test_authorization_binds_ordered_allowlist_and_ledger_rejects_foreign_hash(
         approval_record=approval,
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     assert authorization.ordered_input_sha256s == tuple(
         preflight["inputs"]["ordered_input_sha256s"]
     )
@@ -527,7 +530,6 @@ def test_single_public_record_runner_owns_live_factory_and_input_loader(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
-    monkeypatch.delenv(LIVE_APPROVAL_ENV, raising=False)
-    with pytest.raises(LLMProviderError, match="live_calls_not_approved"):
+    with pytest.raises(GateBPreflightError, match="launch_witness_unavailable"):
         gate_b.run_gate_b_record(authorization=authorization)
     assert not (authorization.experiment_root / "run-ledger.sqlite3").exists()

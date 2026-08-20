@@ -92,6 +92,14 @@ GATE_A_DATABASE_SHA256 = (
     "08fefb5a0fdcaee7c59b5921b1b74291471e58405fd3299e8834c5a5a6c0d8ff"
 )
 GATE_B_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-b")
+GATE_B_LAUNCH_WITNESS_PATH = Path(
+    "/var/lib/job-intel/gate-b-launch-witness/r3-launch.json"
+)
+GATE_B_RECONCILIATION_WITNESS_PATH = Path(
+    "/var/lib/job-intel/gate-b-launch-witness/r3-reconciliation.json"
+)
+GATE_B_LAUNCH_WITNESS_SCHEMA_VERSION = "1.0.0"
+GATE_B_RECONCILIATION_SCHEMA_VERSION = "1.0.0"
 GATE_B_CORPUS_SHA256 = (
     "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
 )
@@ -1730,12 +1738,375 @@ def _write_descriptor_bytes(descriptor: int, payload: bytes) -> None:
         payload = payload[written:]
 
 
+def _canonical_gate_b_paths() -> tuple[Path, Path, Path, Path]:
+    experiment_root = GATE_B_EXPERIMENT_ROOT / GATE_B_CORPUS_SHA256
+    corpus_manifest_path = experiment_root / "corpus-manifest.json"
+    package_root = experiment_root / "input-package-v2-r3"
+    input_manifest_path = package_root / "run-manifest.v2.json"
+    return (
+        experiment_root,
+        corpus_manifest_path,
+        package_root,
+        input_manifest_path,
+    )
+
+
+def _read_regular_descriptor(descriptor: int) -> bytes:
+    file_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise GateBPreflightError("namespace_entry_not_regular")
+    payload = _read_descriptor_bytes(descriptor)
+    after = os.fstat(descriptor)
+    if (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        raise GateBPreflightError("namespace_inventory_changed_during_read")
+    return payload
+
+
+def _canonical_namespace_inventory(root: Path) -> dict[str, Any]:
+    """Inventory every inode below the fixed r3 namespace without following links."""
+    root_path = Path(os.path.abspath(root))
+    root_descriptor = _open_directory_nofollow(root_path)
+    root_before = os.fstat(root_descriptor)
+    entries: list[dict[str, Any]] = []
+
+    def walk(directory_descriptor: int, prefix: tuple[str, ...]) -> None:
+        try:
+            names = sorted(os.listdir(directory_descriptor))
+        except OSError as exc:
+            raise GateBPreflightError("namespace_inventory_failed") from exc
+        for name in names:
+            if not name or name in {".", ".."} or "/" in name:
+                raise GateBPreflightError("namespace_entry_invalid")
+            relative = "/".join((*prefix, name))
+            try:
+                before = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise GateBPreflightError("namespace_inventory_failed") from exc
+            common = {
+                "path": relative,
+                "device": before.st_dev,
+                "inode": before.st_ino,
+                "mode": stat.S_IMODE(before.st_mode),
+                "uid": before.st_uid,
+                "gid": before.st_gid,
+                "nlink": before.st_nlink,
+                "size": before.st_size,
+                "mtime_ns": before.st_mtime_ns,
+                "ctime_ns": before.st_ctime_ns,
+            }
+            if stat.S_ISDIR(before.st_mode):
+                child = _open_child_directory(directory_descriptor, name)
+                try:
+                    opened = os.fstat(child)
+                    if (before.st_dev, before.st_ino) != (
+                        opened.st_dev,
+                        opened.st_ino,
+                    ):
+                        raise GateBPreflightError(
+                            "namespace_inventory_changed_during_read"
+                        )
+                    entries.append({**common, "kind": "directory"})
+                    walk(child, (*prefix, name))
+                    after = os.fstat(child)
+                    if (opened.st_dev, opened.st_ino) != (
+                        after.st_dev,
+                        after.st_ino,
+                    ):
+                        raise GateBPreflightError(
+                            "namespace_inventory_changed_during_read"
+                        )
+                finally:
+                    os.close(child)
+                continue
+            if stat.S_ISREG(before.st_mode):
+                try:
+                    descriptor = os.open(
+                        name,
+                        os.O_RDONLY
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_NONBLOCK", 0),
+                        dir_fd=directory_descriptor,
+                    )
+                except OSError as exc:
+                    raise GateBPreflightError("namespace_inventory_failed") from exc
+                try:
+                    opened = os.fstat(descriptor)
+                    if (before.st_dev, before.st_ino) != (
+                        opened.st_dev,
+                        opened.st_ino,
+                    ):
+                        raise GateBPreflightError(
+                            "namespace_inventory_changed_during_read"
+                        )
+                    payload = _read_regular_descriptor(descriptor)
+                finally:
+                    os.close(descriptor)
+                entries.append({
+                    **common,
+                    "kind": "regular",
+                    "sha256": _sha256_bytes(payload),
+                })
+                continue
+            kind = "symlink" if stat.S_ISLNK(before.st_mode) else "special"
+            entries.append({**common, "kind": kind})
+
+    try:
+        walk(root_descriptor, ())
+        root_after = os.fstat(root_descriptor)
+        if (
+            root_before.st_dev,
+            root_before.st_ino,
+            root_before.st_mtime_ns,
+            root_before.st_ctime_ns,
+        ) != (
+            root_after.st_dev,
+            root_after.st_ino,
+            root_after.st_mtime_ns,
+            root_after.st_ctime_ns,
+        ):
+            raise GateBPreflightError("namespace_inventory_changed_during_read")
+        inventory = {
+            "schema_version": "1.0.0",
+            "canonical_root": str(root_path),
+            "root": {
+                "device": root_before.st_dev,
+                "inode": root_before.st_ino,
+                "mode": stat.S_IMODE(root_before.st_mode),
+                "uid": root_before.st_uid,
+                "gid": root_before.st_gid,
+                "nlink": root_before.st_nlink,
+                "size": root_before.st_size,
+                "mtime_ns": root_before.st_mtime_ns,
+                "ctime_ns": root_before.st_ctime_ns,
+            },
+            "entries": entries,
+        }
+        return {**inventory, "inventory_sha256": _sha256_json(inventory)}
+    finally:
+        os.close(root_descriptor)
+
+
+def _expected_fresh_namespace(
+    *,
+    corpus_manifest_sha256: str,
+    input_manifest_sha256: str,
+    input_manifest: Mapping[str, Any],
+) -> tuple[dict[str, str], set[str]]:
+    files = {
+        "corpus-manifest.json": corpus_manifest_sha256,
+        "input-package-v2-r3/run-manifest.v2.json": input_manifest_sha256,
+    }
+    directories = {
+        "input-package-v2-r3",
+        "input-package-v2-r3/task10-inputs",
+        "input-package-v2-r3/vacancy-artifacts",
+    }
+    for record in input_manifest["records"]:
+        files[
+            f"input-package-v2-r3/{record['task10_input_path']}"
+        ] = str(record["task10_input_sha256"])
+        files[
+            f"input-package-v2-r3/{record['vacancy_artifact_path']}"
+        ] = str(record["vacancy_artifact_sha256"])
+    return files, directories
+
+
+def _validate_fresh_namespace(
+    inventory: Mapping[str, Any],
+    *,
+    corpus_manifest_sha256: str,
+    input_manifest_sha256: str,
+    input_manifest: Mapping[str, Any],
+) -> None:
+    root = inventory.get("root")
+    if (
+        inventory.get("canonical_root") != str(_canonical_gate_b_paths()[0])
+        or not isinstance(root, Mapping)
+        or root.get("uid") != os.geteuid()
+        or int(root.get("mode", 0)) & 0o022
+    ):
+        raise GateBPreflightError("namespace_root_unsafe")
+    expected_files, expected_directories = _expected_fresh_namespace(
+        corpus_manifest_sha256=corpus_manifest_sha256,
+        input_manifest_sha256=input_manifest_sha256,
+        input_manifest=input_manifest,
+    )
+    entries = inventory.get("entries")
+    if not isinstance(entries, list):
+        raise GateBPreflightError("namespace_inventory_invalid")
+    actual_paths = {entry.get("path") for entry in entries}
+    if actual_paths != set(expected_files) | expected_directories:
+        raise GateBPreflightError(
+            "namespace_not_fresh:owner_reconciliation_artifact_required:"
+            f"{inventory.get('inventory_sha256')}"
+        )
+    effective_uid = os.geteuid()
+    for entry in entries:
+        path = str(entry["path"])
+        if path in expected_directories:
+            if (
+                entry.get("kind") != "directory"
+                or entry.get("uid") != effective_uid
+                or int(entry.get("mode", 0)) & 0o022
+            ):
+                raise GateBPreflightError("namespace_directory_unsafe")
+            continue
+        if (
+            entry.get("kind") != "regular"
+            or entry.get("uid") != effective_uid
+            or entry.get("nlink") != 1
+            or int(entry.get("mode", 0)) & 0o022
+        ):
+            if path == "input-package-v2-r3/run-manifest.v2.json":
+                raise GateBPreflightError("input_manifest_lock_not_regular")
+            raise GateBPreflightError("namespace_file_unsafe")
+        if entry.get("sha256") != expected_files[path]:
+            raise GateBPreflightError("namespace_content_hash_mismatch")
+
+
+def _build_process_bound_runner_capability_factory() -> Any:
+    issuance_token = object()
+
+    class ProcessBoundRunnerCapability:
+        __slots__ = (
+            "_claimed",
+            "_consumed",
+            "_expected_witness_bytes",
+            "_lock",
+            "_pid",
+            "_process_start",
+            "_run_identity_sha256",
+            "_runner_instance_sha256",
+        )
+
+        def __init__(self, *, token: object, run_identity_sha256: str) -> None:
+            if token is not issuance_token:
+                raise GateBPreflightError("runner_capability_issuer_invalid")
+            self._pid = os.getpid()
+            self._process_start = _current_process_start_identity()
+            self._run_identity_sha256 = run_identity_sha256
+            nonce = os.urandom(32)
+            self._runner_instance_sha256 = _sha256_bytes(
+                b"gate-b-runner-instance\x00"
+                + nonce
+                + run_identity_sha256.encode("ascii")
+                + str(self._pid).encode("ascii")
+                + self._process_start.encode("utf-8")
+            )
+            self._claimed = False
+            self._consumed = False
+            self._expected_witness_bytes: bytes | None = None
+            self._lock = threading.Lock()
+
+        def __reduce__(self) -> object:
+            raise TypeError("process-bound runner capability cannot be serialized")
+
+        def _bind_expected_witness(
+            self, *, token: object, expected_witness: Mapping[str, Any]
+        ) -> None:
+            with self._lock:
+                if token is not issuance_token:
+                    raise GateBPreflightError(
+                        "runner_capability_issuer_invalid"
+                    )
+                if self._expected_witness_bytes is not None:
+                    raise GateBPreflightError(
+                        "runner_capability_witness_already_bound"
+                    )
+                expected = dict(expected_witness)
+                if (
+                    expected.get("runner_instance_sha256")
+                    != self._runner_instance_sha256
+                    or expected.get("process_id") != self._pid
+                    or expected.get("process_start_identity")
+                    != self._process_start
+                    or expected.get("run_identity_sha256")
+                    != self._run_identity_sha256
+                ):
+                    raise GateBPreflightError(
+                        "runner_capability_witness_binding_invalid"
+                    )
+                self._expected_witness_bytes = _canonical_bytes(expected)
+
+        def claim(self) -> None:
+            with self._lock:
+                if self._consumed:
+                    raise GateBPreflightError("runner_capability_consumed")
+                if self._expected_witness_bytes is None:
+                    raise GateBPreflightError(
+                        "runner_capability_witness_not_bound"
+                    )
+                if (
+                    os.getpid() != self._pid
+                    or _current_process_start_identity() != self._process_start
+                ):
+                    raise GateBPreflightError("runner_capability_wrong_process")
+                supplied = _read_privileged_launch_witness()
+                if _canonical_bytes(supplied) != self._expected_witness_bytes:
+                    raise GateBPreflightError("launch_witness_mismatch")
+                self._consumed = True
+                self._claimed = True
+
+    def issue(run_identity_sha256: str) -> ProcessBoundRunnerCapability:
+        return ProcessBoundRunnerCapability(
+            token=issuance_token,
+            run_identity_sha256=run_identity_sha256,
+        )
+
+    def bind(
+        capability: ProcessBoundRunnerCapability,
+        expected_witness: Mapping[str, Any],
+    ) -> None:
+        if not isinstance(capability, ProcessBoundRunnerCapability):
+            raise GateBPreflightError("runner_capability_issuer_invalid")
+        capability._bind_expected_witness(
+            token=issuance_token,
+            expected_witness=expected_witness,
+        )
+
+    return issue, bind
+
+
+(
+    _issue_process_bound_runner_capability,
+    _bind_process_bound_runner_capability,
+) = (
+    _build_process_bound_runner_capability_factory()
+)
+del _build_process_bound_runner_capability_factory
+
+
+def _current_process_start_identity() -> str:
+    try:
+        stat_fields = Path("/proc/self/stat").read_text(encoding="ascii").split()
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="ascii"
+        ).strip()
+        return f"{boot_id}:{stat_fields[21]}"
+    except (OSError, IndexError, UnicodeError) as exc:
+        raise GateBPreflightError("process_identity_unavailable") from exc
+
+
 class _GateBRunAuthority:
     """One approval-bound inode for run exclusion and ledger continuity."""
 
     _SCHEMA_VERSION = "2.0.0"
-    _CHECKPOINT_SCHEMA_VERSION = "2.0.0"
-    _CHECKPOINT_DOMAIN = b"gate-b-run-checkpoint\x00"
     _ZERO_HASH = "0" * 64
 
     def __init__(
@@ -1747,7 +2118,7 @@ class _GateBRunAuthority:
         input_manifest_sha256: str,
         input_manifest: Mapping[str, Any],
         seal_key: bytes,
-        restart_checkpoint: object,
+        require_existing_authority: bool,
     ) -> None:
         self.run_identity_sha256 = run_identity_sha256
         self.input_manifest_path = Path(os.path.abspath(input_manifest_path))
@@ -1763,7 +2134,6 @@ class _GateBRunAuthority:
         self._authority_sequence = -1
         self._authority_head = self._ZERO_HASH
         self._authority_length = 0
-        self._authority_checkpoints: list[dict[str, Any]] = []
         self._ledger_anchor: dict[str, Any] | None = None
         self._journal_descriptor: int | None = None
         self._journal_path: Path | None = None
@@ -1794,9 +2164,7 @@ class _GateBRunAuthority:
                 or _canonical_bytes(input_manifest) != manifest_bytes
             ):
                 raise GateBPreflightError("input_manifest_changed:authorization")
-            self._open_authority_descriptor(restart_checkpoint)
-            with self.exclusive():
-                self._validate_restart_checkpoint_locked(restart_checkpoint)
+            self._open_authority_descriptor(require_existing_authority)
         except BaseException:
             self.close()
             raise
@@ -1810,72 +2178,6 @@ class _GateBRunAuthority:
             ).hexdigest(),
         }
 
-    def _checkpoint_unsigned_locked(self) -> dict[str, Any]:
-        if self._lock_depth <= 0:
-            raise GateBPreflightError("run_authority_lock_required")
-        return {
-            "schema_version": self._CHECKPOINT_SCHEMA_VERSION,
-            "run_identity_sha256": self.run_identity_sha256,
-            "input_manifest_sha256": self.input_manifest_sha256,
-            "authority_sequence": self._authority_sequence,
-            "authority_length": self._authority_length,
-            "authority_head_sha256": self._authority_head,
-            "ledger_anchor_sha256": (
-                None
-                if self._ledger_anchor is None
-                else _sha256_json(self._ledger_anchor)
-            ),
-        }
-
-    def _checkpoint_hmac(self, unsigned: Mapping[str, Any]) -> str:
-        payload = self._CHECKPOINT_DOMAIN + _canonical_json(
-            dict(unsigned)
-        ).encode("utf-8")
-        return hmac.new(self._seal_key, payload, hashlib.sha256).hexdigest()
-
-    def _checkpoint_record_locked(self) -> dict[str, Any]:
-        unsigned = self._checkpoint_unsigned_locked()
-        return {
-            **unsigned,
-            "checkpoint_hmac_sha256": self._checkpoint_hmac(unsigned),
-        }
-
-    def _validate_restart_checkpoint_locked(self, checkpoint: object) -> None:
-        if self._created_authority:
-            if checkpoint is not None:
-                raise GateBPreflightError("run_checkpoint_mismatch")
-            return
-        if checkpoint is None:
-            raise GateBPreflightError("run_checkpoint_required")
-        if not isinstance(checkpoint, Mapping):
-            raise GateBPreflightError("run_checkpoint_mismatch")
-        supplied = dict(checkpoint)
-        expected_keys = set(self._checkpoint_unsigned_locked()) | {
-            "checkpoint_hmac_sha256"
-        }
-        if set(supplied) != expected_keys:
-            raise GateBPreflightError("run_checkpoint_mismatch")
-        supplied_hmac = supplied.get("checkpoint_hmac_sha256")
-        unsigned = {
-            key: value
-            for key, value in supplied.items()
-            if key != "checkpoint_hmac_sha256"
-        }
-        try:
-            calculated_hmac = self._checkpoint_hmac(unsigned)
-        except (TypeError, ValueError):
-            raise GateBPreflightError("run_checkpoint_mismatch") from None
-        if (
-            not isinstance(supplied_hmac, str)
-            or not hmac.compare_digest(supplied_hmac, calculated_hmac)
-            or unsigned not in self._authority_checkpoints
-        ):
-            raise GateBPreflightError("run_checkpoint_mismatch")
-
-    def export_checkpoint(self) -> dict[str, Any]:
-        with self.exclusive():
-            return self._checkpoint_record_locked()
-
     def _append_raw_authority_record(self, unsigned: Mapping[str, Any]) -> None:
         descriptor = self._authority_descriptor
         if descriptor is None:
@@ -1886,7 +2188,7 @@ class _GateBRunAuthority:
         _write_descriptor_bytes(descriptor, payload)
         os.fsync(descriptor)
 
-    def _open_authority_descriptor(self, restart_checkpoint: object) -> None:
+    def _open_authority_descriptor(self, require_existing_authority: bool) -> None:
         def child_stat(name: str) -> os.stat_result | None:
             try:
                 return os.stat(
@@ -1904,8 +2206,8 @@ class _GateBRunAuthority:
         if (primary_stat is None) != (pin_stat is None):
             raise GateBPreflightError("run_authority_split")
         if created:
-            if restart_checkpoint is not None:
-                raise GateBPreflightError("run_checkpoint_mismatch")
+            if require_existing_authority:
+                raise GateBPreflightError("reconciliation_authority_missing")
             try:
                 descriptor = os.open(
                     self._authority_name,
@@ -1940,6 +2242,11 @@ class _GateBRunAuthority:
             self._append_raw_authority_record(unsigned)
             os.fsync(self._root_descriptor)
         else:
+            if not require_existing_authority:
+                raise GateBPreflightError(
+                    "one_shot_state_not_fresh:"
+                    "owner_reconciliation_artifact_required"
+                )
             try:
                 descriptor = os.open(
                     self._authority_name,
@@ -1994,7 +2301,6 @@ class _GateBRunAuthority:
         previous_hash = self._ZERO_HASH
         offset = 0
         latest_anchor: dict[str, Any] | None = None
-        checkpoints: list[dict[str, Any]] = []
         expected_seen = self._expected_authority_sequence is None
         for line in payload.splitlines(keepends=True):
             if not line.endswith(b"\n"):
@@ -2073,19 +2379,6 @@ class _GateBRunAuthority:
             sequence = int(record["sequence"])
             previous_hash = record_hash
             offset += len(line)
-            checkpoints.append({
-                "schema_version": self._CHECKPOINT_SCHEMA_VERSION,
-                "run_identity_sha256": self.run_identity_sha256,
-                "input_manifest_sha256": self.input_manifest_sha256,
-                "authority_sequence": sequence,
-                "authority_length": offset,
-                "authority_head_sha256": previous_hash,
-                "ledger_anchor_sha256": (
-                    None
-                    if latest_anchor is None
-                    else _sha256_json(latest_anchor)
-                ),
-            })
             if sequence == self._expected_authority_sequence:
                 if record_hash != self._expected_authority_head:
                     raise GateBPreflightError("run_authority_rollback")
@@ -2095,7 +2388,6 @@ class _GateBRunAuthority:
         self._authority_sequence = sequence
         self._authority_head = previous_hash
         self._authority_length = offset
-        self._authority_checkpoints = checkpoints
         self._ledger_anchor = latest_anchor
         self._expected_authority_sequence = sequence
         self._expected_authority_head = previous_hash
@@ -2156,7 +2448,7 @@ class _GateBRunAuthority:
             if (
                 not stat.S_ISREG(manifest_stat.st_mode)
                 or manifest_stat.st_uid != os.geteuid()
-                or manifest_stat.st_nlink < 1
+                or manifest_stat.st_nlink != 1
             ):
                 raise GateBPreflightError("input_manifest_lock_not_regular")
             self._verify_manifest_path_identity_locked(descriptor)
@@ -2228,7 +2520,7 @@ class _GateBRunAuthority:
             pass
 
 
-@dataclass(frozen=True)
+@dataclass
 class GateBRunAuthorization:
     run_identity_sha256: str
     exact_call_cap: int
@@ -2245,34 +2537,249 @@ class GateBRunAuthorization:
     record_count: int
     _owner_capability_sha256: str
     _metadata_seal_key: bytes
-    _legacy_no_live_run_receipt: Mapping[str, Any] | None
-    _run_authority: _GateBRunAuthority
+    _run_authority: _GateBRunAuthority | None
+    _runner_capability: Any | None
+    _authorization_mode: str
+    _namespace_inventory: Mapping[str, Any]
+    _input_manifest: Mapping[str, Any]
+    _activation_lock: threading.Lock
     _issuer: object
 
     def __post_init__(self) -> None:
         if self._issuer is not _AUTHORIZATION_ISSUER:
             raise GateBPreflightError("authorization_issuer_invalid")
+        if self._authorization_mode not in {"record", "reconciliation"}:
+            raise GateBPreflightError("authorization_mode_invalid")
+        if (self._runner_capability is None) != (
+            self._authorization_mode == "reconciliation"
+        ):
+            raise GateBPreflightError("runner_capability_mode_invalid")
+
+
+def _assert_fresh_namespace_unchanged(
+    authorization: GateBRunAuthorization,
+) -> dict[str, Any]:
+    if authorization._authorization_mode != "record":
+        raise GateBPreflightError("fresh_record_authorization_required")
+    current = _canonical_namespace_inventory(authorization.experiment_root)
+    _validate_fresh_namespace(
+        current,
+        corpus_manifest_sha256=authorization.corpus_manifest_sha256,
+        input_manifest_sha256=authorization.input_manifest_sha256,
+        input_manifest=authorization._input_manifest,
+    )
+    if current != dict(authorization._namespace_inventory):
+        raise GateBPreflightError("namespace_inventory_changed")
+    return current
+
+
+def _assert_reconciliation_namespace_unchanged(
+    authorization: GateBRunAuthorization,
+) -> dict[str, Any]:
+    if authorization._authorization_mode != "reconciliation":
+        raise GateBPreflightError("reconciliation_authorization_required")
+    current = _canonical_namespace_inventory(authorization.experiment_root)
+    if current != dict(authorization._namespace_inventory):
+        raise GateBPreflightError("owner_reconciliation_artifact_mismatch")
+    return current
+
+
+def _refresh_reconciliation_namespace_after_governed_write(
+    authorization: GateBRunAuthorization,
+) -> None:
+    authority = authorization._run_authority
+    if authority is None or authority._lock_depth <= 0:
+        raise GateBPreflightError("run_authority_lock_required")
+    authorization._namespace_inventory = _canonical_namespace_inventory(
+        authorization.experiment_root
+    )
+
+
+def _activate_run_authority(
+    authorization: GateBRunAuthorization,
+) -> _GateBRunAuthority:
+    if authorization._issuer is not _AUTHORIZATION_ISSUER:
+        raise GateBPreflightError("authorization_issuer_invalid")
+    if authorization._authorization_mode != "record":
+        raise GateBPreflightError("fresh_record_authorization_required")
+    capability = authorization._runner_capability
+    if capability is None or not capability._claimed:
+        raise GateBPreflightError("runner_capability_not_claimed")
+    with authorization._activation_lock:
+        existing = authorization._run_authority
+        if existing is not None:
+            return existing
+        _assert_fresh_namespace_unchanged(authorization)
+        authority = _GateBRunAuthority(
+            experiment_root=authorization.experiment_root,
+            run_identity_sha256=authorization.run_identity_sha256,
+            input_manifest_path=authorization.input_manifest_path,
+            input_manifest_sha256=authorization.input_manifest_sha256,
+            input_manifest=authorization._input_manifest,
+            seal_key=authorization._metadata_seal_key,
+            require_existing_authority=False,
+        )
+        authorization._run_authority = authority
+        return authority
+
+
+def _activate_reconciliation_authority(
+    authorization: GateBRunAuthorization,
+) -> _GateBRunAuthority:
+    if authorization._issuer is not _AUTHORIZATION_ISSUER:
+        raise GateBPreflightError("authorization_issuer_invalid")
+    if authorization._authorization_mode != "reconciliation":
+        raise GateBPreflightError("reconciliation_authorization_required")
+    with authorization._activation_lock:
+        existing = authorization._run_authority
+        if existing is not None:
+            return existing
+        _assert_reconciliation_namespace_unchanged(authorization)
+        authority = _GateBRunAuthority(
+            experiment_root=authorization.experiment_root,
+            run_identity_sha256=authorization.run_identity_sha256,
+            input_manifest_path=authorization.input_manifest_path,
+            input_manifest_sha256=authorization.input_manifest_sha256,
+            input_manifest=authorization._input_manifest,
+            seal_key=authorization._metadata_seal_key,
+            require_existing_authority=True,
+        )
+        try:
+            _assert_reconciliation_namespace_unchanged(authorization)
+        except BaseException:
+            authority.close()
+            raise
+        authorization._run_authority = authority
+        return authority
+
+
+def _launch_witness_request(
+    authorization: GateBRunAuthorization,
+) -> dict[str, Any]:
+    capability = authorization._runner_capability
+    if authorization._authorization_mode != "record" or capability is None:
+        raise GateBPreflightError("reconciliation_authorization_offline_only")
+    return {
+        "schema_version": GATE_B_LAUNCH_WITNESS_SCHEMA_VERSION,
+        "kind": "gate_b_r3_one_shot_launch",
+        "run_identity_sha256": authorization.run_identity_sha256,
+        "corpus_manifest_sha256": authorization.corpus_manifest_sha256,
+        "input_manifest_sha256": authorization.input_manifest_sha256,
+        "canonical_experiment_root": str(authorization.experiment_root),
+        "canonical_package_root": str(authorization.package_root),
+        "namespace_inventory_sha256": authorization._namespace_inventory[
+            "inventory_sha256"
+        ],
+        "runner_instance_sha256": capability._runner_instance_sha256,
+        "process_id": capability._pid,
+        "process_start_identity": capability._process_start,
+        "record_run_mode": "one_shot_non_resumable",
+    }
+
+
+def export_gate_b_launch_witness_request(
+    authorization: GateBRunAuthorization,
+) -> dict[str, Any]:
+    """Return the exact request a separately approved root installer must seal."""
+    if not isinstance(authorization, GateBRunAuthorization) or (
+        authorization._issuer is not _AUTHORIZATION_ISSUER
+    ):
+        raise GateBPreflightError("runner_authorization_required")
+    if authorization._run_authority is not None:
+        raise GateBPreflightError("launch_witness_request_after_state_bind")
+    return _launch_witness_request(authorization)
+
+
+def _read_privileged_witness(
+    path: Path, *, error_prefix: str
+) -> dict[str, Any]:
+    try:
+        parent_descriptor = os.open(
+            path.parent,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise GateBPreflightError(f"{error_prefix}_unavailable") from exc
+    try:
+        parent_stat = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != 0
+            or stat.S_IMODE(parent_stat.st_mode) & 0o022
+        ):
+            raise GateBPreflightError(f"{error_prefix}_parent_unsafe")
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise GateBPreflightError(f"{error_prefix}_unavailable") from exc
+        try:
+            witness_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(witness_stat.st_mode)
+                or witness_stat.st_uid != 0
+                or witness_stat.st_nlink != 1
+                or stat.S_IMODE(witness_stat.st_mode) & 0o022
+            ):
+                raise GateBPreflightError(f"{error_prefix}_unsafe")
+            payload = _read_regular_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+    try:
+        witness = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise GateBPreflightError(f"{error_prefix}_invalid") from exc
+    if not isinstance(witness, dict) or _canonical_bytes(witness) != payload:
+        raise GateBPreflightError(f"{error_prefix}_invalid")
+    return witness
+
+
+def _read_privileged_launch_witness() -> dict[str, Any]:
+    return _read_privileged_witness(
+        GATE_B_LAUNCH_WITNESS_PATH,
+        error_prefix="launch_witness",
+    )
+
+
+def _read_privileged_reconciliation_witness() -> dict[str, Any]:
+    return _read_privileged_witness(
+        GATE_B_RECONCILIATION_WITNESS_PATH,
+        error_prefix="reconciliation_witness",
+    )
+
+
+def _claim_privileged_launch(
+    authorization: GateBRunAuthorization,
+) -> None:
+    capability = authorization._runner_capability
+    if capability is None:
+        raise GateBPreflightError("reconciliation_authorization_offline_only")
+    capability.claim()
+    _assert_fresh_namespace_unchanged(authorization)
 
 
 def export_gate_b_run_checkpoint(
     authorization: GateBRunAuthorization,
 ) -> dict[str, Any]:
-    """Export the exact owner-authenticated restart lower bound."""
+    """Historical lower-bound restart is intentionally unsupported for r3."""
     if not isinstance(authorization, GateBRunAuthorization) or (
         authorization._issuer is not _AUTHORIZATION_ISSUER
     ):
         raise GateBPreflightError("runner_authorization_required")
-    return authorization._run_authority.export_checkpoint()
-
-
-_NO_LIVE_RUN_RECEIPT_SCHEMA_VERSION = "1.0.0"
-_NO_LIVE_RUN_RECEIPT_DOMAIN = b"gate-b-no-live-run-receipt\x00"
+    raise GateBPreflightError("historical_checkpoint_unsupported")
 
 
 def _legacy_state_artifact_names_locked(
     authorization: GateBRunAuthorization,
-    *,
-    include_recordings: bool = False,
 ) -> tuple[str, ...]:
     authority = authorization._run_authority
     if authority._lock_depth <= 0:
@@ -2293,123 +2800,7 @@ def _legacy_state_artifact_names_locked(
             "run-ledger.sqlite3-wal",
         }
     }
-    if include_recordings and "recordings" in names:
-        try:
-            recording_stat = os.stat(
-                "recordings",
-                dir_fd=authority._root_descriptor,
-                follow_symlinks=False,
-            )
-            if not stat.S_ISDIR(recording_stat.st_mode):
-                artifacts.add("recordings")
-            else:
-                recording_descriptor = _open_child_directory(
-                    authority._root_descriptor, "recordings"
-                )
-                try:
-                    if os.listdir(recording_descriptor):
-                        artifacts.add("recordings")
-                finally:
-                    os.close(recording_descriptor)
-        except (OSError, GateBPreflightError):
-            artifacts.add("recordings")
     return tuple(sorted(artifacts))
-
-
-def _no_live_run_receipt_unsigned_locked(
-    authorization: GateBRunAuthorization,
-    marker_descriptor: int,
-) -> dict[str, Any]:
-    artifacts = _legacy_state_artifact_names_locked(
-        authorization, include_recordings=True
-    )
-    if artifacts:
-        raise GateBPreflightError("ledger_legacy_state_requires_owner_review")
-    before = os.fstat(marker_descriptor)
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or before.st_uid != os.geteuid()
-        or before.st_nlink != 1
-    ):
-        raise GateBPreflightError("ledger_path_unsafe")
-    marker_bytes = _read_descriptor_bytes(marker_descriptor)
-    after = os.fstat(marker_descriptor)
-    try:
-        path_stat = os.stat(
-            "run-ledger.sqlite3",
-            dir_fd=authorization._run_authority._root_descriptor,
-            follow_symlinks=False,
-        )
-    except OSError as exc:
-        raise GateBPreflightError("ledger_path_changed") from exc
-    if (
-        (before.st_dev, before.st_ino, before.st_size)
-        != (after.st_dev, after.st_ino, after.st_size)
-        or (after.st_dev, after.st_ino) != (path_stat.st_dev, path_stat.st_ino)
-    ):
-        raise GateBPreflightError("ledger_path_changed")
-    if marker_bytes:
-        raise GateBPreflightError("ledger_legacy_state_requires_owner_review")
-    return {
-        "schema_version": _NO_LIVE_RUN_RECEIPT_SCHEMA_VERSION,
-        "kind": "gate_b_no_live_run_migration",
-        "source_protocol_max": "r2",
-        "target_protocol": RECORD_STATE_PROTOCOL_VERSION,
-        "run_identity_sha256": authorization.run_identity_sha256,
-        "input_manifest_sha256": authorization.input_manifest_sha256,
-        "legacy_marker_name": "run-ledger.sqlite3",
-        "legacy_marker_sha256": _sha256_bytes(marker_bytes),
-        "legacy_marker_device": after.st_dev,
-        "legacy_marker_inode": after.st_ino,
-        "no_legacy_private_ledgers": True,
-        "no_recordings": True,
-    }
-
-
-def _no_live_run_receipt_hmac(
-    authorization: GateBRunAuthorization,
-    unsigned: Mapping[str, Any],
-) -> str:
-    payload = _NO_LIVE_RUN_RECEIPT_DOMAIN + _canonical_json(
-        dict(unsigned)
-    ).encode("utf-8")
-    return hmac.new(
-        authorization._metadata_seal_key, payload, hashlib.sha256
-    ).hexdigest()
-
-
-def export_gate_b_no_live_run_receipt(
-    authorization: GateBRunAuthorization,
-) -> dict[str, Any]:
-    """Seal the exact empty, never-authorized legacy marker for r3 cutover."""
-    if not isinstance(authorization, GateBRunAuthorization) or (
-        authorization._issuer is not _AUTHORIZATION_ISSUER
-    ):
-        raise GateBPreflightError("runner_authorization_required")
-    authority = authorization._run_authority
-    with authority.exclusive():
-        try:
-            descriptor = os.open(
-                "run-ledger.sqlite3",
-                os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=authority._root_descriptor,
-            )
-        except OSError as exc:
-            raise GateBPreflightError("ledger_no_live_run_marker_missing") from exc
-        try:
-            unsigned = _no_live_run_receipt_unsigned_locked(
-                authorization, descriptor
-            )
-        finally:
-            os.close(descriptor)
-    return {
-        **unsigned,
-        "receipt_hmac_sha256": _no_live_run_receipt_hmac(
-            authorization, unsigned
-        ),
-    }
 
 
 def _locked_manifest_bytes(path: Path) -> bytes:
@@ -2432,12 +2823,69 @@ def _locked_manifest_bytes(path: Path) -> bytes:
         os.close(descriptor)
 
 
-def authorize_record_run(
+def _owner_reconciliation_request(
+    *,
+    run_identity_sha256: str,
+    inventory: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": GATE_B_RECONCILIATION_SCHEMA_VERSION,
+        "kind": "gate_b_r3_owner_reconciliation",
+        "run_identity_sha256": run_identity_sha256,
+        "record_state_protocol_version": RECORD_STATE_PROTOCOL_VERSION,
+        "canonical_namespace_root": str(_canonical_gate_b_paths()[0]),
+        "observed_namespace_inventory_sha256": inventory["inventory_sha256"],
+        "observed_namespace_inventory": dict(inventory),
+        "authorization_scope": "offline_terminal_reconciliation_only",
+    }
+
+
+def build_gate_b_owner_reconciliation_request(
+    preflight: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Inventory the exact blocked r3 state for a separate owner decision."""
+    identity = dict(preflight.get("record_identity", {}))
+    identity_sha256 = _sha256_json(identity)
+    if identity_sha256 != preflight.get("record_identity_sha256"):
+        raise GateBPreflightError("record_identity_mismatch")
+    if (
+        identity.get("record_state_protocol_version")
+        != RECORD_STATE_PROTOCOL_VERSION
+    ):
+        raise GateBPreflightError("record_state_protocol_version")
+    experiment_root, manifest_path, package_root, input_manifest_path = (
+        _canonical_gate_b_paths()
+    )
+    inputs = preflight.get("inputs", {})
+    if (
+        preflight.get("corpus", {}).get("manifest_sha256")
+        != GATE_B_CORPUS_SHA256
+        or str(preflight.get("corpus", {}).get("manifest_path"))
+        != str(manifest_path)
+        or str(inputs.get("package_root")) != str(package_root)
+        or str(inputs.get("manifest_path")) != str(input_manifest_path)
+    ):
+        raise GateBPreflightError("canonical_path_mismatch")
+    inventory = _canonical_namespace_inventory(experiment_root)
+    return _owner_reconciliation_request(
+        run_identity_sha256=identity_sha256,
+        inventory=inventory,
+    )
+
+
+def _authorize_gate_b(
     preflight: Mapping[str, Any],
     *,
     approval_record: Mapping[str, Any],
     owner_capability: str | None,
+    authorization_mode: str,
 ) -> GateBRunAuthorization:
+    if authorization_mode not in {"record", "reconciliation"}:
+        raise GateBPreflightError("authorization_mode_invalid")
+    if "run_checkpoint" in approval_record:
+        raise GateBPreflightError("historical_checkpoint_unsupported")
+    if "legacy_no_live_run_receipt" in approval_record:
+        raise GateBPreflightError("historical_recovery_artifact_unsupported")
     identity = dict(preflight.get("record_identity", {}))
     identity_sha256 = _sha256_json(identity)
     if identity_sha256 != preflight.get("record_identity_sha256"):
@@ -2473,19 +2921,27 @@ def authorize_record_run(
     if approval_record.get("pricing_sha256") != identity.get("pricing_sha256"):
         raise GateBPreflightError("pricing_identity_mismatch")
     expected_corpus = str(preflight["corpus"]["manifest_sha256"])
+    if expected_corpus != GATE_B_CORPUS_SHA256:
+        raise GateBPreflightError("corpus_identity_mismatch")
     if approval_record.get("corpus_manifest_sha256") != expected_corpus:
         raise GateBPreflightError("corpus_identity_mismatch")
-    manifest_path = Path(str(preflight["corpus"]["manifest_path"]))
-    experiment_root = manifest_path.parent
-    if experiment_root.parent.resolve(strict=True) != GATE_B_EXPERIMENT_ROOT.resolve(
-        strict=True
+    (
+        experiment_root,
+        manifest_path,
+        package_root,
+        input_manifest_path,
+    ) = _canonical_gate_b_paths()
+    inputs = preflight.get("inputs", {})
+    if (
+        str(preflight["corpus"].get("manifest_path")) != str(manifest_path)
+        or str(inputs.get("package_root")) != str(package_root)
+        or str(inputs.get("manifest_path")) != str(input_manifest_path)
     ):
-        raise GateBPreflightError("corpus_manifest_changed:root")
+        raise GateBPreflightError("canonical_path_mismatch")
     manifest_bytes = _locked_manifest_bytes(manifest_path)
     if _sha256_bytes(manifest_bytes) != expected_corpus:
         raise GateBPreflightError("corpus_manifest_changed:hash")
     corpus = json.loads(manifest_bytes)
-    inputs = preflight.get("inputs", {})
     expected_input_manifest = str(inputs.get("manifest_sha256"))
     expected_ordered_hashes = str(inputs.get("ordered_input_hashes_sha256"))
     if (
@@ -2496,14 +2952,6 @@ def authorize_record_run(
         or identity.get("ordered_input_hashes_sha256") != expected_ordered_hashes
     ):
         raise GateBPreflightError("input_identity_mismatch")
-    input_manifest_path = Path(str(inputs.get("manifest_path")))
-    package_root = Path(str(inputs.get("package_root")))
-    if (
-        package_root.parent.resolve(strict=True) != experiment_root.resolve(strict=True)
-        or input_manifest_path.parent.resolve(strict=True)
-        != package_root.resolve(strict=True)
-    ):
-        raise GateBPreflightError("input_manifest_root_mismatch")
     input_manifest = load_gate_b_run_manifest(
         input_manifest_path,
         expected_sha256=expected_input_manifest,
@@ -2522,25 +2970,56 @@ def authorize_record_run(
         raw = read_contained_nofollow(gate_a_root, str(record["raw_reference"]))
         if _sha256_bytes(raw) != record["raw_content_sha256"]:
             raise GateBPreflightError("corpus_source_changed")
+    namespace_inventory = _canonical_namespace_inventory(experiment_root)
+    if authorization_mode == "record":
+        if "owner_reconciliation_artifact" in approval_record:
+            raise GateBPreflightError(
+                "owner_reconciliation_artifact_unexpected_for_record"
+            )
+        _validate_fresh_namespace(
+            namespace_inventory,
+            corpus_manifest_sha256=expected_corpus,
+            input_manifest_sha256=expected_input_manifest,
+            input_manifest=input_manifest,
+        )
+    else:
+        try:
+            _validate_fresh_namespace(
+                namespace_inventory,
+                corpus_manifest_sha256=expected_corpus,
+                input_manifest_sha256=expected_input_manifest,
+                input_manifest=input_manifest,
+            )
+        except GateBPreflightError as exc:
+            if not str(exc).startswith("namespace_not_fresh:"):
+                raise
+        else:
+            raise GateBPreflightError("owner_reconciliation_state_not_present")
+        expected_reconciliation = _owner_reconciliation_request(
+            run_identity_sha256=identity_sha256,
+            inventory=namespace_inventory,
+        )
+        supplied_reconciliation = approval_record.get(
+            "owner_reconciliation_artifact"
+        )
+        if (
+            not isinstance(supplied_reconciliation, Mapping)
+            or dict(supplied_reconciliation) != expected_reconciliation
+        ):
+            raise GateBPreflightError(
+                "owner_reconciliation_artifact_mismatch"
+            )
+        protected_reconciliation = (
+            _read_privileged_reconciliation_witness()
+        )
+        if protected_reconciliation != expected_reconciliation:
+            raise GateBPreflightError("reconciliation_witness_mismatch")
     metadata_seal_key = hashlib.sha256(
         b"gate-b-record-seal\x00"
         + owner_capability.encode("utf-8")
         + identity_sha256.encode("ascii")
     ).digest()
-    run_authority = _GateBRunAuthority(
-        experiment_root=experiment_root,
-        run_identity_sha256=identity_sha256,
-        input_manifest_path=input_manifest_path,
-        input_manifest_sha256=expected_input_manifest,
-        input_manifest=input_manifest,
-        seal_key=metadata_seal_key,
-        restart_checkpoint=approval_record.get("run_checkpoint"),
-    )
-    legacy_receipt = approval_record.get("legacy_no_live_run_receipt")
-    if legacy_receipt is not None and not isinstance(legacy_receipt, Mapping):
-        run_authority.close()
-        raise GateBPreflightError("ledger_no_live_run_receipt_mismatch")
-    return GateBRunAuthorization(
+    authorization = GateBRunAuthorization(
         run_identity_sha256=identity_sha256,
         exact_call_cap=EXACT_CALL_CAP,
         exact_spend_cap_usd=EXACT_SPEND_CAP_USD,
@@ -2558,11 +3037,55 @@ def authorize_record_run(
             owner_capability.encode("utf-8")
         ),
         _metadata_seal_key=metadata_seal_key,
-        _legacy_no_live_run_receipt=(
-            None if legacy_receipt is None else dict(legacy_receipt)
+        _run_authority=None,
+        _runner_capability=(
+            _issue_process_bound_runner_capability(identity_sha256)
+            if authorization_mode == "record"
+            else None
         ),
-        _run_authority=run_authority,
+        _authorization_mode=authorization_mode,
+        _namespace_inventory=namespace_inventory,
+        _input_manifest=dict(input_manifest),
+        _activation_lock=threading.Lock(),
         _issuer=_AUTHORIZATION_ISSUER,
+    )
+    if authorization._runner_capability is not None:
+        _bind_process_bound_runner_capability(
+            authorization._runner_capability,
+            _launch_witness_request(authorization),
+        )
+    return authorization
+
+
+def authorize_record_run(
+    preflight: Mapping[str, Any],
+    *,
+    approval_record: Mapping[str, Any],
+    owner_capability: str | None,
+) -> GateBRunAuthorization:
+    """Authorize only an exact fresh, one-shot r3 record namespace."""
+    return _authorize_gate_b(
+        preflight,
+        approval_record=approval_record,
+        owner_capability=owner_capability,
+        authorization_mode="record",
+    )
+
+
+def authorize_gate_b_reconciliation(
+    preflight: Mapping[str, Any],
+    *,
+    approval_record: Mapping[str, Any],
+    owner_capability: str | None,
+) -> GateBRunAuthorization:
+    """Authorize exact-state offline reconciliation, never live recording."""
+    if "owner_reconciliation_artifact" not in approval_record:
+        raise GateBPreflightError("owner_reconciliation_artifact_required")
+    return _authorize_gate_b(
+        preflight,
+        approval_record=approval_record,
+        owner_capability=owner_capability,
+        authorization_mode="reconciliation",
     )
 
 
@@ -2578,7 +3101,11 @@ class GateBBudgetLedger:
             raise GateBPreflightError("runner_authorization_required")
         self.path = path
         self.authorization = authorization
-        self._run_authority = authorization._run_authority
+        self._run_authority = (
+            _activate_run_authority(authorization)
+            if authorization._authorization_mode == "record"
+            else _activate_reconciliation_authority(authorization)
+        )
         self._closed = False
         if Path(os.path.abspath(path.parent)) != Path(
             os.path.abspath(authorization.experiment_root)
@@ -2587,6 +3114,10 @@ class GateBBudgetLedger:
         try:
             with self._run_authority.exclusive():
                 with self._run_authority.compatibility_manifest_lock():
+                    if authorization._authorization_mode == "reconciliation":
+                        _assert_reconciliation_namespace_unchanged(
+                            authorization
+                        )
                     self._bind_journal_locked()
                     self._initialize()
         except BaseException:
@@ -2631,7 +3162,11 @@ class GateBBudgetLedger:
         ):
             os.close(descriptor)
             raise GateBPreflightError("ledger_path_unsafe")
-        os.fchmod(descriptor, 0o600)
+        if stat.S_IMODE(file_stat.st_mode) != 0o600:
+            if self.authorization._authorization_mode == "reconciliation":
+                os.close(descriptor)
+                raise GateBPreflightError("ledger_path_unsafe")
+            os.fchmod(descriptor, 0o600)
         return descriptor
 
     def _verify_public_journal_identity_locked(self) -> None:
@@ -2644,26 +3179,6 @@ class GateBBudgetLedger:
             descriptor_stat.st_ino,
         ):
             raise GateBPreflightError("ledger_path_changed")
-
-    def _validate_no_live_run_receipt_locked(self) -> str:
-        receipt = self.authorization._legacy_no_live_run_receipt
-        if receipt is None:
-            raise GateBPreflightError("ledger_no_live_run_receipt_required")
-        unsigned = _no_live_run_receipt_unsigned_locked(
-            self.authorization, self._ledger_descriptor
-        )
-        supplied = dict(receipt)
-        supplied_hmac = supplied.pop("receipt_hmac_sha256", None)
-        expected_hmac = _no_live_run_receipt_hmac(
-            self.authorization, unsigned
-        )
-        if (
-            supplied != unsigned
-            or not isinstance(supplied_hmac, str)
-            or not hmac.compare_digest(supplied_hmac, expected_hmac)
-        ):
-            raise GateBPreflightError("ledger_no_live_run_receipt_mismatch")
-        return _sha256_json(dict(receipt))
 
     def _bind_journal_locked(self) -> None:
         with self._run_authority.compatibility_manifest_lock():
@@ -2692,13 +3207,16 @@ class GateBBudgetLedger:
                 raise GateBPreflightError("ledger_path_changed")
             descriptor = self._open_journal_descriptor(create=False)
         elif path_stat is None:
-            if self.authorization._legacy_no_live_run_receipt is not None:
-                raise GateBPreflightError(
-                    "ledger_no_live_run_receipt_unexpected"
-                )
+            if self.authorization._authorization_mode == "reconciliation":
+                raise GateBPreflightError("reconciliation_journal_missing")
             descriptor = self._open_journal_descriptor(create=True)
             os.fsync(authority._root_descriptor)
         else:
+            if self.authorization._authorization_mode == "record":
+                raise GateBPreflightError(
+                    "active_namespace_unplanned_state:"
+                    "owner_reconciliation_artifact_required"
+                )
             descriptor = self._open_journal_descriptor(create=False)
         authority._journal_descriptor = descriptor
         authority._journal_path = requested_path
@@ -2716,20 +3234,12 @@ class GateBBudgetLedger:
                 authority._journal_genesis = parsed[4]
                 authority.append_ledger_anchor(self._anchor_from_parsed(parsed))
                 return
-            receipt_sha256 = (
-                None
-                if path_stat is None
-                else self._validate_no_live_run_receipt_locked()
-            )
+            if self.authorization._authorization_mode == "reconciliation":
+                raise GateBPreflightError("reconciliation_journal_empty")
             state = self._initial_state()
             genesis = {
-                "schema_version": "2.0.0",
-                "source": (
-                    "fresh_r3"
-                    if receipt_sha256 is None
-                    else "sealed_no_live_run_receipt"
-                ),
-                "no_live_run_receipt_sha256": receipt_sha256,
+                "schema_version": "3.0.0",
+                "source": "fresh_r3",
                 "initial_state_sha256": _sha256_json(state),
             }
             authority._journal_genesis = genesis
@@ -2952,27 +3462,14 @@ class GateBBudgetLedger:
             if not isinstance(entry["genesis"], dict) or set(entry["genesis"]) != {
                 "schema_version",
                 "source",
-                "no_live_run_receipt_sha256",
                 "initial_state_sha256",
             }:
                 raise GateBPreflightError("ledger_journal_corrupt")
             if sequence == -1:
                 genesis = dict(entry["genesis"])
                 if (
-                    genesis["schema_version"] != "2.0.0"
-                    or genesis["source"]
-                    not in {"fresh_r3", "sealed_no_live_run_receipt"}
-                    or (
-                        genesis["source"] == "fresh_r3"
-                        and genesis["no_live_run_receipt_sha256"] is not None
-                    )
-                    or (
-                        genesis["source"] == "sealed_no_live_run_receipt"
-                        and not re.fullmatch(
-                            r"[0-9a-f]{64}",
-                            str(genesis["no_live_run_receipt_sha256"]),
-                        )
-                    )
+                    genesis["schema_version"] != "3.0.0"
+                    or genesis["source"] != "fresh_r3"
                 ):
                     raise GateBPreflightError("ledger_journal_corrupt")
             elif entry["genesis"] != genesis:
@@ -3023,9 +3520,6 @@ class GateBBudgetLedger:
             "journal_device": file_stat.st_dev,
             "journal_inode": file_stat.st_ino,
             **latest,
-            "no_live_run_receipt_sha256": parsed[4][
-                "no_live_run_receipt_sha256"
-            ],
         }
 
     def _read_state_locked(self) -> tuple[dict[str, Any], int, str]:
@@ -3042,7 +3536,6 @@ class GateBBudgetLedger:
             "journal_head_sha256",
             "journal_state_sha256",
             "journal_genesis_sha256",
-            "no_live_run_receipt_sha256",
         }:
             raise GateBPreflightError("ledger_authority_missing")
         descriptor_stat = os.fstat(descriptor)
@@ -3148,7 +3641,12 @@ class GateBBudgetLedger:
             state, _, _ = self._read_state_locked()
             self._validate_state(state)
 
+    def _require_record_mutation(self) -> None:
+        if self.authorization._authorization_mode != "record":
+            raise GateBPreflightError("reconciliation_authorization_offline_only")
+
     def reserve(self, input_hash: str, amount: Decimal) -> str:
+        self._require_record_mutation()
         amount_micros = _usd_to_micros(amount)
         with self._locked():
             state, sequence, previous_hash = self._load_locked()
@@ -3180,6 +3678,7 @@ class GateBBudgetLedger:
     def reconcile(
         self, reservation_id: str, actual_cost: Decimal, outcome: str
     ) -> None:
+        self._require_record_mutation()
         if outcome not in {"success", "failure"}:
             raise GateBPreflightError("ledger_outcome_invalid")
         actual_micros = _usd_to_micros(actual_cost)
@@ -3202,6 +3701,7 @@ class GateBBudgetLedger:
             self._append_state_locked(state, sequence, previous_hash)
 
     def mark_dispatching(self, reservation_id: str) -> None:
+        self._require_record_mutation()
         with self._locked():
             state, sequence, previous_hash = self._load_locked()
             row = next(
@@ -3229,6 +3729,7 @@ class GateBBudgetLedger:
         The caller holds the run-manifest lock, so no second governed call can
         still be publishing the same content-addressed recording.
         """
+        self._require_record_mutation()
         with self._locked():
             state, sequence, previous_hash = self._load_locked()
             row = state["calls"].get(input_hash)
@@ -3280,6 +3781,25 @@ class GateBBudgetLedger:
         record: Mapping[str, Any],
         capability: StructuredCallCapability,
     ) -> None:
+        if self.authorization._authorization_mode != "record":
+            raise GateBPreflightError(
+                "reconciliation_governed_api_required"
+            )
+        self._reconcile_existing_record(
+            input_hash,
+            record,
+            capability,
+            allow_owner_approved_plain_record=False,
+        )
+
+    def _reconcile_existing_record(
+        self,
+        input_hash: str,
+        record: Mapping[str, Any],
+        capability: StructuredCallCapability,
+        *,
+        allow_owner_approved_plain_record: bool,
+    ) -> None:
         """Recover a crash after atomic record write but before ledger commit."""
         capability.verify_record(dict(record))
         if record.get("input_hash") != input_hash:
@@ -3296,6 +3816,33 @@ class GateBBudgetLedger:
             record=record,
             actual_cost=actual_cost,
         )
+        if (
+            self.authorization._authorization_mode == "reconciliation"
+            and reconciliation is None
+        ):
+            expected_path = f"recordings/{input_hash}.json"
+            expected_entry = next(
+                (
+                    entry
+                    for entry in self.authorization._namespace_inventory[
+                        "entries"
+                    ]
+                    if entry.get("path") == expected_path
+                ),
+                None,
+            )
+            serialized = json.dumps(
+                dict(record), ensure_ascii=False, indent=2, sort_keys=True
+            ).encode("utf-8")
+            if (
+                not allow_owner_approved_plain_record
+                or not isinstance(expected_entry, Mapping)
+                or expected_entry.get("kind") != "regular"
+                or expected_entry.get("sha256") != _sha256_bytes(serialized)
+            ):
+                raise GateBPreflightError(
+                    "reconciliation_governed_api_required"
+                )
         actual_micros = _usd_to_micros(actual_cost)
         with self._locked():
             state, sequence, previous_hash = self._load_locked()
@@ -3425,6 +3972,21 @@ class GateBBudgetLedger:
             }
 
     def structured_capability(self) -> StructuredCallCapability:
+        runner_capability = self.authorization._runner_capability
+        if self.authorization._authorization_mode != "record":
+            raise GateBPreflightError("reconciliation_authorization_offline_only")
+        if runner_capability is None or not runner_capability._claimed:
+            raise GateBPreflightError("runner_capability_not_claimed")
+        return self._issue_record_capability()
+
+    def _issue_reconciliation_record_capability(
+        self,
+    ) -> StructuredCallCapability:
+        if self.authorization._authorization_mode != "reconciliation":
+            raise GateBPreflightError("reconciliation_authorization_required")
+        return self._issue_record_capability()
+
+    def _issue_record_capability(self) -> StructuredCallCapability:
         pricing = governed_pricing_schedule()
         if pricing.identity_sha256 != self.authorization.pricing_sha256:
             raise GateBPreflightError("pricing_identity_mismatch")
@@ -3453,15 +4015,175 @@ def _micros_to_usd(value: int) -> str:
     return f"{Decimal(value) / Decimal(1_000_000):.6f}"
 
 
+def _validate_active_namespace_before_provider(
+    authorization: GateBRunAuthorization,
+    *,
+    expected_recordings: Mapping[str, str | None] | None,
+) -> dict[str, Any]:
+    """Require the whole namespace to equal the one planned r3 state bind."""
+    authority = authorization._run_authority
+    if authority is None or authority._lock_depth <= 0:
+        raise GateBPreflightError("run_authority_lock_required")
+    inventory = _canonical_namespace_inventory(authorization.experiment_root)
+    expected_files, expected_directories = _expected_fresh_namespace(
+        corpus_manifest_sha256=authorization.corpus_manifest_sha256,
+        input_manifest_sha256=authorization.input_manifest_sha256,
+        input_manifest=authorization._input_manifest,
+    )
+    expected_state_files = {
+        authority._authority_name,
+        authority._authority_pin_name,
+        "run-ledger.sqlite3",
+    }
+    expected_state_directories = (
+        {"recordings"} if expected_recordings is not None else set()
+    )
+    expected_recording_paths = (
+        set()
+        if expected_recordings is None
+        else {f"recordings/{name}" for name in expected_recordings}
+    )
+    entries = inventory["entries"]
+    by_path = {str(entry["path"]): entry for entry in entries}
+    expected_paths = (
+        set(expected_files)
+        | expected_directories
+        | expected_state_files
+        | expected_state_directories
+        | expected_recording_paths
+    )
+    if set(by_path) != expected_paths:
+        raise GateBPreflightError(
+            "active_namespace_unplanned_state:owner_reconciliation_artifact_required"
+        )
+    fresh_inventory = {
+        "canonical_root": inventory["canonical_root"],
+        "root": inventory["root"],
+        "entries": [
+            entry
+            for entry in entries
+            if entry["path"] in set(expected_files) | expected_directories
+        ]
+    }
+    _validate_fresh_namespace(
+        fresh_inventory,
+        corpus_manifest_sha256=authorization.corpus_manifest_sha256,
+        input_manifest_sha256=authorization.input_manifest_sha256,
+        input_manifest=authorization._input_manifest,
+    )
+    primary = by_path[authority._authority_name]
+    pin = by_path[authority._authority_pin_name]
+    if (
+        primary.get("kind") != "regular"
+        or pin.get("kind") != "regular"
+        or primary.get("uid") != os.geteuid()
+        or pin.get("uid") != os.geteuid()
+        or primary.get("nlink") != 2
+        or pin.get("nlink") != 2
+        or (primary.get("device"), primary.get("inode"))
+        != (pin.get("device"), pin.get("inode"))
+        or int(primary.get("mode", 0)) & 0o077
+        or int(pin.get("mode", 0)) & 0o077
+    ):
+        raise GateBPreflightError("active_namespace_authority_unsafe")
+    journal = by_path["run-ledger.sqlite3"]
+    if (
+        journal.get("kind") != "regular"
+        or journal.get("uid") != os.geteuid()
+        or journal.get("nlink") != 1
+        or int(journal.get("mode", 0)) & 0o077
+    ):
+        raise GateBPreflightError("active_namespace_journal_unsafe")
+    if expected_recordings is not None:
+        recording = by_path["recordings"]
+        if (
+            recording.get("kind") != "directory"
+            or recording.get("uid") != os.geteuid()
+            or int(recording.get("mode", 0)) & 0o022
+        ):
+            raise GateBPreflightError("recording_namespace_unsafe")
+        for name, expected_sha256 in expected_recordings.items():
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+                raise GateBPreflightError("recording_namespace_plan_invalid")
+            entry = by_path[f"recordings/{name}"]
+            if (
+                entry.get("kind") != "regular"
+                or entry.get("uid") != os.geteuid()
+                or entry.get("nlink") != 1
+                or int(entry.get("mode", 0)) & 0o077
+                or (
+                    expected_sha256 is not None
+                    and entry.get("sha256") != expected_sha256
+                )
+            ):
+                raise GateBPreflightError("recording_namespace_unsafe")
+    return inventory
+
+
+def _create_planned_recording_root(
+    authorization: GateBRunAuthorization,
+) -> None:
+    authority = authorization._run_authority
+    if authority is None or authority._lock_depth <= 0:
+        raise GateBPreflightError("run_authority_lock_required")
+    try:
+        os.mkdir("recordings", mode=0o700, dir_fd=authority._root_descriptor)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise GateBPreflightError("recording_namespace_create_failed") from exc
+    os.fsync(authority._root_descriptor)
+
+
+def _open_reconciliation_recording_store(
+    authorization: GateBRunAuthorization,
+) -> RecordingStore:
+    authority = authorization._run_authority
+    if (
+        authorization._authorization_mode != "reconciliation"
+        or authority is None
+        or authority._lock_depth <= 0
+    ):
+        raise GateBPreflightError("reconciliation_authorization_required")
+    recording_planned = any(
+        entry.get("path") == "recordings"
+        for entry in authorization._namespace_inventory["entries"]
+    )
+    if not recording_planned:
+        try:
+            os.mkdir("recordings", mode=0o700, dir_fd=authority._root_descriptor)
+        except OSError as exc:
+            raise GateBPreflightError(
+                "reconciliation_recording_create_failed"
+            ) from exc
+        os.fsync(authority._root_descriptor)
+        _refresh_reconciliation_namespace_after_governed_write(authorization)
+    descriptor = _open_child_directory(
+        authority._root_descriptor,
+        "recordings",
+    )
+    directory_stat = os.fstat(descriptor)
+    if (
+        directory_stat.st_uid != os.geteuid()
+        or stat.S_IMODE(directory_stat.st_mode) & 0o022
+    ):
+        os.close(descriptor)
+        raise GateBPreflightError("reconciliation_recording_unsafe")
+    store = RecordingStore(authorization.experiment_root / "recordings")
+    store._root_descriptor = descriptor
+    return store
+
+
 @contextmanager
 def _locked_gate_b_run_manifest(
     authorization: GateBRunAuthorization,
 ) -> Iterable[dict[str, Any]]:
-    if authorization._run_authority.run_identity_sha256 != (
-        authorization.run_identity_sha256
-    ):
+    authority = authorization._run_authority
+    if authority is None:
+        raise GateBPreflightError("run_authority_not_activated")
+    if authority.run_identity_sha256 != authorization.run_identity_sha256:
         raise GateBPreflightError("run_authority_identity_mismatch")
-    with authorization._run_authority.locked_manifest() as manifest:
+    with authority.locked_manifest() as manifest:
         yield manifest
 
 
@@ -3484,6 +4206,12 @@ def reconcile_gate_b_charge_unknown(
         authorization._issuer is not _AUTHORIZATION_ISSUER
     ):
         raise GateBPreflightError("runner_authorization_required")
+    if authorization._authorization_mode != "reconciliation":
+        raise GateBPreflightError(
+            "separate_owner_reconciliation_authorization_required"
+        )
+    if authorization._run_authority is None:
+        _activate_reconciliation_authority(authorization)
     with _locked_gate_b_run_manifest(authorization) as manifest:
         return _reconcile_gate_b_charge_unknown_locked(
             authorization=authorization,
@@ -3581,7 +4309,8 @@ def _reconcile_gate_b_charge_unknown_locked(
         gate_a_root=authorization.gate_a_root,
     )
     policy = load_evidence_synthesis_policy()
-    store = RecordingStore(authorization.experiment_root / "recordings")
+    _assert_reconciliation_namespace_unchanged(authorization)
+    store = _open_reconciliation_recording_store(authorization)
     semantic_provider = LLMObservationProvider(
         store=store,
         mode="replay",
@@ -3591,7 +4320,8 @@ def _reconcile_gate_b_charge_unknown_locked(
     ledger = GateBBudgetLedger(
         authorization.experiment_root / "run-ledger.sqlite3", authorization
     )
-    capability = ledger.structured_capability()
+    _assert_reconciliation_namespace_unchanged(authorization)
+    capability = ledger._issue_reconciliation_record_capability()
     adapter = RecordedEvidenceSynthesisProviderV2(
         semantic_provider=semantic_provider,
         policy=policy,
@@ -3603,8 +4333,16 @@ def _reconcile_gate_b_charge_unknown_locked(
     except LLMProviderError as exc:
         if exc.reason != "recording_missing":
             raise GateBPreflightError("reconciliation_recording_unsafe") from exc
+        _assert_reconciliation_namespace_unchanged(authorization)
     else:
-        ledger.reconcile_existing_record(input_hash, existing, capability)
+        _assert_reconciliation_namespace_unchanged(authorization)
+        ledger._reconcile_existing_record(
+            input_hash,
+            existing,
+            capability,
+            allow_owner_approved_plain_record=True,
+        )
+        _refresh_reconciliation_namespace_after_governed_write(authorization)
         recorded_reconciliation = existing.get("charge_unknown_reconciliation")
         recorded_semantics = (
             recorded_reconciliation.get("cost_semantics")
@@ -3641,8 +4379,17 @@ def _reconcile_gate_b_charge_unknown_locked(
     except LLMProviderError as exc:
         if exc.reason != "recording_exists":
             raise GateBPreflightError("reconciliation_recording_write_failed") from exc
-        terminal_record = store.load(input_hash)
-    ledger.reconcile_existing_record(input_hash, terminal_record, capability)
+        existing = store.load(input_hash)
+        if existing != terminal_record:
+            raise GateBPreflightError("reconciliation_recording_conflict")
+        terminal_record = existing
+    ledger._reconcile_existing_record(
+        input_hash,
+        terminal_record,
+        capability,
+        allow_owner_approved_plain_record=False,
+    )
+    _refresh_reconciliation_namespace_after_governed_write(authorization)
     return {
         "status": "terminal_failure_recorded",
         "cost_semantics": semantics[disposition],
@@ -3656,23 +4403,22 @@ def run_gate_b_record(
     *,
     authorization: GateBRunAuthorization,
 ) -> list[Any]:
-    """Sole resumable record entrypoint; provider and inputs are runner-owned."""
+    """Sole one-shot record entrypoint; provider and inputs are runner-owned."""
     if not isinstance(authorization, GateBRunAuthorization):
         raise GateBPreflightError("runner_authorization_required")
     if authorization._issuer is not _AUTHORIZATION_ISSUER:
         raise GateBPreflightError("authorization_issuer_invalid")
+    if authorization._authorization_mode != "record":
+        raise GateBPreflightError("reconciliation_authorization_offline_only")
     if authorization.record_count != EXACT_CALL_CAP:
         raise GateBPreflightError("runner_corpus_count_mismatch")
+    _claim_privileged_launch(authorization)
+    _activate_run_authority(authorization)
     recording_root = authorization.experiment_root / "recordings"
     if recording_root.is_symlink():
         raise GateBPreflightError("recording_root_symlink")
     policy = load_evidence_synthesis_policy()
     with _locked_gate_b_run_manifest(authorization) as manifest:
-        semantic_provider = build_live_llm_provider(
-            store_dir=recording_root,
-            model_id=policy.model_id,
-            prompt_version=policy.semantic_prompt_version,
-        )
         records = manifest.get("records")
         if not isinstance(records, list) or len(records) != EXACT_CALL_CAP:
             raise GateBPreflightError("runner_corpus_count_mismatch")
@@ -3682,6 +4428,19 @@ def run_gate_b_record(
             raise GateBPreflightError("runner_input_allowlist_mismatch")
         ledger = GateBBudgetLedger(
             authorization.experiment_root / "run-ledger.sqlite3", authorization
+        )
+        _create_planned_recording_root(authorization)
+        recording_sha256s: dict[str, str | None] = {}
+        _validate_active_namespace_before_provider(
+            authorization, expected_recordings=recording_sha256s
+        )
+        semantic_provider = build_live_llm_provider(
+            store_dir=recording_root,
+            model_id=policy.model_id,
+            prompt_version=policy.semantic_prompt_version,
+        )
+        _validate_active_namespace_before_provider(
+            authorization, expected_recordings=recording_sha256s
         )
         capability = ledger.structured_capability()
         adapter = RecordedEvidenceSynthesisProviderV2(
@@ -3702,19 +4461,30 @@ def run_gate_b_record(
             )
             if input_hash != record.get("task10_input_sha256"):
                 raise GateBPreflightError("runner_task10_input_hash_mismatch")
-            try:
-                existing = semantic_provider.store.load(input_hash)
-            except LLMProviderError as exc:
-                if exc.reason != "recording_missing":
-                    raise GateBPreflightError("recording_load_failed") from exc
-                ledger.retry_reserved_without_record(input_hash)
-            else:
-                ledger.reconcile_existing_record(input_hash, existing, capability)
-            results.append(
-                run_evidence_synthesis_v2(
-                    synthesis_input=synthesis_input,
-                    provider=adapter,
-                    policy=policy,
+            if ledger.call_state(input_hash) is not None:
+                raise GateBPreflightError(
+                    "one_shot_state_not_fresh:owner_reconciliation_artifact_required"
                 )
+            _validate_active_namespace_before_provider(
+                authorization, expected_recordings=recording_sha256s
+            )
+            results.append(run_evidence_synthesis_v2(
+                synthesis_input=synthesis_input,
+                provider=adapter,
+                policy=policy,
+            ))
+            recording_name = f"{input_hash}.json"
+            observed = _validate_active_namespace_before_provider(
+                authorization,
+                expected_recordings={
+                    **recording_sha256s,
+                    recording_name: None,
+                },
+            )
+            observed_by_path = {
+                str(entry["path"]): entry for entry in observed["entries"]
+            }
+            recording_sha256s[recording_name] = str(
+                observed_by_path[f"recordings/{recording_name}"]["sha256"]
             )
         return results

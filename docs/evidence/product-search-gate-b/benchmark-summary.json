@@ -91,6 +91,41 @@
     "status": "not_supplied",
     "value": null
   },
+  "record_runtime_control": {
+    "state_protocol": "gate-b-record-state-r3",
+    "canonical_namespace_root": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "canonical_package_root": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r3",
+    "runner_mode": "one_shot_non_resumable",
+    "caller_selected_root_allowed": false,
+    "whole_namespace_inventory_required": true,
+    "full_recording_scan_before_each_call": true,
+    "historical_checkpoint_restart_allowed": false,
+    "owner_reconciliation_artifact_required_after_state": true,
+    "reconciliation_authorization_live_calls_allowed": false
+  },
+  "privileged_launch_witness": {
+    "required": true,
+    "fixed_path": "/var/lib/job-intel/gate-b-launch-witness/r3-launch.json",
+    "required_owner_uid": 0,
+    "required_regular_single_link": true,
+    "group_world_writable_allowed": false,
+    "binds_process_and_runner_instance": true,
+    "installed_by_this_task": false,
+    "installation_authorized": false,
+    "live_launch_available": false
+  },
+  "privileged_reconciliation_witness": {
+    "required_after_any_record_state": true,
+    "fixed_path": "/var/lib/job-intel/gate-b-launch-witness/r3-reconciliation.json",
+    "required_owner_uid": 0,
+    "required_regular_single_link": true,
+    "group_world_writable_allowed": false,
+    "binds_complete_observed_namespace": true,
+    "self_appended_request_sufficient": false,
+    "installed_by_this_task": false,
+    "installation_authorized": false,
+    "offline_reconciliation_available": false
+  },
   "record_run_authorized": false,
   "stage_4": {
     "status": "not_run",

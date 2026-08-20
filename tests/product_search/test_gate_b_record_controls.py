@@ -8,6 +8,8 @@ import inspect
 import json
 import os
 from pathlib import Path
+import pickle
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -68,6 +70,31 @@ def _approval(preflight: dict[str, Any]) -> dict[str, Any]:
 def _preflight(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", tmp_path)
     return build_dry_run_preflight(gate_a_root=GATE_A_ROOT)
+
+
+def _claim_test_runner(authorization: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    witness = gate_b.export_gate_b_launch_witness_request(authorization)
+    monkeypatch.setattr(gate_b, "_read_privileged_launch_witness", lambda: witness)
+    gate_b._claim_privileged_launch(authorization)
+
+
+def _authorize_test_reconciliation(
+    preflight: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> Any:
+    request = gate_b.build_gate_b_owner_reconciliation_request(preflight)
+    monkeypatch.setattr(
+        gate_b,
+        "_read_privileged_reconciliation_witness",
+        lambda: request,
+    )
+    return gate_b.authorize_gate_b_reconciliation(
+        preflight,
+        approval_record={
+            **_approval(preflight),
+            "owner_reconciliation_artifact": request,
+        },
+        owner_capability=OWNER_CAPABILITY,
+    )
 
 
 def _write_legacy_sqlite_ledger(authorization: Any) -> Path:
@@ -177,6 +204,7 @@ def test_transactional_ledger_prevents_double_reserve_and_preserves_crash_state(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = (
         Path(preflight["corpus"]["manifest_path"]).parent / "run-ledger.sqlite3"
     )
@@ -214,6 +242,7 @@ def test_stale_inflight_without_record_can_retry_but_completed_call_cannot(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger = GateBBudgetLedger(
         authorization.experiment_root / "run-ledger.sqlite3", authorization
     )
@@ -238,6 +267,8 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    witness = gate_b.export_gate_b_launch_witness_request(authorization)
+    monkeypatch.setattr(gate_b, "_read_privileged_launch_witness", lambda: witness)
 
     class _CrashingCompletions:
         def __init__(self) -> None:
@@ -268,12 +299,15 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
             )
 
     completions = _CrashingCompletions()
-    semantic = LLMObservationProvider(
-        store=RecordingStore(authorization.experiment_root / "recordings"),
-        mode="record",
-        transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
-    )
-    monkeypatch.setattr(gate_b, "build_live_llm_provider", lambda **_: semantic)
+
+    def build_fixture_provider(**kwargs: Any) -> LLMObservationProvider:
+        return LLMObservationProvider(
+            store=RecordingStore(kwargs["store_dir"]),
+            mode="record",
+            transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        )
+
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", build_fixture_provider)
 
     with pytest.raises(SystemExit, match="after dispatch"):
         run_gate_b_record(authorization=authorization)
@@ -283,7 +317,7 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
     )
     input_hash = authorization.ordered_input_sha256s[0]
     assert ledger.call_state(input_hash) == "charge_unknown"
-    with pytest.raises(GateBPreflightError, match="owner_reconciliation_required"):
+    with pytest.raises(GateBPreflightError, match="runner_capability_consumed"):
         run_gate_b_record(authorization=authorization)
     assert completions.calls == 1
 
@@ -294,9 +328,23 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
         "disposition": "charge_amount_unknown",
         "provider_evidence_sha256": "a" * 64,
     }
-    with pytest.raises(GateBPreflightError, match="owner_capability"):
+    with pytest.raises(
+        GateBPreflightError,
+        match="separate_owner_reconciliation_authorization_required",
+    ):
         gate_b.reconcile_gate_b_charge_unknown(
             authorization=authorization,
+            owner_capability=OWNER_CAPABILITY,
+            input_hash=input_hash,
+            disposition="charge_amount_unknown",
+            measured_cost_usd=None,
+            reconciliation_evidence=evidence,
+        )
+    authorization._run_authority.close()
+    recovery = _authorize_test_reconciliation(preflight, monkeypatch)
+    with pytest.raises(GateBPreflightError, match="owner_capability"):
+        gate_b.reconcile_gate_b_charge_unknown(
+            authorization=recovery,
             owner_capability="wrong-owner-capability",
             input_hash=input_hash,
             disposition="charge_amount_unknown",
@@ -304,7 +352,7 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
             reconciliation_evidence=evidence,
         )
     reconciliation = gate_b.reconcile_gate_b_charge_unknown(
-        authorization=authorization,
+        authorization=recovery,
         owner_capability=OWNER_CAPABILITY,
         input_hash=input_hash,
         disposition="charge_amount_unknown",
@@ -319,19 +367,22 @@ def test_post_dispatch_crash_requires_owner_reconciliation_without_retry(
         "record_replayed": False,
     }
 
-    results = run_gate_b_record(authorization=authorization)
-    assert len(results) == 48
-    assert completions.calls == 48
-    assert ledger.call_state(input_hash) == "failure"
-    assert ledger.reconciliation_for(input_hash) == {
+    with pytest.raises(GateBPreflightError, match="runner_capability_consumed"):
+        run_gate_b_record(authorization=authorization)
+    assert completions.calls == 1
+    recovery_ledger = GateBBudgetLedger(
+        recovery.experiment_root / "run-ledger.sqlite3", recovery
+    )
+    assert recovery_ledger.call_state(input_hash) == "failure"
+    assert recovery_ledger.reconciliation_for(input_hash) == {
         "disposition": "charge_amount_unknown",
         "cost_semantics": "unknown_reserved_max",
         "actual_cost_usd": "0.010000",
         "provider_evidence_sha256": "a" * 64,
         "run_identity_sha256": authorization.run_identity_sha256,
     }
-    snapshot = ledger.snapshot()
-    assert snapshot["calls_completed"] == 48
+    snapshot = recovery_ledger.snapshot()
+    assert snapshot["calls_completed"] == 1
     assert snapshot["outstanding_reserved_usd"] == "0.000000"
 
 
@@ -344,119 +395,111 @@ def test_reconciliation_waits_across_same_content_manifest_inode_replacement(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
-    restart_approval = {
+    _claim_test_runner(authorization, monkeypatch)
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    input_hash = authorization.ordered_input_sha256s[0]
+    reservation = ledger.reserve(input_hash, Decimal("0.010000"))
+    ledger.mark_dispatching(reservation)
+    assert ledger.call_state(input_hash) == "charge_unknown"
+    authorization._run_authority.close()
+
+    request = gate_b.build_gate_b_owner_reconciliation_request(preflight)
+    assert (
+        request["observed_namespace_inventory"]["inventory_sha256"]
+        == (request["observed_namespace_inventory_sha256"])
+    )
+    approval = {
         **_approval(preflight),
-        "run_checkpoint": gate_b.export_gate_b_run_checkpoint(authorization),
+        "owner_reconciliation_artifact": request,
     }
-    recovery_authorization = authorize_record_run(
+    monkeypatch.setattr(
+        gate_b,
+        "_read_privileged_reconciliation_witness",
+        lambda: request,
+    )
+    recovery = gate_b.authorize_gate_b_reconciliation(
         preflight,
-        approval_record=restart_approval,
+        approval_record=approval,
         owner_capability=OWNER_CAPABILITY,
     )
-    entered_transport = Event()
-    release_transport = Event()
 
-    class _BlockingCompletions:
-        def __init__(self) -> None:
-            self.calls = 0
+    provider_calls = 0
 
-        def create(self, **_: Any) -> object:
-            self.calls += 1
-            if self.calls == 1:
-                entered_transport.set()
-                assert release_transport.wait(10)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content=json.dumps({
-                                "schema_version": "2.0.0",
-                                "claims": [],
-                                "conflicts": [],
-                                "question_candidates": [],
-                            }),
-                            refusal=None,
-                        )
-                    )
-                ],
-                usage=SimpleNamespace(
-                    prompt_tokens=10, completion_tokens=10, total_tokens=20
-                ),
-                model="openai/gpt-5-mini",
-            )
+    def forbidden_provider(**_: Any) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("reconciliation authorization is offline-only")
 
-    completions = _BlockingCompletions()
-    semantic = LLMObservationProvider(
-        store=RecordingStore(authorization.experiment_root / "recordings"),
-        mode="record",
-        transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
-    )
-    monkeypatch.setattr(gate_b, "build_live_llm_provider", lambda **_: semantic)
-    runner_errors: list[BaseException] = []
-    reconciliation_errors: list[BaseException] = []
-    reconciliation_results: list[dict[str, Any]] = []
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", forbidden_provider)
+    with pytest.raises(GateBPreflightError, match="reconciliation.*offline"):
+        run_gate_b_record(authorization=recovery)
+    assert provider_calls == 0
 
-    def run_live() -> None:
-        try:
-            run_gate_b_record(authorization=authorization)
-        except BaseException as exc:
-            runner_errors.append(exc)
-
-    input_hash = authorization.ordered_input_sha256s[0]
     evidence = {
         "schema_version": "1.0.0",
-        "run_identity_sha256": authorization.run_identity_sha256,
+        "run_identity_sha256": recovery.run_identity_sha256,
         "input_hash": input_hash,
         "disposition": "confirmed_unbilled",
         "provider_evidence_sha256": "c" * 64,
     }
+    result = gate_b.reconcile_gate_b_charge_unknown(
+        authorization=recovery,
+        owner_capability=OWNER_CAPABILITY,
+        input_hash=input_hash,
+        disposition="confirmed_unbilled",
+        measured_cost_usd=None,
+        reconciliation_evidence=evidence,
+    )
+    assert result["status"] == "terminal_failure_recorded"
+    assert result["cost_semantics"] == "confirmed_zero"
 
-    def reconcile() -> None:
-        try:
-            reconciliation_results.append(
-                gate_b.reconcile_gate_b_charge_unknown(
-                    authorization=recovery_authorization,
-                    owner_capability=OWNER_CAPABILITY,
-                    input_hash=input_hash,
-                    disposition="confirmed_unbilled",
-                    measured_cost_usd=None,
-                    reconciliation_evidence=evidence,
-                )
-            )
-        except BaseException as exc:
-            reconciliation_errors.append(exc)
 
-    runner = Thread(target=run_live)
-    recovery = Thread(target=reconcile)
-    runner.start()
-    assert entered_transport.wait(10)
-    manifest_path = authorization.input_manifest_path
-    original_manifest = manifest_path.read_bytes()
-    original_inode = manifest_path.stat().st_ino
-    displaced_manifest = manifest_path.with_name("run-manifest.displaced.json")
-    manifest_path.rename(displaced_manifest)
-    manifest_path.write_bytes(original_manifest)
-    manifest_path.chmod(0o600)
-    assert manifest_path.stat().st_ino != original_inode
-    try:
-        recovery.start()
-        recovery.join(0.5)
-        recovery_was_serialized = recovery.is_alive()
-    finally:
-        manifest_path.unlink(missing_ok=True)
-        displaced_manifest.rename(manifest_path)
-        release_transport.set()
-        runner.join(20)
-        recovery.join(20)
+def test_reconciliation_artifact_must_bind_the_complete_current_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "artifact", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    _claim_test_runner(authorization, monkeypatch)
+    GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    authorization._run_authority.close()
+    request = gate_b.build_gate_b_owner_reconciliation_request(preflight)
 
-    assert recovery_was_serialized
-    assert not runner.is_alive()
-    assert not recovery.is_alive()
-    assert runner_errors == []
-    assert reconciliation_errors == []
-    assert reconciliation_results[0]["status"] == "sealed_record_replayed"
-    assert reconciliation_results[0]["cost_semantics"] == "measured"
-    assert completions.calls == 48
+    incomplete = deepcopy(request)
+    incomplete["observed_namespace_inventory"]["entries"].pop()
+    with pytest.raises(
+        GateBPreflightError, match="owner_reconciliation_artifact_mismatch"
+    ):
+        gate_b.authorize_gate_b_reconciliation(
+            preflight,
+            approval_record={
+                **_approval(preflight),
+                "owner_reconciliation_artifact": incomplete,
+            },
+            owner_capability=OWNER_CAPABILITY,
+        )
+
+    (authorization.experiment_root / "late-sidecar.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    with pytest.raises(
+        GateBPreflightError, match="owner_reconciliation_artifact_mismatch"
+    ):
+        gate_b.authorize_gate_b_reconciliation(
+            preflight,
+            approval_record={
+                **_approval(preflight),
+                "owner_reconciliation_artifact": request,
+            },
+            owner_capability=OWNER_CAPABILITY,
+        )
 
 
 @pytest.mark.parametrize(
@@ -486,22 +529,25 @@ def test_owner_reconciliation_has_closed_terminal_cost_semantics(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger = GateBBudgetLedger(
         authorization.experiment_root / "run-ledger.sqlite3", authorization
     )
     input_hash = authorization.ordered_input_sha256s[0]
     reservation = ledger.reserve(input_hash, Decimal("0.010000"))
     ledger.mark_dispatching(reservation)
+    authorization._run_authority.close()
+    recovery = _authorize_test_reconciliation(preflight, monkeypatch)
     evidence = {
         "schema_version": "1.0.0",
-        "run_identity_sha256": authorization.run_identity_sha256,
+        "run_identity_sha256": recovery.run_identity_sha256,
         "input_hash": input_hash,
         "disposition": disposition,
         "provider_evidence_sha256": "b" * 64,
     }
 
     result = gate_b.reconcile_gate_b_charge_unknown(
-        authorization=authorization,
+        authorization=recovery,
         owner_capability=OWNER_CAPABILITY,
         input_hash=input_hash,
         disposition=disposition,
@@ -511,9 +557,12 @@ def test_owner_reconciliation_has_closed_terminal_cost_semantics(
 
     assert result["cost_semantics"] == expected_semantics
     assert result["cost_usd"] == expected_cost
-    assert ledger.call_state(input_hash) == "failure"
+    recovery_ledger = GateBBudgetLedger(
+        recovery.experiment_root / "run-ledger.sqlite3", recovery
+    )
+    assert recovery_ledger.call_state(input_hash) == "failure"
     replayed = gate_b.reconcile_gate_b_charge_unknown(
-        authorization=authorization,
+        authorization=recovery,
         owner_capability=OWNER_CAPABILITY,
         input_hash=input_hash,
         disposition=disposition,
@@ -538,6 +587,7 @@ def test_ledger_reconciles_crash_after_owner_sealed_record_write(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger = GateBBudgetLedger(
         authorization.experiment_root / "run-ledger.sqlite3", authorization
     )
@@ -559,7 +609,7 @@ def test_ledger_reconciles_crash_after_owner_sealed_record_write(
     assert snapshot["measured_actual_usd"] == "0.001250"
 
 
-def test_runner_retries_stale_reservation_and_never_duplicates_completed_calls(
+def test_runner_never_auto_resumes_a_preexisting_reservation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "experiment", monkeypatch)
@@ -568,52 +618,18 @@ def test_runner_retries_stale_reservation_and_never_duplicates_completed_calls(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger = GateBBudgetLedger(
         authorization.experiment_root / "run-ledger.sqlite3", authorization
     )
     ledger.reserve(authorization.ordered_input_sha256s[0], Decimal("0.010000"))
-
-    class _Completions:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, Any]] = []
-
-        def create(self, **kwargs: Any) -> object:
-            self.calls.append(kwargs)
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content=json.dumps({
-                                "schema_version": "2.0.0",
-                                "claims": [],
-                                "conflicts": [],
-                                "question_candidates": [],
-                            }),
-                            refusal=None,
-                        )
-                    )
-                ],
-                usage=SimpleNamespace(
-                    prompt_tokens=10, completion_tokens=10, total_tokens=20
-                ),
-                model="openai/gpt-5-mini",
-            )
-
-    completions = _Completions()
-    semantic = LLMObservationProvider(
-        store=RecordingStore(authorization.experiment_root / "recordings"),
-        mode="record",
-        transport=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
-    )
-    monkeypatch.setattr(gate_b, "build_live_llm_provider", lambda **_: semantic)
-
-    first = run_gate_b_record(authorization=authorization)
-    second = run_gate_b_record(authorization=authorization)
-
-    assert len(first) == len(second) == 48
-    assert len(completions.calls) == 48
-    snapshot = ledger.snapshot()
-    assert snapshot["calls_completed"] == 48
+    authorization._run_authority.close()
+    with pytest.raises(GateBPreflightError, match="namespace_not_fresh"):
+        authorize_record_run(
+            preflight,
+            approval_record=_approval(preflight),
+            owner_capability=OWNER_CAPABILITY,
+        )
 
 
 def test_direct_task10_record_without_runner_capability_never_enters_transport(
@@ -669,12 +685,15 @@ def test_ledger_rejects_final_symlink_without_mutating_its_target(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     external = tmp_path / "external.sqlite3"
     external.write_bytes(b"")
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger_path.symlink_to(external)
 
-    with pytest.raises(GateBPreflightError, match="ledger.*symlink"):
+    with pytest.raises(
+        GateBPreflightError, match="owner_reconciliation_artifact_required"
+    ):
         GateBBudgetLedger(ledger_path, authorization)
 
     assert external.read_bytes() == b""
@@ -689,6 +708,7 @@ def test_ledger_uses_descriptor_journal_without_sqlite(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     monkeypatch.setattr(
         gate_b.sqlite3,
@@ -712,6 +732,7 @@ def test_ledger_creation_fsyncs_state_and_parent_directory(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     original_fsync = gate_b.os.fsync
     synced_modes: list[int] = []
 
@@ -763,6 +784,7 @@ def test_r3_rejects_state_bearing_legacy_sqlite_without_loading_it(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger_path.touch(mode=0o600)
     legacy_database = _write_legacy_sqlite_ledger(authorization)
@@ -777,7 +799,7 @@ def test_r3_rejects_state_bearing_legacy_sqlite_without_loading_it(
 
     with pytest.raises(
         GateBPreflightError,
-        match="ledger_legacy_state_requires_owner_review",
+        match="owner_reconciliation_artifact_required",
     ):
         GateBBudgetLedger(ledger_path, authorization)
 
@@ -794,6 +816,7 @@ def test_r3_rejects_legacy_sqlite_restored_after_anchor(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger = GateBBudgetLedger(ledger_path, authorization)
     legacy_database = _write_legacy_sqlite_ledger(authorization)
@@ -819,7 +842,7 @@ def test_unexpected_fresh_checkpoint_does_not_poison_correct_retry(
     preflight = _preflight(tmp_path / "fresh-checkpoint", monkeypatch)
     approval = _approval(preflight)
 
-    with pytest.raises(GateBPreflightError, match="run_checkpoint_mismatch"):
+    with pytest.raises(GateBPreflightError, match="historical_checkpoint_unsupported"):
         authorize_record_run(
             preflight,
             approval_record={**approval, "run_checkpoint": {}},
@@ -834,7 +857,7 @@ def test_unexpected_fresh_checkpoint_does_not_poison_correct_retry(
     assert authorization.run_identity_sha256 == preflight["record_identity_sha256"]
 
 
-def test_empty_legacy_marker_requires_exact_sealed_no_live_run_receipt(
+def test_empty_legacy_marker_blocks_first_bind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "empty-legacy", monkeypatch)
@@ -844,62 +867,18 @@ def test_empty_legacy_marker_requires_exact_sealed_no_live_run_receipt(
         approval_record=approval,
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger_path.touch(mode=0o600)
 
     with pytest.raises(
         GateBPreflightError,
-        match="ledger_no_live_run_receipt_required",
+        match="owner_reconciliation_artifact_required",
     ):
         GateBBudgetLedger(ledger_path, authorization)
 
-    receipt = gate_b.export_gate_b_no_live_run_receipt(authorization)
-    checkpoint = gate_b.export_gate_b_run_checkpoint(authorization)
-    authorization._run_authority.close()
 
-    tampered_receipt = {
-        **receipt,
-        "legacy_marker_inode": receipt["legacy_marker_inode"] + 1,
-    }
-    tampered = authorize_record_run(
-        preflight,
-        approval_record={
-            **approval,
-            "run_checkpoint": checkpoint,
-            "legacy_no_live_run_receipt": tampered_receipt,
-        },
-        owner_capability=OWNER_CAPABILITY,
-    )
-    with pytest.raises(
-        GateBPreflightError,
-        match="ledger_no_live_run_receipt_mismatch",
-    ):
-        GateBBudgetLedger(ledger_path, tampered)
-    tampered._run_authority.close()
-
-    authorized = authorize_record_run(
-        preflight,
-        approval_record={
-            **approval,
-            "run_checkpoint": checkpoint,
-            "legacy_no_live_run_receipt": receipt,
-        },
-        owner_capability=OWNER_CAPABILITY,
-    )
-    ledger = GateBBudgetLedger(ledger_path, authorized)
-
-    assert ledger.snapshot() == {
-        "calls_reserved": 0,
-        "calls_completed": 0,
-        "outstanding_reserved_usd": "0.000000",
-        "measured_actual_usd": "0.000000",
-        "spend_reserved_usd": "0.000000",
-    }
-    assert authorized.exact_call_cap == 48
-    assert authorized.exact_spend_cap_usd == Decimal("0.48")
-
-
-def test_fresh_authorization_requires_owner_checkpoint_and_accepts_signed_prefix(
+def test_historical_checkpoint_cannot_resume_a_state_bearing_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "restart-checkpoint", monkeypatch)
@@ -909,48 +888,21 @@ def test_fresh_authorization_requires_owner_checkpoint_and_accepts_signed_prefix
         approval_record=approval,
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger = GateBBudgetLedger(ledger_path, authorization)
-    reservation = ledger.reserve(
-        authorization.ordered_input_sha256s[0], Decimal("0.010000")
-    )
-    checkpoint = gate_b.export_gate_b_run_checkpoint(authorization)
-    ledger.mark_dispatching(reservation)
-
-    with pytest.raises(GateBPreflightError, match="run_checkpoint_required"):
+    ledger.reserve(authorization.ordered_input_sha256s[0], Decimal("0.010000"))
+    with pytest.raises(GateBPreflightError, match="historical_checkpoint_unsupported"):
+        gate_b.export_gate_b_run_checkpoint(authorization)
+    with pytest.raises(GateBPreflightError, match="historical_checkpoint_unsupported"):
         authorize_record_run(
             preflight,
-            approval_record=approval,
-            owner_capability=OWNER_CAPABILITY,
-        )
-
-    resumed = authorize_record_run(
-        preflight,
-        approval_record={**approval, "run_checkpoint": checkpoint},
-        owner_capability=OWNER_CAPABILITY,
-    )
-    resumed_ledger = GateBBudgetLedger(ledger_path, resumed)
-    assert resumed_ledger.call_state(authorization.ordered_input_sha256s[0]) == (
-        "charge_unknown"
-    )
-    resumed._run_authority.close()
-
-    tampered_checkpoint = {
-        **checkpoint,
-        "authority_sequence": checkpoint["authority_sequence"] - 1,
-    }
-    with pytest.raises(GateBPreflightError, match="run_checkpoint_mismatch"):
-        authorize_record_run(
-            preflight,
-            approval_record={
-                **approval,
-                "run_checkpoint": tampered_checkpoint,
-            },
+            approval_record={**approval, "run_checkpoint": {}},
             owner_capability=OWNER_CAPABILITY,
         )
 
 
-def test_owner_held_checkpoint_rejects_coordinated_authority_and_journal_rollback(
+def test_total_same_uid_state_rollback_cannot_reuse_old_launch_witness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     preflight = _preflight(tmp_path / "coordinated-rollback", monkeypatch)
@@ -960,29 +912,38 @@ def test_owner_held_checkpoint_rejects_coordinated_authority_and_journal_rollbac
         approval_record=approval,
         owner_capability=OWNER_CAPABILITY,
     )
+    old_witness = gate_b.export_gate_b_launch_witness_request(authorization)
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger = GateBBudgetLedger(ledger_path, authorization)
-    input_hash = authorization.ordered_input_sha256s[0]
-    reservation = ledger.reserve(input_hash, Decimal("0.010000"))
+    ledger.reserve(authorization.ordered_input_sha256s[0], Decimal("0.010000"))
     old_authority = authorization._run_authority
-    authority_path = authorization.experiment_root / old_authority._authority_name
-    authority_prefix = authority_path.read_bytes()
-    journal_prefix = ledger_path.read_bytes()
-    ledger.mark_dispatching(reservation)
-    latest_checkpoint = gate_b.export_gate_b_run_checkpoint(authorization)
+    authority_paths = [
+        authorization.experiment_root / old_authority._authority_name,
+        authorization.experiment_root / old_authority._authority_pin_name,
+    ]
     ledger.close()
     old_authority.close()
+    for path in (*authority_paths, ledger_path):
+        path.unlink()
 
-    authority_path.write_bytes(authority_prefix)
-    ledger_path.write_bytes(journal_prefix)
-    restarted_approval = {**approval, "run_checkpoint": latest_checkpoint}
+    replacement = authorize_record_run(
+        preflight,
+        approval_record=approval,
+        owner_capability=OWNER_CAPABILITY,
+    )
+    provider_calls = 0
 
-    with pytest.raises(GateBPreflightError, match="run_checkpoint_mismatch"):
-        authorize_record_run(
-            preflight,
-            approval_record=restarted_approval,
-            owner_capability=OWNER_CAPABILITY,
-        )
+    def forbidden_provider(**_: Any) -> object:
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("rolled-back state must not reach provider")
+
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", forbidden_provider)
+    monkeypatch.setattr(gate_b, "_read_privileged_launch_witness", lambda: old_witness)
+    with pytest.raises(GateBPreflightError, match="launch_witness_mismatch"):
+        run_gate_b_record(authorization=replacement)
+    assert provider_calls == 0
 
 
 @pytest.mark.parametrize("mutation", ["empty", "valid_prefix", "new_inode"])
@@ -995,6 +956,7 @@ def test_ledger_anchor_rejects_empty_prefix_and_new_inode_rollback(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     input_hash = authorization.ordered_input_sha256s[0]
     ledger = GateBBudgetLedger(ledger_path, authorization)
@@ -1026,6 +988,7 @@ def test_ledger_promotes_exact_hmac_state_after_anchor_append_crash(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     input_hash = authorization.ordered_input_sha256s[0]
     ledger = GateBBudgetLedger(ledger_path, authorization)
@@ -1062,6 +1025,7 @@ def test_unreadable_legacy_sqlite_fails_closed_without_initializing_marker(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     private_root = authorization.experiment_root / (
         f".gate-b-ledger-{authorization.run_identity_sha256[:16]}"
     )
@@ -1072,7 +1036,9 @@ def test_unreadable_legacy_sqlite_fails_closed_without_initializing_marker(
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger_path.touch(mode=0o600)
 
-    with pytest.raises(GateBPreflightError, match="ledger_legacy"):
+    with pytest.raises(
+        GateBPreflightError, match="owner_reconciliation_artifact_required"
+    ):
         GateBBudgetLedger(ledger_path, authorization)
 
     assert ledger_path.read_bytes() == b""
@@ -1088,12 +1054,15 @@ def test_ledger_rejects_preexisting_hard_link(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     external = tmp_path / "external-ledger-state"
     external.write_bytes(b"")
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     os.link(external, ledger_path)
 
-    with pytest.raises(GateBPreflightError, match="ledger_path_unsafe"):
+    with pytest.raises(
+        GateBPreflightError, match="owner_reconciliation_artifact_required"
+    ):
         GateBBudgetLedger(ledger_path, authorization)
 
     assert external.read_bytes() == b""
@@ -1108,6 +1077,7 @@ def test_open_ledger_remains_pinned_when_public_path_is_swapped(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     ledger = GateBBudgetLedger(ledger_path, authorization)
     displaced = authorization.experiment_root / "run-ledger.displaced"
@@ -1137,6 +1107,7 @@ def test_ledger_recovers_last_fsynced_state_from_torn_journal_tail(
         approval_record=_approval(preflight),
         owner_capability=OWNER_CAPABILITY,
     )
+    _claim_test_runner(authorization, monkeypatch)
     ledger_path = authorization.experiment_root / "run-ledger.sqlite3"
     input_hash = authorization.ordered_input_sha256s[0]
     ledger = GateBBudgetLedger(ledger_path, authorization)
@@ -1597,3 +1568,408 @@ def test_authorization_rehashes_corpus_and_rejects_replacement(
 
 def test_single_record_runner_has_no_caller_provider_or_loader_bypass() -> None:
     assert set(inspect.signature(run_gate_b_record).parameters) == {"authorization"}
+
+
+def test_authorization_is_read_only_and_issues_opaque_process_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "canonical", monkeypatch)
+    before = sorted(
+        (path.relative_to(tmp_path).as_posix(), path.stat().st_ino)
+        for path in tmp_path.rglob("*")
+    )
+
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+
+    after = sorted(
+        (path.relative_to(tmp_path).as_posix(), path.stat().st_ino)
+        for path in tmp_path.rglob("*")
+    )
+    assert after == before
+    assert authorization._run_authority is None
+    with pytest.raises(TypeError, match="process-bound"):
+        pickle.dumps(authorization._runner_capability)
+    monkeypatch.setattr(
+        gate_b,
+        "GATE_B_LAUNCH_WITNESS_PATH",
+        tmp_path / "missing-root-witness-parent" / "launch.json",
+    )
+    with pytest.raises(GateBPreflightError, match="launch_witness_unavailable"):
+        authorization._runner_capability.claim()
+    with pytest.raises(GateBPreflightError, match="runner_capability_not_claimed"):
+        GateBBudgetLedger(
+            authorization.experiment_root / "run-ledger.sqlite3", authorization
+        )
+    assert (
+        sorted(
+            (path.relative_to(tmp_path).as_posix(), path.stat().st_ino)
+            for path in tmp_path.rglob("*")
+        )
+        == before
+    )
+
+
+def test_authorization_rejects_byte_identical_sibling_package_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "canonical", monkeypatch)
+    canonical_root = Path(preflight["corpus"]["manifest_path"]).parent
+    sibling_root = canonical_root.with_name("byte-identical-sibling")
+    shutil.copytree(canonical_root, sibling_root)
+    sibling = deepcopy(preflight)
+    sibling["corpus"]["manifest_path"] = str(sibling_root / "corpus-manifest.json")
+    sibling["inputs"]["package_root"] = str(sibling_root / "input-package-v2-r3")
+    sibling["inputs"]["manifest_path"] = str(
+        sibling_root / "input-package-v2-r3" / "run-manifest.v2.json"
+    )
+
+    with pytest.raises(GateBPreflightError, match="canonical_path"):
+        authorize_record_run(
+            sibling,
+            approval_record=_approval(sibling),
+            owner_capability=OWNER_CAPABILITY,
+        )
+
+
+def test_historical_checkpoint_cannot_restart_one_shot_record_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "checkpoint", monkeypatch)
+    approval = _approval(preflight)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=approval,
+        owner_capability=OWNER_CAPABILITY,
+    )
+    with pytest.raises(GateBPreflightError, match="historical_checkpoint_unsupported"):
+        gate_b.export_gate_b_run_checkpoint(authorization)
+
+    with pytest.raises(
+        GateBPreflightError,
+        match="historical_checkpoint_unsupported",
+    ):
+        authorize_record_run(
+            preflight,
+            approval_record={**approval, "run_checkpoint": {}},
+            owner_capability=OWNER_CAPABILITY,
+        )
+
+
+def test_full_recording_inventory_blocks_before_provider_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "recordings", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    witness = gate_b.export_gate_b_launch_witness_request(authorization)
+    monkeypatch.setattr(gate_b, "_read_privileged_launch_witness", lambda: witness)
+    recording_root = authorization.experiment_root / "recordings"
+    recording_root.mkdir()
+    late_hash = authorization.ordered_input_sha256s[-1]
+    (recording_root / f"{late_hash}.json").write_text(
+        '{"legacy":true}\n', encoding="utf-8"
+    )
+    factory_calls = 0
+
+    def forbidden_factory(**_: Any) -> object:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("provider factory must not be constructed")
+
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", forbidden_factory)
+
+    with pytest.raises(
+        GateBPreflightError,
+        match="owner_reconciliation_artifact_required|namespace_not_fresh|recording",
+    ):
+        run_gate_b_record(authorization=authorization)
+    assert factory_calls == 0
+
+
+def test_manifest_hardlink_added_after_authorization_is_rejected_on_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "manifest-hardlink", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    _claim_test_runner(authorization, monkeypatch)
+    hardlink = tmp_path / "manifest-hardlink-copy.json"
+    os.link(authorization.input_manifest_path, hardlink)
+
+    with pytest.raises(GateBPreflightError, match="input_manifest_lock_not_regular"):
+        GateBBudgetLedger(
+            authorization.experiment_root / "run-ledger.sqlite3", authorization
+        )
+
+
+def test_missing_privileged_launch_witness_blocks_before_provider_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "witness", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    witness_path = tmp_path / "not-installed" / "launch-witness.json"
+    monkeypatch.setattr(gate_b, "GATE_B_LAUNCH_WITNESS_PATH", witness_path)
+    factory_calls = 0
+
+    def forbidden_factory(**_: Any) -> object:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("provider factory must not be constructed")
+
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", forbidden_factory)
+
+    with pytest.raises(GateBPreflightError, match="launch_witness_unavailable"):
+        run_gate_b_record(authorization=authorization)
+    assert factory_calls == 0
+
+
+def test_runner_capability_is_one_shot_and_root_aba_is_detected_before_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "aba", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    request = gate_b.export_gate_b_launch_witness_request(authorization)
+    monkeypatch.setattr(
+        gate_b,
+        "_read_privileged_launch_witness",
+        lambda: request,
+    )
+    canonical_root = authorization.experiment_root
+    displaced = canonical_root.with_name("displaced-canonical-root")
+    canonical_root.rename(displaced)
+    shutil.copytree(displaced, canonical_root)
+    factory_calls = 0
+
+    def forbidden_factory(**_: Any) -> object:
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("provider factory must not be constructed")
+
+    monkeypatch.setattr(gate_b, "build_live_llm_provider", forbidden_factory)
+
+    with pytest.raises(GateBPreflightError, match="namespace_inventory_changed"):
+        run_gate_b_record(authorization=authorization)
+    with pytest.raises(GateBPreflightError, match="runner_capability_consumed"):
+        run_gate_b_record(authorization=authorization)
+    assert factory_calls == 0
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        ".gate-b-ledger-r1/ledger.db",
+        ".gate-b-run-authority-r2.state",
+        ".gate-b-r3-run-authority-deadbeef.state",
+        "run-ledger.sqlite3-wal",
+        "legacy-no-live-run-receipt.json",
+        "recordings/deadbeef.json",
+    ],
+)
+def test_whole_canonical_namespace_inventory_rejects_every_unplanned_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    preflight = _preflight(tmp_path / artifact.replace("/", "-"), monkeypatch)
+    target = Path(preflight["corpus"]["manifest_path"]).parent / artifact
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"legacy-or-partial-state")
+
+    with pytest.raises(
+        GateBPreflightError,
+        match="owner_reconciliation_artifact_required|namespace_not_fresh",
+    ):
+        authorize_record_run(
+            preflight,
+            approval_record=_approval(preflight),
+            owner_capability=OWNER_CAPABILITY,
+        )
+
+
+def test_process_capability_has_no_caller_accessible_claim_issuer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "issuer", monkeypatch)
+    authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+
+    assert not hasattr(gate_b, "_RUNNER_CAPABILITY_ISSUER")
+
+
+def test_process_capability_cannot_trust_caller_supplied_stale_witness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "stale-witness", monkeypatch)
+    first = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    second = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    stale_witness = gate_b.export_gate_b_launch_witness_request(first)
+    monkeypatch.setattr(
+        gate_b, "_read_privileged_launch_witness", lambda: stale_witness
+    )
+    claim_parameters = inspect.signature(
+        type(second._runner_capability).claim
+    ).parameters
+
+    def direct_claim() -> None:
+        if "expected_witness" in claim_parameters:
+            second._runner_capability.claim(expected_witness=stale_witness)
+        else:
+            second._runner_capability.claim()
+
+    with pytest.raises(GateBPreflightError, match="launch_witness_mismatch"):
+        direct_claim()
+    assert set(claim_parameters) == {"self"}
+    with pytest.raises(GateBPreflightError, match="runner_capability_not_claimed"):
+        GateBBudgetLedger(second.experiment_root / "run-ledger.sqlite3", second)
+
+
+def test_self_appended_reconciliation_request_is_not_owner_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "separate-approval", monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    _claim_test_runner(authorization, monkeypatch)
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    input_hash = authorization.ordered_input_sha256s[0]
+    reservation = ledger.reserve(input_hash, Decimal("0.010000"))
+    ledger.mark_dispatching(reservation)
+    authorization._run_authority.close()
+    request = gate_b.build_gate_b_owner_reconciliation_request(preflight)
+    monkeypatch.setattr(
+        gate_b,
+        "GATE_B_RECONCILIATION_WITNESS_PATH",
+        tmp_path / "not-owner-installed" / "r3-reconciliation.json",
+        raising=False,
+    )
+
+    with pytest.raises(GateBPreflightError, match="reconciliation_witness_unavailable"):
+        gate_b.authorize_gate_b_reconciliation(
+            preflight,
+            approval_record={
+                **_approval(preflight),
+                "owner_reconciliation_artifact": request,
+            },
+            owner_capability=OWNER_CAPABILITY,
+        )
+
+
+def _reconciliation_ledger_and_record_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, GateBBudgetLedger, Any, str]:
+    preflight = _preflight(tmp_path, monkeypatch)
+    authorization = authorize_record_run(
+        preflight,
+        approval_record=_approval(preflight),
+        owner_capability=OWNER_CAPABILITY,
+    )
+    _claim_test_runner(authorization, monkeypatch)
+    ledger = GateBBudgetLedger(
+        authorization.experiment_root / "run-ledger.sqlite3", authorization
+    )
+    record_capability = ledger.structured_capability()
+    input_hash = authorization.ordered_input_sha256s[0]
+    reservation = ledger.reserve(input_hash, Decimal("0.010000"))
+    ledger.mark_dispatching(reservation)
+    authorization._run_authority.close()
+    request = gate_b.build_gate_b_owner_reconciliation_request(preflight)
+    monkeypatch.setattr(
+        gate_b,
+        "_read_privileged_reconciliation_witness",
+        lambda: request,
+        raising=False,
+    )
+    recovery = gate_b.authorize_gate_b_reconciliation(
+        preflight,
+        approval_record={
+            **_approval(preflight),
+            "owner_reconciliation_artifact": request,
+        },
+        owner_capability=OWNER_CAPABILITY,
+    )
+    recovery_ledger = GateBBudgetLedger(
+        recovery.experiment_root / "run-ledger.sqlite3", recovery
+    )
+    return recovery, recovery_ledger, record_capability, input_hash
+
+
+def test_reconciliation_cannot_issue_generic_record_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, recovery_ledger, _, _ = _reconciliation_ledger_and_record_capability(
+        tmp_path / "generic-capability", monkeypatch
+    )
+
+    with pytest.raises(GateBPreflightError, match="reconciliation.*offline"):
+        recovery_ledger.structured_capability()
+
+
+def test_reconciliation_rejects_caller_sealed_ordinary_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, recovery_ledger, record_capability, input_hash = (
+        _reconciliation_ledger_and_record_capability(
+            tmp_path / "ordinary-record", monkeypatch
+        )
+    )
+    fabricated = record_capability.seal_record({
+        "input_hash": input_hash,
+        "status": "success",
+        "cost_usd": "0.001250",
+    })
+
+    with pytest.raises(
+        GateBPreflightError, match="reconciliation_governed_api_required"
+    ):
+        recovery_ledger.reconcile_existing_record(
+            input_hash, fabricated, record_capability
+        )
+
+
+def test_canonical_namespace_root_must_be_owner_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preflight = _preflight(tmp_path / "unsafe-root", monkeypatch)
+    canonical_root = Path(preflight["corpus"]["manifest_path"]).parent
+    canonical_root.chmod(0o777)
+
+    with pytest.raises(GateBPreflightError, match="namespace_root_unsafe"):
+        authorize_record_run(
+            preflight,
+            approval_record=_approval(preflight),
+            owner_capability=OWNER_CAPABILITY,
+        )
