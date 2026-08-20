@@ -2127,6 +2127,11 @@ def test_one_time_launch_receipt_rejects_long_expiry_or_extra_authority() -> Non
 
     with pytest.raises(ValidationError, match="30 minutes"):
         receipt_type.model_validate(payload)
+    payload["expires_at"] = datetime(
+        2026, 8, 20, 12, 29, 59, tzinfo=timezone.utc
+    )
+    with pytest.raises(ValidationError, match="exactly 30 minutes"):
+        receipt_type.model_validate(payload)
     payload["expires_at"] = datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc)
     payload["provider_token"] = "forbidden"
     with pytest.raises(ValidationError, match="Extra inputs"):

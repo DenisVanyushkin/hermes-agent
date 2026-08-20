@@ -1,0 +1,53 @@
+[Unit]
+Description=Job Intel Gate B at-most-once benchmark
+Wants=network-online.target
+After=network-online.target
+ConditionPathIsDirectory=/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+UMask=0077
+WorkingDirectory=/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime/runtime
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=JOB_INTEL_LLM_LIVE_APPROVED=1
+EnvironmentFile=/etc/job-intel/gate-b-provider.env
+ExecStartPre=+/usr/bin/env /home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime/runtime/scripts/job_intel_gate_b_benchmark.sh consume-launch-receipt
+ExecStart=/usr/bin/env /home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime/runtime/scripts/job_intel_gate_b_benchmark.sh run-at-most-once
+Restart=no
+TimeoutStartSec=2h
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=read-only
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once
+ReadOnlyPaths=/home/hermes/.hermes/job_intel/experiments/gate-a
+ReadOnlyPaths=/home/hermes/.hermes/job_intel/experiments/gate-b
+ReadOnlyPaths=/home/hermes/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json
+ReadWritePaths=/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs
+ReadWritePaths=/etc/job-intel/gate-b-at-most-once
+ReadWritePaths=/run/job-intel/gate-b-at-most-once
+InaccessiblePaths=/home/hermes/.hermes/state.db
+InaccessiblePaths=/home/hermes/.hermes/job_intel/job_intel.sqlite3
+InaccessiblePaths=/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal
+InaccessiblePaths=/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm
+InaccessiblePaths=/home/hermes/.hermes/job_intel/outbox
+InaccessiblePaths=/home/hermes/.hermes/sessions
+InaccessiblePaths=/home/hermes/.cache
+InaccessiblePaths=/var/lib/browser-desktop/profiles
+StandardOutput=journal
+StandardError=journal

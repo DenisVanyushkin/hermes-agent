@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
+from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +17,11 @@ import job_intel.product_search.gate_b_benchmark_v3 as gate_b_v3
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPORTER = ROOT / "scripts/export_job_intel_gate_b_benchmark.sh"
+RUNNER = ROOT / "scripts/job_intel_gate_b_benchmark.sh"
+SERVICE = (
+    ROOT
+    / "deploy/systemd/experiments/job-intel-gate-b-benchmark.service"
+)
 
 
 def _runtime_manifest_payload() -> dict[str, object]:
@@ -164,3 +172,150 @@ esac
     assert hashlib.sha256(
         (destination / "runtime-manifest.json").read_bytes()
     ).hexdigest() == (destination / "runtime-manifest.sha256").read_text().strip()
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
+    tmp_path: Path,
+) -> None:
+    runtime_manifest = gate_b_v3.GateBRuntimeManifestV3.model_validate(
+        _runtime_manifest_payload()
+    )
+    package_manifest = gate_b_v3.GateBPackageManifestV3(
+        schema_version="3.0.0",
+        package_id="gate-b-v3-test",
+        created_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+        ordered_input_sha256s=tuple(f"{index + 1:064x}" for index in range(48)),
+        authority_sha256s=("a" * 64,),
+    )
+    package_sha256 = package_manifest.canonical_sha256
+    launch = gate_b_v3.GateBLaunchBindingV3(
+        schema_version="3.0.0",
+        run_id=f"gate-b-at-most-once-{package_sha256[:16]}",
+        candidate_commit=runtime_manifest.candidate_commit,
+        runtime_manifest_sha256=runtime_manifest.canonical_sha256,
+        package_manifest_sha256=package_sha256,
+        ordered_input_sha256s=package_manifest.ordered_input_sha256s,
+        ordered_projection_sha256s=tuple(
+            f"{index + 101:064x}" for index in range(48)
+        ),
+        source_authority_sha256s={"fixture": "b" * 64},
+        model_id="openai/gpt-5-mini",
+        maximum_output_tokens=2_000,
+        ordered_call_cap=48,
+        per_call_maximum_usd=Decimal("0.01"),
+        aggregate_maximum_usd=Decimal("0.48"),
+    )
+    checkpoint = gate_b_v3.GateBOwnerCheckpointManifestV3(
+        schema_version="3.0.0",
+        checkpoint_kind="gate_b_at_most_once_owner_approval",
+        approved_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+        launch_identity=launch,
+    )
+    receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
+        schema_version="3.0.0",
+        receipt_kind="gate_b_at_most_once_launch",
+        run_id=launch.run_id,
+        issued_at=datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 8, 20, 12, 31, tzinfo=timezone.utc),
+        nonce="c" * 64,
+        checkpoint_manifest_sha256=checkpoint.canonical_sha256,
+        launch_identity_sha256=launch.canonical_sha256,
+        candidate_commit=launch.candidate_commit,
+        runtime_manifest_sha256=launch.runtime_manifest_sha256,
+        package_manifest_sha256=launch.package_manifest_sha256,
+        ordered_call_cap=48,
+        per_call_maximum_usd=Decimal("0.01"),
+        aggregate_maximum_usd=Decimal("0.48"),
+    )
+    pending_root = tmp_path / "etc"
+    consumed_root = tmp_path / "run"
+    package_parent = tmp_path / "packages"
+    runtime_root = tmp_path / "runtime"
+    pending_dir = pending_root / launch.run_id
+    package_dir = package_parent / package_sha256
+    pending_dir.mkdir(parents=True, mode=0o700)
+    package_dir.mkdir(parents=True)
+    runtime_root.mkdir()
+    pending_path = pending_dir / "launch.pending.json"
+    checkpoint_path = pending_dir / "owner-checkpoint.json"
+    recovery_key_path = pending_dir / "owner-recovery-public-key.bin"
+    pending_path.write_bytes(_canonical_bytes(receipt.model_dump(mode="json")))
+    checkpoint_path.write_bytes(
+        _canonical_bytes(checkpoint.model_dump(mode="json"))
+    )
+    recovery_key_path.write_bytes(bytes.fromhex("22" * 32))
+    for path in (pending_path, checkpoint_path, recovery_key_path):
+        path.chmod(0o400)
+    (package_dir / "package-manifest.json").write_bytes(
+        _canonical_bytes(package_manifest.model_dump(mode="json"))
+    )
+    (runtime_root / "runtime-manifest.json").write_bytes(
+        _canonical_bytes(runtime_manifest.model_dump(mode="json"))
+    )
+
+    consumed = gate_b_v3.consume_gate_b_launch_receipt_v3(
+        pending_root=pending_root,
+        consumed_root=consumed_root,
+        package_parent=package_parent,
+        runtime_export_root=runtime_root,
+        now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
+        expected_root_uid=os.geteuid(),
+        expected_root_gid=os.getegid(),
+        expected_hermes_gid=os.getegid(),
+    )
+
+    assert consumed == consumed_root / launch.run_id / "launch.consumed.json"
+    assert not pending_path.exists()
+    assert consumed.read_bytes() == _canonical_bytes(receipt.model_dump(mode="json"))
+    assert stat.S_IMODE(consumed.stat().st_mode) == 0o440
+    assert (consumed.parent / "owner-checkpoint.json").read_bytes() == (
+        _canonical_bytes(checkpoint.model_dump(mode="json"))
+    )
+    assert (consumed.parent / "owner-recovery-public-key.bin").read_bytes() == (
+        bytes.fromhex("22" * 32)
+    )
+    with pytest.raises(ValueError, match="pending_receipt"):
+        gate_b_v3.consume_gate_b_launch_receipt_v3(
+            pending_root=pending_root,
+            consumed_root=consumed_root,
+            package_parent=package_parent,
+            runtime_export_root=runtime_root,
+            now=datetime(2026, 8, 20, 12, 11, tzinfo=timezone.utc),
+            expected_root_uid=os.geteuid(),
+            expected_root_gid=os.getegid(),
+            expected_hermes_gid=os.getegid(),
+        )
+
+
+def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
+    assert RUNNER.exists()
+    assert SERVICE.exists()
+    completed = subprocess.run(
+        ["systemd-analyze", "verify", str(SERVICE)],
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    unit = SERVICE.read_text(encoding="utf-8")
+    assert "Type=oneshot" in unit
+    assert "User=hermes" in unit
+    assert "Restart=no" in unit
+    assert "ExecStartPre=+" in unit
+    assert "launch.pending.json" not in unit
+    assert "SLACK" not in unit.upper()
+    assert "job_intel.sqlite3" in unit
+    syntax = subprocess.run(
+        ["bash", "-n", str(RUNNER)],
+        text=True,
+        capture_output=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
