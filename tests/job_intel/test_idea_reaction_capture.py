@@ -190,3 +190,43 @@ def test_append_to_doc_honours_explicit_google_home_override(monkeypatch, tmp_pa
     mod._append_to_doc("- idea\n")
 
     assert captured["env"]["HERMES_HOME"] == str(override)
+
+
+CRON_POST = (
+    "Cronjob Response: idle-idea-prompt (job_id: 4645b2d6a977) ------------- "
+    "* [Финансы] История цены перед крупной покупкой - Записывай цену. "
+    "Чтобы остановить или изменить эту задачу, отправь новое сообщение "
+    "(например: „останови напоминание idle-idea-prompt“). "
+    'To stop or manage this job, send me a new message (e.g. "stop reminder idle-idea-prompt").'
+)
+
+
+def _dry_run(monkeypatch, tmp_path, message, ts="1787205694.242879"):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("SLACK_IDEA_REACTION_CHANNELS", "C123")
+    monkeypatch.setenv("SLACK_IDEA_DOC_ID", "doc-123")
+    event = {"type": "reaction_added", "reaction": "+1", "item": {"channel": "C123", "ts": ts}}
+    return mod.process_event(event, message=message, bot_user_id="U_BOT", dry_run=True)
+
+
+def test_cron_banner_and_stop_trailer_are_stripped(tmp_path, monkeypatch):
+    """The idea is the payload; the cron envelope around it is noise."""
+    result = _dry_run(monkeypatch, tmp_path, {"text": CRON_POST, "bot_id": "B1"})
+    text = result["append_text"]
+
+    assert "Cronjob Response" not in text
+    assert "job_id" not in text
+    assert "Чтобы остановить" not in text
+    assert "To stop or manage this job" not in text
+    assert "История цены перед крупной покупкой" in text
+
+
+def test_bullet_is_dated_from_the_idea_not_from_capture_time(tmp_path, monkeypatch):
+    """Backfilled ideas must carry their own date, not the day we repaired auth."""
+    result = _dry_run(monkeypatch, tmp_path, {"text": "Идея", "bot_id": "B1"})
+    assert result["append_text"].startswith("- [2026-08-20 11:01")  # 06:01 UTC in Asia/Almaty
+
+
+def test_message_without_cron_envelope_is_untouched(tmp_path, monkeypatch):
+    result = _dry_run(monkeypatch, tmp_path, {"text": "Просто идея без обёртки", "bot_id": "B1"})
+    assert "Просто идея без обёртки" in result["append_text"]
