@@ -133,14 +133,47 @@ def _current_almaty_timestamp() -> str:
     return datetime.now(ZoneInfo("Asia/Almaty")).strftime("%Y-%m-%d %H:%M %Z")
 
 
+SANDBOX_GOOGLE_HOME_PARTS = ("sandboxes", "docker", "default", "home", ".hermes")
+
+
+def _google_credentials_home() -> Path:
+    """Locate the HERMES_HOME that actually holds the Google OAuth token.
+
+    The agent authorises Google from inside a Docker sandbox, where ``HOME`` is
+    ``/root`` and the token lands in the sandbox home on the host. The gateway
+    runs on the host with ``HERMES_HOME=~/.hermes`` and therefore never saw that
+    token, so every capture died with "Not authenticated" (2026-08-20).
+
+    Order: explicit override, host home, sandbox home. Only a home that really
+    carries ``google_token.json`` wins, so this degrades to the host home rather
+    than inventing a path.
+    """
+
+    override = os.getenv("GOOGLE_WORKSPACE_HERMES_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    host_home = _hermes_home()
+    if (host_home / "google_token.json").exists():
+        return host_home
+
+    sandbox_home = host_home.joinpath(*SANDBOX_GOOGLE_HOME_PARTS)
+    if (sandbox_home / "google_token.json").exists():
+        return sandbox_home
+
+    return host_home
+
+
 def _append_to_doc(text: str) -> dict[str, Any]:
     doc_id = _doc_id()
     repo_script = Path(__file__).resolve().parents[1] / "skills" / "productivity" / "google-workspace" / "scripts" / "google_api.py"
     hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     home_script = hermes_home / "skills" / "productivity" / "google-workspace" / "scripts" / "google_api.py"
     script = repo_script if repo_script.exists() else home_script
+    # The install is found relative to the host home, but the credentials may
+    # live in a different home entirely — keep the two lookups separate.
     env = os.environ.copy()
-    env["HERMES_HOME"] = str(hermes_home)
+    env["HERMES_HOME"] = str(_google_credentials_home())
     cmd = [sys.executable, str(script), "docs", "append", doc_id, "--text", text]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:

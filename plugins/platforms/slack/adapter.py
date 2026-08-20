@@ -2713,12 +2713,23 @@ class SlackAdapter(BasePlatformAdapter):
             except Exception:
                 logger.debug("[Slack] block text extraction failed for idea capture", exc_info=True)
 
-        result = process_event(
-            event,
-            message=message,
-            bot_user_id=bot_uid,
-            dry_run=False,
-        )
+        # Acknowledge on the post itself. A logger-only outcome is how this
+        # stayed broken from 2026-06-14 to 2026-08-20: the operator kept
+        # liking ideas and nothing ever said they were not being captured.
+        team_id = str((event or {}).get("team") or "")
+        try:
+            result = process_event(
+                event,
+                message=message,
+                bot_user_id=bot_uid,
+                dry_run=False,
+            )
+        except Exception:
+            await self._add_reaction(channel, message_ts, "x", team_id)
+            raise
+
+        if str(result.get("status") or "") == "ok":
+            await self._add_reaction(channel, message_ts, "memo", team_id)
         logger.info("slack_idea_reaction_capture_result %s", result)
 
     async def _maybe_dispatch_vacancy_reaction_task(self, event: dict) -> None:

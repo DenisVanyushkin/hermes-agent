@@ -103,3 +103,90 @@ def test_append_to_doc_surfaces_google_cli_stderr(monkeypatch, tmp_path):
         assert "Google credentials are unavailable" in str(exc)
     else:  # pragma: no cover - assertion keeps the failure actionable
         raise AssertionError("Google CLI failure must preserve stderr")
+
+
+def test_append_to_doc_falls_back_to_sandbox_google_home(monkeypatch, tmp_path):
+    """The gateway runs on the host, but the Google token lives in the sandbox home.
+
+    Regression guard for the 2026-08-20 incident: every 👍 capture failed with
+    "Not authenticated" because HERMES_HOME on the host has no google_token.json.
+    """
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    sandbox_home = hermes_home / "sandboxes" / "docker" / "default" / "home" / ".hermes"
+    sandbox_home.mkdir(parents=True)
+    (sandbox_home / "google_token.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("GOOGLE_WORKSPACE_HERMES_HOME", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, capture_output, text, env):
+        captured["env"] = env
+
+        class Proc:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    mod._append_to_doc("- idea\n")
+
+    assert captured["env"]["HERMES_HOME"] == str(sandbox_home)
+
+
+def test_append_to_doc_prefers_host_home_when_token_present(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / "google_token.json").write_text("{}", encoding="utf-8")
+    sandbox_home = hermes_home / "sandboxes" / "docker" / "default" / "home" / ".hermes"
+    sandbox_home.mkdir(parents=True)
+    (sandbox_home / "google_token.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("GOOGLE_WORKSPACE_HERMES_HOME", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, capture_output, text, env):
+        captured["env"] = env
+
+        class Proc:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    mod._append_to_doc("- idea\n")
+
+    assert captured["env"]["HERMES_HOME"] == str(hermes_home)
+
+
+def test_append_to_doc_honours_explicit_google_home_override(monkeypatch, tmp_path):
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    override = tmp_path / "elsewhere"
+    override.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("GOOGLE_WORKSPACE_HERMES_HOME", str(override))
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, capture_output, text, env):
+        captured["env"] = env
+
+        class Proc:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    mod._append_to_doc("- idea\n")
+
+    assert captured["env"]["HERMES_HOME"] == str(override)
