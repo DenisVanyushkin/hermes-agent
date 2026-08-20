@@ -87,22 +87,22 @@ def test_service_template_uses_install_time_env_file_placeholder() -> None:
 
 def test_runtime_provenance_reports_company_career_profile_path(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
+    workdir = tmp_path / "workdir"
+    (workdir / "job_intel").mkdir(parents=True)
     monkeypatch.delenv("JOB_INTEL_SERVICE_USER", raising=False)
     monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "hermes")
-    monkeypatch.setenv("JOB_INTEL_WORKDIR", "/workspace/live-hermes")
+    monkeypatch.setenv("JOB_INTEL_WORKDIR", str(workdir))
     monkeypatch.setenv("JOB_INTEL_DB_PATH", str(tmp_path / "state" / "job_intel.sqlite3"))
     monkeypatch.setenv("JOB_INTEL_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR", str(tmp_path / "profiles"))
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", str(tmp_path / "profiles" / "linkedin"))
-    monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", str(tmp_path / "profiles" / "hh"))
     monkeypatch.setenv("JOB_INTEL_EXPECTED_GIT_COMMIT", "abc123")
     (tmp_path / "state").mkdir(parents=True)
     (tmp_path / "profiles" / "linkedin").mkdir(parents=True)
-    (tmp_path / "profiles" / "hh").mkdir(parents=True)
     monkeypatch.setattr(runtime.pwd, "getpwnam", lambda name: type("U", (), {"pw_dir": str(tmp_path / "home" / name), "pw_uid": 1000, "pw_gid": 1000})())
     (tmp_path / "home" / "hermes").mkdir(parents=True)
     monkeypatch.setattr(runtime, "_git_commit_hash", lambda *args: "abc123")
-    monkeypatch.setattr(runtime, "_module_origin", lambda name: f"/workspace/live-hermes/{name.replace('.', '/')}.py" if name in {"job_intel.runtime", "job_intel.store", "job_intel.browser_sourcing", "job_intel.cli"} else None)
+    monkeypatch.setattr(runtime, "_module_origin", lambda name: f"{workdir}/{name.replace('.', '/')}.py" if name in {"job_intel.runtime", "job_intel.store", "job_intel.browser_sourcing", "job_intel.cli"} else None)
 
     provenance = runtime.capture_runtime_provenance()
 

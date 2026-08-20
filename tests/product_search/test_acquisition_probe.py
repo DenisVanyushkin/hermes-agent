@@ -316,10 +316,6 @@ def test_isolated_environment_overrides_ambient_production_paths(tmp_path: Path)
                 "mode": "cloned_profile",
                 "path": str(root / "browser-profile/linkedin"),
             },
-            "headhunter": {
-                "mode": "cloned_profile",
-                "path": str(root / "browser-profile/headhunter"),
-            },
         },
     }
 
@@ -336,9 +332,7 @@ def test_isolated_environment_overrides_ambient_production_paths(tmp_path: Path)
     assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"] == str(
         root / "browser-profile/linkedin"
     )
-    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_HH"] == str(
-        root / "browser-profile/headhunter"
-    )
+    assert "JOB_INTEL_BROWSER_PROFILE_DIR_HH" not in environment
     assert environment["JOB_INTEL_BROWSER_PYTHON"] == str(
         root / "python-runtime/venv/bin/python"
     )
@@ -354,9 +348,7 @@ def test_isolated_environment_overrides_ambient_production_paths(tmp_path: Path)
 def test_owner_approved_shared_profiles_require_experiment_local_backups(tmp_path: Path) -> None:
     root = tmp_path / "gate-a" / ("a" * 40)
     linkedin_backup = root / "browser-profile-backup/linkedin"
-    headhunter_backup = root / "browser-profile-backup/headhunter"
     linkedin_backup.mkdir(parents=True)
-    headhunter_backup.mkdir(parents=True)
     manifest = {
         "root": str(root),
         "paths": {
@@ -374,12 +366,6 @@ def test_owner_approved_shared_profiles_require_experiment_local_backups(tmp_pat
                 "shared_profile_path": "/var/lib/browser-desktop/profiles/linkedin",
                 "backup_path": str(linkedin_backup),
             },
-            "headhunter": {
-                "mode": "exclusive_lock",
-                "path": str(root / "locks/headhunter-profile.lock"),
-                "shared_profile_path": "/var/lib/browser-desktop/profiles/hh",
-                "backup_path": str(headhunter_backup),
-            },
         },
     }
 
@@ -388,11 +374,9 @@ def test_owner_approved_shared_profiles_require_experiment_local_backups(tmp_pat
     assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"] == (
         "/var/lib/browser-desktop/profiles/linkedin"
     )
-    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_HH"] == (
-        "/var/lib/browser-desktop/profiles/hh"
-    )
+    assert "JOB_INTEL_BROWSER_PROFILE_DIR_HH" not in environment
 
-    headhunter_backup.rmdir()
+    linkedin_backup.rmdir()
     with __import__("pytest").raises(ValueError, match="shared profile backup"):
         build_isolated_probe_environment(manifest)
 

@@ -27,7 +27,7 @@ def test_store_start_run_persists_runtime_provenance(monkeypatch, tmp_path) -> N
         "python_executable": "/usr/bin/python3",
         "db_path": str(db_path),
         "state_dir": "/root/.hermes/job_intel",
-        "browser_profile_paths": {"linkedin": "/profiles/linkedin", "headhunter": "/profiles/hh"},
+        "browser_profile_paths": {"linkedin": "/profiles/linkedin"},
         "env_overrides": {"JOB_INTEL_DB_PATH": str(db_path)},
         "runtime_mirror_paths": {"resolved_scripts_dir": "/root/.hermes/scripts"},
         "imported_module_locations": {"job_intel.runtime": "/workspace/live-hermes/job_intel/runtime.py"},

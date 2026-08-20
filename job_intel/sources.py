@@ -15,17 +15,18 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlu
 
 import requests
 
+from . import hh_api
 from .browser_sourcing import (
     BrowserAcquisitionConfig,
     BrowserNativeUnavailable,
     BrowserSourceClient,
     browser_native_available,
     extract_company_career_vacancies_from_html,
-    extract_headhunter_vacancies_from_html,
     extract_linkedin_vacancies_from_html,
     metrics_from_counts,
     resolve_browser_config,
     _ensure_required_browser_profile,
+    _looks_executive,
 )
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
@@ -391,12 +392,6 @@ _BROWSER_TIMEOUT_TARGETS = {
         "display": ":99",
         "profile": "linkedin",
     },
-    "headhunter": {
-        "source": "headhunter",
-        "cdp_url": "http://127.0.0.1:9223/json/list",
-        "display": ":100",
-        "profile": "hh",
-    },
 }
 
 
@@ -545,41 +540,128 @@ def fetch_company_career_vacancies(url: str) -> list[Vacancy]:
     return extract_company_career_vacancies_from_html(response.text, page_url=url)
 
 
-def _request_json(url: str, *, params: dict[str, object], headers: dict[str, str]) -> dict:
-    response = requests.get(url, params=params, timeout=30, headers=headers)
-    if response.status_code == 403:
-        raise SourceFetchError(
-            "HeadHunter API returned 403 Forbidden. Browser-native HH acquisition is preferred and does not require JOB_INTEL_HH_ACCESS_TOKEN."
+DEFAULT_HH_ACQUISITION_MAX_ITEMS = 100
+
+
+def _headhunter_max_items(configured: int | None) -> int:
+    if configured is not None:
+        value = int(configured)
+    else:
+        raw = os.getenv(
+            "JOB_INTEL_HEADHUNTER_MAX_ITEMS",
+            str(DEFAULT_HH_ACQUISITION_MAX_ITEMS),
         )
-    response.raise_for_status()
-    return response.json()
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = DEFAULT_HH_ACQUISITION_MAX_ITEMS
+    return min(max(value, 1), hh_api.PAGINATION_DEPTH_CAP)
 
 
-def fetch_headhunter_vacancies(query: str, *, per_page: int = 20) -> list[Vacancy]:
+def fetch_headhunter_vacancies(
+    query: str,
+    *,
+    per_page: int = 20,
+    max_items: int | None = None,
+) -> list[Vacancy]:
     fetch_headhunter_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_headhunter_vacancies.last_trace = None  # type: ignore[attr-defined]
-    if not browser_native_available():
-        raise SourceFetchError("Playwright is not installed, so HeadHunter browser-native acquisition is unavailable.")
-    config = _browser_config("headhunter")
-    _ensure_required_browser_profile("headhunter", config)
+    trace: dict[str, Any] = {
+        "found": 0,
+        "pages_fetched": 0,
+        "truncated": False,
+        "detail_failures": 0,
+        "rate_limited": False,
+    }
     try:
-        payload = _browser_worker_payload("headhunter", query, str(per_page))
-        fetch_headhunter_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
-        fetch_headhunter_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
-        return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
-    except BrowserNativeUnavailable as exc:
-        raise SourceFetchError(str(exc)) from exc
+        result = hh_api.collect_search_results(
+            text=query,
+            per_page=min(max(int(per_page), 1), hh_api.MAX_PER_PAGE),
+            max_items=_headhunter_max_items(max_items),
+        )
+    except hh_api.HHRateLimited as exc:
+        trace["rate_limited"] = True
+        fetch_headhunter_vacancies.last_trace = trace  # type: ignore[attr-defined]
+        raise SourceFetchError(f"HeadHunter API rate limited: {exc}") from exc
+    except hh_api.HHError as exc:
+        fetch_headhunter_vacancies.last_trace = trace  # type: ignore[attr-defined]
+        raise SourceFetchError(f"HeadHunter API failed: {exc}") from exc
+
+    trace.update({
+        "found": result.found,
+        "pages_fetched": result.pages_requested,
+        "truncated": result.truncated,
+    })
+    vacancies: list[Vacancy] = []
+    detail_rate_limited = False
+    for item in result.items:
+        title = str(item.get("name") or "")
+        if not title or not _looks_executive(title):
+            continue
+        detail = None
+        vacancy_id = str(item.get("id") or "").strip()
+        detail_fetch_failed = False
+        if vacancy_id:
+            if detail_rate_limited:
+                detail_fetch_failed = True
+                trace["detail_failures"] += 1
+            else:
+                try:
+                    detail = hh_api.fetch_vacancy_detail(vacancy_id)
+                except hh_api.HHRateLimited:
+                    trace["rate_limited"] = True
+                    detail_rate_limited = True
+                    detail_fetch_failed = True
+                    trace["detail_failures"] += 1
+                except hh_api.HHNotFound:
+                    detail_fetch_failed = True
+                    trace["detail_failures"] += 1
+                except Exception:
+                    detail_fetch_failed = True
+                    trace["detail_failures"] += 1
+        if is_hh_advertising_placement(item, detail):
+            trace["advertising_filtered"] = int(trace.get("advertising_filtered") or 0) + 1
+            continue
+        vacancies.append(
+            hh_item_to_vacancy(
+                item,
+                detail,
+                detail_fetch_failed=detail_fetch_failed,
+            )
+        )
+    trace["successful_details"] = sum(bool(vacancy.description) for vacancy in vacancies)
+    fetch_headhunter_vacancies.last_trace = trace  # type: ignore[attr-defined]
+    fetch_headhunter_vacancies.last_health = {
+        "status": "rate_limited" if trace["rate_limited"] else "ok",
+        "acquisition": "api",
+        "pages_fetched": result.pages_requested,
+        "found": result.found,
+        "detail_failures": trace["detail_failures"],
+        "successful_details": trace["successful_details"],
+        "advertising_filtered": trace.get("advertising_filtered", 0),
+    }  # type: ignore[attr-defined]
+    return vacancies
 
 
-def fetch_headhunter_detail_html(url: str) -> str:
-    """One detail-page HTML fetch via the persistent, DDoS-Guard-cleared
-    `hh` browser session -- api.hh.ru/vacancies/<id> returns a wholesale
-    403 from this VPS's IP regardless of headers, so the detail fetcher
-    routes through the browser instead of `requests`. Raises
-    SourceFetchError/BrowserNativeUnavailable on failure; the caller decides
-    what that means for the retry taxonomy."""
-    payload = _browser_worker_payload("fetch", url, "--source", "headhunter")
-    return str(payload.get("html") or "")
+def is_hh_advertising_placement(item: dict[str, Any], detail: dict[str, Any] | None) -> bool:
+    """Return whether HH marked the result as an advertising placement.
+
+    ``HH_ADVERTISING`` is a placement in ``vacancy_properties``, not an open
+    vacancy. It must be removed before the item reaches scoring or storage.
+    """
+    payloads = [item]
+    if isinstance(detail, dict):
+        payloads.append(detail)
+    for payload in payloads:
+        properties = payload.get("vacancy_properties") or []
+        if not isinstance(properties, list):
+            continue
+        for prop in properties:
+            if isinstance(prop, dict) and str(prop.get("id") or prop.get("type") or "").strip().upper() == "HH_ADVERTISING":
+                return True
+            if isinstance(prop, str) and prop.strip().upper() == "HH_ADVERTISING":
+                return True
+    return False
 
 
 def _format_salary(salary: dict | None) -> str | None:
@@ -589,6 +671,65 @@ def _format_salary(salary: dict | None) -> str | None:
     if not any(parts):
         return None
     return " ".join(str(part) for part in parts if part)
+
+
+def hh_item_to_vacancy(
+    item: dict[str, Any],
+    detail: dict[str, Any] | None,
+    *,
+    detail_fetch_failed: bool = False,
+) -> Vacancy:
+    """Map one search item and optional detail payload to the shared model."""
+    detail = detail if isinstance(detail, dict) else {}
+    employer = item.get("employer") if isinstance(item.get("employer"), dict) else {}
+    area = item.get("area") if isinstance(item.get("area"), dict) else {}
+    detail_employer = detail.get("employer") if isinstance(detail.get("employer"), dict) else {}
+    detail_area = detail.get("area") if isinstance(detail.get("area"), dict) else {}
+    vacancy_id = str(item.get("id") or detail.get("id") or "").strip()
+    url = str(item.get("alternate_url") or "").strip()
+    if not url and vacancy_id:
+        url = f"https://hh.ru/vacancy/{vacancy_id}"
+    title = str(item.get("name") or detail.get("name") or "Vacancy").strip() or "Vacancy"
+    company = str(employer.get("name") or detail_employer.get("name") or "Unknown").strip() or "Unknown"
+    location = str(area.get("name") or detail_area.get("name") or "Unknown").strip() or "Unknown"
+    raw_description = detail.get("description")
+    if isinstance(raw_description, str) and raw_description:
+        from .ats_sources import _clean_html_text
+
+        description = _clean_html_text(raw_description)
+    else:
+        description = ""
+    metadata = {
+        "archived": detail.get("archived", item.get("archived")),
+        "closed_for_applicants": detail.get("closed_for_applicants", item.get("closed_for_applicants")),
+        "vacancy_properties": detail.get("vacancy_properties", item.get("vacancy_properties", [])),
+        "professional_roles": detail.get("professional_roles", item.get("professional_roles", [])),
+        "detail_fetch_failed": detail_fetch_failed,
+    }
+    return Vacancy(
+        source="headhunter",
+        source_id=vacancy_id or sha256_text(url)[:16],
+        company=company,
+        title=title,
+        location=location,
+        url=url,
+        description=description,
+        posted_at=str(item.get("published_at") or detail.get("published_at") or "") or None,
+        salary=_format_salary(item.get("salary") if isinstance(item.get("salary"), dict) else detail.get("salary")),
+        company_url=str(employer.get("alternate_url") or detail_employer.get("alternate_url") or "") or None,
+        metadata=metadata,
+    )
+
+
+def hh_item_to_vacancy_filtered(items: list[dict[str, Any]]) -> list[Vacancy]:
+    """Preserve the browser-era ingest gate before detail acquisition."""
+    return [
+        hh_item_to_vacancy(item, None)
+        for item in items
+        if isinstance(item, dict)
+        and _looks_executive(str(item.get("name") or ""))
+        and not is_hh_advertising_placement(item, None)
+    ]
 
 
 ROLE_FAMILIES: list[tuple[str, tuple[str, ...]]] = [

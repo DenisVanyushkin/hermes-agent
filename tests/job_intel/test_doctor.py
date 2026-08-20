@@ -17,7 +17,6 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     (workdir / "job_intel").mkdir()
     scripts_dir.mkdir()
     (browser_profiles / "linkedin").mkdir(parents=True)
-    (browser_profiles / "hh").mkdir(parents=True)
     for name in ["job_intel_daily.sh", "job_intel_alert.sh", "job_intel_enrichment.sh", "job_intel_browser_health.sh"]:
         (scripts_dir / name).write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -37,7 +36,6 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
     monkeypatch.setenv("JOB_INTEL_SCRIPTS_DIR", str(scripts_dir))
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR", str(browser_profiles))
     monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", str(browser_profiles / "linkedin"))
-    monkeypatch.setenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", str(browser_profiles / "hh"))
     monkeypatch.setenv("JOB_INTEL_RUNTIME_USER", "hermes")
     monkeypatch.delenv("JOB_INTEL_SERVICE_USER", raising=False)
     monkeypatch.setenv("JOB_INTEL_EXPECTED_GIT_COMMIT", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
@@ -65,7 +63,6 @@ def test_doctor_reports_runtime_and_source_status(monkeypatch, tmp_path) -> None
                 "playwright_import": {"ok": False, "detail": "missing"},
                 "chromium_launch": {"ok": False, "detail": "missing"},
                 "profile_linkedin": {"ok": True},
-                "profile_hh": {"ok": True},
             },
         },
     )

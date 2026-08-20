@@ -28,7 +28,6 @@ FORBIDDEN_PROBE_ROOTS = (
 GATE_A_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-a")
 SHARED_BROWSER_PROFILES = {
     "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
-    "headhunter": Path("/var/lib/browser-desktop/profiles/hh"),
 }
 
 
@@ -63,18 +62,10 @@ def build_isolated_probe_environment(
     paths = dict(manifest.get("paths") or {})
     isolation = dict(manifest.get("source_isolation") or {})
     linkedin_settings = dict(isolation.get("linkedin") or {})
-    headhunter_settings = dict(isolation.get("headhunter") or {})
     linkedin = Path(
         str(
             linkedin_settings.get("shared_profile_path")
             or linkedin_settings.get("path")
-            or ""
-        )
-    )
-    headhunter = Path(
-        str(
-            headhunter_settings.get("shared_profile_path")
-            or headhunter_settings.get("path")
             or ""
         )
     )
@@ -89,10 +80,7 @@ def build_isolated_probe_environment(
     for name, path in required.items():
         if not _inside(str(path), root):
             raise ValueError(f"isolated environment path outside experiment root: {name}")
-    for family, settings, profile in (
-        ("linkedin", linkedin_settings, linkedin),
-        ("headhunter", headhunter_settings, headhunter),
-    ):
+    for family, settings, profile in (("linkedin", linkedin_settings, linkedin),):
         shared = settings.get("shared_profile_path")
         if not shared:
             if not _inside(str(profile), root):
@@ -113,7 +101,6 @@ def build_isolated_probe_environment(
             "JOB_INTEL_STATE_DIR": str(root),
             "JOB_INTEL_BROWSER_PROFILE_DIR": str(browser_profile),
             "JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN": str(linkedin),
-            "JOB_INTEL_BROWSER_PROFILE_DIR_HH": str(headhunter),
             "JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER": str(
                 browser_profile / "company-career"
             ),
@@ -307,7 +294,7 @@ def run_probe(
         cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
         source = sources.get(query.source_family)
         source_isolation = isolation.get(query.source_family)
-        if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock"}:
+        if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock", "api"}:
             _record_source_state(
                 source_states, query.source_family, "blocked_no_safe_isolation"
             )
@@ -540,6 +527,10 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     for family, settings in dict(manifest.get("source_isolation") or {}).items():
         mode = str(dict(settings).get("mode") or "")
         path = str(dict(settings).get("path") or "")
+        if mode == "api":
+            if family != "headhunter":
+                raise ValueError(f"API source isolation is not supported for: {family}")
+            continue
         if mode not in {"cloned_profile", "exclusive_lock"}:
             raise ValueError(f"invalid source isolation mode: {family}")
         if not _inside(path, root):
@@ -706,12 +697,7 @@ def relocate_experiment_manifest(
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
-        "headhunter": {
-            "backup_path": str(new_root / "browser-profile-backup/headhunter"),
-            "mode": "exclusive_lock",
-            "path": str(new_root / "locks/headhunter-profile.lock"),
-            "shared_profile_path": str(SHARED_BROWSER_PROFILES["headhunter"]),
-        },
+        "headhunter": {"mode": "api"},
         "greenhouse": {
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/greenhouse.lock"),

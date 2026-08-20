@@ -207,13 +207,26 @@ Historical resolution order in the host wrapper:
 
 ## Browser Runtime Dependencies
 
-Historical profile directories:
+Enabled browser profile directories:
 
 - `/var/lib/browser-desktop/profiles/linkedin`
-- `/var/lib/browser-desktop/profiles/hh`
 - `/var/lib/browser-desktop/profiles/company-career`
 
-If scraping fails after deploy, re-verify these before blaming pipeline logic.
+HeadHunter is no longer a browser source. Its detail/search transport uses
+`api.hh.ru` and `JOB_INTEL_HH_TOKEN_CACHE`; browser health checks therefore do
+not include an HH profile or CDP endpoint.
+
+HeadHunter request controls:
+
+- `JOB_INTEL_HEADHUNTER_QUERY_LIMIT` limits configured queries.
+- `JOB_INTEL_HEADHUNTER_PER_PAGE` is only the API page size.
+- `JOB_INTEL_HEADHUNTER_MAX_ITEMS` is the per-query acquisition budget (default
+  `100`, hard cap `2000`).
+- `JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS` overrides pacing for non-HH ATS
+  detail requests. HH detail pacing is owned by `job_intel.hh_api` and uses
+  `JOB_INTEL_HH_DELAY_SECONDS`.
+- Vacancies whose detail request failed or was rate-limited remain stored for
+  auditability but are suppressed from notification until detail is available.
 
 ## Exporter And Grafana Notes
 

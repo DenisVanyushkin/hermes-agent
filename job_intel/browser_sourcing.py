@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import imaplib
 import json
 import os
 import random
@@ -48,7 +47,6 @@ class _WallTimeout:
         return False
 
 
-from email import message_from_bytes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from html import unescape
@@ -66,8 +64,6 @@ from .runtime import resolve_browser_profile_base, sha256_text
 _BROWSER_PROFILE_DEFAULT = resolve_browser_profile_base() / "company-career"
 _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
     "linkedin": resolve_browser_profile_base() / "linkedin",
-    "headhunter": resolve_browser_profile_base() / "hh",
-    "hh": resolve_browser_profile_base() / "hh",
     "company_career": _BROWSER_PROFILE_DEFAULT,
 }
 
@@ -86,7 +82,6 @@ class BrowserAcquisitionConfig:
     noise_probability: float = 0.18
     linkedin_followup_page_probability: float = 0.35
     max_linkedin_pages: int = 2
-    max_headhunter_pages: int = 2
 
 
 @dataclass
@@ -110,8 +105,6 @@ class BrowserSessionHealth:
     session_state: str = "unknown"
     cookie_mismatch: bool = False
     page_unrecognised: bool = False
-    email_challenge_attempted: bool = False
-    email_challenge_resolved: bool = False
     status: str = "healthy"
 
     def snapshot(self) -> dict[str, Any]:
@@ -271,11 +264,7 @@ def resolve_browser_config(source: str | None = None) -> BrowserAcquisitionConfi
     if source_key:
         env_suffix = source_key.upper().replace("-", "_")
         overrides.append(os.getenv(f"JOB_INTEL_BROWSER_PROFILE_DIR_{env_suffix}", "").strip())
-        if source_key == "headhunter":
-            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip())
-        elif source_key == "hh":
-            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip())
-        elif source_key == "linkedin":
+        if source_key == "linkedin":
             overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", "").strip())
     overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR", "").strip())
     default_dir = _BROWSER_PROFILE_DEFAULTS.get(source_key, BrowserAcquisitionConfig().user_data_dir)
@@ -310,7 +299,7 @@ def _browser_profile_is_populated(path: Path) -> bool:
 
 
 def _ensure_required_browser_profile(source: str, config: BrowserAcquisitionConfig) -> None:
-    if source not in {"linkedin", "headhunter", "hh", "company_career"}:
+    if source not in {"linkedin", "company_career"}:
         return
     if not _browser_profile_is_populated(config.user_data_dir):
         raise BrowserNativeUnavailable(
@@ -377,22 +366,10 @@ def _looks_like_linkedin_results_page(url: str, html: str) -> bool:
     )
 
 
-def _looks_like_headhunter_results_page(url: str, html: str) -> bool:
-    lowered_url = url.lower()
-    lowered_html = html.lower()
-    return "hh.ru/search/vacancy" in lowered_url and (
-        'data-qa="serp-item__title"' in lowered_html
-        or 'data-qa="vacancy-serp__vacancy-employer-text"' in lowered_html
-        or 'data-qa="vacancy-serp__vacancy-address"' in lowered_html
-    )
-
-
 def _page_has_source_results(source: str, url: str, html: str) -> bool:
     source_key = (source or "").strip().lower()
     if source_key == "linkedin":
         return _looks_like_linkedin_results_page(url, html)
-    if source_key in {"headhunter", "hh"}:
-        return _looks_like_headhunter_results_page(url, html)
     return False
 
 
@@ -435,8 +412,6 @@ def _company_from_url(url: str) -> str:
         return _normalize_whitespace(brand.replace("-", " ").replace("_", " ").title()) or "Unknown"
     if ("greenhouse.io" in host or "boards.greenhouse.io" in host or "lever.co" in host or "ashbyhq.com" in host) and path_parts:
         return _normalize_whitespace(path_parts[0].replace("-", " ").replace("_", " ").title())
-    if "hh.ru" in host:
-        return "HeadHunter"
     if path_parts and path_parts[0] not in {"jobs", "vacancy", "careers", "roles", "positions", "openings"}:
         return _normalize_whitespace(path_parts[0].replace("-", " ").replace("_", " ").title())
     return _normalize_whitespace(host.replace("www.", "").split(":")[0].split(".")[0].title()) or "Unknown"
@@ -664,35 +639,6 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vaca
     return _dedupe_vacancies(vacancies)
 
 
-def _headhunter_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
-    vacancies: list[Vacancy] = []
-    title_pattern = re.compile(
-        r'<a[^>]+data-qa="serp-item__title"[^>]+href="(?P<href>(?:https://hh\.ru)?/vacancy/[^"]+)"[^>]*>.*?<span[^>]+data-qa="serp-item__title-text"[^>]*>(?P<title>.*?)</span>.*?</a>',
-        flags=re.S,
-    )
-    for match in title_pattern.finditer(html):
-        title = _clean_html_text(match.group("title"))
-        if not title or not _looks_executive(title):
-            continue
-        tail = html[match.end():match.end() + 4000]
-        company_match = re.search(r'data-qa="vacancy-serp__vacancy-employer-text"[^>]*>(?P<company>.*?)</span>', tail, flags=re.S)
-        location_match = re.search(r'data-qa="vacancy-serp__vacancy-address"[^>]*>(?P<location>.*?)</span>', tail, flags=re.S)
-        company = _clean_html_text(company_match.group("company")) if company_match else _company_from_url(match.group("href"))
-        location = _normalize_location_text(location_match.group("location")) if location_match else "Unknown"
-        absolute = urljoin(page_url, match.group("href"))
-        vacancies.append(Vacancy(
-            source="headhunter",
-            source_id=_vacancy_source_id("headhunter", absolute, title),
-            company=company or "Unknown",
-            title=title,
-            location=location or "Unknown",
-            url=absolute,
-            description=title,
-            metadata={"source_url": page_url, "href": match.group("href")},
-        ))
-    return _dedupe_vacancies(vacancies)
-
-
 def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_override: str | None = None) -> list[Vacancy]:
     parser = _LinkCapture()
     parser.feed(html)
@@ -707,7 +653,7 @@ def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_
             if "linkedin.com/jobs/view/" not in normalized:
                 continue
         elif not (
-            any(domain in normalized for domain in ("hh.ru/vacancy", "greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "teamtailor.com", "personio", "recruitee"))
+            any(domain in normalized for domain in ("greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "teamtailor.com", "personio", "recruitee"))
             or any(token in path_tokens for token in {"careers", "jobs", "vacancy", "vacancies", "positions", "openings", "roles", "job"})
             or any(token in page_host for token in ("careers", "jobs", "vacancies", "openings"))
         ):
@@ -769,13 +715,6 @@ def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Va
     return merged
 
 
-def extract_headhunter_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
-    card_vacancies = _headhunter_card_vacancies_from_html(html, page_url=page_url)
-    structured = [_vacancy_from_jobposting(jobposting, source="headhunter", page_url=page_url) for jobposting in _jobposting_objects(html)]
-    fallback = _link_vacancies_from_html(html, source="headhunter", page_url=page_url) if not card_vacancies and not structured else []
-    return _merge_vacancy_lists(card_vacancies or structured, structured + fallback)
-
-
 def extract_company_career_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
     structured = [_vacancy_from_jobposting(jobposting, source="company_career", page_url=page_url) for jobposting in _jobposting_objects(html)]
     link_vacancies = _link_vacancies_from_html(html, source="company_career", page_url=page_url)
@@ -811,7 +750,7 @@ class BrowserSourceClient:
         from playwright.sync_api import sync_playwright  # type: ignore
 
         profile_name = self.config.source_name.strip().lower().replace("-", "_")
-        if profile_name in {"linkedin", "headhunter", "hh", "company_career"}:
+        if profile_name in {"linkedin", "company_career"}:
             _ensure_required_browser_profile(profile_name, self.config)
 
         cdp_url = os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip()
@@ -1036,124 +975,6 @@ class BrowserSourceClient:
             raise BrowserNativeUnavailable(f"{source} authenticated feed/profile markers were not visible at {url}")
         self._health.last_successful_authenticated_request = url
 
-    @staticmethod
-    def _extract_message_text(message: Any) -> str:
-        parts: list[str] = []
-        if getattr(message, "is_multipart", lambda: False)():
-            for part in message.walk():
-                if part.get_content_maintype() != "text":
-                    continue
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="ignore"))
-                except Exception:
-                    continue
-        else:
-            try:
-                payload = message.get_payload(decode=True)
-                if payload:
-                    parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="ignore"))
-            except Exception:
-                body = message.get_payload()
-                if isinstance(body, str):
-                    parts.append(body)
-        try:
-            subject = message.get("Subject") or ""
-        except Exception:
-            subject = ""
-        if subject:
-            parts.append(str(subject))
-        return "\n".join(parts)
-
-    def _read_headhunter_otp_from_gmail(self) -> str | None:
-        gmail_account = os.getenv("JOB_INTEL_GMAIL_ADDRESS", "").strip() or os.getenv("JOB_INTEL_GMAIL_USERNAME", "").strip()
-        gmail_password = os.getenv("JOB_INTEL_GMAIL_APP_PASSWORD", "").strip() or os.getenv("JOB_INTEL_GMAIL_PASSWORD", "").strip()
-        if not gmail_account or not gmail_password:
-            return None
-        host = os.getenv("JOB_INTEL_GMAIL_IMAP_HOST", "imap.gmail.com").strip()
-        port = int(os.getenv("JOB_INTEL_GMAIL_IMAP_PORT", "993"))
-        sender_hint = os.getenv("JOB_INTEL_HH_OTP_FROM", "hh.ru").strip() or "hh.ru"
-        subject_hint = os.getenv("JOB_INTEL_HH_OTP_SUBJECT_HINT", "code").strip() or "code"
-        try:
-            with imaplib.IMAP4_SSL(host, port) as client:
-                client.login(gmail_account, gmail_password)
-                client.select("INBOX")
-                status, data = client.search(None, f'(FROM "{sender_hint}" SUBJECT "{subject_hint}")')
-                if status != "OK":
-                    status, data = client.search(None, 'ALL')
-                ids = [item for item in (data[0].split() if data and data[0] else []) if item]
-                for message_id in reversed(ids[-10:]):
-                    fetch_status, payload = client.fetch(message_id, "(RFC822)")
-                    if fetch_status != "OK" or not payload or not payload[0]:
-                        continue
-                    raw_bytes = payload[0][1]
-                    if not raw_bytes:
-                        continue
-                    message = message_from_bytes(raw_bytes)
-                    body = self._extract_message_text(message)
-                    match = re.search(r"\b(\d{4,8})\b", body)
-                    if match:
-                        return match.group(1)
-        except Exception:
-            return None
-        return None
-
-    def _attempt_headhunter_otp_recovery(self, login_url: str) -> bool:
-        if self._context is None:
-            raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
-        self._health.email_challenge_attempted = True
-        page = self._context.new_page()
-        try:
-            page.goto(login_url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
-            page.wait_for_timeout(self.config.scroll_pause_ms)
-            login_email = os.getenv("JOB_INTEL_HH_LOGIN_EMAIL", "").strip() or os.getenv("JOB_INTEL_GMAIL_ADDRESS", "").strip()
-            if login_email:
-                for selector in (
-                    "input[type='email']",
-                    "input[name*='email']",
-                    "input[name='login']",
-                    "input[name*='login']",
-                ):
-                    locator = page.locator(selector)
-                    if locator.count():
-                        locator.first.fill(login_email)
-                        break
-            otp_code = self._read_headhunter_otp_from_gmail()
-            if not otp_code:
-                return False
-            for selector in (
-                "input[name*='code']",
-                "input[name*='otp']",
-                "input[type='tel']",
-                "input[inputmode='numeric']",
-                "input[autocomplete='one-time-code']",
-            ):
-                locator = page.locator(selector)
-                if locator.count():
-                    locator.first.fill(otp_code)
-                    break
-            for selector in (
-                "button:has-text('Verify')",
-                "button:has-text('Continue')",
-                "button:has-text('Submit')",
-                "button:has-text('Sign in')",
-                "button[type='submit']",
-            ):
-                locator = page.locator(selector)
-                if locator.count():
-                    locator.first.click()
-                    break
-            else:
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(self.config.scroll_pause_ms)
-            self._health.email_challenge_resolved = True
-            return True
-        except Exception:
-            return False
-        finally:
-            page.close()
-
     def _validate_linkedin_auth(self) -> None:
         from job_intel.linkedin_session import (
             SESSION_MISSING,
@@ -1213,34 +1034,6 @@ class BrowserSourceClient:
             f"linkedin authentication validation: {verdict.state} at {url}"
         )
 
-    def _validate_headhunter_auth(self) -> None:
-        search_url = "https://hh.ru/search/vacancy?text=Head+of+Product"
-        self._health.auth_attempted = True
-        required_markers = (
-            "hh.ru/search/vacancy",
-            "vacancy_search",
-            "vacancy search",
-            "поиск вакансий",
-            "найдено",
-            "resume",
-            "резюме",
-        )
-        search_html = self.fetch_html(search_url, scrolls=0)
-        has_results_markers = self._page_contains_any(search_html, required_markers) or _looks_like_headhunter_results_page(search_url, search_html)
-        if not has_results_markers and (_looks_like_login_wall(search_url, search_html) or _looks_like_auth_redirect(search_url, search_html)):
-            self._write_attach_diagnostics(label="headhunter-auth-search-otp-recovery-attempt", extra={"requested_url": search_url})
-            if self._attempt_headhunter_otp_recovery("https://hh.ru/account/login?backurl=https%3A%2F%2Fhh.ru%2Fsearch%2Fvacancy"):
-                search_html = self.fetch_html(search_url, scrolls=0)
-        elif has_results_markers:
-            self._write_attach_diagnostics(label="headhunter-auth-search-results-detected", extra={"requested_url": search_url})
-        self._validate_authenticated_html(
-            source="headhunter",
-            url=search_url,
-            html=search_html,
-            required_markers=required_markers,
-            login_markers=("sign in", "log in", "authorize", "verification code"),
-        )
-
     def session_health_snapshot(self) -> dict[str, Any]:
         return self._health.snapshot()
 
@@ -1260,48 +1053,6 @@ class BrowserSourceClient:
                     label=f"{label}-page-{idx}",
                     extra={"browser_state": snapshot, "page_index": idx},
                 )
-
-    def _reuse_or_prepare_headhunter_page(self, *, requested_url: str, label: str) -> Any | None:
-        if self._context is None:
-            return None
-        pages = list(getattr(self._context, "pages", []) or [])
-        if not pages:
-            return None
-        keep = None
-        closed = 0
-        page_urls: list[str] = []
-        for page in pages:
-            url = ""
-            with suppress(Exception):
-                url = getattr(page, "url", "") or ""
-            page_urls.append(url)
-            normalized = url.lower()
-            should_keep = (
-                normalized.startswith("https://hh.ru/search/vacancy")
-                or normalized == "https://hh.ru/"
-                or normalized == "about:blank"
-            )
-            if keep is None and should_keep:
-                keep = page
-                continue
-            with suppress(Exception):
-                page.close()
-                closed += 1
-        if keep is None:
-            return None
-        with suppress(Exception):
-            keep.bring_to_front()
-        self._write_attach_diagnostics(
-            label=f"{label}-reuse-page",
-            extra={
-                "requested_url": requested_url,
-                "closed_pages": closed,
-                "remaining_url": getattr(keep, "url", ""),
-                "seen_urls": page_urls[:15],
-            },
-        )
-        return keep
-
 
     def _reuse_or_prepare_linkedin_page(self, *, requested_url: str, label: str) -> Any | None:
         if self._context is None:
@@ -1356,10 +1107,7 @@ class BrowserSourceClient:
             page = None
             reuse_existing = False
             try:
-                if source_key in {"headhunter", "hh"}:
-                    page = self._reuse_or_prepare_headhunter_page(requested_url=url, label=fetch_label)
-                    reuse_existing = page is not None
-                elif source_key == "linkedin":
+                if source_key == "linkedin":
                     # For LinkedIn search pages we prefer a fresh tab. Reusing the feed tab sometimes
                     # yields Page.goto net::ERR_ABORTED / frame-detached.
                     if fetch_label.startswith("linkedin-search"):
@@ -1421,32 +1169,6 @@ class BrowserSourceClient:
                 page=page_obj,
                 html=html_obj,
             )
-            should_retry = (
-                source_key in {"headhunter", "hh"}
-                and ("Target page, context or browser has been closed" in str(exc) or "BrowserContext.new_page" in str(exc))
-            )
-            if should_retry:
-                self._write_browser_failure_diagnostics(
-                    label=f"{fetch_label}-retry-context-close",
-                    requested_url=url,
-                    error=str(exc),
-                    page=page_obj,
-                    html=html_obj,
-                )
-                try:
-                    if self._browser is not None and self._cdp_attached:
-                        with suppress(Exception):
-                            self._browser.close()
-                    if self._playwright is not None:
-                        with suppress(Exception):
-                            self._playwright.stop()
-                finally:
-                    self._browser = None
-                    self._context = None
-                    self._playwright = None
-                    self._cdp_attached = False
-                    self._cdp_url = ""
-                raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
             raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
         finally:
             self._last_fetch_seconds = max(0.0, time.perf_counter() - start)
@@ -1455,10 +1177,7 @@ class BrowserSourceClient:
         source_key = (source or self.config.source_name or "").strip().lower()
         min_delay = self.config.min_delay_ms
         max_delay = self.config.max_delay_ms
-        if source_key in {"headhunter", "hh"}:
-            min_delay += 250
-            max_delay += 1200
-        elif source_key == "linkedin":
+        if source_key == "linkedin":
             min_delay += 200
             max_delay += 900
         if extra_bias_ms:
@@ -1471,16 +1190,6 @@ class BrowserSourceClient:
         source_key = (self.config.source_name or "").strip().lower()
         lowered_url = url.lower()
         try:
-            if source_key in {"headhunter", "hh"} and "hh.ru" in lowered_url:
-                if random.random() < 0.65:
-                    page.wait_for_timeout(random.randint(450, 1800))
-                if random.random() < 0.45:
-                    page.mouse.wheel(0, random.randint(180, 900))
-                    page.wait_for_timeout(random.randint(250, 900))
-                if random.random() < 0.18:
-                    page.mouse.wheel(0, -random.randint(120, 420))
-                    page.wait_for_timeout(random.randint(150, 700))
-                return
             if source_key == "linkedin" and "linkedin.com/jobs" in lowered_url:
                 if random.random() < 0.75:
                     page.wait_for_timeout(random.randint(700, 2400))
@@ -1517,15 +1226,11 @@ class BrowserSourceClient:
             normalized = absolute.lower()
             if source == "linkedin" and "linkedin.com/jobs/view" in normalized:
                 candidates.append(absolute)
-            elif source == "headhunter" and "hh.ru/vacancy" in normalized:
-                candidates.append(absolute)
             elif source == "company_career" and any(domain in normalized for domain in ("greenhouse.io", "lever.co", "ashbyhq.com", "careers", "jobs", "vacancy", "openings")):
                 candidates.append(absolute)
         return list(dict.fromkeys(candidates))
 
     def _maybe_open_noise_page(self, *, page_url: str, html: str, source: str) -> list[Vacancy]:
-        if source == "headhunter":
-            return []
         if random.random() > self.config.noise_probability:
             return []
         candidates = self._detail_candidates(html, page_url=page_url, source=source)
@@ -1535,15 +1240,12 @@ class BrowserSourceClient:
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
-            "headhunter": extract_headhunter_vacancies_from_html,
             "company_career": extract_company_career_vacancies_from_html,
         }[source](detail_html, page_url=detail_url)
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
 
     def _maybe_open_detail_vacancy(self, *, source: str, vacancies: list[Vacancy]) -> list[Vacancy]:
-        if source == "headhunter":
-            return []
         if not vacancies or random.random() > max(0.25, self.config.noise_probability):
             return []
         candidates = [vacancy for vacancy in vacancies if vacancy.url]
@@ -1554,7 +1256,6 @@ class BrowserSourceClient:
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
-            "headhunter": extract_headhunter_vacancies_from_html,
         }.get(source, extract_company_career_vacancies_from_html)(detail_html, page_url=detail_url)
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
@@ -1563,15 +1264,6 @@ class BrowserSourceClient:
         allowed_pages = max(1, min(max_pages, self.config.max_linkedin_pages))
         plan = [0]
         if allowed_pages > 1 and random.random() < self.config.linkedin_followup_page_probability:
-            followups = list(range(1, allowed_pages))
-            random.shuffle(followups)
-            plan.extend(followups[:1])
-        return plan
-
-    def _headhunter_page_plan(self, max_pages: int) -> list[int]:
-        allowed_pages = max(1, min(max_pages, self.config.max_headhunter_pages))
-        plan = [0]
-        if allowed_pages > 1 and random.random() < 0.25:
             followups = list(range(1, allowed_pages))
             random.shuffle(followups)
             plan.extend(followups[:1])
@@ -1623,75 +1315,6 @@ class BrowserSourceClient:
             noise_rows = self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
             vacancies.extend(noise_rows)
             trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-        started = time.perf_counter()
-        deduped = _dedupe_vacancies(vacancies)
-        trace["filter_ms"] = int(round((time.perf_counter() - started) * 1000))
-        started = time.perf_counter()
-        snapshot = self.session_health_snapshot()
-        trace["session_health_ms"] = int(round((time.perf_counter() - started) * 1000))
-        trace["pages_fetched"] = int(snapshot.get("pages_fetched") or 0)
-        trace["detail_pages_opened"] = int(snapshot.get("detail_pages_opened") or 0)
-        trace["login_wall_hits"] = int(snapshot.get("login_walls") or 0)
-        trace["auth_redirects"] = int(snapshot.get("auth_redirects") or 0)
-        trace["anti_bot_events"] = int(snapshot.get("anti_bot_events") or 0)
-        if deduped:
-            trace["zero_result_reason"] = ""
-        elif trace["login_wall_hits"]:
-            trace["zero_result_reason"] = "login_wall"
-        elif trace["auth_redirects"]:
-            trace["zero_result_reason"] = "auth_redirect"
-        elif trace["pages_fetched"] > 0:
-            trace["zero_result_reason"] = "search_returned_no_actionable_results"
-        else:
-            trace["zero_result_reason"] = "no_pages_fetched"
-        trace["normalize_ms"] = 0
-        trace["planned_search_pages"] = len(page_plan)
-        self._last_search_trace = trace
-        return deduped
-
-    def search_headhunter(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
-        url = f"https://hh.ru/search/vacancy?text={quote_plus(query)}"
-        vacancies: list[Vacancy] = []
-        self._health.source = "headhunter"
-        trace: dict[str, Any] = {
-            "browser_start_ms": 0,
-            "search_pages_ms": 0,
-            "detail_pages_ms": 0,
-            "extract_ms": 0,
-            "normalize_ms": 0,
-            "filter_ms": 0,
-            "session_health_ms": 0,
-            "login_wall_check_ms": 0,
-            "pages_fetched": 0,
-            "detail_pages_opened": 0,
-            "vacancies_extracted": 0,
-            "login_wall_hits": 0,
-            "auth_redirects": 0,
-            "anti_bot_events": 0,
-            "zero_result_reason": "",
-        }
-        started = time.perf_counter()
-        self._validate_headhunter_auth()
-        trace["login_wall_check_ms"] = int(round((time.perf_counter() - started) * 1000))
-        page_plan = self._headhunter_page_plan(max_pages)
-        for page_index in page_plan:
-            self._sleep(source="headhunter", extra_bias_ms=(300, 1600))
-            page_url = f"{url}&page={page_index}" if page_index else url
-            started = time.perf_counter()
-            html = self.fetch_html(page_url)
-            trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-            started = time.perf_counter()
-            page_vacancies = extract_headhunter_vacancies_from_html(html, page_url=page_url)
-            trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
-            self._observe_page(page_url, html, len(page_vacancies))
-            trace["vacancies_extracted"] += len(page_vacancies)
-            vacancies.extend(page_vacancies)
-            started = time.perf_counter()
-            detail_rows = self._maybe_open_detail_vacancy(source="headhunter", vacancies=page_vacancies)
-            vacancies.extend(detail_rows)
-            trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-            if self._health.login_walls or self._health.auth_redirects:
-                break
         started = time.perf_counter()
         deduped = _dedupe_vacancies(vacancies)
         trace["filter_ms"] = int(round((time.perf_counter() - started) * 1000))

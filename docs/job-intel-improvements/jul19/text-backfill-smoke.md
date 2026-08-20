@@ -39,21 +39,19 @@ Persisted state after the runs:
 
 `filled >= 1` — the plan's acceptance condition for this step — is met with 36.
 
-## Finding: `api.hh.ru` returns 403, so headhunter recovers nothing
+## Historical finding superseded: anonymous HH API requests returned 403
 
-`fetch_headhunter_detail` correctly derives `https://api.hh.ru/vacancies/<id>`, but
-that endpoint answers:
+This smoke report predates the official application-token migration. The
+anonymous `403` was an authentication-policy response, not a DDoS-Guard IP
+block: the same VPS could read public reference endpoints, and authenticated
+`GET /vacancies/{id}` succeeded. The old browser workaround therefore carried
+cookies for an auth problem rather than bypassing an IP restriction.
 
-    HTTP 403  {"errors":[{"type":"forbidden"}],"request_id":"..."}
-
-hh.ru requires its own `HH-User-Agent` header; `_http_get` sends only the generic
-UA. Every headhunter row therefore lands in `failed`.
-
-**This is the taxonomy working as designed, not a second bug.** Before the final
-review's M3 fix, a 403 would have been recorded as `unavailable`, which
-`rows_needing_text` excludes permanently — 214 headhunter rows would have been
-retired for ever by a missing header. They are instead retryable, and a
-one-line header fix recovers all of them. Tracked as a follow-up.
+Current HeadHunter acquisition uses `job_intel.hh_api`, a cached application
+token, the exact `hermes-job-intel/1.0 (denis@vanyushk.in)` User-Agent, bounded
+429 retry/backoff, and explicit transient/permanent detail signals. The counts
+below remain a historical snapshot of the pre-migration backfill and must not
+be used as current API health evidence.
 
 ## Finding: the backlog is recoverable, but the named exemplar is not
 
@@ -96,7 +94,7 @@ attached: the rows that would move the gated metric are exactly the ones the
 nightly sweep will not reach except by accident.
 
 A targeted fill of the 33 eligible shown rows (30 attempted after the title
-blocklist, 17 filled, 13 failed on the hh 403) moved it: title-only among shown
+blocklist, 17 filled, 13 failed on the pre-migration hh 403) moved it: title-only among shown
 roles 29.2% -> 15.0%, `why_attractive` 20.0% -> 22.5%. Conversion is about 18% —
 17 rows of new text produced 3 new `why_attractive`.
 

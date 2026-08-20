@@ -36,7 +36,9 @@ All four are configured to deliver to the Slack thread plus `C0B42K4H4KV`.
 The host-side wrappers are cwd-independent:
 - `JOB_INTEL_WORKDIR` defaults to the repository checkout root discovered from the wrapper location / git top-level
 - `JOB_INTEL_PYTHON` defaults to `$JOB_INTEL_WORKDIR/venv/bin/python`
-- `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN` and `JOB_INTEL_BROWSER_PROFILE_DIR_HH` point at the persistent browser profiles used for LinkedIn and HeadHunter acquisition
+- `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN` points at the persistent LinkedIn browser profile; HeadHunter uses `JOB_INTEL_HH_TOKEN_CACHE` and the official API
+- `JOB_INTEL_HEADHUNTER_QUERY_LIMIT` limits configured queries; `JOB_INTEL_HEADHUNTER_PER_PAGE` controls page size only; `JOB_INTEL_HEADHUNTER_MAX_ITEMS` bounds acquisition per query (default `100`, hard cap `2000`)
+- `JOB_INTEL_HH_DELAY_SECONDS` paces HeadHunter search and detail requests; `JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS` applies only to non-HH ATS detail requests
 - each wrapper `cd`s into the workdir before invoking `python -m job_intel ...`
 
 The shell wrappers are cwd-independent:

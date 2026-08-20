@@ -187,10 +187,7 @@ def test_manifest_relocation_repins_all_runtime_paths(tmp_path: Path) -> None:
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
         "headhunter": {
-            "backup_path": str(new_root / "browser-profile-backup/headhunter"),
-            "mode": "exclusive_lock",
-            "path": str(new_root / "locks/headhunter-profile.lock"),
-            "shared_profile_path": "/var/lib/browser-desktop/profiles/hh",
+            "mode": "api",
         },
         "greenhouse": {
             "mode": "exclusive_lock",

@@ -31,13 +31,6 @@ _CDP_TARGETS = {
         "allowed_prefixes": ("https://www.linkedin.com/", "chrome://newtab/", "about:blank"),
         "max_page_targets": 8,
     },
-    "headhunter": {
-        "profile": "hh",
-        "start_url": "https://hh.ru/",
-        "cdp_url": "http://127.0.0.1:9223",
-        "allowed_prefixes": ("https://hh.ru/", "chrome://newtab/", "about:blank"),
-        "max_page_targets": 3,
-    },
 }
 
 
@@ -109,8 +102,6 @@ def _page_cleanup_key(source: str, url: str) -> str:
         return "empty"
     if url == "about:blank":
         return "about:blank"
-    if source == "headhunter" and url.startswith("https://hh.ru/search/vacancy"):
-        return "hh-search"
     if source == "linkedin" and url.startswith("https://www.linkedin.com/"):
         return "linkedin-main"
     return url
@@ -374,14 +365,6 @@ def _run_linkedin(query: str, *, max_pages: int) -> tuple[list[Vacancy], dict[st
     return _with_browser_source("linkedin", _run)
 
 
-def _run_headhunter(query: str, *, per_page: int) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
-    max_pages = max(1, (per_page + 24) // 25)
-    def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
-        vacancies = client.search_headhunter(query, max_pages=max_pages)[:per_page]
-        return vacancies, client.session_health_snapshot()
-    return _with_browser_source("headhunter", _run)
-
-
 def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
         if os.getenv("JOB_INTEL_BROWSER_CAPTURE_EXISTING_PAGES", "").strip():
@@ -391,24 +374,8 @@ def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
 
 
 def _fetch_page(url: str, *, source: str) -> str:
-    """Render one page and return its HTML.
-
-    headhunter has a persistent, CDP-attached Chrome session (the `hh`
-    profile) that has already solved DDoS-Guard's challenge -- the same one
-    _run_headhunter uses for listing search. Routing through
-    _with_browser_source attaches to that session instead of local-launching
-    a fresh, cookie-less Chromium the sandboxed user can't even reach the
-    binary for. Other sources (company_career) have no such session and keep
-    the original local-launch behaviour.
-    """
+    """Render one page and return its HTML for browser-backed sources."""
     _prepare_browser_runtime_env()
-    source_key = source.strip().lower().replace("-", "_")
-    if source_key in {"headhunter", "hh"}:
-        def _run(client: BrowserSourceClient) -> tuple[str, dict[str, Any]]:
-            return client.fetch_html(url), client.session_health_snapshot()
-
-        html, _session_health, _search_trace = _with_browser_source("headhunter", _run)
-        return html
     config = resolve_browser_config(source)
     with BrowserSourceClient(config) as client:
         return client.fetch_html(url)
@@ -422,12 +389,8 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("query")
     linkedin.add_argument("max_pages", type=int)
 
-    hh = sub.add_parser("headhunter")
-    hh.add_argument("query")
-    hh.add_argument("per_page", type=int)
-
     probe = sub.add_parser("probe")
-    probe.add_argument("source", choices=("linkedin", "headhunter"))
+    probe.add_argument("source", choices=("linkedin",))
 
     fetch = sub.add_parser("fetch")
     fetch.add_argument("url")
@@ -446,8 +409,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "linkedin":
             vacancies, session_health, search_trace = _run_linkedin(args.query, max_pages=args.max_pages)
-        elif args.cmd == "headhunter":
-            vacancies, session_health, search_trace = _run_headhunter(args.query, per_page=args.per_page)
         else:
             vacancies, session_health, search_trace = _probe(args.source)
     except Exception as exc:

@@ -119,10 +119,10 @@ Examples:
 - Canonical deployed DB path is historically `/var/lib/job-intel/state/job_intel.sqlite3`.
 - Older DB files under `/home/hermes/.hermes/...` should be treated as split-brain risk until re-verified.
 - Host env file is `/etc/job-intel/job-intel.env`.
-- Browser profile directories historically involved:
+- Browser profile directories still involved:
   - `/var/lib/browser-desktop/profiles/linkedin`
-  - `/var/lib/browser-desktop/profiles/hh`
   - `/var/lib/browser-desktop/profiles/company-career`
+- HeadHunter uses the official API token cache, not a browser profile.
 
 ## Noisy Timer Handling
 

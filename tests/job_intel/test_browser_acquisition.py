@@ -13,7 +13,6 @@ from job_intel.browser_sourcing import (
     BrowserSourceClient,
     browser_native_available,
     extract_company_career_vacancies_from_html,
-    extract_headhunter_vacancies_from_html,
     extract_linkedin_vacancies_from_html,
     metrics_from_counts,
     resolve_browser_config,
@@ -53,39 +52,6 @@ def test_extract_linkedin_vacancies_from_html_uses_jobposting_data() -> None:
     assert vacancy.location == "Dubai, AE"
     assert vacancy.url == "https://www.linkedin.com/jobs/view/123"
     assert "monetization" in vacancy.description.lower()
-
-
-def test_extract_headhunter_vacancies_from_html_supports_exec_roles_without_tokens() -> None:
-    html = """
-    <html>
-      <head>
-        <script type="application/ld+json">
-        {
-          "@context": "https://schema.org",
-          "@type": "JobPosting",
-          "title": "Head of Product",
-          "description": "Own monetization and product strategy",
-          "hiringOrganization": {"name": "Fintech Group"},
-          "jobLocation": {"address": {"addressLocality": "Almaty", "addressCountry": "KZ"}},
-          "url": "https://hh.ru/vacancy/456"
-        }
-        </script>
-      </head>
-      <body>
-        <a href="/vacancy/456">Head of Product</a>
-      </body>
-    </html>
-    """
-
-    vacancies = extract_headhunter_vacancies_from_html(html, page_url="https://hh.ru/search/vacancy")
-
-    assert len(vacancies) == 1
-    vacancy = vacancies[0]
-    assert vacancy.source == "headhunter"
-    assert vacancy.company == "Fintech Group"
-    assert vacancy.title == "Head of Product"
-    assert vacancy.location == "Almaty, KZ"
-    assert vacancy.url == "https://hh.ru/vacancy/456"
 
 
 def test_extract_company_career_vacancies_from_html_parses_common_ats_links() -> None:
@@ -175,13 +141,9 @@ def test_metrics_from_counts_calculates_quality_ratios() -> None:
 def test_resolve_browser_config_uses_source_specific_defaults(monkeypatch) -> None:
     monkeypatch.delenv("JOB_INTEL_BROWSER_PROFILE_DIR", raising=False)
     monkeypatch.delenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", raising=False)
-    monkeypatch.delenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", raising=False)
 
     linkedin_config = resolve_browser_config("linkedin")
-    hh_config = resolve_browser_config("headhunter")
-
     assert linkedin_config.user_data_dir.as_posix() == "/var/lib/browser-desktop/profiles/linkedin"
-    assert hh_config.user_data_dir.as_posix() == "/var/lib/browser-desktop/profiles/hh"
 
 
 def test_resolve_browser_config_respects_env_overrides(monkeypatch) -> None:

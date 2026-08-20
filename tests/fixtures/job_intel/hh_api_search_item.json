@@ -1,0 +1,29 @@
+{
+  "id": "123456",
+  "name": "Head of Product",
+  "url": "https://api.hh.ru/vacancies/123456",
+  "alternate_url": "https://hh.ru/vacancy/123456",
+  "employer": {
+    "id": "7",
+    "name": "Acme Payments",
+    "alternate_url": "https://hh.ru/employer/7"
+  },
+  "area": {
+    "id": "160",
+    "name": "Алматы",
+    "url": "https://api.hh.ru/areas/160"
+  },
+  "salary": {
+    "from": 100000,
+    "to": 200000,
+    "currency": "KZT",
+    "gross": false
+  },
+  "published_at": "2026-08-20T08:00:00+0500",
+  "archived": false,
+  "closed_for_applicants": false,
+  "vacancy_properties": [],
+  "professional_roles": [
+    {"id": "73", "name": "Менеджер продукта"}
+  ]
+}

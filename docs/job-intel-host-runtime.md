@@ -19,9 +19,9 @@ The repo includes deployable host artifacts under `deploy/`:
 - State dir: `/var/lib/job-intel/state`
 - Browser profiles:
   - LinkedIn: `/var/lib/browser-desktop/profiles/linkedin`
-  - HeadHunter: `/var/lib/browser-desktop/profiles/hh`
   - Company career: `/var/lib/browser-desktop/profiles/company-career` (optional; created by the installer and required only when browser-native company crawling is enabled)
   - Base: `/var/lib/browser-desktop/profiles`
+- HeadHunter API token cache: `/var/lib/job-intel/state/hh_app_token.json` (`0600`)
 - Browser runtime: `/var/lib/browser-desktop`
 - Env file: `/etc/job-intel/job-intel.env`
 - Host wrapper: `<repo-root>/scripts/job_intel_host_wrapper.sh`
@@ -34,7 +34,8 @@ Every job-intel command must fail loudly unless:
 - `JOB_INTEL_WORKDIR` exists and points at the canonical checkout
 - `JOB_INTEL_DB_PATH` is writable
 - `JOB_INTEL_STATE_DIR` is writable
-- the LinkedIn / HH browser profile directories exist
+- the LinkedIn browser profile directory exists
+- the HeadHunter API token cache/configuration is readable by the service user
 - job-intel imports resolve from `JOB_INTEL_WORKDIR`
 - the runtime git HEAD matches `JOB_INTEL_EXPECTED_GIT_COMMIT`
 

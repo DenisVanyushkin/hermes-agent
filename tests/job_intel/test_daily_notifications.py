@@ -58,8 +58,8 @@ def test_run_daily_emits_per_source_notifications(monkeypatch, tmp_path) -> None
             "status": "ok",
             "hits": 1,
             "errors": [],
-            "acquisition": "browser-native-first",
-            "session_health": {"browser_profile": "/var/lib/browser-desktop/profiles/hh", "pages_fetched": 1, "login_walls": 0, "auth_redirects": 0},
+            "acquisition": "api",
+            "session_health": {"pages_fetched": 1, "found": 1, "detail_failures": 0, "status": "ok"},
         },
         "linkedin": {
             "source": "linkedin",
