@@ -189,3 +189,9 @@ provider failures/cost/latency, delivery and urgency eligibility, and complete
 the high-risk plus deterministic-random human audit. Until then every result
 field in `benchmark-summary.json` remains explicitly `not_run` or
 `not_computable`, never a fabricated zero.
+
+## V3 benchmark policy replacement scope
+
+The additive v3 at-most-once benchmark policy governs only future Gate B
+execution. It neither rewrites nor authorizes historical packages, journals,
+or results. This preparation remains non-live: `record_run_authorized=false`.
