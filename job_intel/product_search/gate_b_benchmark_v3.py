@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import ctypes
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 import errno
@@ -15,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import stat
+from types import MappingProxyType
 from typing import Any, Literal, Self
 
 import yaml
@@ -1998,3 +2000,1095 @@ def apply_owner_recovery_v3(
             )
         else:
             raise GateBLedgerErrorV3("recovery_transition_not_allowed")
+
+
+# The package boundary below is deliberately additive.  It does not call the
+# historical dry-run builder and it does not invoke the v3 projector: the
+# projector still owns launch-time semantic recomputation, while this stage
+# binds its immutable, content-addressed source and independent-review inputs.
+_GATE_A_RUN_ID_V3 = "gate-a-20260816T141344Z"
+_GATE_A_COMMIT_V3 = "65d60daae16093a9a7e34a11a159e2f789dd14dd"
+_GATE_A_MANIFEST_SHA256_V3 = (
+    "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d"
+)
+_GATE_B_CORPUS_SHA256_V3 = (
+    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
+)
+_GATE_A_SOURCE_ROOT_V3 = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-a/"
+    f"{_GATE_A_COMMIT_V3}"
+)
+_GATE_B_CORPUS_MANIFEST_PATH_V3 = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-b/"
+    f"{_GATE_B_CORPUS_SHA256_V3}/corpus-manifest.json"
+)
+_GATE_B_PACKAGE_PARENT_V3 = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once"
+)
+_GATE_B_ALLOWLIST_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
+)
+_GATE_B_PROFILE_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "config/product_search/career_profile.v2.yaml"
+)
+_GATE_B_SEMANTIC_CONTRACT_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
+)
+_GATE_B_PROTECTED_PATHS_V3 = (
+    Path("/home/hermes/.hermes/state.db"),
+    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
+    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal"),
+    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm"),
+    Path("/home/hermes/.hermes/hermes-agent/.env"),
+    Path("/home/hermes/.hermes/hermes-agent/config.yml"),
+    Path("/etc/job-intel/job-intel.env"),
+)
+_GATE_B_SOURCE_KEYS_V3 = frozenset(
+    {
+        "corpus_manifest",
+        "gate_a_manifest",
+        "benchmark_policy",
+        "reviewed_fragment_allowlist",
+        "career_profile",
+        "semantic_contract",
+        "raw_artifacts",
+    }
+)
+_GATE_B_REVIEW_DECISIONS_V3 = frozenset(
+    {
+        "allow_role_responsibility",
+        "allow_role_requirement",
+        "exclude_company_fact",
+        "exclude_ambiguous",
+    }
+)
+_GATE_B_MAX_SOURCE_BYTES_V3 = 16_000_000
+_RENAME_NOREPLACE = 1
+_MAPPING_PROXY_TYPE_V3 = type(MappingProxyType({}))
+
+
+class GateBPackageErrorV3(ValueError):
+    """Fail-closed v3 source, package, or materialization error."""
+
+
+class _ReviewedFragmentEntryContractV3(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    selection_key: str = Field(pattern=SHA256_PATTERN)
+    vacancy_artifact_sha256: str = Field(pattern=SHA256_PATTERN)
+    source_locator: str = Field(pattern=r"^/description#[0-9]{3}$")
+    text_sha256: str = Field(pattern=SHA256_PATTERN)
+    decision: Literal[
+        "allow_role_responsibility",
+        "allow_role_requirement",
+        "exclude_company_fact",
+        "exclude_ambiguous",
+    ]
+    reviewer_role: Literal["independent_gate_b_evidence_reviewer"]
+    reviewed_at: AwareDatetime
+
+    @field_validator("reviewed_at")
+    @classmethod
+    def validate_reviewed_at(cls, value: AwareDatetime) -> AwareDatetime:
+        return _require_utc(value)
+
+
+class _ReviewedFragmentAllowlistContractV3(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["3.0.0"]
+    gate_a_run_id: Literal["gate-a-20260816T141344Z"]
+    gate_b_corpus_sha256: Literal[
+        "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
+    ]
+    entries: tuple[_ReviewedFragmentEntryContractV3, ...]
+
+    @model_validator(mode="after")
+    def validate_entries(self) -> Self:
+        identities = tuple(
+            (
+                entry.selection_key,
+                entry.vacancy_artifact_sha256,
+                entry.source_locator,
+                entry.text_sha256,
+            )
+            for entry in self.entries
+        )
+        if len(set(identities)) != len(identities):
+            raise ValueError("reviewed fragment identities must be unique")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class GateBValidatedPackageV3:
+    """Data-only result of pure validation; it grants no I/O capability."""
+
+    package_sha256: str
+    manifest_sha256: str
+    manifest_bytes: bytes
+    ordered_input_sha256s: tuple[str, ...]
+    artifacts: Mapping[str, bytes]
+    artifact_sha256s: Mapping[str, str]
+    source_file_sha256s: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class GateBObservedOperationV3:
+    kind: str
+    path: str | None
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class GateBMaterializationReceiptV3:
+    package_root: str
+    package_sha256: str
+    created: bool
+    artifact_sha256s: Mapping[str, str]
+    source_snapshot_sha256: str
+    protected_snapshot_sha256: str
+    observed_operations: tuple[GateBObservedOperationV3, ...]
+
+
+def _open_directory_nofollow_v3(path: Path) -> int:
+    if not path.is_absolute():
+        raise GateBPackageErrorV3("source_path_not_absolute")
+    descriptor = os.open(
+        "/",
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        for component in path.parts[1:]:
+            if component in {"", ".", ".."}:
+                raise GateBPackageErrorV3("source_path_component_invalid")
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            metadata = os.fstat(next_descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                os.close(next_descriptor)
+                raise GateBPackageErrorV3("source_parent_not_directory")
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _read_path_nofollow_v3(
+    path: Path,
+    *,
+    maximum_bytes: int = _GATE_B_MAX_SOURCE_BYTES_V3,
+) -> bytes:
+    parent_descriptor = _open_directory_nofollow_v3(path.parent)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_size > maximum_bytes
+        ):
+            raise GateBPackageErrorV3("source_file_metadata_invalid")
+        payload = _read_all(descriptor)
+        if len(payload) != metadata.st_size:
+            raise GateBPackageErrorV3("source_file_changed_while_reading")
+        final_metadata = os.fstat(descriptor)
+        if (
+            final_metadata.st_dev != metadata.st_dev
+            or final_metadata.st_ino != metadata.st_ino
+            or final_metadata.st_size != metadata.st_size
+            or final_metadata.st_mtime_ns != metadata.st_mtime_ns
+        ):
+            raise GateBPackageErrorV3("source_file_changed_while_reading")
+        return payload
+    except OSError as exc:
+        raise GateBPackageErrorV3("source_read_failed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_descriptor)
+
+
+def load_gate_b_source_bytes_v3() -> dict[str, bytes | dict[str, bytes]]:
+    """Load only the fixed, pinned v3 sources without following symlinks."""
+    corpus_bytes = _read_path_nofollow_v3(_GATE_B_CORPUS_MANIFEST_PATH_V3)
+    if hashlib.sha256(corpus_bytes).hexdigest() != _GATE_B_CORPUS_SHA256_V3:
+        raise GateBPackageErrorV3("corpus_manifest_sha256_mismatch")
+    try:
+        corpus = json.loads(corpus_bytes)
+        records = corpus["records"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise GateBPackageErrorV3("corpus_manifest_invalid") from exc
+    if not isinstance(records, list) or len(records) != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("corpus_record_count_invalid")
+    raw_artifacts: dict[str, bytes] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise GateBPackageErrorV3("corpus_record_invalid")
+        reference = record.get("raw_reference")
+        expected_sha256 = record.get("raw_content_sha256")
+        if (
+            not isinstance(reference, str)
+            or not isinstance(expected_sha256, str)
+            or reference != f"raw-evidence/{expected_sha256}.json"
+            or re.fullmatch(SHA256_PATTERN, expected_sha256) is None
+        ):
+            raise GateBPackageErrorV3("corpus_raw_reference_invalid")
+        payload = _read_path_nofollow_v3(_GATE_A_SOURCE_ROOT_V3 / reference)
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise GateBPackageErrorV3("raw_artifact_sha256_mismatch")
+        raw_artifacts[reference] = payload
+    return {
+        "corpus_manifest": corpus_bytes,
+        "gate_a_manifest": _read_path_nofollow_v3(
+            _GATE_A_SOURCE_ROOT_V3 / "manifest.yaml"
+        ),
+        "benchmark_policy": _read_path_nofollow_v3(
+            DEFAULT_GATE_B_BENCHMARK_POLICY_V3_PATH
+        ),
+        "reviewed_fragment_allowlist": _read_path_nofollow_v3(
+            _GATE_B_ALLOWLIST_PATH_V3
+        ),
+        "career_profile": _read_path_nofollow_v3(_GATE_B_PROFILE_PATH_V3),
+        "semantic_contract": _read_path_nofollow_v3(
+            _GATE_B_SEMANTIC_CONTRACT_PATH_V3
+        ),
+        "raw_artifacts": raw_artifacts,
+    }
+
+
+def _plain_mapping_v3(value: object, *, error: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise GateBPackageErrorV3(error)
+    if not all(isinstance(key, str) for key in value):
+        raise GateBPackageErrorV3(error)
+    return value
+
+
+def _source_payload_v3(source_bytes: Mapping[str, object], key: str) -> bytes:
+    value = source_bytes.get(key)
+    if type(value) is not bytes:
+        raise GateBPackageErrorV3(f"source_{key}_must_be_bytes")
+    return value
+
+
+def _decode_json_mapping_v3(payload: bytes, *, error: str) -> dict[str, Any]:
+    try:
+        value = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise GateBPackageErrorV3(error) from exc
+    return _plain_mapping_v3(value, error=error)
+
+
+def _decode_yaml_mapping_v3(payload: bytes, *, error: str) -> dict[str, Any]:
+    try:
+        value = yaml.safe_load(payload)
+    except yaml.YAMLError as exc:
+        raise GateBPackageErrorV3(error) from exc
+    return _plain_mapping_v3(value, error=error)
+
+
+def _profile_authority_hashes_v3(profile: Mapping[str, Any]) -> dict[str, str]:
+    authorities = _plain_mapping_v3(
+        profile.get("authorities"),
+        error="career_profile_authorities_invalid",
+    )
+    required = {
+        "candidate_facts_ref",
+        "preference_model_ref",
+        "product_sot_ref",
+        "search_contract_ref",
+    }
+    if set(authorities) != required:
+        raise GateBPackageErrorV3("career_profile_authorities_invalid")
+    result: dict[str, str] = {}
+    for name in sorted(required):
+        reference = _plain_mapping_v3(
+            authorities[name],
+            error="career_profile_authority_ref_invalid",
+        )
+        sha256 = reference.get("sha256")
+        if (
+            set(reference) != {"artifact_id", "version", "sha256"}
+            or not isinstance(reference.get("artifact_id"), str)
+            or not isinstance(reference.get("version"), str)
+            or not isinstance(sha256, str)
+            or re.fullmatch(SHA256_PATTERN, sha256) is None
+        ):
+            raise GateBPackageErrorV3("career_profile_authority_ref_invalid")
+        result[name] = sha256
+    return result
+
+
+def _validated_review_entries_v3(
+    payload: bytes,
+    *,
+    selection_keys: frozenset[str],
+) -> tuple[_ReviewedFragmentEntryContractV3, ...]:
+    mapping = _decode_yaml_mapping_v3(
+        payload,
+        error="reviewed_fragment_allowlist_invalid",
+    )
+    try:
+        allowlist = _ReviewedFragmentAllowlistContractV3.model_validate(mapping)
+    except ValidationError as exc:
+        raise GateBPackageErrorV3("reviewed_fragment_allowlist_invalid") from exc
+    if any(entry.selection_key not in selection_keys for entry in allowlist.entries):
+        raise GateBPackageErrorV3("reviewed_fragment_selection_unknown")
+    artifact_by_selection: dict[str, str] = {}
+    for entry in allowlist.entries:
+        existing = artifact_by_selection.setdefault(
+            entry.selection_key,
+            entry.vacancy_artifact_sha256,
+        )
+        if existing != entry.vacancy_artifact_sha256:
+            raise GateBPackageErrorV3("reviewed_fragment_artifact_mixed")
+        if entry.decision not in _GATE_B_REVIEW_DECISIONS_V3:
+            raise GateBPackageErrorV3("reviewed_fragment_decision_invalid")
+    return allowlist.entries
+
+
+def _validate_corpus_v3(
+    corpus: Mapping[str, Any],
+) -> tuple[dict[str, Any], ...]:
+    if set(corpus) != {"schema_version", "gate", "gate_a", "selection", "records"}:
+        raise GateBPackageErrorV3("corpus_manifest_fields_invalid")
+    gate_a = _plain_mapping_v3(
+        corpus.get("gate_a"),
+        error="corpus_gate_a_identity_invalid",
+    )
+    if (
+        corpus.get("schema_version") != "1.0.0"
+        or corpus.get("gate") != "gate-b"
+        or gate_a
+        != {
+            "commit": _GATE_A_COMMIT_V3,
+            "manifest_sha256": _GATE_A_MANIFEST_SHA256_V3,
+            "run_id": _GATE_A_RUN_ID_V3,
+        }
+    ):
+        raise GateBPackageErrorV3("corpus_identity_invalid")
+    selection = _plain_mapping_v3(
+        corpus.get("selection"),
+        error="corpus_selection_invalid",
+    )
+    if selection.get("sample_size") != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("corpus_record_count_invalid")
+    raw_records = corpus.get("records")
+    if not isinstance(raw_records, list) or len(raw_records) != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("corpus_record_count_invalid")
+    records: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for item in raw_records:
+        record = _plain_mapping_v3(item, error="corpus_record_invalid")
+        selection_key = record.get("selection_key")
+        raw_sha256 = record.get("raw_content_sha256")
+        raw_reference = record.get("raw_reference")
+        if (
+            not isinstance(selection_key, str)
+            or re.fullmatch(SHA256_PATTERN, selection_key) is None
+            or selection_key in identities
+            or not isinstance(raw_sha256, str)
+            or re.fullmatch(SHA256_PATTERN, raw_sha256) is None
+            or raw_reference != f"raw-evidence/{raw_sha256}.json"
+            or record.get("run_id") != _GATE_A_RUN_ID_V3
+        ):
+            raise GateBPackageErrorV3("corpus_record_identity_invalid")
+        expected_selection_key = canonical_json_sha256(
+            {
+                "run_id": record.get("run_id"),
+                "source_family": record.get("source_family"),
+                "source_id": record.get("source_id"),
+                "raw_content_sha256": raw_sha256,
+            }
+        )
+        if selection_key != expected_selection_key:
+            raise GateBPackageErrorV3("corpus_selection_key_mismatch")
+        identities.add(selection_key)
+        records.append(record)
+    return tuple(records)
+
+
+def _freeze_bytes_mapping_v3(value: Mapping[str, bytes]) -> Mapping[str, bytes]:
+    return MappingProxyType(dict(value))
+
+
+def _freeze_text_mapping_v3(value: Mapping[str, str]) -> Mapping[str, str]:
+    return MappingProxyType(dict(value))
+
+
+def validate_gate_b_package_pure_v3(
+    source_bytes: Mapping[str, object],
+) -> GateBValidatedPackageV3:
+    """Validate and canonically package already-read bytes with zero I/O."""
+    sources = _plain_mapping_v3(
+        source_bytes,
+        error="source_bytes_must_be_a_plain_mapping",
+    )
+    if set(sources) != _GATE_B_SOURCE_KEYS_V3:
+        raise GateBPackageErrorV3("source_bytes_fields_invalid")
+    corpus_bytes = _source_payload_v3(sources, "corpus_manifest")
+    gate_a_manifest_bytes = _source_payload_v3(sources, "gate_a_manifest")
+    policy_bytes = _source_payload_v3(sources, "benchmark_policy")
+    allowlist_bytes = _source_payload_v3(sources, "reviewed_fragment_allowlist")
+    profile_bytes = _source_payload_v3(sources, "career_profile")
+    semantic_contract_bytes = _source_payload_v3(sources, "semantic_contract")
+    raw_artifacts = _plain_mapping_v3(
+        sources.get("raw_artifacts"),
+        error="raw_artifacts_must_be_a_plain_mapping",
+    )
+    if not all(type(payload) is bytes for payload in raw_artifacts.values()):
+        raise GateBPackageErrorV3("raw_artifacts_must_contain_bytes")
+
+    corpus_sha256 = hashlib.sha256(corpus_bytes).hexdigest()
+    gate_a_manifest_sha256 = hashlib.sha256(gate_a_manifest_bytes).hexdigest()
+    if corpus_sha256 != _GATE_B_CORPUS_SHA256_V3:
+        raise GateBPackageErrorV3("corpus_manifest_sha256_mismatch")
+    if gate_a_manifest_sha256 != _GATE_A_MANIFEST_SHA256_V3:
+        raise GateBPackageErrorV3("gate_a_manifest_sha256_mismatch")
+    corpus = _decode_json_mapping_v3(corpus_bytes, error="corpus_manifest_invalid")
+    records = _validate_corpus_v3(corpus)
+    expected_raw_references = {str(record["raw_reference"]) for record in records}
+    if set(raw_artifacts) != expected_raw_references:
+        raise GateBPackageErrorV3("raw_artifact_inventory_invalid")
+
+    try:
+        policy = load_gate_b_benchmark_policy_v3(
+            _decode_yaml_mapping_v3(policy_bytes, error="benchmark_policy_invalid")
+        )
+    except (ValidationError, ValueError) as exc:
+        raise GateBPackageErrorV3("benchmark_policy_invalid") from exc
+    if policy.ordered_call_cap != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("benchmark_policy_call_cap_invalid")
+    profile = _decode_yaml_mapping_v3(profile_bytes, error="career_profile_invalid")
+    profile_authorities = _profile_authority_hashes_v3(profile)
+    if not semantic_contract_bytes:
+        raise GateBPackageErrorV3("semantic_contract_empty")
+    selection_keys = frozenset(str(record["selection_key"]) for record in records)
+    review_entries = _validated_review_entries_v3(
+        allowlist_bytes,
+        selection_keys=selection_keys,
+    )
+    entries_by_selection: dict[
+        str,
+        list[_ReviewedFragmentEntryContractV3],
+    ] = {selection_key: [] for selection_key in selection_keys}
+    for entry in review_entries:
+        entries_by_selection[entry.selection_key].append(entry)
+
+    source_authorities = {
+        "benchmark_policy": hashlib.sha256(policy_bytes).hexdigest(),
+        "career_profile": hashlib.sha256(profile_bytes).hexdigest(),
+        "corpus_manifest": corpus_sha256,
+        "gate_a_manifest": gate_a_manifest_sha256,
+        "reviewed_fragment_allowlist": hashlib.sha256(allowlist_bytes).hexdigest(),
+        "semantic_contract": hashlib.sha256(semantic_contract_bytes).hexdigest(),
+        **{
+            f"profile_{name}": sha256
+            for name, sha256 in profile_authorities.items()
+        },
+    }
+    artifacts: dict[str, bytes] = {}
+    ordered_input_sha256s: list[str] = []
+    index_records: list[dict[str, Any]] = []
+    source_file_sha256s = {"manifest.yaml": gate_a_manifest_sha256}
+    for ordinal, record in enumerate(records):
+        reference = str(record["raw_reference"])
+        raw_bytes = raw_artifacts[reference]
+        raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        if raw_sha256 != record["raw_content_sha256"]:
+            raise GateBPackageErrorV3("raw_artifact_sha256_mismatch")
+        raw = _decode_json_mapping_v3(raw_bytes, error="raw_artifact_invalid")
+        for field_name in ("source_family", "source_id", "query_id", "company"):
+            if raw.get(field_name) != record.get(field_name):
+                raise GateBPackageErrorV3("raw_artifact_record_mismatch")
+        source_file_sha256s[reference] = raw_sha256
+        selected_entries = sorted(
+            entries_by_selection[str(record["selection_key"])],
+            key=lambda entry: (
+                entry.source_locator,
+                entry.text_sha256,
+                entry.decision,
+            ),
+        )
+        reviewed_artifact_sha256s = {
+            entry.vacancy_artifact_sha256 for entry in selected_entries
+        }
+        if len(reviewed_artifact_sha256s) > 1:
+            raise GateBPackageErrorV3("reviewed_fragment_artifact_mixed")
+        reviewed_artifact_sha256 = next(iter(reviewed_artifact_sha256s), None)
+        input_payload = {
+            "schema_version": "3.0.0",
+            "input_kind": "gate_b_projector_source",
+            "ordinal": ordinal,
+            "selection_key": record["selection_key"],
+            "raw_content_sha256": raw_sha256,
+            "source_record": dict(record),
+            "raw": raw,
+            "projection_contract": {
+                "interface": "project_vacancy_evidence_v3",
+                "reviewed_vacancy_artifact_sha256": reviewed_artifact_sha256,
+                "reviewed_fragment_entries": [
+                    entry.model_dump(mode="json") for entry in selected_entries
+                ],
+            },
+            "source_authority_sha256s": source_authorities,
+        }
+        input_bytes = _canonical_json_bytes(input_payload)
+        input_sha256 = hashlib.sha256(input_bytes).hexdigest()
+        input_reference = f"task10-inputs/{input_sha256}.json"
+        if input_reference in artifacts:
+            raise GateBPackageErrorV3("ordered_input_hashes_not_unique")
+        artifacts[input_reference] = input_bytes
+        ordered_input_sha256s.append(input_sha256)
+        index_records.append(
+            {
+                "ordinal": ordinal,
+                "selection_key": record["selection_key"],
+                "raw_reference": reference,
+                "raw_content_sha256": raw_sha256,
+                "reviewed_vacancy_artifact_sha256": reviewed_artifact_sha256,
+                "reviewed_fragment_entry_count": len(selected_entries),
+                "task10_input_reference": input_reference,
+                "task10_input_sha256": input_sha256,
+            }
+        )
+    if len(set(ordered_input_sha256s)) != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("ordered_input_hashes_not_unique")
+
+    index_payload = {
+        "schema_version": "3.0.0",
+        "package_kind": "gate_b_at_most_once",
+        "gate_a": {
+            "run_id": _GATE_A_RUN_ID_V3,
+            "commit": _GATE_A_COMMIT_V3,
+            "manifest_sha256": gate_a_manifest_sha256,
+        },
+        "corpus_manifest_sha256": corpus_sha256,
+        "source_authority_sha256s": source_authorities,
+        "records": index_records,
+    }
+    index_bytes = _canonical_json_bytes(index_payload)
+    index_sha256 = hashlib.sha256(index_bytes).hexdigest()
+    artifacts["package-index.json"] = index_bytes
+    authority_sha256s = tuple(
+        sorted({*source_authorities.values(), index_sha256})
+    )
+    manifest = GateBPackageManifestV3(
+        schema_version="3.0.0",
+        package_id=f"gate-b-at-most-once-v3:{corpus_sha256}",
+        created_at=datetime(2026, 8, 16, 14, 13, 44, tzinfo=timezone.utc),
+        ordered_input_sha256s=tuple(ordered_input_sha256s),
+        authority_sha256s=authority_sha256s,
+    )
+    manifest_bytes = _canonical_json_bytes(manifest.model_dump(mode="json"))
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    if manifest_sha256 != manifest.canonical_sha256:
+        raise GateBPackageErrorV3("package_manifest_not_canonical")
+    artifacts["package-manifest.json"] = manifest_bytes
+    artifact_sha256s = {
+        reference: hashlib.sha256(payload).hexdigest()
+        for reference, payload in artifacts.items()
+    }
+    return GateBValidatedPackageV3(
+        package_sha256=manifest_sha256,
+        manifest_sha256=manifest_sha256,
+        manifest_bytes=manifest_bytes,
+        ordered_input_sha256s=tuple(ordered_input_sha256s),
+        artifacts=_freeze_bytes_mapping_v3(artifacts),
+        artifact_sha256s=_freeze_text_mapping_v3(artifact_sha256s),
+        source_file_sha256s=_freeze_text_mapping_v3(source_file_sha256s),
+    )
+
+
+def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
+    if type(package) is not GateBValidatedPackageV3:
+        raise GateBPackageErrorV3("validated_package_required")
+    if type(package.source_file_sha256s) is not _MAPPING_PROXY_TYPE_V3:
+        raise GateBPackageErrorV3("validated_package_source_inventory_invalid")
+    if (
+        type(package.artifacts) is not _MAPPING_PROXY_TYPE_V3
+        or type(package.artifact_sha256s) is not _MAPPING_PROXY_TYPE_V3
+        or type(package.manifest_bytes) is not bytes
+        or type(package.ordered_input_sha256s) is not tuple
+    ):
+        raise GateBPackageErrorV3("validated_package_data_invalid")
+    if (
+        re.fullmatch(SHA256_PATTERN, package.package_sha256) is None
+        or package.package_sha256 != package.manifest_sha256
+        or package.manifest_bytes != package.artifacts.get("package-manifest.json")
+        or hashlib.sha256(package.manifest_bytes).hexdigest()
+        != package.package_sha256
+        or set(package.artifacts) != set(package.artifact_sha256s)
+    ):
+        raise GateBPackageErrorV3("validated_package_identity_invalid")
+    try:
+        manifest = GateBPackageManifestV3.model_validate_json(package.manifest_bytes)
+    except ValidationError as exc:
+        raise GateBPackageErrorV3("validated_package_manifest_invalid") from exc
+    if (
+        manifest.canonical_sha256 != package.package_sha256
+        or manifest.ordered_input_sha256s != package.ordered_input_sha256s
+    ):
+        raise GateBPackageErrorV3("validated_package_manifest_mismatch")
+    expected_references = {
+        "package-index.json",
+        "package-manifest.json",
+        *{
+            f"task10-inputs/{sha256}.json"
+            for sha256 in package.ordered_input_sha256s
+        },
+    }
+    if set(package.artifacts) != expected_references:
+        raise GateBPackageErrorV3("validated_package_inventory_invalid")
+    for reference, payload in package.artifacts.items():
+        if type(payload) is not bytes:
+            raise GateBPackageErrorV3("validated_package_artifact_not_bytes")
+        if hashlib.sha256(payload).hexdigest() != package.artifact_sha256s[reference]:
+            raise GateBPackageErrorV3("validated_package_artifact_hash_mismatch")
+    for sha256 in package.ordered_input_sha256s:
+        reference = f"task10-inputs/{sha256}.json"
+        if package.artifact_sha256s[reference] != sha256:
+            raise GateBPackageErrorV3("validated_package_input_hash_mismatch")
+    index = _decode_json_mapping_v3(
+        package.artifacts["package-index.json"],
+        error="validated_package_index_invalid",
+    )
+    index_records = index.get("records")
+    if not isinstance(index_records, list) or len(index_records) != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("validated_package_index_invalid")
+    expected_source_files = {"manifest.yaml": _GATE_A_MANIFEST_SHA256_V3}
+    for raw_record in index_records:
+        record = _plain_mapping_v3(
+            raw_record,
+            error="validated_package_index_invalid",
+        )
+        reference = record.get("raw_reference")
+        raw_sha256 = record.get("raw_content_sha256")
+        if (
+            not isinstance(raw_sha256, str)
+            or re.fullmatch(SHA256_PATTERN, raw_sha256) is None
+            or reference != f"raw-evidence/{raw_sha256}.json"
+            or reference in expected_source_files
+        ):
+            raise GateBPackageErrorV3("validated_package_index_invalid")
+        expected_source_files[reference] = raw_sha256
+    if dict(package.source_file_sha256s) != expected_source_files:
+        raise GateBPackageErrorV3("validated_package_source_inventory_invalid")
+
+
+def _snapshot_sha256_v3(snapshot: tuple[tuple[object, ...], ...]) -> str:
+    return canonical_json_sha256([list(item) for item in snapshot])
+
+
+def _snapshot_gate_a_sources_v3(
+    package: GateBValidatedPackageV3,
+    operations: list[GateBObservedOperationV3],
+    *,
+    phase: str,
+) -> tuple[tuple[object, ...], ...]:
+    snapshot: list[tuple[object, ...]] = []
+    for reference, expected_sha256 in sorted(package.source_file_sha256s.items()):
+        path = _GATE_A_SOURCE_ROOT_V3 / reference
+        payload = _read_path_nofollow_v3(path)
+        observed_sha256 = hashlib.sha256(payload).hexdigest()
+        if observed_sha256 != expected_sha256:
+            raise GateBPackageErrorV3("gate_a_source_changed")
+        snapshot.append((reference, observed_sha256, len(payload)))
+        operations.append(
+            GateBObservedOperationV3(
+                kind="source_snapshot",
+                path=str(path),
+                detail=phase,
+            )
+        )
+    return tuple(snapshot)
+
+
+def _snapshot_protected_paths_v3(
+    operations: list[GateBObservedOperationV3],
+    *,
+    phase: str,
+) -> tuple[tuple[object, ...], ...]:
+    snapshot: list[tuple[object, ...]] = []
+    for path in _GATE_B_PROTECTED_PATHS_V3:
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            snapshot.append((str(path), "missing"))
+            operations.append(
+                GateBObservedOperationV3(
+                    kind="protected_snapshot",
+                    path=str(path),
+                    detail=f"{phase}:missing",
+                )
+            )
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            kind = "symlink"
+            content_sha256 = None
+        elif stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+            content_sha256 = hashlib.sha256(
+                _read_path_nofollow_v3(path)
+            ).hexdigest()
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+            content_sha256 = None
+        else:
+            kind = "other"
+            content_sha256 = None
+        snapshot.append(
+            (
+                str(path),
+                kind,
+                metadata.st_mode,
+                metadata.st_uid,
+                metadata.st_gid,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                content_sha256,
+            )
+        )
+        operations.append(
+            GateBObservedOperationV3(
+                kind="protected_snapshot",
+                path=str(path),
+                detail=f"{phase}:{kind}",
+            )
+        )
+    return tuple(snapshot)
+
+
+def _open_materialization_parent_v3() -> int:
+    try:
+        descriptor = _open_directory_nofollow_v3(_GATE_B_PACKAGE_PARENT_V3)
+    except (OSError, GateBPackageErrorV3) as exc:
+        raise GateBPackageErrorV3("package_parent_unavailable") from exc
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        os.close(descriptor)
+        raise GateBPackageErrorV3("package_parent_metadata_invalid")
+    return descriptor
+
+
+def _open_child_directory_optional_v3(parent_descriptor: int, name: str) -> int | None:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise GateBPackageErrorV3("package_root_open_failed") from exc
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink < 2
+        or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+    ):
+        os.close(descriptor)
+        raise GateBPackageErrorV3("package_root_metadata_invalid")
+    return descriptor
+
+
+def _write_package_artifact_v3(
+    directory_descriptor: int,
+    filename: str,
+    payload: bytes,
+) -> None:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            filename,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            _PRIVATE_FILE_MODE,
+            dir_fd=directory_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+        ):
+            raise GateBPackageErrorV3("package_artifact_metadata_invalid")
+        _write_all(descriptor, payload)
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise GateBPackageErrorV3("package_artifact_write_failed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _rename_directory_noreplace_v3(
+    parent_descriptor: int,
+    source_name: str,
+    target_name: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError as exc:
+        raise GateBPackageErrorV3("package_atomic_rename_unsupported") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        parent_descriptor,
+        os.fsencode(source_name),
+        parent_descriptor,
+        os.fsencode(target_name),
+        _RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(error_number, os.strerror(error_number), target_name)
+    raise GateBPackageErrorV3("package_atomic_rename_failed")
+
+
+def _read_materialized_file_v3(
+    directory_descriptor: int,
+    filename: str,
+) -> bytes:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            filename,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=directory_descriptor,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+        ):
+            raise GateBPackageErrorV3("package_artifact_metadata_invalid")
+        return _read_all(descriptor)
+    except OSError as exc:
+        raise GateBPackageErrorV3("package_artifact_read_failed") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _verify_materialized_root_v3(
+    root_descriptor: int,
+    package: GateBValidatedPackageV3,
+    operations: list[GateBObservedOperationV3],
+) -> None:
+    expected_root_names = {
+        "package-index.json",
+        "package-manifest.json",
+        "task10-inputs",
+    }
+    if set(os.listdir(root_descriptor)) != expected_root_names:
+        raise GateBPackageErrorV3("package_existing_unknown_content")
+    input_descriptor = _open_child_directory_optional_v3(
+        root_descriptor,
+        "task10-inputs",
+    )
+    if input_descriptor is None:
+        raise GateBPackageErrorV3("package_existing_unknown_content")
+    try:
+        expected_inputs = {
+            f"{sha256}.json" for sha256 in package.ordered_input_sha256s
+        }
+        if set(os.listdir(input_descriptor)) != expected_inputs:
+            raise GateBPackageErrorV3("package_existing_unknown_content")
+        for reference, expected_payload in sorted(package.artifacts.items()):
+            if "/" in reference:
+                directory_descriptor = input_descriptor
+                filename = reference.split("/", 1)[1]
+            else:
+                directory_descriptor = root_descriptor
+                filename = reference
+            observed_payload = _read_materialized_file_v3(
+                directory_descriptor,
+                filename,
+            )
+            if (
+                observed_payload != expected_payload
+                or hashlib.sha256(observed_payload).hexdigest()
+                != package.artifact_sha256s[reference]
+            ):
+                raise GateBPackageErrorV3("package_artifact_rehash_mismatch")
+            operations.append(
+                GateBObservedOperationV3(
+                    kind="artifact_rehash",
+                    path=str(_GATE_B_PACKAGE_PARENT_V3 / package.package_sha256 / reference),
+                    detail=package.artifact_sha256s[reference],
+                )
+            )
+    finally:
+        os.close(input_descriptor)
+
+
+def materialize_gate_b_package_v3(
+    package: GateBValidatedPackageV3,
+) -> GateBMaterializationReceiptV3:
+    """Atomically publish a pure package to its one fixed SHA-derived root."""
+    _validate_package_in_memory_v3(package)
+    operations: list[GateBObservedOperationV3] = []
+    source_before = _snapshot_gate_a_sources_v3(
+        package,
+        operations,
+        phase="before",
+    )
+    protected_before = _snapshot_protected_paths_v3(operations, phase="before")
+    parent_descriptor = _open_materialization_parent_v3()
+    created = False
+    root_descriptor = -1
+    staging_descriptor = -1
+    try:
+        root_descriptor = _open_child_directory_optional_v3(
+            parent_descriptor,
+            package.package_sha256,
+        ) or -1
+        if root_descriptor < 0:
+            staging_name = f".{package.package_sha256}.materializing"
+            if _open_child_directory_optional_v3(parent_descriptor, staging_name) is not None:
+                raise GateBPackageErrorV3("package_staging_unknown_content")
+            try:
+                os.mkdir(
+                    staging_name,
+                    _PRIVATE_DIRECTORY_MODE,
+                    dir_fd=parent_descriptor,
+                )
+                os.fsync(parent_descriptor)
+            except OSError as exc:
+                raise GateBPackageErrorV3("package_staging_create_failed") from exc
+            operations.append(
+                GateBObservedOperationV3(
+                    kind="artifact_directory_create",
+                    path=str(_GATE_B_PACKAGE_PARENT_V3 / staging_name),
+                    detail="mode=0700",
+                )
+            )
+            staging_descriptor = _open_child_directory_optional_v3(
+                parent_descriptor,
+                staging_name,
+            ) or -1
+            if staging_descriptor < 0:
+                raise GateBPackageErrorV3("package_staging_open_failed")
+            try:
+                os.mkdir(
+                    "task10-inputs",
+                    _PRIVATE_DIRECTORY_MODE,
+                    dir_fd=staging_descriptor,
+                )
+                os.fsync(staging_descriptor)
+            except OSError as exc:
+                raise GateBPackageErrorV3("package_input_directory_create_failed") from exc
+            input_descriptor = _open_child_directory_optional_v3(
+                staging_descriptor,
+                "task10-inputs",
+            )
+            if input_descriptor is None:
+                raise GateBPackageErrorV3("package_input_directory_open_failed")
+            try:
+                for reference, payload in sorted(package.artifacts.items()):
+                    if "/" in reference:
+                        directory_descriptor = input_descriptor
+                        filename = reference.split("/", 1)[1]
+                    else:
+                        directory_descriptor = staging_descriptor
+                        filename = reference
+                    _write_package_artifact_v3(
+                        directory_descriptor,
+                        filename,
+                        payload,
+                    )
+                    operations.append(
+                        GateBObservedOperationV3(
+                            kind="artifact_write",
+                            path=str(
+                                _GATE_B_PACKAGE_PARENT_V3 / staging_name / reference
+                            ),
+                            detail=package.artifact_sha256s[reference],
+                        )
+                    )
+                os.fsync(input_descriptor)
+                os.fsync(staging_descriptor)
+            finally:
+                os.close(input_descriptor)
+            os.close(staging_descriptor)
+            staging_descriptor = -1
+            _rename_directory_noreplace_v3(
+                parent_descriptor,
+                staging_name,
+                package.package_sha256,
+            )
+            os.fsync(parent_descriptor)
+            operations.append(
+                GateBObservedOperationV3(
+                    kind="artifact_atomic_publish",
+                    path=str(
+                        _GATE_B_PACKAGE_PARENT_V3 / package.package_sha256
+                    ),
+                    detail=package.package_sha256,
+                )
+            )
+            created = True
+            root_descriptor = _open_child_directory_optional_v3(
+                parent_descriptor,
+                package.package_sha256,
+            ) or -1
+            if root_descriptor < 0:
+                raise GateBPackageErrorV3("package_published_root_missing")
+        _verify_materialized_root_v3(root_descriptor, package, operations)
+    finally:
+        if staging_descriptor >= 0:
+            os.close(staging_descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
+        os.close(parent_descriptor)
+
+    source_after = _snapshot_gate_a_sources_v3(
+        package,
+        operations,
+        phase="after",
+    )
+    protected_after = _snapshot_protected_paths_v3(operations, phase="after")
+    if source_before != source_after:
+        raise GateBPackageErrorV3("gate_a_sources_changed_during_materialization")
+    if protected_before != protected_after:
+        raise GateBPackageErrorV3("protected_paths_changed_during_materialization")
+    return GateBMaterializationReceiptV3(
+        package_root=str(_GATE_B_PACKAGE_PARENT_V3 / package.package_sha256),
+        package_sha256=package.package_sha256,
+        created=created,
+        artifact_sha256s=_freeze_text_mapping_v3(package.artifact_sha256s),
+        source_snapshot_sha256=_snapshot_sha256_v3(source_after),
+        protected_snapshot_sha256=_snapshot_sha256_v3(protected_after),
+        observed_operations=tuple(operations),
+    )

@@ -3,10 +3,16 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import builtins
 import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import sqlite3
+import subprocess
+import inspect
+import hashlib
 
 import pytest
 import yaml
@@ -45,6 +51,68 @@ OWNER_PUBLIC_KEY = (
         format=serialization.PublicFormat.Raw,
     )
 )
+
+GATE_A_ROOT_V3 = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-a/"
+    "65d60daae16093a9a7e34a11a159e2f789dd14dd"
+)
+GATE_B_CORPUS_MANIFEST_V3 = Path(
+    "/home/hermes/.hermes/job_intel/experiments/gate-b/"
+    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/"
+    "corpus-manifest.json"
+)
+
+
+def _gate_b_source_bytes_v3() -> dict[str, object]:
+    corpus_bytes = GATE_B_CORPUS_MANIFEST_V3.read_bytes()
+    corpus = json.loads(corpus_bytes)
+    return {
+        "corpus_manifest": corpus_bytes,
+        "gate_a_manifest": (GATE_A_ROOT_V3 / "manifest.yaml").read_bytes(),
+        "benchmark_policy": POLICY_PATH.read_bytes(),
+        "reviewed_fragment_allowlist": (
+            ROOT / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
+        ).read_bytes(),
+        "career_profile": (
+            ROOT / "config/product_search/career_profile.v2.yaml"
+        ).read_bytes(),
+        "semantic_contract": (
+            ROOT
+            / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
+        ).read_bytes(),
+        "raw_artifacts": {
+            record["raw_reference"]: (
+                GATE_A_ROOT_V3 / record["raw_reference"]
+            ).read_bytes()
+            for record in corpus["records"]
+        },
+    }
+
+
+def _write_gate_a_source_fixture_v3(
+    root: Path,
+    source_bytes: dict[str, object],
+) -> None:
+    root.mkdir(mode=0o700)
+    (root / "raw-evidence").mkdir(mode=0o700)
+    (root / "manifest.yaml").write_bytes(source_bytes["gate_a_manifest"])
+    raw_artifacts = source_bytes["raw_artifacts"]
+    assert isinstance(raw_artifacts, dict)
+    for reference, payload in raw_artifacts.items():
+        assert isinstance(reference, str)
+        assert isinstance(payload, bytes)
+        (root / reference).write_bytes(payload)
+
+
+def _path_snapshot_v3(paths: tuple[Path, ...]) -> dict[str, tuple[int, int, str]]:
+    snapshot: dict[str, tuple[int, int, str]] = {}
+    for root in paths:
+        candidates = (root, *sorted(root.rglob("*"))) if root.is_dir() else (root,)
+        for path in candidates:
+            metadata = path.lstat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+            snapshot[str(path)] = (metadata.st_mode, metadata.st_size, digest)
+    return snapshot
 
 
 def test_v3_call_state_is_closed() -> None:
@@ -1184,3 +1252,224 @@ def test_ledger_files_are_private_canonical_and_hash_chained(
         assert entry["previous_entry_sha256"] == previous
         assert canonical_json_sha256(entry) == entry_hash
         previous = entry_hash
+
+
+def test_validate_gate_b_package_pure_v3_performs_zero_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_bytes = _gate_b_source_bytes_v3()
+    validate = getattr(gate_b_v3, "validate_gate_b_package_pure_v3")
+    attempted: list[str] = []
+
+    def deny(operation: str):
+        def denied(*_args: object, **_kwargs: object) -> None:
+            attempted.append(operation)
+            raise AssertionError(f"pure validation attempted {operation}")
+
+        return denied
+
+    monkeypatch.setattr(builtins, "open", deny("builtins.open"))
+    for name in (
+        "open",
+        "stat",
+        "lstat",
+        "fstat",
+        "access",
+        "listdir",
+        "scandir",
+        "readlink",
+        "getenv",
+    ):
+        monkeypatch.setattr(os, name, deny(f"os.{name}"))
+    for name in ("open", "read_bytes", "read_text", "stat", "lstat", "resolve"):
+        monkeypatch.setattr(Path, name, deny(f"Path.{name}"))
+    monkeypatch.setattr(socket, "socket", deny("socket.socket"))
+    monkeypatch.setattr(socket, "create_connection", deny("socket.create_connection"))
+    monkeypatch.setattr(subprocess, "Popen", deny("subprocess.Popen"))
+    monkeypatch.setattr(subprocess, "run", deny("subprocess.run"))
+    monkeypatch.setattr(sqlite3, "connect", deny("sqlite3.connect"))
+
+    package = validate(source_bytes)
+
+    assert attempted == []
+    assert package.package_sha256 == hashlib.sha256(package.manifest_bytes).hexdigest()
+    assert package.manifest_sha256 == package.package_sha256
+    assert len(package.ordered_input_sha256s) == 48
+    assert len(set(package.ordered_input_sha256s)) == 48
+    assert tuple(sorted(package.artifacts)) == (
+        "package-index.json",
+        "package-manifest.json",
+        *tuple(
+            f"task10-inputs/{input_sha256}.json"
+            for input_sha256 in sorted(package.ordered_input_sha256s)
+        ),
+    )
+
+
+def test_public_gate_b_v3_package_apis_accept_no_io_capabilities() -> None:
+    load = getattr(gate_b_v3, "load_gate_b_source_bytes_v3")
+    validate = getattr(gate_b_v3, "validate_gate_b_package_pure_v3")
+    materialize = getattr(gate_b_v3, "materialize_gate_b_package_v3")
+
+    assert tuple(inspect.signature(load).parameters) == ()
+    assert tuple(inspect.signature(validate).parameters) == ("source_bytes",)
+    assert tuple(inspect.signature(materialize).parameters) == ("package",)
+    for api in (load, validate, materialize):
+        parameters = inspect.signature(api).parameters.values()
+        assert all(
+            parameter.kind
+            not in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}
+            for parameter in parameters
+        )
+        assert not {
+            "callback",
+            "boundary",
+            "boundary_attempt",
+            "file",
+            "file_handle",
+            "output_root",
+            "path",
+            "root",
+            "io_capability",
+        } & set(inspect.signature(api).parameters)
+
+    with pytest.raises(TypeError):
+        load(boundary_attempt=lambda _boundary: None)
+    with pytest.raises(TypeError):
+        validate({}, output_root=Path("/tmp/forbidden"))
+    with pytest.raises(TypeError):
+        materialize(object(), io_capability=object())
+
+
+def test_materialize_gate_b_package_v3_is_atomic_scoped_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_bytes = _gate_b_source_bytes_v3()
+    validate = getattr(gate_b_v3, "validate_gate_b_package_pure_v3")
+    materialize = getattr(gate_b_v3, "materialize_gate_b_package_v3")
+    package = validate(source_bytes)
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir(mode=0o700)
+    gate_a_root = tmp_path / "gate-a"
+    _write_gate_a_source_fixture_v3(gate_a_root, source_bytes)
+    protected_file = tmp_path / "protected.sqlite3"
+    protected_file.write_bytes(b"immutable production state")
+    protected_directory = tmp_path / "protected-runtime"
+    protected_directory.mkdir(mode=0o700)
+    (protected_directory / "runtime.conf").write_bytes(b"immutable runtime")
+    protected_paths = (gate_a_root, protected_file, protected_directory)
+    protected_before = _path_snapshot_v3(protected_paths)
+    external_attempts: list[str] = []
+
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(gate_b_v3, "_GATE_A_SOURCE_ROOT_V3", gate_a_root)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_PROTECTED_PATHS_V3",
+        (protected_file, protected_directory),
+    )
+
+    def deny_external(operation: str):
+        def denied(*_args: object, **_kwargs: object) -> None:
+            external_attempts.append(operation)
+            raise AssertionError(f"materialization attempted {operation}")
+
+        return denied
+
+    monkeypatch.setattr(socket, "socket", deny_external("socket.socket"))
+    monkeypatch.setattr(
+        socket,
+        "create_connection",
+        deny_external("socket.create_connection"),
+    )
+    monkeypatch.setattr(subprocess, "Popen", deny_external("subprocess.Popen"))
+    monkeypatch.setattr(subprocess, "run", deny_external("subprocess.run"))
+    monkeypatch.setattr(sqlite3, "connect", deny_external("sqlite3.connect"))
+
+    receipt = materialize(package)
+
+    package_root = package_parent / package.package_sha256
+    assert receipt.package_root == str(package_root)
+    assert receipt.created is True
+    assert external_attempts == []
+    assert _path_snapshot_v3(protected_paths) == protected_before
+    assert set(receipt.artifact_sha256s) == set(package.artifacts)
+    assert receipt.observed_operations
+    assert sum(
+        operation.kind == "artifact_write"
+        for operation in receipt.observed_operations
+    ) == len(package.artifacts)
+    assert sum(
+        operation.kind == "artifact_rehash"
+        for operation in receipt.observed_operations
+    ) == len(package.artifacts)
+    assert all(
+        Path(operation.path).is_relative_to(package_parent)
+        for operation in receipt.observed_operations
+        if operation.path is not None and operation.kind.startswith("artifact_")
+    )
+    assert not any(path.name.endswith(".materializing") for path in package_parent.iterdir())
+
+    second = materialize(package)
+
+    assert second.created is False
+    assert not any(
+        operation.kind == "artifact_write"
+        for operation in second.observed_operations
+    )
+    assert sum(
+        operation.kind == "artifact_rehash"
+        for operation in second.observed_operations
+    ) == len(package.artifacts)
+    assert _path_snapshot_v3(protected_paths) == protected_before
+
+
+def test_materialize_gate_b_package_v3_rejects_existing_unknown_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_bytes = _gate_b_source_bytes_v3()
+    validate = getattr(gate_b_v3, "validate_gate_b_package_pure_v3")
+    materialize = getattr(gate_b_v3, "materialize_gate_b_package_v3")
+    package = validate(source_bytes)
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir(mode=0o700)
+    gate_a_root = tmp_path / "gate-a"
+    _write_gate_a_source_fixture_v3(gate_a_root, source_bytes)
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(gate_b_v3, "_GATE_A_SOURCE_ROOT_V3", gate_a_root)
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PROTECTED_PATHS_V3", ())
+    materialize(package)
+    unexpected = package_parent / package.package_sha256 / "unexpected"
+    unexpected.write_bytes(b"unknown")
+
+    with pytest.raises(ValueError, match="unknown_content"):
+        materialize(package)
+
+    assert unexpected.read_bytes() == b"unknown"
+
+
+def test_materialize_gate_b_package_v3_rejects_forged_source_inventory_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = gate_b_v3.validate_gate_b_package_pure_v3(
+        _gate_b_source_bytes_v3()
+    )
+    forged = type(package)(
+        package_sha256=package.package_sha256,
+        manifest_sha256=package.manifest_sha256,
+        manifest_bytes=package.manifest_bytes,
+        ordered_input_sha256s=package.ordered_input_sha256s,
+        artifacts=package.artifacts,
+        artifact_sha256s=package.artifact_sha256s,
+        source_file_sha256s={"../../outside": "a" * 64},
+    )
+
+    def deny_io(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unvalidated source inventory reached I/O")
+
+    monkeypatch.setattr(os, "open", deny_io)
+
+    with pytest.raises(ValueError, match="source_inventory_invalid"):
+        gate_b_v3.materialize_gate_b_package_v3(forged)
