@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 import hashlib
 import json
@@ -33,6 +34,7 @@ from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     DECODING_PARAMETERS,
     GovernedPricingSchedule,
     GovernedStructuredRequest,
+    GovernedStructuredTerminalUnknown,
     LLMObservationProvider,
     LLMProviderError,
     RECORDING_FORMAT_VERSION,
@@ -776,6 +778,15 @@ class EvidenceSynthesisResultV2(_StrictFrozenModel):
         return self
 
 
+class PostDispatchOutcomeV3(_StrictFrozenModel):
+    """Cost evidence exposed to the at-most-once benchmark runner."""
+
+    terminal: Literal["success", "terminal_failure", "terminal_unknown"]
+    measured_cost_usd: Decimal | None
+    conservative_cost_usd: Decimal = Field(ge=Decimal("0"))
+    sealed_provider_record_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
 def synthesis_input_sha256(
     input_payload: dict[str, Any], *, provider: RecordedEvidenceSynthesisProvider
 ) -> str:
@@ -976,6 +987,84 @@ class RecordedEvidenceSynthesisProvider:
             raise LLMProviderError("provider_metadata_mismatch", "latency_ms")
         if record.get("retry_count", 0) != 0:
             raise LLMProviderError("provider_metadata_mismatch", "retry_count")
+        post_dispatch_outcome = record.get("post_dispatch_outcome_v3")
+        if post_dispatch_outcome is not None:
+            if post_dispatch_outcome not in {
+                "success",
+                "terminal_failure",
+                "terminal_unknown",
+            }:
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "post_dispatch_outcome_v3"
+                )
+            try:
+                conservative_cost = Decimal(str(record.get("conservative_cost_usd")))
+                measured_value = record.get("measured_cost_usd")
+                measured_cost = (
+                    None if measured_value is None else Decimal(str(measured_value))
+                )
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "post_dispatch_costs"
+                ) from exc
+            if (
+                not conservative_cost.is_finite()
+                or conservative_cost < 0
+                or conservative_cost > self.pricing.reservation_cost_usd
+                or str(conservative_cost) != record.get("conservative_cost_usd")
+            ):
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "conservative_cost_usd"
+                )
+            if post_dispatch_outcome == "terminal_unknown":
+                if (
+                    status != "failure"
+                    or not failure_code
+                    or record.get("usage") is not None
+                    or record.get("raw_response_text") != ""
+                    or measured_cost is not None
+                    or conservative_cost != self.pricing.reservation_cost_usd
+                    or record.get("cost_usd") != str(conservative_cost)
+                ):
+                    raise LLMProviderError(
+                        "provider_metadata_mismatch", "terminal_unknown"
+                    )
+                self.last_call_metadata = {
+                    "latency_ms": latency_ms,
+                    "cost_usd": str(conservative_cost),
+                    "post_dispatch_outcome_v3": post_dispatch_outcome,
+                    "measured_cost_usd": None,
+                    "conservative_cost_usd": str(conservative_cost),
+                    "sealed_provider_record_sha256": record["metadata_sha256"],
+                }
+                return GovernedStructuredTerminalUnknown(
+                    raw_response_text="",
+                    latency_ms=latency_ms,
+                    failure_code=str(failure_code),
+                    failure_diagnostic=str(record.get("failure_diagnostic") or ""),
+                    conservative_cost_usd=conservative_cost,
+                    record=record,
+                )
+            if (
+                (post_dispatch_outcome == "success" and status != "success")
+                or (
+                    post_dispatch_outcome == "terminal_failure"
+                    and status != "failure"
+                )
+            ):
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "post_dispatch_status"
+                )
+            if (
+                measured_cost is None
+                or not measured_cost.is_finite()
+                or measured_cost < 0
+                or conservative_cost != measured_cost
+                or record.get("cost_usd") != str(measured_cost)
+            ):
+                raise LLMProviderError(
+                    "provider_metadata_mismatch", "measured_cost_usd"
+                )
         usage_payload = record.get("usage")
         if usage_payload is None:
             reconciliation = record.get("charge_unknown_reconciliation")
@@ -992,7 +1081,11 @@ class RecordedEvidenceSynthesisProvider:
                 )
         else:
             response_model = record.get("response_model")
-            if response_model is not None and response_model != self.model_id:
+            if (
+                response_model is not None
+                and response_model != self.model_id
+                and post_dispatch_outcome != "terminal_failure"
+            ):
                 raise LLMProviderError(
                     "provider_metadata_mismatch", "response_model"
                 )
@@ -1011,6 +1104,10 @@ class RecordedEvidenceSynthesisProvider:
         self.last_call_metadata = {
             "latency_ms": record.get("latency_ms", 0),
             "cost_usd": record.get("cost_usd"),
+            "post_dispatch_outcome_v3": post_dispatch_outcome,
+            "measured_cost_usd": record.get("measured_cost_usd"),
+            "conservative_cost_usd": record.get("conservative_cost_usd"),
+            "sealed_provider_record_sha256": record.get("metadata_sha256"),
         }
         if failure_code:
             recorded_reason = str(failure_code)
@@ -1119,6 +1216,8 @@ class RecordedEvidenceSynthesisProvider:
             )
         finally:
             self.last_call_metadata = dict(self.semantic_provider.last_call_metadata)
+        if isinstance(result, GovernedStructuredTerminalUnknown):
+            return result
         try:
             return json.loads(result.raw_response_text)
         except (json.JSONDecodeError, TypeError) as exc:
@@ -1459,6 +1558,19 @@ def run_evidence_synthesis(
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
 
+    if isinstance(raw_payload, GovernedStructuredTerminalUnknown):
+        return _failure(
+            _status_for_provider_error(
+                LLMProviderError(
+                    raw_payload.failure_code, raw_payload.failure_diagnostic
+                )
+            ),
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=_EMPTY_SHA256,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
     output_hash = _safe_output_sha256(raw_payload)
     elapsed_ms = int((time.monotonic() - started) * 1000)
     forbidden = _find_forbidden_field(raw_payload, policy.forbidden_fields)
@@ -1664,6 +1776,40 @@ def _failure_v2(
     )
 
 
+def post_dispatch_outcome_v3(
+    provider: RecordedEvidenceSynthesisProvider,
+) -> PostDispatchOutcomeV3:
+    """Return the sealed cost classification for one post-dispatch call."""
+    metadata = provider.last_call_metadata
+    terminal = metadata.get("post_dispatch_outcome_v3")
+    sealed_record = metadata.get("sealed_provider_record_sha256")
+    conservative_value = metadata.get("conservative_cost_usd")
+    if terminal is None or sealed_record is None or conservative_value is None:
+        raise ValueError("post_dispatch_outcome_v3 is unavailable")
+    try:
+        conservative_cost = Decimal(conservative_value)
+        measured_cost = (
+            None
+            if metadata.get("measured_cost_usd") is None
+            else Decimal(str(metadata["measured_cost_usd"]))
+        )
+    except InvalidOperation as exc:
+        raise ValueError("post_dispatch_outcome_v3 cost is invalid") from exc
+    if not conservative_cost.is_finite() or conservative_cost < 0:
+        raise ValueError("post_dispatch_outcome_v3 cost is invalid")
+    if terminal == "terminal_unknown":
+        if measured_cost is not None:
+            raise ValueError("terminal_unknown cannot have measured cost")
+    elif measured_cost is None or measured_cost != conservative_cost:
+        raise ValueError("measured terminal outcome requires exact cost")
+    return PostDispatchOutcomeV3(
+        terminal=terminal,
+        measured_cost_usd=measured_cost,
+        conservative_cost_usd=conservative_cost,
+        sealed_provider_record_sha256=sealed_record,
+    )
+
+
 def run_evidence_synthesis_v2(
     *,
     synthesis_input: EvidenceSynthesisInputV2,
@@ -1697,6 +1843,19 @@ def run_evidence_synthesis_v2(
     except Exception as error:
         return _failure_v2(
             _status_for_provider_error(error),
+            synthesis_input=synthesis_input,
+            provider=provider,
+            input_hash=input_hash,
+            output_hash=_EMPTY_SHA256,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+    if isinstance(raw_payload, GovernedStructuredTerminalUnknown):
+        return _failure_v2(
+            _status_for_provider_error(
+                LLMProviderError(
+                    raw_payload.failure_code, raw_payload.failure_diagnostic
+                )
+            ),
             synthesis_input=synthesis_input,
             provider=provider,
             input_hash=input_hash,

@@ -189,6 +189,18 @@ class GovernedStructuredResult:
     record: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class GovernedStructuredTerminalUnknown:
+    """Sealed post-dispatch result whose provider cost cannot be trusted."""
+
+    raw_response_text: str
+    latency_ms: int
+    failure_code: str
+    failure_diagnostic: str
+    conservative_cost_usd: Decimal
+    record: dict[str, Any]
+
+
 _CAPABILITY_ISSUER = object()
 
 
@@ -700,7 +712,7 @@ class LLMObservationProvider:
         *,
         request: GovernedStructuredRequest,
         capability: StructuredCallCapability,
-    ) -> GovernedStructuredResult:
+    ) -> GovernedStructuredResult | GovernedStructuredTerminalUnknown:
         """Execute and atomically record one capability-governed JSON call.
 
         This is the sole public structured-call transport boundary.  The
@@ -732,10 +744,7 @@ class LLMObservationProvider:
         raw_text = ""
         response_model: Optional[str] = None
         usage: Optional[dict[str, int]] = None
-        # Reservation is only a pre-call ceiling. Until the provider returns
-        # validated usage, the measured actual cost is zero rather than the
-        # reserved maximum.
-        actual_cost = Decimal("0.000000")
+        measured_cost: Optional[Decimal] = None
         failure_code: Optional[str] = None
         failure_diagnostic: Optional[str] = None
         try:
@@ -757,40 +766,47 @@ class LLMObservationProvider:
                 max_tokens=capability.pricing.max_output_tokens,
                 **DECODING_PARAMETERS,
             )
-            choice = response.choices[0]
-            message = getattr(choice, "message", None)
-            refusal = getattr(message, "refusal", None)
-            content = getattr(message, "content", None)
             response_model = getattr(response, "model", None)
             raw_usage = getattr(response, "usage", None)
             try:
                 usage = capability.pricing.validate_usage(raw_usage)
-                actual_cost = capability.pricing.cost(
+                measured_cost = capability.pricing.cost(
                     prompt_tokens=usage["prompt_tokens"],
                     completion_tokens=usage["completion_tokens"],
                 )
-                if actual_cost > reservation_cost:
+                if measured_cost > reservation_cost:
                     failure_code = "cost_bound_exceeded"
                     failure_diagnostic = "reservation"
             except LLMProviderError as exc:
-                if not refusal or raw_usage is not None:
-                    failure_code = exc.reason
-                    failure_diagnostic = "usage_validation"
+                failure_code = exc.reason
+                failure_diagnostic = "usage_validation"
             parsed_payload: Any = None
-            if failure_code is not None:
-                pass
-            elif refusal:
+            try:
+                choice = response.choices[0]
+                message = getattr(choice, "message", None)
+                refusal = getattr(message, "refusal", None)
+                content = getattr(message, "content", None)
+            except Exception:
+                refusal = None
+                content = None
+                if failure_code is None:
+                    failure_code = "schema_invalid"
+                    failure_diagnostic = "response_shape"
+            if refusal:
                 failure_code = "refusal"
                 failure_diagnostic = "provider_refusal"
-            elif not isinstance(content, str) or not content:
+            elif failure_code is None and (
+                not isinstance(content, str) or not content
+            ):
                 failure_code = "schema_invalid"
                 failure_diagnostic = "empty_response"
-            elif not response_model or not allowed_response_model(
-                self.model_id, response_model
+            elif failure_code is None and (
+                not response_model
+                or not allowed_response_model(self.model_id, response_model)
             ):
                 failure_code = "provider_metadata_mismatch"
                 failure_diagnostic = "served_model"
-            else:
+            elif failure_code is None:
                 raw_text = content
                 if any(
                     marker.casefold() in raw_text.casefold()
@@ -815,15 +831,21 @@ class LLMObservationProvider:
                             normalized_code = "result_validation_failed"
                         failure_code = normalized_code
                         failure_diagnostic = "response_validator"
-        except LLMProviderError as exc:
-            failure_code = exc.reason
-            failure_diagnostic = "usage_validation"
         except Exception as exc:
-            failure_code = "transport_error"
+            failure_code = "timeout" if isinstance(exc, TimeoutError) else "transport_error"
             failure_diagnostic = type(exc).__name__[:80]
 
         latency_ms = int((time.monotonic() - started) * 1000)
-        persisted_raw = raw_text if failure_code is None else ""
+        trustworthy_cost = measured_cost is not None and measured_cost <= reservation_cost
+        if trustworthy_cost:
+            terminal = "success" if failure_code is None else "terminal_failure"
+            conservative_cost = measured_cost
+        else:
+            terminal = "terminal_unknown"
+            usage = None
+            measured_cost = None
+            conservative_cost = reservation_cost
+        persisted_raw = raw_text if terminal == "success" else ""
         record = {
             "recording_format_version": RECORDING_FORMAT_VERSION,
             "input_hash": request.input_hash,
@@ -843,12 +865,17 @@ class LLMObservationProvider:
             "usage": usage,
             "pricing": capability.pricing.as_record(),
             "pricing_sha256": capability.pricing.identity_sha256,
-            "cost_usd": str(actual_cost),
+            "cost_usd": str(conservative_cost),
+            "measured_cost_usd": (
+                None if measured_cost is None else str(measured_cost)
+            ),
+            "conservative_cost_usd": str(conservative_cost),
+            "post_dispatch_outcome_v3": terminal,
             "latency_ms": latency_ms,
             "retry_count": 0,
             "decoding_parameters": dict(DECODING_PARAMETERS),
             "max_output_tokens": capability.pricing.max_output_tokens,
-            "status": "failure" if failure_code else "success",
+            "status": "success" if terminal == "success" else "failure",
             "failure_code": failure_code,
             "failure_diagnostic": failure_diagnostic,
         }
@@ -856,8 +883,8 @@ class LLMObservationProvider:
         self.store.save_exclusive(record)
         capability.reconcile(
             reservation_id,
-            actual_cost,
-            "failure" if failure_code else "success",
+            conservative_cost,
+            terminal,
         )
         self.last_call_metadata = {
             "mode": "record",
@@ -866,15 +893,32 @@ class LLMObservationProvider:
             "latency_ms": latency_ms,
             "model_id": self.model_id,
             "retry_count": 0,
-            "cost_usd": str(actual_cost),
+            "cost_usd": str(conservative_cost),
+            "measured_cost_usd": (
+                None if measured_cost is None else str(measured_cost)
+            ),
+            "conservative_cost_usd": str(conservative_cost),
+            "post_dispatch_outcome_v3": terminal,
+            "sealed_provider_record_sha256": record["metadata_sha256"],
             "failure_code": failure_code,
         }
+        if terminal == "terminal_unknown":
+            return GovernedStructuredTerminalUnknown(
+                raw_response_text="",
+                latency_ms=latency_ms,
+                failure_code=failure_code or "post_dispatch_unknown",
+                failure_diagnostic=failure_diagnostic or "cost_evidence_missing",
+                conservative_cost_usd=conservative_cost,
+                record=record,
+            )
         if failure_code:
             raise LLMProviderError(failure_code, failure_diagnostic or "")
         return GovernedStructuredResult(
             raw_response_text=persisted_raw,
             usage=usage or {},
-            cost_usd=actual_cost,
+            cost_usd=(
+                measured_cost if measured_cost is not None else Decimal("0.000000")
+            ),
             latency_ms=latency_ms,
             response_model=response_model or "",
             record=record,

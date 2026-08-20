@@ -5,6 +5,7 @@ from decimal import Decimal
 import hashlib
 import importlib
 import importlib.abc
+import job_intel.product_search.evidence_synthesis as evidence_synthesis
 import importlib.util
 import json
 from pathlib import Path
@@ -932,6 +933,55 @@ def test_recorded_transport_failure_replays_with_same_explicit_status(
     assert persisted["failure_code"] == "transport_error"
     assert persisted["failure_diagnostic"] == "ConnectionError"
     assert "error" not in persisted
+
+
+def test_terminal_unknown_metadata_replays_without_a_second_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Mutation caught: ambiguous post-dispatch rows are retried or charged zero."""
+    policy = load_evidence_synthesis_policy(POLICY)
+    store = RecordingStore(tmp_path)
+    transport = _FakeTransport()
+    dispatch_attempts = 0
+
+    def fail(**kwargs: Any) -> None:
+        nonlocal dispatch_attempts
+        dispatch_attempts += 1
+        raise TimeoutError("fixture timeout after dispatch")
+
+    transport.chat.completions.create = fail  # type: ignore[method-assign]
+    record_provider = RecordedEvidenceSynthesisProvider(
+        semantic_provider=LLMObservationProvider(
+            store=store,
+            mode="record",
+            model_id=DEFAULT_MODEL_ID,
+            transport=transport,
+            prompt_version=LLM_PROMPT_VERSION,
+        ),
+        policy=policy,
+        pricing=_pricing(),
+        record_capability=_record_capability(),
+    )
+
+    recorded = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+    persisted = store.load(recorded.metadata.input_sha256)
+    replayed = run_evidence_synthesis(
+        synthesis_input=_input(), provider=record_provider, policy=policy
+    )
+
+    outcome = evidence_synthesis.post_dispatch_outcome_v3(record_provider)
+    assert recorded.deliverable is False
+    assert replayed.status is recorded.status
+    assert dispatch_attempts == 1
+    assert outcome.terminal == "terminal_unknown"
+    assert outcome.measured_cost_usd is None
+    assert outcome.conservative_cost_usd == Decimal("0.010000")
+    assert outcome.sealed_provider_record_sha256 == persisted["metadata_sha256"]
+    assert recorded.metadata.cost_usd == "0.010000"
+    assert persisted["raw_response_text"] == ""
+    assert persisted["usage"] is None
 
 
 def test_arbitrary_provider_object_is_not_an_authorized_boundary() -> None:
