@@ -18,6 +18,8 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
+import sysconfig
 from types import MappingProxyType
 from typing import Any, Literal, Self
 
@@ -38,6 +40,19 @@ from pydantic import (
 from pydantic import model_validator
 
 from job_intel.product_search.contracts import SHA256_PATTERN
+from job_intel.product_search.evidence_synthesis import (
+    EvidenceSynthesisPolicyV1,
+    ProviderEvidencePayloadV2,
+    TASK10_PROMPT_VERSION_V2,
+    build_task10_prompt_v2,
+)
+from job_intel.vacancy_understanding.semantic.contract import (
+    SemanticFactContract,
+)
+from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    GovernedPricingSchedule,
+    build_prompt_for_version,
+)
 
 
 DEFAULT_GATE_B_BENCHMARK_POLICY_V3_PATH = (
@@ -2038,9 +2053,30 @@ _GATE_B_PROFILE_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "config/product_search/career_profile.v2.yaml"
 )
+_GATE_B_CANDIDATE_FACTS_PATH_V3 = Path(
+    "/home/hermes/.hermes/private/career/"
+    "denis_vanyushkin_structured_resume_v1_1.json"
+)
+_GATE_B_DECISION_CONTRACT_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "config/product_search/decision_contract.v2.yaml"
+)
+_GATE_B_PRODUCT_SOT_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "docs/superpowers/specs/"
+    "2026-08-10-job-intel-search-product-redesign-design.md"
+)
+_GATE_B_SEARCH_CONTRACT_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "config/product_search/search_contract.v1.yaml"
+)
 _GATE_B_SEMANTIC_CONTRACT_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
+)
+_GATE_B_TASK10_POLICY_PATH_V3 = (
+    Path(__file__).resolve().parents[2]
+    / "config/product_search/evidence_synthesis.v1.yaml"
 )
 _GATE_B_PROTECTED_PATHS_V3 = (
     Path("/home/hermes/.hermes/state.db"),
@@ -2058,7 +2094,12 @@ _GATE_B_SOURCE_KEYS_V3 = frozenset(
         "benchmark_policy",
         "reviewed_fragment_allowlist",
         "career_profile",
+        "candidate_facts",
+        "decision_contract",
+        "product_sot",
+        "search_contract",
         "semantic_contract",
+        "task10_policy",
         "raw_artifacts",
     }
 )
@@ -2167,6 +2208,162 @@ class GateBMaterializationReceiptV3:
     source_snapshot_sha256: str
     protected_snapshot_sha256: str
     observed_operations: tuple[GateBObservedOperationV3, ...]
+
+
+class GateBRuntimeManifestV3(_StrictFrozenModel):
+    schema_version: Literal["3.0.0"]
+    runtime_kind: Literal["gate_b_at_most_once"]
+    candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    python_version: Literal["3.12.13"]
+    runtime_tree_sha256: str = Field(pattern=SHA256_PATTERN)
+    python_executable_sha256: str = Field(pattern=SHA256_PATTERN)
+    stdlib_tree_sha256: str = Field(pattern=SHA256_PATTERN)
+    dependency_lock_sha256: str = Field(pattern=SHA256_PATTERN)
+    installed_distributions_sha256: str = Field(pattern=SHA256_PATTERN)
+    sys_path_sha256: str = Field(pattern=SHA256_PATTERN)
+    editable_installs: tuple[str, ...]
+
+    @field_validator("editable_installs", mode="before")
+    @classmethod
+    def normalize_editable_installs(cls, value: object) -> object:
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return tuple(value)
+        return value
+
+    @field_validator("editable_installs")
+    @classmethod
+    def validate_no_editable_installs(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if value:
+            raise ValueError("editable installs are forbidden")
+        return value
+
+    @property
+    def canonical_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
+class GateBLaunchBindingV3(_StrictFrozenModel):
+    schema_version: Literal["3.0.0"]
+    run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
+    candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    runtime_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    package_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    ordered_input_sha256s: tuple[str, ...] = Field(
+        min_length=_ORDERED_CALL_CAP,
+        max_length=_ORDERED_CALL_CAP,
+    )
+    ordered_projection_sha256s: tuple[str, ...] = Field(
+        min_length=_ORDERED_CALL_CAP,
+        max_length=_ORDERED_CALL_CAP,
+    )
+    source_authority_sha256s: dict[str, str]
+    model_id: Literal["openai/gpt-5-mini"]
+    maximum_output_tokens: Literal[2000]
+    ordered_call_cap: Literal[48]
+    per_call_maximum_usd: Decimal
+    aggregate_maximum_usd: Decimal
+
+    @field_validator("ordered_input_sha256s", "ordered_projection_sha256s")
+    @classmethod
+    def validate_ordered_sha256s(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(re.fullmatch(SHA256_PATTERN, item) is None for item in value):
+            raise ValueError("ordered launch hashes must be SHA-256 values")
+        if len(set(value)) != _ORDERED_CALL_CAP:
+            raise ValueError("ordered launch hashes must be unique")
+        return value
+
+    @field_validator("source_authority_sha256s")
+    @classmethod
+    def validate_source_authorities(cls, value: dict[str, str]) -> dict[str, str]:
+        if not value or any(
+            not name
+            or re.fullmatch(SHA256_PATTERN, sha256) is None
+            for name, sha256 in value.items()
+        ):
+            raise ValueError("source authority identity is invalid")
+        return dict(sorted(value.items()))
+
+    @field_validator("per_call_maximum_usd")
+    @classmethod
+    def validate_per_call_maximum(cls, value: Decimal) -> Decimal:
+        if value != _PER_CALL_MAXIMUM_USD:
+            raise ValueError("per-call maximum must be USD 0.01")
+        return value
+
+    @field_validator("aggregate_maximum_usd")
+    @classmethod
+    def validate_aggregate_maximum(cls, value: Decimal) -> Decimal:
+        if value != _AGGREGATE_MAXIMUM_USD:
+            raise ValueError("aggregate maximum must be USD 0.48")
+        return value
+
+    @property
+    def canonical_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
+class GateBOwnerCheckpointManifestV3(_StrictFrozenModel):
+    schema_version: Literal["3.0.0"]
+    checkpoint_kind: Literal["gate_b_at_most_once_owner_approval"]
+    approved_at: AwareDatetime
+    launch_identity: GateBLaunchBindingV3
+
+    @field_validator("approved_at")
+    @classmethod
+    def validate_approved_at(cls, value: AwareDatetime) -> AwareDatetime:
+        return _require_utc(value)
+
+    @property
+    def canonical_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
+class GateBOneTimeLaunchReceiptV3(_StrictFrozenModel):
+    schema_version: Literal["3.0.0"]
+    receipt_kind: Literal["gate_b_at_most_once_launch"]
+    run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
+    issued_at: AwareDatetime
+    expires_at: AwareDatetime
+    nonce: str = Field(pattern=SHA256_PATTERN)
+    checkpoint_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    launch_identity_sha256: str = Field(pattern=SHA256_PATTERN)
+    candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    runtime_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    package_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    ordered_call_cap: Literal[48]
+    per_call_maximum_usd: Decimal
+    aggregate_maximum_usd: Decimal
+
+    @field_validator("issued_at", "expires_at")
+    @classmethod
+    def validate_timestamps(cls, value: AwareDatetime) -> AwareDatetime:
+        return _require_utc(value)
+
+    @field_validator("per_call_maximum_usd")
+    @classmethod
+    def validate_per_call_maximum(cls, value: Decimal) -> Decimal:
+        if value != _PER_CALL_MAXIMUM_USD:
+            raise ValueError("per-call maximum must be USD 0.01")
+        return value
+
+    @field_validator("aggregate_maximum_usd")
+    @classmethod
+    def validate_aggregate_maximum(cls, value: Decimal) -> Decimal:
+        if value != _AGGREGATE_MAXIMUM_USD:
+            raise ValueError("aggregate maximum must be USD 0.48")
+        return value
+
+    @model_validator(mode="after")
+    def validate_one_time_window(self) -> Self:
+        if self.expires_at <= self.issued_at:
+            raise ValueError("launch receipt expiry must follow issuance")
+        if self.expires_at - self.issued_at > timedelta(minutes=30):
+            raise ValueError("launch receipt expiry cannot exceed 30 minutes")
+        return self
+
+    @property
+    def canonical_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
 
 
 def _open_directory_nofollow_v3(path: Path) -> int:
@@ -2278,9 +2475,20 @@ def load_gate_b_source_bytes_v3() -> dict[str, bytes | dict[str, bytes]]:
             _GATE_B_ALLOWLIST_PATH_V3
         ),
         "career_profile": _read_path_nofollow_v3(_GATE_B_PROFILE_PATH_V3),
+        "candidate_facts": _read_path_nofollow_v3(
+            _GATE_B_CANDIDATE_FACTS_PATH_V3
+        ),
+        "decision_contract": _read_path_nofollow_v3(
+            _GATE_B_DECISION_CONTRACT_PATH_V3
+        ),
+        "product_sot": _read_path_nofollow_v3(_GATE_B_PRODUCT_SOT_PATH_V3),
+        "search_contract": _read_path_nofollow_v3(
+            _GATE_B_SEARCH_CONTRACT_PATH_V3
+        ),
         "semantic_contract": _read_path_nofollow_v3(
             _GATE_B_SEMANTIC_CONTRACT_PATH_V3
         ),
+        "task10_policy": _read_path_nofollow_v3(_GATE_B_TASK10_POLICY_PATH_V3),
         "raw_artifacts": raw_artifacts,
     }
 
@@ -2345,6 +2553,147 @@ def _profile_authority_hashes_v3(profile: Mapping[str, Any]) -> dict[str, str]:
         ):
             raise GateBPackageErrorV3("career_profile_authority_ref_invalid")
         result[name] = sha256
+    return result
+
+
+def gate_b_governed_pricing_schedule_v3() -> GovernedPricingSchedule:
+    """Return the one reviewed Gate B pricing and token schedule."""
+    return GovernedPricingSchedule(
+        version="openrouter-openai-gpt5-mini-2026-08-17",
+        model_id="openai/gpt-5-mini",
+        input_usd_per_mtok=Decimal("0.25"),
+        output_usd_per_mtok=Decimal("2.00"),
+        max_input_tokens=24_000,
+        max_output_tokens=2_000,
+    )
+
+
+def _derive_launch_authority_sha256s_v3(
+    source_bytes: Mapping[str, object],
+) -> dict[str, str]:
+    """Derive all non-corpus launch authorities without performing I/O."""
+    profile_bytes = _source_payload_v3(source_bytes, "career_profile")
+    candidate_facts_bytes = _source_payload_v3(source_bytes, "candidate_facts")
+    decision_contract_bytes = _source_payload_v3(source_bytes, "decision_contract")
+    product_sot_bytes = _source_payload_v3(source_bytes, "product_sot")
+    search_contract_bytes = _source_payload_v3(source_bytes, "search_contract")
+    semantic_contract_bytes = _source_payload_v3(source_bytes, "semantic_contract")
+    task10_policy_bytes = _source_payload_v3(source_bytes, "task10_policy")
+    benchmark_policy_bytes = _source_payload_v3(source_bytes, "benchmark_policy")
+
+    profile = _decode_yaml_mapping_v3(profile_bytes, error="career_profile_invalid")
+    profile_authorities = _profile_authority_hashes_v3(profile)
+    actual_content_hashes = {
+        "candidate_facts_ref": hashlib.sha256(candidate_facts_bytes).hexdigest(),
+        "product_sot_ref": hashlib.sha256(product_sot_bytes).hexdigest(),
+        "search_contract_ref": hashlib.sha256(search_contract_bytes).hexdigest(),
+    }
+    if any(
+        actual_content_hashes[name] != profile_authorities[name]
+        for name in actual_content_hashes
+    ):
+        raise GateBPackageErrorV3("profile_authority_content_mismatch")
+    try:
+        json.loads(candidate_facts_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise GateBPackageErrorV3("candidate_facts_invalid") from exc
+
+    decision_contract = _decode_yaml_mapping_v3(
+        decision_contract_bytes,
+        error="decision_contract_invalid",
+    )
+    decision_authorities = _plain_mapping_v3(
+        decision_contract.get("authority_hashes"),
+        error="decision_contract_authorities_invalid",
+    )
+    expected_decision_authorities = {
+        "career_profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+        "candidate_facts_sha256": actual_content_hashes["candidate_facts_ref"],
+        "search_contract_sha256": actual_content_hashes["search_contract_ref"],
+        "product_sot_sha256": actual_content_hashes["product_sot_ref"],
+        "evidence_synthesis_contract_sha256": hashlib.sha256(
+            task10_policy_bytes
+        ).hexdigest(),
+    }
+    if any(
+        decision_authorities.get(name) != value
+        for name, value in expected_decision_authorities.items()
+    ):
+        raise GateBPackageErrorV3("decision_contract_authority_mismatch")
+
+    semantic_payload = _decode_yaml_mapping_v3(
+        semantic_contract_bytes,
+        error="semantic_contract_invalid",
+    )
+    semantic_contract_data = semantic_payload.get("semantic_fact_contract")
+    try:
+        semantic_contract = SemanticFactContract.model_validate(
+            semantic_contract_data
+        )
+        task10_policy = EvidenceSynthesisPolicyV1.model_validate(
+            _decode_yaml_mapping_v3(
+                task10_policy_bytes,
+                error="task10_policy_invalid",
+            )
+        )
+        benchmark_policy = load_gate_b_benchmark_policy_v3(
+            _decode_yaml_mapping_v3(
+                benchmark_policy_bytes,
+                error="benchmark_policy_invalid",
+            )
+        )
+    except (ValidationError, ValueError) as exc:
+        raise GateBPackageErrorV3("launch_authority_contract_invalid") from exc
+    semantic_prompt = build_prompt_for_version(
+        task10_policy.semantic_prompt_version,
+        semantic_contract,
+    )
+    task10_prompt = build_task10_prompt_v2(task10_policy)
+    pricing = gate_b_governed_pricing_schedule_v3()
+    if (
+        pricing.model_id != task10_policy.model_id
+        or pricing.max_output_tokens != 2_000
+        or pricing.reservation_cost_usd != _PER_CALL_MAXIMUM_USD
+    ):
+        raise GateBPackageErrorV3("launch_pricing_contract_invalid")
+    launch_limits = {
+        "ordered_call_cap": benchmark_policy.ordered_call_cap,
+        "per_call_maximum_usd": str(benchmark_policy.per_call_maximum_usd),
+        "aggregate_maximum_usd": str(benchmark_policy.aggregate_maximum_usd),
+        "maximum_output_tokens": pricing.max_output_tokens,
+    }
+    result = {
+        "benchmark_policy": hashlib.sha256(benchmark_policy_bytes).hexdigest(),
+        "career_profile": hashlib.sha256(profile_bytes).hexdigest(),
+        "candidate_facts": actual_content_hashes["candidate_facts_ref"],
+        "decision_contract": hashlib.sha256(decision_contract_bytes).hexdigest(),
+        "product_sot": actual_content_hashes["product_sot_ref"],
+        "search_contract": actual_content_hashes["search_contract_ref"],
+        "semantic_contract": hashlib.sha256(semantic_contract_bytes).hexdigest(),
+        "task10_policy": hashlib.sha256(task10_policy_bytes).hexdigest(),
+        "task10_prompt": hashlib.sha256(task10_prompt.encode("utf-8")).hexdigest(),
+        "task10_prompt_version": hashlib.sha256(
+            TASK10_PROMPT_VERSION_V2.encode("utf-8")
+        ).hexdigest(),
+        "semantic_prompt": hashlib.sha256(
+            semantic_prompt.encode("utf-8")
+        ).hexdigest(),
+        "semantic_prompt_version": hashlib.sha256(
+            task10_policy.semantic_prompt_version.encode("utf-8")
+        ).hexdigest(),
+        "provider_output_schema": canonical_json_sha256(
+            ProviderEvidencePayloadV2.model_json_schema()
+        ),
+        "model_id": hashlib.sha256(task10_policy.model_id.encode("utf-8")).hexdigest(),
+        "pricing": pricing.identity_sha256,
+        "launch_limits": canonical_json_sha256(launch_limits),
+        **{
+            f"profile_{name}": sha256
+            for name, sha256 in profile_authorities.items()
+        },
+    }
+    if any(re.fullmatch(SHA256_PATTERN, value) is None for value in result.values()):
+        raise GateBPackageErrorV3("launch_authority_identity_invalid")
     return result
 
 
@@ -2698,8 +3047,7 @@ def validate_gate_b_package_pure_v3(
     gate_a_manifest_bytes = _source_payload_v3(sources, "gate_a_manifest")
     policy_bytes = _source_payload_v3(sources, "benchmark_policy")
     allowlist_bytes = _source_payload_v3(sources, "reviewed_fragment_allowlist")
-    profile_bytes = _source_payload_v3(sources, "career_profile")
-    semantic_contract_bytes = _source_payload_v3(sources, "semantic_contract")
+    launch_authorities = _derive_launch_authority_sha256s_v3(sources)
     raw_artifacts = _plain_mapping_v3(
         sources.get("raw_artifacts"),
         error="raw_artifacts_must_be_a_plain_mapping",
@@ -2727,10 +3075,6 @@ def validate_gate_b_package_pure_v3(
         raise GateBPackageErrorV3("benchmark_policy_invalid") from exc
     if policy.ordered_call_cap != _ORDERED_CALL_CAP:
         raise GateBPackageErrorV3("benchmark_policy_call_cap_invalid")
-    profile = _decode_yaml_mapping_v3(profile_bytes, error="career_profile_invalid")
-    profile_authorities = _profile_authority_hashes_v3(profile)
-    if not semantic_contract_bytes:
-        raise GateBPackageErrorV3("semantic_contract_empty")
     if hashlib.sha256(allowlist_bytes).hexdigest() != _GATE_B_ALLOWLIST_SHA256_V3:
         raise GateBPackageErrorV3("reviewed_fragment_candidate_contract_invalid")
     selection_keys = frozenset(str(record["selection_key"]) for record in records)
@@ -2786,16 +3130,10 @@ def validate_gate_b_package_pure_v3(
         entries_by_selection[entry.selection_key].append(entry)
 
     source_authorities = {
-        "benchmark_policy": hashlib.sha256(policy_bytes).hexdigest(),
-        "career_profile": hashlib.sha256(profile_bytes).hexdigest(),
+        **launch_authorities,
         "corpus_manifest": corpus_sha256,
         "gate_a_manifest": gate_a_manifest_sha256,
         "reviewed_fragment_allowlist": hashlib.sha256(allowlist_bytes).hexdigest(),
-        "semantic_contract": hashlib.sha256(semantic_contract_bytes).hexdigest(),
-        **{
-            f"profile_{name}": sha256
-            for name, sha256 in profile_authorities.items()
-        },
     }
     artifacts: dict[str, bytes] = {}
     ordered_input_sha256s: list[str] = []
@@ -3028,6 +3366,294 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
         expected_source_files[reference] = raw_sha256
     if dict(package.source_file_sha256s) != expected_source_files:
         raise GateBPackageErrorV3("validated_package_source_inventory_invalid")
+
+
+_GATE_B_RUNTIME_PAYLOAD_KEYS_V3 = frozenset(
+    {
+        "runtime_tree_manifest",
+        "python_executable",
+        "stdlib_tree_manifest",
+        "dependency_lock",
+        "installed_distributions",
+        "sys_path",
+    }
+)
+
+
+def _validate_runtime_payloads_v3(
+    manifest: GateBRuntimeManifestV3,
+    runtime_payloads: Mapping[str, object],
+) -> None:
+    payloads = _plain_mapping_v3(
+        runtime_payloads,
+        error="runtime_payloads_must_be_a_plain_mapping",
+    )
+    if set(payloads) != _GATE_B_RUNTIME_PAYLOAD_KEYS_V3 or any(
+        type(value) is not bytes for value in payloads.values()
+    ):
+        raise GateBPackageErrorV3("runtime_payload_inventory_invalid")
+    expected_hashes = {
+        "runtime_tree_manifest": manifest.runtime_tree_sha256,
+        "python_executable": manifest.python_executable_sha256,
+        "stdlib_tree_manifest": manifest.stdlib_tree_sha256,
+        "dependency_lock": manifest.dependency_lock_sha256,
+        "installed_distributions": manifest.installed_distributions_sha256,
+        "sys_path": manifest.sys_path_sha256,
+    }
+    for name, expected_sha256 in expected_hashes.items():
+        value = payloads[name]
+        assert isinstance(value, bytes)
+        if hashlib.sha256(value).hexdigest() != expected_sha256:
+            raise GateBPackageErrorV3(f"runtime_{name}_identity_mismatch")
+    for name in ("runtime_tree_manifest", "stdlib_tree_manifest"):
+        value = payloads[name]
+        assert isinstance(value, bytes)
+        inventory = _decode_json_mapping_v3(
+            value,
+            error=f"runtime_{name}_invalid",
+        )
+        if (
+            not inventory
+            or _canonical_json_bytes(inventory) != value
+            or any(
+                not isinstance(reference, str)
+                or Path(reference).is_absolute()
+                or ".." in Path(reference).parts
+                or not isinstance(sha256, str)
+                or re.fullmatch(SHA256_PATTERN, sha256) is None
+                for reference, sha256 in inventory.items()
+            )
+        ):
+            raise GateBPackageErrorV3(f"runtime_{name}_invalid")
+    sys_path_bytes = payloads["sys_path"]
+    assert isinstance(sys_path_bytes, bytes)
+    try:
+        sys_path = json.loads(sys_path_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise GateBPackageErrorV3("runtime_sys_path_invalid") from exc
+    if (
+        not isinstance(sys_path, list)
+        or not sys_path
+        or any(not isinstance(item, str) or not item for item in sys_path)
+        or _canonical_json_bytes(sys_path) != sys_path_bytes
+        or any("__editable__" in item for item in sys_path)
+    ):
+        raise GateBPackageErrorV3("runtime_sys_path_invalid")
+    distributions = payloads["installed_distributions"]
+    assert isinstance(distributions, bytes)
+    if b" @ file:" in distributions or any(
+        line.lstrip().startswith(b"-e ") for line in distributions.splitlines()
+    ):
+        raise GateBPackageErrorV3("runtime_editable_install_invalid")
+
+
+def _validate_model_from_json_mapping_v3(
+    model: type[BaseModel],
+    payload: Mapping[str, object],
+    *,
+    error: str,
+) -> Any:
+    try:
+        return model.model_validate_json(_canonical_json_bytes(dict(payload)))
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise GateBPackageErrorV3(error) from exc
+
+
+def _recompute_projection_sha256s_v3(
+    package: GateBValidatedPackageV3,
+    source_authorities: Mapping[str, str],
+    allowlist_bytes: bytes,
+) -> tuple[str, ...]:
+    from job_intel.product_search.gate_b_evidence_v3 import (
+        ReviewedFragmentAllowlistV3,
+        project_vacancy_evidence_v3,
+    )
+
+    try:
+        allowlist = ReviewedFragmentAllowlistV3.model_validate(
+            _decode_yaml_mapping_v3(
+                allowlist_bytes,
+                error="launch_reviewed_allowlist_invalid",
+            )
+        )
+    except ValidationError as exc:
+        raise GateBPackageErrorV3("launch_reviewed_allowlist_invalid") from exc
+    index = _decode_json_mapping_v3(
+        package.artifacts["package-index.json"],
+        error="launch_package_index_invalid",
+    )
+    records = index.get("records")
+    if not isinstance(records, list) or len(records) != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("launch_package_index_invalid")
+    projection_sha256s: list[str] = []
+    for ordinal, input_sha256 in enumerate(package.ordered_input_sha256s):
+        reference = f"task10-inputs/{input_sha256}.json"
+        input_payload = _decode_json_mapping_v3(
+            package.artifacts[reference],
+            error="launch_package_input_invalid",
+        )
+        record = _plain_mapping_v3(
+            records[ordinal],
+            error="launch_package_index_invalid",
+        )
+        if (
+            input_payload.get("ordinal") != ordinal
+            or record.get("ordinal") != ordinal
+            or record.get("task10_input_reference") != reference
+            or record.get("task10_input_sha256") != input_sha256
+            or input_payload.get("selection_key") != record.get("selection_key")
+            or input_payload.get("source_authority_sha256s")
+            != dict(source_authorities)
+        ):
+            raise GateBPackageErrorV3("launch_package_row_identity_mismatch")
+        source_record = _plain_mapping_v3(
+            input_payload.get("source_record"),
+            error="launch_package_input_invalid",
+        )
+        raw = _plain_mapping_v3(
+            input_payload.get("raw"),
+            error="launch_package_input_invalid",
+        )
+        try:
+            projection = project_vacancy_evidence_v3(
+                source_record,
+                raw,
+                allowlist,
+            )
+        except (ValidationError, ValueError) as exc:
+            raise GateBPackageErrorV3("launch_projection_invalid") from exc
+        references = projection.assessment_input.references
+        reference_hashes = {
+            "career_profile": references.profile_ref.sha256,
+            "candidate_facts": references.candidate_facts_ref.sha256,
+            "semantic_contract": references.semantic_contract_ref.sha256,
+            "search_contract": references.search_contract_ref.sha256,
+            "product_sot": references.policy_ref.sha256,
+        }
+        if any(
+            source_authorities.get(name) != sha256
+            for name, sha256 in reference_hashes.items()
+        ):
+            raise GateBPackageErrorV3("launch_projection_authority_mismatch")
+        projection_sha256s.append(
+            hashlib.sha256(
+                _canonical_json_bytes(projection.provider_payload())
+            ).hexdigest()
+        )
+    result = tuple(projection_sha256s)
+    if len(set(result)) != _ORDERED_CALL_CAP:
+        raise GateBPackageErrorV3("launch_projection_identity_not_unique")
+    return result
+
+
+def recompute_launch_identity_v3(
+    package: GateBValidatedPackageV3,
+    runtime_manifest_payload: Mapping[str, object],
+    runtime_payloads: Mapping[str, object],
+    owner_checkpoint_payload: Mapping[str, object],
+    launch_receipt_payload: Mapping[str, object],
+) -> GateBLaunchBindingV3:
+    """Recompute every launch identity before any provider can be constructed."""
+    _validate_package_in_memory_v3(package)
+    runtime_manifest = _validate_model_from_json_mapping_v3(
+        GateBRuntimeManifestV3,
+        runtime_manifest_payload,
+        error="runtime_manifest_invalid",
+    )
+    _validate_runtime_payloads_v3(runtime_manifest, runtime_payloads)
+    current_source_bytes = load_gate_b_source_bytes_v3()
+    current_package = validate_gate_b_package_pure_v3(current_source_bytes)
+    if (
+        current_package.package_sha256 != package.package_sha256
+        or current_package.manifest_bytes != package.manifest_bytes
+        or dict(current_package.artifact_sha256s) != dict(package.artifact_sha256s)
+    ):
+        raise GateBPackageErrorV3("launch_package_identity_drift")
+    index = _decode_json_mapping_v3(
+        package.artifacts["package-index.json"],
+        error="launch_package_index_invalid",
+    )
+    source_authorities = _plain_mapping_v3(
+        index.get("source_authority_sha256s"),
+        error="launch_package_authority_invalid",
+    )
+    derived_authorities = _derive_launch_authority_sha256s_v3(
+        current_source_bytes
+    )
+    expected_authorities = {
+        **derived_authorities,
+        "corpus_manifest": hashlib.sha256(
+            _source_payload_v3(current_source_bytes, "corpus_manifest")
+        ).hexdigest(),
+        "gate_a_manifest": hashlib.sha256(
+            _source_payload_v3(current_source_bytes, "gate_a_manifest")
+        ).hexdigest(),
+        "reviewed_fragment_allowlist": hashlib.sha256(
+            _source_payload_v3(current_source_bytes, "reviewed_fragment_allowlist")
+        ).hexdigest(),
+    }
+    if source_authorities != expected_authorities:
+        raise GateBPackageErrorV3("launch_package_authority_drift")
+    projection_sha256s = _recompute_projection_sha256s_v3(
+        package,
+        expected_authorities,
+        _source_payload_v3(current_source_bytes, "reviewed_fragment_allowlist"),
+    )
+    task10_policy = _decode_yaml_mapping_v3(
+        _source_payload_v3(current_source_bytes, "task10_policy"),
+        error="task10_policy_invalid",
+    )
+    model_id = task10_policy.get("model_id")
+    pricing = gate_b_governed_pricing_schedule_v3()
+    benchmark_policy = load_gate_b_benchmark_policy_v3(
+        _decode_yaml_mapping_v3(
+            _source_payload_v3(current_source_bytes, "benchmark_policy"),
+            error="benchmark_policy_invalid",
+        )
+    )
+    observed = GateBLaunchBindingV3(
+        schema_version="3.0.0",
+        run_id=f"gate-b-at-most-once-{package.package_sha256[:16]}",
+        candidate_commit=runtime_manifest.candidate_commit,
+        runtime_manifest_sha256=runtime_manifest.canonical_sha256,
+        package_manifest_sha256=package.package_sha256,
+        ordered_input_sha256s=package.ordered_input_sha256s,
+        ordered_projection_sha256s=projection_sha256s,
+        source_authority_sha256s=expected_authorities,
+        model_id=model_id,
+        maximum_output_tokens=pricing.max_output_tokens,
+        ordered_call_cap=benchmark_policy.ordered_call_cap,
+        per_call_maximum_usd=benchmark_policy.per_call_maximum_usd,
+        aggregate_maximum_usd=benchmark_policy.aggregate_maximum_usd,
+    )
+    checkpoint = _validate_model_from_json_mapping_v3(
+        GateBOwnerCheckpointManifestV3,
+        owner_checkpoint_payload,
+        error="owner_checkpoint_invalid",
+    )
+    if checkpoint.launch_identity != observed:
+        raise GateBPackageErrorV3("owner_approval_identity_mismatch")
+    receipt = _validate_model_from_json_mapping_v3(
+        GateBOneTimeLaunchReceiptV3,
+        launch_receipt_payload,
+        error="launch_receipt_invalid",
+    )
+    receipt_identity = {
+        "run_id": observed.run_id,
+        "checkpoint_manifest_sha256": checkpoint.canonical_sha256,
+        "launch_identity_sha256": observed.canonical_sha256,
+        "candidate_commit": observed.candidate_commit,
+        "runtime_manifest_sha256": observed.runtime_manifest_sha256,
+        "package_manifest_sha256": observed.package_manifest_sha256,
+        "ordered_call_cap": observed.ordered_call_cap,
+        "per_call_maximum_usd": observed.per_call_maximum_usd,
+        "aggregate_maximum_usd": observed.aggregate_maximum_usd,
+    }
+    if any(getattr(receipt, name) != value for name, value in receipt_identity.items()):
+        raise GateBPackageErrorV3("launch_receipt_identity_mismatch")
+    if receipt.issued_at < checkpoint.approved_at:
+        raise GateBPackageErrorV3("launch_receipt_precedes_owner_approval")
+    return observed
 
 
 def _snapshot_sha256_v3(snapshot: tuple[tuple[object, ...], ...]) -> str:
@@ -3440,3 +4066,117 @@ def materialize_gate_b_package_v3(
         protected_snapshot_sha256=_snapshot_sha256_v3(protected_after),
         observed_operations=tuple(operations),
     )
+
+
+def _tree_manifest_bytes_v3(root: Path) -> bytes:
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise GateBPackageErrorV3("runtime_tree_root_invalid")
+    inventory: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        reference = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            inventory[reference] = hashlib.sha256(
+                ("symlink:" + os.readlink(path)).encode("utf-8")
+            ).hexdigest()
+        elif path.is_file():
+            if path.suffix in {".pyc", ".pyo"} or "__pycache__" in path.parts:
+                raise GateBPackageErrorV3("runtime_bytecode_forbidden")
+            inventory[reference] = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif not path.is_dir():
+            raise GateBPackageErrorV3("runtime_tree_entry_invalid")
+    if not inventory:
+        raise GateBPackageErrorV3("runtime_tree_empty")
+    return _canonical_json_bytes(inventory)
+
+
+def _stdlib_tree_manifest_bytes_v3(root: Path) -> bytes:
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise GateBPackageErrorV3("stdlib_tree_root_invalid")
+    inventory: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        reference = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            inventory[reference] = hashlib.sha256(
+                ("symlink:" + os.readlink(path)).encode("utf-8")
+            ).hexdigest()
+        elif path.is_file():
+            inventory[reference] = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif not path.is_dir():
+            raise GateBPackageErrorV3("stdlib_tree_entry_invalid")
+    if not inventory:
+        raise GateBPackageErrorV3("stdlib_tree_empty")
+    return _canonical_json_bytes(inventory)
+
+
+def _export_runtime_manifest_v3(root: Path, candidate_commit: str) -> Path:
+    root = root.resolve()
+    runtime_root = root / "runtime"
+    python_executable = Path(sys.executable).resolve()
+    stdlib_root = Path(sysconfig.get_path("stdlib")).resolve()
+    dependency_lock_path = runtime_root / "uv.lock"
+    distributions_path = root / "python-runtime/installed-distributions.txt"
+    if re.fullmatch(r"[0-9a-f]{40}", candidate_commit) is None:
+        raise GateBPackageErrorV3("runtime_candidate_commit_invalid")
+    if ".".join(str(item) for item in sys.version_info[:3]) != "3.12.13":
+        raise GateBPackageErrorV3("runtime_python_version_invalid")
+    for required in (
+        runtime_root,
+        python_executable,
+        stdlib_root,
+        dependency_lock_path,
+        distributions_path,
+    ):
+        if not required.is_relative_to(root):
+            raise GateBPackageErrorV3("runtime_path_outside_export")
+    runtime_tree_bytes = _tree_manifest_bytes_v3(runtime_root)
+    stdlib_tree_bytes = _stdlib_tree_manifest_bytes_v3(stdlib_root)
+    executable_bytes = python_executable.read_bytes()
+    dependency_lock_bytes = dependency_lock_path.read_bytes()
+    installed_distributions_bytes = distributions_path.read_bytes()
+    editable_installs = tuple(
+        line.decode("utf-8", errors="replace")
+        for line in installed_distributions_bytes.splitlines()
+        if line.lstrip().startswith(b"-e ") or b" @ file:" in line
+    )
+    normalized_sys_path = tuple(
+        str(Path(item or os.getcwd()).resolve()) for item in sys.path
+    )
+    if any(not Path(item).is_absolute() for item in normalized_sys_path):
+        raise GateBPackageErrorV3("runtime_sys_path_invalid")
+    sys_path_bytes = _canonical_json_bytes(list(normalized_sys_path))
+    manifest = GateBRuntimeManifestV3(
+        schema_version="3.0.0",
+        runtime_kind="gate_b_at_most_once",
+        candidate_commit=candidate_commit,
+        python_version="3.12.13",
+        runtime_tree_sha256=hashlib.sha256(runtime_tree_bytes).hexdigest(),
+        python_executable_sha256=hashlib.sha256(executable_bytes).hexdigest(),
+        stdlib_tree_sha256=hashlib.sha256(stdlib_tree_bytes).hexdigest(),
+        dependency_lock_sha256=hashlib.sha256(dependency_lock_bytes).hexdigest(),
+        installed_distributions_sha256=hashlib.sha256(
+            installed_distributions_bytes
+        ).hexdigest(),
+        sys_path_sha256=hashlib.sha256(sys_path_bytes).hexdigest(),
+        editable_installs=editable_installs,
+    )
+    identity_root = root / "runtime-identity"
+    identity_root.mkdir(mode=0o700)
+    (identity_root / "runtime-tree.json").write_bytes(runtime_tree_bytes)
+    (identity_root / "stdlib-tree.json").write_bytes(stdlib_tree_bytes)
+    (identity_root / "sys-path.json").write_bytes(sys_path_bytes)
+    manifest_path = root / "runtime-manifest.json"
+    manifest_path.write_bytes(_canonical_json_bytes(manifest.model_dump(mode="json")))
+    return manifest_path
+
+
+def _main_v3(arguments: list[str]) -> int:
+    if len(arguments) == 3 and arguments[0] == "export-runtime-manifest":
+        _export_runtime_manifest_v3(Path(arguments[1]), arguments[2])
+        return 0
+    raise SystemExit(
+        "usage: gate_b_benchmark_v3 export-runtime-manifest ROOT COMMIT"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main_v3(sys.argv[1:]))

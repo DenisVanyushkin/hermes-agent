@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import inspect
 import hashlib
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
@@ -77,9 +78,27 @@ def _gate_b_source_bytes_v3() -> dict[str, object]:
         "career_profile": (
             ROOT / "config/product_search/career_profile.v2.yaml"
         ).read_bytes(),
+        "candidate_facts": Path(
+            "/home/hermes/.hermes/private/career/"
+            "denis_vanyushkin_structured_resume_v1_1.json"
+        ).read_bytes(),
+        "decision_contract": (
+            ROOT / "config/product_search/decision_contract.v2.yaml"
+        ).read_bytes(),
+        "product_sot": (
+            ROOT
+            / "docs/superpowers/specs/"
+            "2026-08-10-job-intel-search-product-redesign-design.md"
+        ).read_bytes(),
+        "search_contract": (
+            ROOT / "config/product_search/search_contract.v1.yaml"
+        ).read_bytes(),
         "semantic_contract": (
             ROOT
             / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
+        ).read_bytes(),
+        "task10_policy": (
+            ROOT / "config/product_search/evidence_synthesis.v1.yaml"
         ).read_bytes(),
         "raw_artifacts": {
             record["raw_reference"]: (
@@ -1585,3 +1604,356 @@ def test_materializer_never_reads_credential_file_contents(
     ]
     assert len(credential_operations) == 4
     assert all("metadata_only" in operation.detail for operation in credential_operations)
+
+
+def _runtime_identity_fixture_v3() -> tuple[object, dict[str, bytes]]:
+    runtime_payloads = {
+        "runtime_tree_manifest": b'{"job_intel/product_search/gate_b_benchmark_v3.py":"'
+        + b"1" * 64
+        + b'"}',
+        "python_executable": b"pinned-cpython-3.12.13",
+        "stdlib_tree_manifest": b'{"pathlib.py":"' + b"2" * 64 + b'"}',
+        "dependency_lock": b"version = 1\n",
+        "installed_distributions": b"pydantic==2.11.7\n",
+        "sys_path": b'["/runtime","/stdlib","/site-packages"]',
+    }
+    manifest_type = getattr(gate_b_v3, "GateBRuntimeManifestV3")
+    manifest = manifest_type(
+        schema_version="3.0.0",
+        runtime_kind="gate_b_at_most_once",
+        candidate_commit="a" * 40,
+        python_version="3.12.13",
+        runtime_tree_sha256=hashlib.sha256(
+            runtime_payloads["runtime_tree_manifest"]
+        ).hexdigest(),
+        python_executable_sha256=hashlib.sha256(
+            runtime_payloads["python_executable"]
+        ).hexdigest(),
+        stdlib_tree_sha256=hashlib.sha256(
+            runtime_payloads["stdlib_tree_manifest"]
+        ).hexdigest(),
+        dependency_lock_sha256=hashlib.sha256(
+            runtime_payloads["dependency_lock"]
+        ).hexdigest(),
+        installed_distributions_sha256=hashlib.sha256(
+            runtime_payloads["installed_distributions"]
+        ).hexdigest(),
+        sys_path_sha256=hashlib.sha256(runtime_payloads["sys_path"]).hexdigest(),
+        editable_installs=(),
+    )
+    return manifest, runtime_payloads
+
+
+def _projection_hashes_v3(package: object) -> tuple[str, ...]:
+    from job_intel.product_search.gate_b_evidence_v3 import (
+        ReviewedFragmentAllowlistV3,
+        project_vacancy_evidence_v3,
+    )
+
+    sources = _gate_b_source_bytes_v3()
+    allowlist = ReviewedFragmentAllowlistV3.model_validate(
+        yaml.safe_load(sources["reviewed_fragment_allowlist"])
+    )
+    hashes: list[str] = []
+    for input_sha256 in package.ordered_input_sha256s:
+        payload = json.loads(
+            package.artifacts[f"task10-inputs/{input_sha256}.json"]
+        )
+        projection = project_vacancy_evidence_v3(
+            payload["source_record"],
+            payload["raw"],
+            allowlist,
+        )
+        hashes.append(
+            hashlib.sha256(
+                json.dumps(
+                    projection.provider_payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+    return tuple(hashes)
+
+
+def _launch_approval_fixture_v3() -> tuple[
+    object,
+    object,
+    dict[str, bytes],
+    dict[str, object],
+    object,
+    object,
+    object,
+]:
+    sources = _gate_b_source_bytes_v3()
+    package = gate_b_v3.validate_gate_b_package_pure_v3(sources)
+    runtime_manifest, runtime_payloads = _runtime_identity_fixture_v3()
+    package_index = json.loads(package.artifacts["package-index.json"])
+    authority_sha256s = package_index["source_authority_sha256s"]
+    policy = gate_b_v3.load_gate_b_benchmark_policy_v3(
+        yaml.safe_load(sources["benchmark_policy"])
+    )
+    launch_type = getattr(gate_b_v3, "GateBLaunchBindingV3")
+    launch = launch_type(
+        schema_version="3.0.0",
+        run_id=f"gate-b-at-most-once-{package.package_sha256[:16]}",
+        candidate_commit=runtime_manifest.candidate_commit,
+        runtime_manifest_sha256=runtime_manifest.canonical_sha256,
+        package_manifest_sha256=package.package_sha256,
+        ordered_input_sha256s=package.ordered_input_sha256s,
+        ordered_projection_sha256s=_projection_hashes_v3(package),
+        source_authority_sha256s=authority_sha256s,
+        model_id="openai/gpt-5-mini",
+        maximum_output_tokens=2_000,
+        ordered_call_cap=48,
+        per_call_maximum_usd=policy.per_call_maximum_usd,
+        aggregate_maximum_usd=policy.aggregate_maximum_usd,
+    )
+    checkpoint_type = getattr(gate_b_v3, "GateBOwnerCheckpointManifestV3")
+    checkpoint = checkpoint_type(
+        schema_version="3.0.0",
+        checkpoint_kind="gate_b_at_most_once_owner_approval",
+        approved_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+        launch_identity=launch,
+    )
+    receipt_type = getattr(gate_b_v3, "GateBOneTimeLaunchReceiptV3")
+    receipt = receipt_type(
+        schema_version="3.0.0",
+        receipt_kind="gate_b_at_most_once_launch",
+        run_id=launch.run_id,
+        issued_at=datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 8, 20, 12, 31, tzinfo=timezone.utc),
+        nonce="3" * 64,
+        checkpoint_manifest_sha256=checkpoint.canonical_sha256,
+        launch_identity_sha256=launch.canonical_sha256,
+        candidate_commit=launch.candidate_commit,
+        runtime_manifest_sha256=launch.runtime_manifest_sha256,
+        package_manifest_sha256=launch.package_manifest_sha256,
+        ordered_call_cap=launch.ordered_call_cap,
+        per_call_maximum_usd=launch.per_call_maximum_usd,
+        aggregate_maximum_usd=launch.aggregate_maximum_usd,
+    )
+    return (
+        package,
+        runtime_manifest,
+        runtime_payloads,
+        sources,
+        checkpoint,
+        receipt,
+        launch,
+    )
+
+
+def test_launch_identity_recomputation_binds_current_package_runtime_and_approval() -> None:
+    (
+        package,
+        runtime_manifest,
+        runtime_payloads,
+        _sources,
+        checkpoint,
+        receipt,
+        expected,
+    ) = _launch_approval_fixture_v3()
+
+    observed = getattr(gate_b_v3, "recompute_launch_identity_v3")(
+        package,
+        runtime_manifest.model_dump(mode="json"),
+        runtime_payloads,
+        checkpoint.model_dump(mode="json"),
+        receipt.model_dump(mode="json"),
+    )
+
+    assert observed == expected
+    assert len(observed.ordered_input_sha256s) == 48
+    assert len(observed.ordered_projection_sha256s) == 48
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        "benchmark_policy",
+        "career_profile",
+        "candidate_facts",
+        "decision_contract",
+        "product_sot",
+        "search_contract",
+        "semantic_contract",
+        "task10_policy",
+    ],
+)
+def test_launch_identity_rejects_stale_approval_after_authority_drift(
+    source_name: str,
+) -> None:
+    (
+        package,
+        runtime_manifest,
+        runtime_payloads,
+        sources,
+        checkpoint,
+        receipt,
+        _expected,
+    ) = _launch_approval_fixture_v3()
+    changed_sources = deepcopy(sources)
+    changed_sources[source_name] += b"\n"
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            gate_b_v3,
+            "load_gate_b_source_bytes_v3",
+            lambda: changed_sources,
+        )
+        with pytest.raises(
+            ValueError, match="identity|authority|package|policy|contract"
+        ):
+            gate_b_v3.recompute_launch_identity_v3(
+                package,
+                runtime_manifest.model_dump(mode="json"),
+                runtime_payloads,
+                checkpoint.model_dump(mode="json"),
+                receipt.model_dump(mode="json"),
+            )
+
+
+@pytest.mark.parametrize(
+    "runtime_payload_name",
+    [
+        "runtime_tree_manifest",
+        "python_executable",
+        "stdlib_tree_manifest",
+        "dependency_lock",
+        "installed_distributions",
+        "sys_path",
+    ],
+)
+def test_launch_identity_rejects_runtime_payload_drift(
+    runtime_payload_name: str,
+) -> None:
+    (
+        package,
+        runtime_manifest,
+        runtime_payloads,
+        _sources,
+        checkpoint,
+        receipt,
+        _expected,
+    ) = _launch_approval_fixture_v3()
+    changed_runtime = dict(runtime_payloads)
+    changed_runtime[runtime_payload_name] += b"drift"
+
+    with pytest.raises(ValueError, match="runtime"):
+        gate_b_v3.recompute_launch_identity_v3(
+            package,
+            runtime_manifest.model_dump(mode="json"),
+            changed_runtime,
+            checkpoint.model_dump(mode="json"),
+            receipt.model_dump(mode="json"),
+        )
+
+
+def test_launch_identity_rejects_candidate_commit_and_input_order_drift() -> None:
+    (
+        package,
+        runtime_manifest,
+        runtime_payloads,
+        _sources,
+        checkpoint,
+        receipt,
+        _expected,
+    ) = _launch_approval_fixture_v3()
+    changed_runtime_manifest = runtime_manifest.model_copy(
+        update={"candidate_commit": "b" * 40}
+    )
+    reordered_package = replace(
+        package,
+        ordered_input_sha256s=tuple(reversed(package.ordered_input_sha256s)),
+    )
+
+    with pytest.raises(ValueError, match="runtime|approval|receipt|identity"):
+        gate_b_v3.recompute_launch_identity_v3(
+            package,
+            changed_runtime_manifest.model_dump(mode="json"),
+            runtime_payloads,
+            checkpoint.model_dump(mode="json"),
+            receipt.model_dump(mode="json"),
+        )
+    with pytest.raises(ValueError, match="package|identity|order"):
+        gate_b_v3.recompute_launch_identity_v3(
+            reordered_package,
+            runtime_manifest.model_dump(mode="json"),
+            runtime_payloads,
+            checkpoint.model_dump(mode="json"),
+            receipt.model_dump(mode="json"),
+        )
+
+
+@pytest.mark.parametrize(
+    "authority_name",
+    [
+        "task10_prompt",
+        "task10_prompt_version",
+        "semantic_prompt",
+        "semantic_prompt_version",
+        "provider_output_schema",
+        "model_id",
+        "pricing",
+        "launch_limits",
+    ],
+)
+def test_launch_identity_rejects_derived_prompt_schema_model_pricing_or_cap_drift(
+    authority_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        package,
+        runtime_manifest,
+        runtime_payloads,
+        _sources,
+        checkpoint,
+        receipt,
+        _expected,
+    ) = _launch_approval_fixture_v3()
+    original = gate_b_v3._derive_launch_authority_sha256s_v3
+
+    def changed(source_bytes: dict[str, object]) -> dict[str, str]:
+        result = original(source_bytes)
+        result[authority_name] = "f" * 64
+        return result
+
+    monkeypatch.setattr(gate_b_v3, "_derive_launch_authority_sha256s_v3", changed)
+
+    with pytest.raises(ValueError, match="authority|package|identity"):
+        gate_b_v3.recompute_launch_identity_v3(
+            package,
+            runtime_manifest.model_dump(mode="json"),
+            runtime_payloads,
+            checkpoint.model_dump(mode="json"),
+            receipt.model_dump(mode="json"),
+        )
+
+
+def test_one_time_launch_receipt_rejects_long_expiry_or_extra_authority() -> None:
+    receipt_type = getattr(gate_b_v3, "GateBOneTimeLaunchReceiptV3")
+    payload = {
+        "schema_version": "3.0.0",
+        "receipt_kind": "gate_b_at_most_once_launch",
+        "run_id": "gate-b-at-most-once-" + "1" * 16,
+        "issued_at": datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+        "expires_at": datetime(2026, 8, 20, 12, 30, 1, tzinfo=timezone.utc),
+        "nonce": "2" * 64,
+        "checkpoint_manifest_sha256": "3" * 64,
+        "launch_identity_sha256": "4" * 64,
+        "candidate_commit": "5" * 40,
+        "runtime_manifest_sha256": "6" * 64,
+        "package_manifest_sha256": "7" * 64,
+        "ordered_call_cap": 48,
+        "per_call_maximum_usd": Decimal("0.01"),
+        "aggregate_maximum_usd": Decimal("0.48"),
+    }
+
+    with pytest.raises(ValidationError, match="30 minutes"):
+        receipt_type.model_validate(payload)
+    payload["expires_at"] = datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc)
+    payload["provider_token"] = "forbidden"
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        receipt_type.model_validate(payload)
