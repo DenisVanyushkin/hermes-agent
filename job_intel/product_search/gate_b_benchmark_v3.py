@@ -786,17 +786,43 @@ class GateBLedgerV3:
         )
 
     def _open(self) -> None:
+        root_name = self.root.name
+        if not root_name or root_name in {".", ".."}:
+            raise GateBLedgerErrorV3("ledger_root_unsafe")
         try:
-            self.root.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
-        except FileExistsError:
-            pass
-        try:
-            self._root_descriptor = os.open(
-                self.root,
+            root_parent_descriptor = os.open(
+                self.root.parent,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
             )
         except OSError as exc:
-            raise GateBLedgerErrorV3("ledger_root_unsafe") from exc
+            raise GateBLedgerErrorV3("ledger_root_parent_unsafe") from exc
+        try:
+            try:
+                os.mkdir(
+                    root_name,
+                    _PRIVATE_DIRECTORY_MODE,
+                    dir_fd=root_parent_descriptor,
+                )
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise GateBLedgerErrorV3("ledger_root_unsafe") from exc
+            try:
+                os.fsync(root_parent_descriptor)
+            except OSError as exc:
+                raise GateBLedgerErrorV3(
+                    "ledger_root_parent_fsync_failed"
+                ) from exc
+            try:
+                self._root_descriptor = os.open(
+                    root_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=root_parent_descriptor,
+                )
+            except OSError as exc:
+                raise GateBLedgerErrorV3("ledger_root_unsafe") from exc
+        finally:
+            os.close(root_parent_descriptor)
         self._root_identity = self._validate_directory_descriptor(
             self._root_descriptor, "ledger_root"
         )

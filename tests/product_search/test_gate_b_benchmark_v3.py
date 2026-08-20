@@ -689,6 +689,83 @@ def test_create_once_artifact_fault_never_publishes_empty_or_partial_final_name(
     resumed.close()
 
 
+def test_absent_root_parent_fsync_precedes_ledger_publication(
+    tmp_path: Path,
+    v3_identity: tuple[GateBPackageManifestV3, GateBLaunchIdentityV3],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
+    events: list[str] = []
+    original_fsync = os.fsync
+    original_publish = gate_b_v3._publish_prepared_file
+
+    def observe_fsync(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == parent_identity:
+            events.append("parent_fsync")
+        original_fsync(descriptor)
+
+    def observe_publish(
+        *args: object, **kwargs: object
+    ) -> tuple[int, tuple[int, int]]:
+        events.append("ledger_publish")
+        assert "parent_fsync" in events
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(gate_b_v3.os, "fsync", observe_fsync)
+    monkeypatch.setattr(gate_b_v3, "_publish_prepared_file", observe_publish)
+
+    ledger = _open_ledger(root, v3_identity)
+    assert events.index("parent_fsync") < events.index("ledger_publish")
+    ledger.close()
+
+
+def test_absent_root_parent_fsync_failure_prevents_ledger_initialization(
+    tmp_path: Path,
+    v3_identity: tuple[GateBPackageManifestV3, GateBLaunchIdentityV3],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
+    original_fsync = os.fsync
+    original_publish = gate_b_v3._publish_prepared_file
+    parent_fsync_attempts = 0
+    events: list[str] = []
+
+    def fail_parent_fsync(descriptor: int) -> None:
+        nonlocal parent_fsync_attempts
+        metadata = os.fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) == parent_identity:
+            parent_fsync_attempts += 1
+            if parent_fsync_attempts == 1:
+                raise OSError("simulated crash before root durability")
+            events.append("parent_fsync")
+        original_fsync(descriptor)
+
+    def observe_publish(
+        *args: object, **kwargs: object
+    ) -> tuple[int, tuple[int, int]]:
+        events.append("ledger_publish")
+        assert "parent_fsync" in events
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(gate_b_v3.os, "fsync", fail_parent_fsync)
+    monkeypatch.setattr(gate_b_v3, "_publish_prepared_file", observe_publish)
+
+    with pytest.raises(
+        GateBLedgerErrorV3,
+        match="ledger_root_parent_fsync_failed",
+    ):
+        _open_ledger(root, v3_identity)
+    assert not (root / "ledger.jsonl").exists()
+
+    ledger = _open_ledger(root, v3_identity)
+    assert parent_fsync_attempts == 2
+    assert events.index("parent_fsync") < events.index("ledger_publish")
+    ledger.close()
+
+
 def test_recording_fsync_without_terminal_ledger_entry_reopens_terminal(
     tmp_path: Path,
     v3_identity: tuple[GateBPackageManifestV3, GateBLaunchIdentityV3],
