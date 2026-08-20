@@ -241,6 +241,144 @@ def test_company_and_marketing_fragments_are_excluded_before_provider_input() ->
         evidence.project_vacancy_evidence_v3(_record(), raw, invalid_allowlist)
 
 
+def test_v3_provider_payload_omits_all_excluded_artifact_text_and_hashes() -> None:
+    """Mutation caught: local immutable artifact bytes leak into v3 provider input."""
+    role_statement = "Own the product roadmap with engineering and design."
+    company_statement = "We are a global leader with millions of customers."
+    ambiguous_statement = "This is an exceptional opportunity for the right person."
+    raw = {
+        "title": "Head of Product",
+        "description": (
+            "<h2>Responsibilities</h2>"
+            f"<p>{role_statement}</p><p>{company_statement}</p>"
+            f"<p>{ambiguous_statement}</p>"
+        ),
+    }
+    candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
+    allowlist = _allowlist(
+        candidates,
+        decisions={
+            role_statement: ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY,
+            company_statement: ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT,
+            ambiguous_statement: ReviewedFragmentDecisionV3.EXCLUDE_AMBIGUOUS,
+        },
+    )
+
+    result = evidence.project_vacancy_evidence_v3(_record(), raw, allowlist)
+    payload = result.provider_payload()
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    assert "vacancy_evidence" not in payload
+    assert payload["vacancy_evidence_ref"] == result.vacancy_evidence_ref.model_dump(
+        mode="json"
+    )
+    assert role_statement in serialized
+    for excluded in (company_statement, ambiguous_statement):
+        assert excluded not in serialized
+        assert hashlib.sha256(excluded.encode()).hexdigest() not in serialized
+
+
+def test_v3_provider_serializer_rejects_a_generic_v2_input() -> None:
+    """Mutation caught: a caller bypasses the v3-admitted dispatch contract."""
+    role_statement = "Own the product roadmap with engineering and design."
+    raw = {
+        "title": "Head of Product",
+        "description": f"<h2>Responsibilities</h2><p>{role_statement}</p>",
+    }
+    candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
+    allowlist = _allowlist(
+        candidates,
+        decisions={
+            role_statement: ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY,
+        },
+    )
+    result = evidence.project_vacancy_evidence_v3(_record(), raw, allowlist)
+    generic_v2_input = evidence.EvidenceSynthesisInputV2.model_validate(
+        result.model_dump(mode="json")
+    )
+
+    with pytest.raises(TypeError, match="v3-admitted"):
+        evidence.serialize_provider_payload_v3(generic_v2_input)
+
+
+def test_v3_synthesis_dispatch_receives_only_admitted_provider_payload() -> None:
+    """Mutation caught: the v2 runner bypasses the v3 serializer at dispatch."""
+    role_statement = "Own the product roadmap with engineering and design."
+    company_statement = "We are a global leader with millions of customers."
+    ambiguous_statement = "This is an exceptional opportunity for the right person."
+    raw = {
+        "title": "Head of Product",
+        "description": (
+            "<h2>Responsibilities</h2>"
+            f"<p>{role_statement}</p><p>{company_statement}</p>"
+            f"<p>{ambiguous_statement}</p>"
+        ),
+    }
+    candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
+    allowlist = _allowlist(
+        candidates,
+        decisions={
+            role_statement: ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY,
+            company_statement: ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT,
+            ambiguous_statement: ReviewedFragmentDecisionV3.EXCLUDE_AMBIGUOUS,
+        },
+    )
+    result = evidence.project_vacancy_evidence_v3(_record(), raw, allowlist)
+    claims = []
+    for dimension in evidence.EvidenceDimension:
+        fragment = next(
+            item
+            for item in result.fragments
+            if any(claim.dimension is dimension for claim in item.allowed_claims)
+        )
+        allowed = next(
+            claim for claim in fragment.allowed_claims if claim.dimension is dimension
+        )
+        claims.append({
+            "claim_id": f"claim:{dimension.value}",
+            "dimension": dimension.value,
+            "status": allowed.status.value,
+            "claim_code": allowed.claim_code,
+            "statement": allowed.statement,
+            "citations": [fragment.fragment_id],
+        })
+
+    class CapturingProvider(synthesis.RecordedEvidenceSynthesisProviderV2):
+        def __init__(self) -> None:
+            policy = synthesis.load_evidence_synthesis_policy()
+            self.provider_id = policy.provider_runtime
+            self.provider_version = synthesis.PROVIDER_ADAPTER_VERSION_V2
+            self.model_id = policy.model_id
+            self.semantic_prompt_version = policy.semantic_prompt_version
+            self.prompt_version = synthesis.TASK10_PROMPT_VERSION_V2
+            self.output_payload_model = synthesis.ProviderEvidencePayloadV2
+            self.last_call_metadata = {"latency_ms": 0, "cost_usd": "0"}
+            self.input_payload: dict[str, object] | None = None
+
+        def synthesize_evidence(self, *, input_payload: dict[str, object]) -> object:
+            self.input_payload = input_payload
+            return {
+                "schema_version": "2.0.0",
+                "claims": claims,
+                "conflicts": [],
+                "question_candidates": [],
+            }
+
+    provider = CapturingProvider()
+    synthesis_result = synthesis.run_evidence_synthesis_v2(
+        synthesis_input=result,
+        provider=provider,
+    )
+
+    assert synthesis_result.status is synthesis.EvidenceSynthesisStatus.DELIVERABLE
+    assert provider.input_payload is not None
+    serialized = json.dumps(provider.input_payload, sort_keys=True, separators=(",", ":"))
+    assert "vacancy_evidence" not in provider.input_payload
+    for excluded in (company_statement, ambiguous_statement):
+        assert excluded not in serialized
+        assert hashlib.sha256(excluded.encode()).hexdigest() not in serialized
+
+
 def test_company_section_is_not_a_candidate_and_cannot_be_allowlisted() -> None:
     """Mutation caught: an About-company sentence is reclassified as role evidence."""
     role_statement = "Lead quarterly roadmap planning with engineering and design."

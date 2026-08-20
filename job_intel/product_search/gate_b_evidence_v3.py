@@ -256,6 +256,34 @@ class VacancyProjectionCandidatesV3(_StrictFrozenModel):
     description_candidates: tuple[DescriptionCandidateV3, ...]
 
 
+def serialize_provider_payload_v3(
+    synthesis_input: EvidenceSynthesisInputV3,
+) -> dict[str, Any]:
+    """Serialize only v3-admitted provider evidence and its immutable identity."""
+    if not isinstance(synthesis_input, EvidenceSynthesisInputV3):
+        raise TypeError("v3-admitted evidence input is required")
+    return {
+        "schema_version": synthesis_input.schema_version,
+        "assessment_input": synthesis_input.assessment_input.model_dump(mode="json"),
+        "company_authority": synthesis_input.company_authority.model_dump(
+            mode="json"
+        ),
+        "vacancy_evidence_ref": synthesis_input.vacancy_evidence_ref.model_dump(
+            mode="json"
+        ),
+        "fragments": [
+            fragment.model_dump(mode="json") for fragment in synthesis_input.fragments
+        ],
+    }
+
+
+class EvidenceSynthesisInputV3(EvidenceSynthesisInputV2):
+    """V3 input preserves the local artifact but dispatches only admitted evidence."""
+
+    def provider_payload(self) -> dict[str, Any]:
+        return serialize_provider_payload_v3(self)
+
+
 class _DescriptionBlock:
     __slots__ = ("section", "text")
 
@@ -788,7 +816,7 @@ def _build_projection_v3(
         dimensions=DecisionDimensionsInput(**dimensions_payload),
         company_authority_status=CompanyAuthorityStatus.UNAVAILABLE,
     )
-    result = EvidenceSynthesisInputV2(
+    result = EvidenceSynthesisInputV3(
         schema_version="2.0.0",
         assessment_input=assessment,
         company_authority=CompanyAuthorityUnavailableV2(
