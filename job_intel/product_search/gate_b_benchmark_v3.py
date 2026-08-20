@@ -11,6 +11,8 @@ from enum import Enum
 import errno
 import fcntl
 import hashlib
+from html import unescape
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -2014,6 +2016,9 @@ _GATE_A_MANIFEST_SHA256_V3 = (
 _GATE_B_CORPUS_SHA256_V3 = (
     "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
 )
+_GATE_B_ALLOWLIST_SHA256_V3 = (
+    "bc22330c9a17b3d6f325d75ab96712011e892de8a8bf66d06b9ff2ba12fa179c"
+)
 _GATE_A_SOURCE_ROOT_V3 = Path(
     "/home/hermes/.hermes/job_intel/experiments/gate-a/"
     f"{_GATE_A_COMMIT_V3}"
@@ -2063,6 +2068,17 @@ _GATE_B_REVIEW_DECISIONS_V3 = frozenset(
         "allow_role_requirement",
         "exclude_company_fact",
         "exclude_ambiguous",
+    }
+)
+_GATE_B_DIRECT_FIELDS_V3 = ("title", "location", "salary", "posted_at")
+_GATE_B_ALLOWED_SECTIONS_V3 = frozenset(
+    {
+        "responsibilities",
+        "what_you_will_do",
+        "requirements",
+        "qualifications",
+        "skills",
+        "experience",
     }
 )
 _GATE_B_MAX_SOURCE_BYTES_V3 = 16_000_000
@@ -2332,6 +2348,245 @@ def _profile_authority_hashes_v3(profile: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
+class _GateBDescriptionBlockV3:
+    __slots__ = ("section", "text")
+
+    def __init__(self, section: str | None, text: str) -> None:
+        self.section = section
+        self.text = text
+
+
+def _gate_b_canonical_text_v3(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())
+
+
+def _gate_b_classify_section_v3(value: str) -> str | None:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+    if not normalized:
+        return None
+    if "responsibilit" in normalized:
+        return "responsibilities"
+    if "what_you" in normalized and ("do" in normalized or "work" in normalized):
+        return "what_you_will_do"
+    if "who_you_are" in normalized:
+        return "qualifications"
+    if (
+        "what_you" in normalized and "bring" in normalized
+    ) or "who_are_you" in normalized:
+        return "requirements"
+    if "requirement" in normalized:
+        return "requirements"
+    if "qualification" in normalized:
+        return "qualifications"
+    if "skill" in normalized:
+        return "skills"
+    if "experience" in normalized:
+        return "experience"
+    if "about" in normalized or "company" in normalized:
+        return "company"
+    return None
+
+
+def _gate_b_split_inline_section_v3(value: str) -> tuple[str | None, str]:
+    match = re.match(
+        (
+            r"^(responsibilities?|what\s+you(?:'|’)ll\s+do|"
+            r"what\s+you\s+will\s+do|requirements?|qualifications?|"
+            r"skills?|experience)\s*(?::|-)?\s*"
+        ),
+        value,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None, value
+    return _gate_b_classify_section_v3(match.group(1)), value[match.end() :]
+
+
+class _GateBSectionedDescriptionParserV3(HTMLParser):
+    _BLOCK_TAGS = frozenset({"p", "div", "li", "br"})
+    _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[_GateBDescriptionBlockV3] = []
+        self._section: str | None = None
+        self._buffer: list[str] = []
+        self._heading_buffer: list[str] | None = None
+        self._active_block_tag: str | None = None
+        self._block_prior_section: str | None = None
+        self._emphasis_depth = 0
+        self._block_has_text = False
+        self._block_has_non_emphasis_text = False
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        del attrs
+        lowered = tag.casefold()
+        if lowered in self._HEADING_TAGS:
+            self._flush()
+            self._heading_buffer = []
+        elif lowered in self._BLOCK_TAGS:
+            self._flush()
+            if lowered != "br":
+                self._active_block_tag = lowered
+                self._block_prior_section = self._section
+                self._block_has_text = False
+                self._block_has_non_emphasis_text = False
+        elif lowered in {"b", "strong", "em"}:
+            self._emphasis_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        lowered = tag.casefold()
+        if lowered in self._HEADING_TAGS:
+            heading = _gate_b_canonical_text_v3(
+                " ".join(self._heading_buffer or ())
+            )
+            self._section = _gate_b_classify_section_v3(heading)
+            self._heading_buffer = None
+        elif lowered in {"p", "div", "li"}:
+            text = _gate_b_canonical_text_v3(" ".join(self._buffer))
+            prior_section = self._block_prior_section
+            inline_section, _ = _gate_b_split_inline_section_v3(text)
+            structural_heading = (
+                self._is_emphasized_block_heading() and inline_section is None
+            )
+            self._flush()
+            if structural_heading:
+                heading_section = _gate_b_classify_section_v3(text)
+                if heading_section is not None:
+                    self._section = (
+                        heading_section
+                        if prior_section in _GATE_B_ALLOWED_SECTIONS_V3
+                        else None
+                    )
+            self._active_block_tag = None
+            self._block_prior_section = None
+            self._block_has_text = False
+            self._block_has_non_emphasis_text = False
+        elif lowered in {"b", "strong", "em"} and self._emphasis_depth:
+            self._emphasis_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._heading_buffer is not None:
+            self._heading_buffer.append(data)
+        else:
+            self._buffer.append(data)
+            if _gate_b_canonical_text_v3(data):
+                self._block_has_text = True
+                if self._emphasis_depth == 0:
+                    self._block_has_non_emphasis_text = True
+
+    def finish(self) -> tuple[_GateBDescriptionBlockV3, ...]:
+        self._flush()
+        return tuple(self.blocks)
+
+    def _is_emphasized_block_heading(self) -> bool:
+        return (
+            self._active_block_tag is not None
+            and self._block_has_text
+            and not self._block_has_non_emphasis_text
+        )
+
+    def _flush(self) -> None:
+        text = _gate_b_canonical_text_v3(" ".join(self._buffer))
+        self._buffer = []
+        if not text:
+            return
+        inline_section, body = _gate_b_split_inline_section_v3(text)
+        if inline_section is not None:
+            self._section = inline_section
+            text = _gate_b_canonical_text_v3(body)
+        if text:
+            self.blocks.append(_GateBDescriptionBlockV3(self._section, text))
+
+
+def _gate_b_description_blocks_v3(
+    raw_description: object,
+) -> tuple[_GateBDescriptionBlockV3, ...]:
+    decoded = str(raw_description or "")
+    for _ in range(3):
+        next_value = unescape(decoded)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    parser = _GateBSectionedDescriptionParserV3()
+    parser.feed(decoded)
+    parser.close()
+    blocks = parser.finish()
+    if blocks:
+        return blocks
+    text = _gate_b_canonical_text_v3(decoded)
+    return () if not text else (_GateBDescriptionBlockV3(None, text),)
+
+
+def _gate_b_exact_fragments_v3(value: str) -> tuple[str, ...]:
+    pieces: list[str] = []
+    for bullet in re.split(r"(?:\s*[•▪●]\s*|\s+-\s+)", value):
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", bullet):
+            text = _gate_b_canonical_text_v3(sentence)
+            if not text:
+                continue
+            while text:
+                if len(text) <= 500:
+                    pieces.append(text)
+                    break
+                boundary = text.rfind(" ", 0, 501)
+                if boundary <= 0:
+                    raise GateBPackageErrorV3(
+                        "reviewed_fragment_candidate_contract_invalid"
+                    )
+                pieces.append(text[:boundary])
+                text = text[boundary + 1 :]
+    return tuple(pieces)
+
+
+def _gate_b_candidate_contract_v3(
+    record: Mapping[str, Any],
+    raw: Mapping[str, Any],
+) -> tuple[str, dict[tuple[str, str, str, str], str]]:
+    selection_key = str(record["selection_key"])
+    artifact_fragments: list[dict[str, str]] = []
+    candidate_fragments: list[tuple[str, str, str]] = []
+    for field_name in _GATE_B_DIRECT_FIELDS_V3:
+        text = _gate_b_canonical_text_v3(raw.get(field_name))
+        if text:
+            artifact_fragments.append(
+                {"source_locator": f"/{field_name}#000", "text": text}
+            )
+    description_index = 0
+    for block in _gate_b_description_blocks_v3(raw.get("description")):
+        for text in _gate_b_exact_fragments_v3(block.text):
+            locator = f"/description#{description_index:03d}"
+            description_index += 1
+            artifact_fragments.append({"source_locator": locator, "text": text})
+            if block.section in _GATE_B_ALLOWED_SECTIONS_V3:
+                candidate_fragments.append((locator, text, block.section))
+    if not artifact_fragments:
+        raise GateBPackageErrorV3("reviewed_fragment_candidate_contract_invalid")
+    artifact_payload = {
+        "schema_version": "1.0.0",
+        "artifact_id": f"gate-b-v3-vacancy:{selection_key}",
+        "artifact_version": "3.0.0",
+        "redaction_state": "shareable_redacted",
+        "fragments": artifact_fragments,
+    }
+    artifact_sha256 = canonical_json_sha256(artifact_payload)
+    return artifact_sha256, {
+        (
+            selection_key,
+            artifact_sha256,
+            locator,
+            hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        ): section
+        for locator, text, section in candidate_fragments
+    }
+
+
 def _validated_review_entries_v3(
     payload: bytes,
     *,
@@ -2476,11 +2731,53 @@ def validate_gate_b_package_pure_v3(
     profile_authorities = _profile_authority_hashes_v3(profile)
     if not semantic_contract_bytes:
         raise GateBPackageErrorV3("semantic_contract_empty")
+    if hashlib.sha256(allowlist_bytes).hexdigest() != _GATE_B_ALLOWLIST_SHA256_V3:
+        raise GateBPackageErrorV3("reviewed_fragment_candidate_contract_invalid")
     selection_keys = frozenset(str(record["selection_key"]) for record in records)
+    raw_by_reference: dict[str, dict[str, Any]] = {}
+    artifact_by_selection: dict[str, str] = {}
+    expected_candidate_sections: dict[tuple[str, str, str, str], str] = {}
+    for record in records:
+        reference = str(record["raw_reference"])
+        raw_bytes = raw_artifacts[reference]
+        raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        if raw_sha256 != record["raw_content_sha256"]:
+            raise GateBPackageErrorV3("raw_artifact_sha256_mismatch")
+        raw = _decode_json_mapping_v3(raw_bytes, error="raw_artifact_invalid")
+        for field_name in ("source_family", "source_id", "query_id", "company"):
+            if raw.get(field_name) != record.get(field_name):
+                raise GateBPackageErrorV3("raw_artifact_record_mismatch")
+        raw_by_reference[reference] = raw
+        artifact_sha256, candidates = _gate_b_candidate_contract_v3(record, raw)
+        artifact_by_selection[str(record["selection_key"])] = artifact_sha256
+        if set(expected_candidate_sections).intersection(candidates):
+            raise GateBPackageErrorV3("reviewed_fragment_candidate_contract_invalid")
+        expected_candidate_sections.update(candidates)
     review_entries = _validated_review_entries_v3(
         allowlist_bytes,
         selection_keys=selection_keys,
     )
+    actual_candidates = {
+        (
+            entry.selection_key,
+            entry.vacancy_artifact_sha256,
+            entry.source_locator,
+            entry.text_sha256,
+        ): entry
+        for entry in review_entries
+    }
+    if set(actual_candidates) != set(expected_candidate_sections):
+        raise GateBPackageErrorV3("reviewed_fragment_candidate_contract_invalid")
+    for identity, entry in actual_candidates.items():
+        section = expected_candidate_sections[identity]
+        if (
+            entry.decision == "allow_role_responsibility"
+            and section not in {"responsibilities", "what_you_will_do"}
+        ) or (
+            entry.decision == "allow_role_requirement"
+            and section in {"responsibilities", "what_you_will_do"}
+        ):
+            raise GateBPackageErrorV3("reviewed_fragment_candidate_contract_invalid")
     entries_by_selection: dict[
         str,
         list[_ReviewedFragmentEntryContractV3],
@@ -2508,12 +2805,7 @@ def validate_gate_b_package_pure_v3(
         reference = str(record["raw_reference"])
         raw_bytes = raw_artifacts[reference]
         raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-        if raw_sha256 != record["raw_content_sha256"]:
-            raise GateBPackageErrorV3("raw_artifact_sha256_mismatch")
-        raw = _decode_json_mapping_v3(raw_bytes, error="raw_artifact_invalid")
-        for field_name in ("source_family", "source_id", "query_id", "company"):
-            if raw.get(field_name) != record.get(field_name):
-                raise GateBPackageErrorV3("raw_artifact_record_mismatch")
+        raw = raw_by_reference[reference]
         source_file_sha256s[reference] = raw_sha256
         selected_entries = sorted(
             entries_by_selection[str(record["selection_key"])],
@@ -2523,12 +2815,9 @@ def validate_gate_b_package_pure_v3(
                 entry.decision,
             ),
         )
-        reviewed_artifact_sha256s = {
-            entry.vacancy_artifact_sha256 for entry in selected_entries
-        }
-        if len(reviewed_artifact_sha256s) > 1:
-            raise GateBPackageErrorV3("reviewed_fragment_artifact_mixed")
-        reviewed_artifact_sha256 = next(iter(reviewed_artifact_sha256s), None)
+        reviewed_artifact_sha256 = artifact_by_selection[
+            str(record["selection_key"])
+        ]
         input_payload = {
             "schema_version": "3.0.0",
             "input_kind": "gate_b_projector_source",
@@ -2641,6 +2930,10 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
     if (
         manifest.canonical_sha256 != package.package_sha256
         or manifest.ordered_input_sha256s != package.ordered_input_sha256s
+        or manifest.package_id
+        != f"gate-b-at-most-once-v3:{_GATE_B_CORPUS_SHA256_V3}"
+        or manifest.created_at
+        != datetime(2026, 8, 16, 14, 13, 44, tzinfo=timezone.utc)
     ):
         raise GateBPackageErrorV3("validated_package_manifest_mismatch")
     expected_references = {
@@ -2653,19 +2946,67 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
     }
     if set(package.artifacts) != expected_references:
         raise GateBPackageErrorV3("validated_package_inventory_invalid")
-    for reference, payload in package.artifacts.items():
-        if type(payload) is not bytes:
-            raise GateBPackageErrorV3("validated_package_artifact_not_bytes")
-        if hashlib.sha256(payload).hexdigest() != package.artifact_sha256s[reference]:
-            raise GateBPackageErrorV3("validated_package_artifact_hash_mismatch")
-    for sha256 in package.ordered_input_sha256s:
-        reference = f"task10-inputs/{sha256}.json"
-        if package.artifact_sha256s[reference] != sha256:
-            raise GateBPackageErrorV3("validated_package_input_hash_mismatch")
     index = _decode_json_mapping_v3(
         package.artifacts["package-index.json"],
         error="validated_package_index_invalid",
     )
+    if (
+        set(index)
+        != {
+            "schema_version",
+            "package_kind",
+            "gate_a",
+            "corpus_manifest_sha256",
+            "source_authority_sha256s",
+            "records",
+        }
+        or index.get("schema_version") != "3.0.0"
+        or index.get("package_kind") != "gate_b_at_most_once"
+        or index.get("corpus_manifest_sha256") != _GATE_B_CORPUS_SHA256_V3
+        or index.get("gate_a")
+        != {
+            "run_id": _GATE_A_RUN_ID_V3,
+            "commit": _GATE_A_COMMIT_V3,
+            "manifest_sha256": _GATE_A_MANIFEST_SHA256_V3,
+        }
+    ):
+        raise GateBPackageErrorV3("validated_package_index_invalid")
+    source_authorities = _plain_mapping_v3(
+        index.get("source_authority_sha256s"),
+        error="validated_package_index_invalid",
+    )
+    if not source_authorities or any(
+        not isinstance(value, str)
+        or re.fullmatch(SHA256_PATTERN, value) is None
+        for value in source_authorities.values()
+    ):
+        raise GateBPackageErrorV3("validated_package_index_invalid")
+    index_sha256 = hashlib.sha256(
+        package.artifacts["package-index.json"]
+    ).hexdigest()
+    if set(manifest.authority_sha256s) != {
+        *source_authorities.values(),
+        index_sha256,
+    }:
+        raise GateBPackageErrorV3("validated_package_index_manifest_mismatch")
+    trusted_artifact_sha256s = {
+        "package-index.json": index_sha256,
+        "package-manifest.json": package.package_sha256,
+        **{
+            f"task10-inputs/{sha256}.json": sha256
+            for sha256 in package.ordered_input_sha256s
+        },
+    }
+    if dict(package.artifact_sha256s) != trusted_artifact_sha256s:
+        raise GateBPackageErrorV3("validated_package_artifact_hash_mismatch")
+    for reference, payload in package.artifacts.items():
+        if type(payload) is not bytes:
+            raise GateBPackageErrorV3("validated_package_artifact_not_bytes")
+        if (
+            hashlib.sha256(payload).hexdigest()
+            != trusted_artifact_sha256s[reference]
+        ):
+            raise GateBPackageErrorV3("validated_package_artifact_hash_mismatch")
     index_records = index.get("records")
     if not isinstance(index_records, list) or len(index_records) != _ORDERED_CALL_CAP:
         raise GateBPackageErrorV3("validated_package_index_invalid")
@@ -2724,6 +3065,7 @@ def _snapshot_protected_paths_v3(
 ) -> tuple[tuple[object, ...], ...]:
     snapshot: list[tuple[object, ...]] = []
     for path in _GATE_B_PROTECTED_PATHS_V3:
+        credential_metadata_only = path.name in {".env", "job-intel.env"}
         try:
             metadata = os.lstat(path)
         except FileNotFoundError:
@@ -2741,9 +3083,11 @@ def _snapshot_protected_paths_v3(
             content_sha256 = None
         elif stat.S_ISREG(metadata.st_mode):
             kind = "file"
-            content_sha256 = hashlib.sha256(
-                _read_path_nofollow_v3(path)
-            ).hexdigest()
+            content_sha256 = (
+                None
+                if credential_metadata_only
+                else hashlib.sha256(_read_path_nofollow_v3(path)).hexdigest()
+            )
         elif stat.S_ISDIR(metadata.st_mode):
             kind = "directory"
             content_sha256 = None
@@ -2766,7 +3110,11 @@ def _snapshot_protected_paths_v3(
             GateBObservedOperationV3(
                 kind="protected_snapshot",
                 path=str(path),
-                detail=f"{phase}:{kind}",
+                detail=(
+                    f"{phase}:{kind}:metadata_only"
+                    if credential_metadata_only
+                    else f"{phase}:{kind}"
+                ),
             )
         )
     return tuple(snapshot)

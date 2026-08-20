@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import inspect
 import hashlib
+from types import MappingProxyType
 
 import pytest
 import yaml
@@ -1473,3 +1474,114 @@ def test_materialize_gate_b_package_v3_rejects_forged_source_inventory_before_io
 
     with pytest.raises(ValueError, match="source_inventory_invalid"):
         gate_b_v3.materialize_gate_b_package_v3(forged)
+
+
+def test_pure_package_rejects_missing_invented_or_misbound_review_candidates() -> None:
+    sources = _gate_b_source_bytes_v3()
+    allowlist = yaml.safe_load(sources["reviewed_fragment_allowlist"])
+    assert isinstance(allowlist, dict)
+    entries = allowlist["entries"]
+    assert isinstance(entries, list)
+    assert entries
+
+    empty = deepcopy(allowlist)
+    empty["entries"] = []
+    invented = deepcopy(allowlist)
+    invented["entries"][0]["text_sha256"] = "f" * 64
+    misbound = deepcopy(allowlist)
+    selection_key = misbound["entries"][0]["selection_key"]
+    for entry in misbound["entries"]:
+        if entry["selection_key"] == selection_key:
+            entry["vacancy_artifact_sha256"] = "f" * 64
+
+    for mutated in (empty, invented, misbound):
+        mutated_sources = dict(sources)
+        mutated_sources["reviewed_fragment_allowlist"] = yaml.safe_dump(
+            mutated,
+            sort_keys=True,
+        ).encode("utf-8")
+        with pytest.raises(ValueError, match="reviewed_fragment_candidate_contract"):
+            gate_b_v3.validate_gate_b_package_pure_v3(mutated_sources)
+
+
+def test_materializer_rejects_forged_index_not_bound_by_manifest_before_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = gate_b_v3.validate_gate_b_package_pure_v3(
+        _gate_b_source_bytes_v3()
+    )
+    index = json.loads(package.artifacts["package-index.json"])
+    index["source_authority_sha256s"]["benchmark_policy"] = "f" * 64
+    index_bytes = json.dumps(
+        index,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    artifacts = dict(package.artifacts)
+    artifacts["package-index.json"] = index_bytes
+    artifact_sha256s = dict(package.artifact_sha256s)
+    artifact_sha256s["package-index.json"] = hashlib.sha256(index_bytes).hexdigest()
+    forged = type(package)(
+        package_sha256=package.package_sha256,
+        manifest_sha256=package.manifest_sha256,
+        manifest_bytes=package.manifest_bytes,
+        ordered_input_sha256s=package.ordered_input_sha256s,
+        artifacts=MappingProxyType(artifacts),
+        artifact_sha256s=MappingProxyType(artifact_sha256s),
+        source_file_sha256s=package.source_file_sha256s,
+    )
+
+    def deny_io(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("forged package index reached I/O")
+
+    monkeypatch.setattr(os, "open", deny_io)
+
+    with pytest.raises(ValueError, match="index_manifest_mismatch"):
+        gate_b_v3.materialize_gate_b_package_v3(forged)
+
+
+def test_materializer_never_reads_credential_file_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = _gate_b_source_bytes_v3()
+    package = gate_b_v3.validate_gate_b_package_pure_v3(sources)
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir(mode=0o700)
+    gate_a_root = tmp_path / "gate-a"
+    _write_gate_a_source_fixture_v3(gate_a_root, sources)
+    credential_env = tmp_path / ".env"
+    credential_env.write_bytes(b"credential bytes must remain unread\n")
+    job_intel_env = tmp_path / "job-intel.env"
+    job_intel_env.write_bytes(b"second credential payload must remain unread\n")
+    original_read = gate_b_v3._read_path_nofollow_v3
+    credential_paths = {credential_env, job_intel_env}
+
+    def reject_credential_read(path: Path, **kwargs: object) -> bytes:
+        if path in credential_paths:
+            raise AssertionError("credential contents were read")
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(gate_b_v3, "_GATE_A_SOURCE_ROOT_V3", gate_a_root)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_PROTECTED_PATHS_V3",
+        (credential_env, job_intel_env),
+    )
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_read_path_nofollow_v3",
+        reject_credential_read,
+    )
+
+    receipt = gate_b_v3.materialize_gate_b_package_v3(package)
+
+    credential_operations = [
+        operation
+        for operation in receipt.observed_operations
+        if operation.path in {str(credential_env), str(job_intel_env)}
+    ]
+    assert len(credential_operations) == 4
+    assert all("metadata_only" in operation.detail for operation in credential_operations)
