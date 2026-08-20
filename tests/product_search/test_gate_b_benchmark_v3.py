@@ -1606,16 +1606,45 @@ def test_materializer_never_reads_credential_file_contents(
     assert all("metadata_only" in operation.detail for operation in credential_operations)
 
 
-def _runtime_identity_fixture_v3() -> tuple[object, dict[str, bytes]]:
+@pytest.fixture
+def _actual_runtime_identity_fixture_v3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, Path], object, dict[str, bytes]]:
+    export_root = tmp_path / "gate-b-runtime"
+    runtime_root = export_root / "runtime"
+    module_path = (
+        runtime_root / "job_intel/product_search/gate_b_benchmark_v3.py"
+    )
+    python_executable = export_root / "python-runtime/venv/bin/python"
+    stdlib_root = export_root / "python-runtime/stdlib"
+    dependency_lock = runtime_root / "uv.lock"
+    installed_distributions = (
+        export_root / "python-runtime/installed-distributions.txt"
+    )
+    module_path.parent.mkdir(parents=True)
+    python_executable.parent.mkdir(parents=True)
+    stdlib_root.mkdir(parents=True)
+    module_path.write_bytes(b"reviewed runtime module\n")
+    python_executable.write_bytes(b"pinned-cpython-3.12.13")
+    (stdlib_root / "pathlib.py").write_bytes(b"reviewed stdlib\n")
+    dependency_lock.write_bytes(b"version = 1\n")
+    installed_distributions.write_bytes(b"pydantic==2.11.7\n")
+    sys_path = [str(runtime_root), str(stdlib_root)]
     runtime_payloads = {
-        "runtime_tree_manifest": b'{"job_intel/product_search/gate_b_benchmark_v3.py":"'
-        + b"1" * 64
-        + b'"}',
-        "python_executable": b"pinned-cpython-3.12.13",
-        "stdlib_tree_manifest": b'{"pathlib.py":"' + b"2" * 64 + b'"}',
-        "dependency_lock": b"version = 1\n",
-        "installed_distributions": b"pydantic==2.11.7\n",
-        "sys_path": b'["/runtime","/stdlib","/site-packages"]',
+        "runtime_tree_manifest": gate_b_v3._tree_manifest_bytes_v3(runtime_root),
+        "python_executable": python_executable.read_bytes(),
+        "stdlib_tree_manifest": gate_b_v3._stdlib_tree_manifest_bytes_v3(
+            stdlib_root
+        ),
+        "dependency_lock": dependency_lock.read_bytes(),
+        "installed_distributions": installed_distributions.read_bytes(),
+        "sys_path": json.dumps(
+            sys_path,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8"),
     }
     manifest_type = getattr(gate_b_v3, "GateBRuntimeManifestV3")
     manifest = manifest_type(
@@ -1641,7 +1670,53 @@ def _runtime_identity_fixture_v3() -> tuple[object, dict[str, bytes]]:
         sys_path_sha256=hashlib.sha256(runtime_payloads["sys_path"]).hexdigest(),
         editable_installs=(),
     )
-    return manifest, runtime_payloads
+    identity_root = export_root / "runtime-identity"
+    identity_root.mkdir()
+    (identity_root / "runtime-tree.json").write_bytes(
+        runtime_payloads["runtime_tree_manifest"]
+    )
+    (identity_root / "stdlib-tree.json").write_bytes(
+        runtime_payloads["stdlib_tree_manifest"]
+    )
+    (identity_root / "sys-path.json").write_bytes(runtime_payloads["sys_path"])
+    manifest_bytes = json.dumps(
+        manifest.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    (export_root / "runtime-manifest.json").write_bytes(manifest_bytes)
+    (export_root / "runtime-manifest.sha256").write_text(
+        hashlib.sha256(manifest_bytes).hexdigest() + "\n",
+        encoding="ascii",
+    )
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_RUNTIME_EXPORT_ROOT_V3",
+        export_root,
+        raising=False,
+    )
+    monkeypatch.setattr(gate_b_v3.sys, "executable", str(python_executable))
+    monkeypatch.setattr(gate_b_v3.sys, "path", sys_path)
+    monkeypatch.setattr(gate_b_v3.sys, "version_info", (3, 12, 13))
+    monkeypatch.setattr(gate_b_v3, "__file__", str(module_path))
+    monkeypatch.setattr(
+        gate_b_v3.sysconfig,
+        "get_path",
+        lambda name: str(stdlib_root) if name == "stdlib" else None,
+    )
+    return (
+        {
+            "export_root": export_root,
+            "runtime_tree_manifest": module_path,
+            "python_executable": python_executable,
+            "stdlib_tree_manifest": stdlib_root / "pathlib.py",
+            "dependency_lock": dependency_lock,
+            "installed_distributions": installed_distributions,
+        },
+        manifest,
+        runtime_payloads,
+    )
 
 
 def _projection_hashes_v3(package: object) -> tuple[str, ...]:
@@ -1677,7 +1752,9 @@ def _projection_hashes_v3(package: object) -> tuple[str, ...]:
     return tuple(hashes)
 
 
-def _launch_approval_fixture_v3() -> tuple[
+def _launch_approval_fixture_v3(
+    runtime_identity: tuple[object, dict[str, bytes]],
+) -> tuple[
     object,
     object,
     dict[str, bytes],
@@ -1688,7 +1765,7 @@ def _launch_approval_fixture_v3() -> tuple[
 ]:
     sources = _gate_b_source_bytes_v3()
     package = gate_b_v3.validate_gate_b_package_pure_v3(sources)
-    runtime_manifest, runtime_payloads = _runtime_identity_fixture_v3()
+    runtime_manifest, runtime_payloads = runtime_identity
     package_index = json.loads(package.artifacts["package-index.json"])
     authority_sha256s = package_index["source_authority_sha256s"]
     policy = gate_b_v3.load_gate_b_benchmark_policy_v3(
@@ -1745,21 +1822,28 @@ def _launch_approval_fixture_v3() -> tuple[
     )
 
 
-def test_launch_identity_recomputation_binds_current_package_runtime_and_approval() -> None:
+def test_launch_identity_recomputation_binds_current_package_runtime_and_approval(
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
+) -> None:
+    _runtime_paths, actual_runtime_manifest, actual_runtime_payloads = (
+        _actual_runtime_identity_fixture_v3
+    )
     (
         package,
-        runtime_manifest,
-        runtime_payloads,
+        _runtime_manifest,
+        _runtime_payloads,
         _sources,
         checkpoint,
         receipt,
         expected,
-    ) = _launch_approval_fixture_v3()
+    ) = _launch_approval_fixture_v3(
+        (actual_runtime_manifest, actual_runtime_payloads)
+    )
 
     observed = getattr(gate_b_v3, "recompute_launch_identity_v3")(
         package,
-        runtime_manifest.model_dump(mode="json"),
-        runtime_payloads,
         checkpoint.model_dump(mode="json"),
         receipt.model_dump(mode="json"),
     )
@@ -1767,6 +1851,42 @@ def test_launch_identity_recomputation_binds_current_package_runtime_and_approva
     assert observed == expected
     assert len(observed.ordered_input_sha256s) == 48
     assert len(observed.ordered_projection_sha256s) == 48
+
+
+def test_launch_identity_rejects_mutated_actual_export_with_replayed_runtime_snapshots(
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
+) -> None:
+    runtime_paths, runtime_manifest, runtime_payloads = (
+        _actual_runtime_identity_fixture_v3
+    )
+    (
+        package,
+        _runtime_manifest,
+        _runtime_payloads,
+        _sources,
+        checkpoint,
+        receipt,
+        _expected,
+    ) = _launch_approval_fixture_v3((runtime_manifest, runtime_payloads))
+    assert tuple(
+        inspect.signature(gate_b_v3.recompute_launch_identity_v3).parameters
+    ) == (
+        "package",
+        "owner_checkpoint_payload",
+        "launch_receipt_payload",
+    )
+    runtime_paths["runtime_tree_manifest"].write_bytes(
+        b"mutated after manifest approval\n"
+    )
+
+    with pytest.raises(ValueError, match="runtime"):
+        gate_b_v3.recompute_launch_identity_v3(
+            package,
+            checkpoint.model_dump(mode="json"),
+            receipt.model_dump(mode="json"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1784,16 +1904,24 @@ def test_launch_identity_recomputation_binds_current_package_runtime_and_approva
 )
 def test_launch_identity_rejects_stale_approval_after_authority_drift(
     source_name: str,
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
 ) -> None:
+    _runtime_paths, actual_runtime_manifest, actual_runtime_payloads = (
+        _actual_runtime_identity_fixture_v3
+    )
     (
         package,
-        runtime_manifest,
-        runtime_payloads,
+        _runtime_manifest,
+        _runtime_payloads,
         sources,
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3()
+    ) = _launch_approval_fixture_v3(
+        (actual_runtime_manifest, actual_runtime_payloads)
+    )
     changed_sources = deepcopy(sources)
     changed_sources[source_name] += b"\n"
 
@@ -1808,8 +1936,6 @@ def test_launch_identity_rejects_stale_approval_after_authority_drift(
         ):
             gate_b_v3.recompute_launch_identity_v3(
                 package,
-                runtime_manifest.model_dump(mode="json"),
-                runtime_payloads,
                 checkpoint.model_dump(mode="json"),
                 receipt.model_dump(mode="json"),
             )
@@ -1828,39 +1954,57 @@ def test_launch_identity_rejects_stale_approval_after_authority_drift(
 )
 def test_launch_identity_rejects_runtime_payload_drift(
     runtime_payload_name: str,
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
 ) -> None:
+    runtime_paths, actual_runtime_manifest, actual_runtime_payloads = (
+        _actual_runtime_identity_fixture_v3
+    )
     (
         package,
-        runtime_manifest,
-        runtime_payloads,
+        _runtime_manifest,
+        _runtime_payloads,
         _sources,
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3()
-    changed_runtime = dict(runtime_payloads)
-    changed_runtime[runtime_payload_name] += b"drift"
+    ) = _launch_approval_fixture_v3(
+        (actual_runtime_manifest, actual_runtime_payloads)
+    )
+    if runtime_payload_name == "sys_path":
+        gate_b_v3.sys.path.append(str(runtime_paths["export_root"] / "drift"))
+    else:
+        changed_path = runtime_paths[runtime_payload_name]
+        changed_path.write_bytes(changed_path.read_bytes() + b"drift")
 
     with pytest.raises(ValueError, match="runtime"):
         gate_b_v3.recompute_launch_identity_v3(
             package,
-            runtime_manifest.model_dump(mode="json"),
-            changed_runtime,
             checkpoint.model_dump(mode="json"),
             receipt.model_dump(mode="json"),
         )
 
 
-def test_launch_identity_rejects_candidate_commit_and_input_order_drift() -> None:
+def test_launch_identity_rejects_candidate_commit_and_input_order_drift(
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
+) -> None:
+    runtime_paths, actual_runtime_manifest, actual_runtime_payloads = (
+        _actual_runtime_identity_fixture_v3
+    )
     (
         package,
         runtime_manifest,
-        runtime_payloads,
+        _runtime_payloads,
         _sources,
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3()
+    ) = _launch_approval_fixture_v3(
+        (actual_runtime_manifest, actual_runtime_payloads)
+    )
     changed_runtime_manifest = runtime_manifest.model_copy(
         update={"candidate_commit": "b" * 40}
     )
@@ -1869,19 +2013,43 @@ def test_launch_identity_rejects_candidate_commit_and_input_order_drift() -> Non
         ordered_input_sha256s=tuple(reversed(package.ordered_input_sha256s)),
     )
 
+    manifest_bytes = json.dumps(
+        changed_runtime_manifest.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    (runtime_paths["export_root"] / "runtime-manifest.json").write_bytes(
+        manifest_bytes
+    )
+    (runtime_paths["export_root"] / "runtime-manifest.sha256").write_text(
+        hashlib.sha256(manifest_bytes).hexdigest() + "\n",
+        encoding="ascii",
+    )
     with pytest.raises(ValueError, match="runtime|approval|receipt|identity"):
         gate_b_v3.recompute_launch_identity_v3(
             package,
-            changed_runtime_manifest.model_dump(mode="json"),
-            runtime_payloads,
             checkpoint.model_dump(mode="json"),
             receipt.model_dump(mode="json"),
         )
+    (runtime_paths["export_root"] / "runtime-manifest.json").write_bytes(
+        json.dumps(
+            runtime_manifest.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    )
+    restored_manifest_bytes = (
+        runtime_paths["export_root"] / "runtime-manifest.json"
+    ).read_bytes()
+    (runtime_paths["export_root"] / "runtime-manifest.sha256").write_text(
+        hashlib.sha256(restored_manifest_bytes).hexdigest() + "\n",
+        encoding="ascii",
+    )
     with pytest.raises(ValueError, match="package|identity|order"):
         gate_b_v3.recompute_launch_identity_v3(
             reordered_package,
-            runtime_manifest.model_dump(mode="json"),
-            runtime_payloads,
             checkpoint.model_dump(mode="json"),
             receipt.model_dump(mode="json"),
         )
@@ -1903,16 +2071,24 @@ def test_launch_identity_rejects_candidate_commit_and_input_order_drift() -> Non
 def test_launch_identity_rejects_derived_prompt_schema_model_pricing_or_cap_drift(
     authority_name: str,
     monkeypatch: pytest.MonkeyPatch,
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
 ) -> None:
+    _runtime_paths, actual_runtime_manifest, actual_runtime_payloads = (
+        _actual_runtime_identity_fixture_v3
+    )
     (
         package,
-        runtime_manifest,
-        runtime_payloads,
+        _runtime_manifest,
+        _runtime_payloads,
         _sources,
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3()
+    ) = _launch_approval_fixture_v3(
+        (actual_runtime_manifest, actual_runtime_payloads)
+    )
     original = gate_b_v3._derive_launch_authority_sha256s_v3
 
     def changed(source_bytes: dict[str, object]) -> dict[str, str]:
@@ -1925,8 +2101,6 @@ def test_launch_identity_rejects_derived_prompt_schema_model_pricing_or_cap_drif
     with pytest.raises(ValueError, match="authority|package|identity"):
         gate_b_v3.recompute_launch_identity_v3(
             package,
-            runtime_manifest.model_dump(mode="json"),
-            runtime_payloads,
             checkpoint.model_dump(mode="json"),
             receipt.model_dump(mode="json"),
         )

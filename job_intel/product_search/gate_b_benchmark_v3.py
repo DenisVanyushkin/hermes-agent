@@ -2045,6 +2045,9 @@ _GATE_B_CORPUS_MANIFEST_PATH_V3 = Path(
 _GATE_B_PACKAGE_PARENT_V3 = Path(
     "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once"
 )
+_GATE_B_RUNTIME_EXPORT_ROOT_V3 = (
+    _GATE_B_PACKAGE_PARENT_V3 / "immutable-runtime"
+)
 _GATE_B_ALLOWLIST_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
@@ -3447,6 +3450,87 @@ def _validate_runtime_payloads_v3(
         raise GateBPackageErrorV3("runtime_editable_install_invalid")
 
 
+def _load_current_runtime_identity_v3() -> GateBRuntimeManifestV3:
+    """Recompute runtime identity from the one fixed immutable export root."""
+    export_root = _GATE_B_RUNTIME_EXPORT_ROOT_V3
+    runtime_root = export_root / "runtime"
+    python_root = export_root / "python-runtime"
+    identity_root = export_root / "runtime-identity"
+    manifest_path = export_root / "runtime-manifest.json"
+    manifest_sha256_path = export_root / "runtime-manifest.sha256"
+    python_executable = Path(sys.executable).resolve()
+    stdlib_root = Path(sysconfig.get_path("stdlib")).resolve()
+    dependency_lock_path = runtime_root / "uv.lock"
+    installed_distributions_path = (
+        python_root / "installed-distributions.txt"
+    )
+    executing_module = Path(__file__).resolve()
+    if (
+        not export_root.is_absolute()
+        or executing_module.parent.parent.parent != runtime_root
+        or not python_executable.is_relative_to(python_root)
+        or not stdlib_root.is_relative_to(python_root)
+    ):
+        raise GateBPackageErrorV3("runtime_execution_outside_fixed_export")
+    manifest_bytes = _read_path_nofollow_v3(manifest_path)
+    manifest_sha256_bytes = _read_path_nofollow_v3(
+        manifest_sha256_path,
+        maximum_bytes=65,
+    )
+    expected_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    if manifest_sha256_bytes != (expected_manifest_sha256 + "\n").encode("ascii"):
+        raise GateBPackageErrorV3("runtime_manifest_content_hash_mismatch")
+    try:
+        manifest_payload = json.loads(manifest_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise GateBPackageErrorV3("runtime_manifest_invalid") from exc
+    if (
+        type(manifest_payload) is not dict
+        or _canonical_json_bytes(manifest_payload) != manifest_bytes
+    ):
+        raise GateBPackageErrorV3("runtime_manifest_invalid")
+    runtime_manifest = _validate_model_from_json_mapping_v3(
+        GateBRuntimeManifestV3,
+        manifest_payload,
+        error="runtime_manifest_invalid",
+    )
+    current_python_version = ".".join(
+        str(item) for item in sys.version_info[:3]
+    )
+    if current_python_version != runtime_manifest.python_version:
+        raise GateBPackageErrorV3("runtime_python_version_identity_mismatch")
+    normalized_sys_path = tuple(
+        str(Path(item or os.getcwd()).resolve()) for item in sys.path
+    )
+    if not normalized_sys_path or any(
+        not Path(item).is_relative_to(export_root) for item in normalized_sys_path
+    ):
+        raise GateBPackageErrorV3("runtime_sys_path_outside_fixed_export")
+    runtime_payloads = {
+        "runtime_tree_manifest": _tree_manifest_bytes_v3(runtime_root),
+        "python_executable": _read_path_nofollow_v3(python_executable),
+        "stdlib_tree_manifest": _stdlib_tree_manifest_bytes_v3(stdlib_root),
+        "dependency_lock": _read_path_nofollow_v3(dependency_lock_path),
+        "installed_distributions": _read_path_nofollow_v3(
+            installed_distributions_path
+        ),
+        "sys_path": _canonical_json_bytes(list(normalized_sys_path)),
+    }
+    _validate_runtime_payloads_v3(runtime_manifest, runtime_payloads)
+    stored_payloads = {
+        "runtime_tree_manifest": _read_path_nofollow_v3(
+            identity_root / "runtime-tree.json"
+        ),
+        "stdlib_tree_manifest": _read_path_nofollow_v3(
+            identity_root / "stdlib-tree.json"
+        ),
+        "sys_path": _read_path_nofollow_v3(identity_root / "sys-path.json"),
+    }
+    if any(runtime_payloads[name] != payload for name, payload in stored_payloads.items()):
+        raise GateBPackageErrorV3("runtime_identity_artifact_mismatch")
+    return runtime_manifest
+
+
 def _validate_model_from_json_mapping_v3(
     model: type[BaseModel],
     payload: Mapping[str, object],
@@ -3548,19 +3632,12 @@ def _recompute_projection_sha256s_v3(
 
 def recompute_launch_identity_v3(
     package: GateBValidatedPackageV3,
-    runtime_manifest_payload: Mapping[str, object],
-    runtime_payloads: Mapping[str, object],
     owner_checkpoint_payload: Mapping[str, object],
     launch_receipt_payload: Mapping[str, object],
 ) -> GateBLaunchBindingV3:
     """Recompute every launch identity before any provider can be constructed."""
     _validate_package_in_memory_v3(package)
-    runtime_manifest = _validate_model_from_json_mapping_v3(
-        GateBRuntimeManifestV3,
-        runtime_manifest_payload,
-        error="runtime_manifest_invalid",
-    )
-    _validate_runtime_payloads_v3(runtime_manifest, runtime_payloads)
+    runtime_manifest = _load_current_runtime_identity_v3()
     current_source_bytes = load_gate_b_source_bytes_v3()
     current_package = validate_gate_b_package_pure_v3(current_source_bytes)
     if (
