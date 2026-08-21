@@ -187,8 +187,11 @@ terminal_unknown_count <= 5
 manual_triage_accuracy >= 0.80, only when the audited set and denominator are complete
 ```
 
-Missing adjudication sets `measurement_status: incomplete`, emits
-`adjudication_incomplete`, and produces `decision: revise`; it is not an
+An incomplete collection (fewer observed rows than the manifest requires) sets
+`measurement_status: incomplete`, emits `collection_incomplete`, and produces
+`decision: revise`; it is never expressed as a threshold refusal. Missing
+adjudication likewise sets `measurement_status: incomplete`, emits
+`adjudication_incomplete`, and produces `decision: revise`; neither case is an
 assumed zero or a caveat attached to a promotable number. A complete
 measurement that violates a threshold produces `measurement_status: complete`
 and `decision: refuse`, while a complete measurement satisfying every rule
