@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -324,6 +325,42 @@ def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
         capture_output=True,
     )
     assert syntax.returncode == 0, syntax.stderr
+
+
+def test_root_preflight_prepares_exact_unit_namespace_runs_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_parent = gate_b_v3._GATE_B_PACKAGE_PARENT_V3
+    unit = SERVICE.read_text(encoding="utf-8")
+    assert f"ReadWritePaths={canonical_parent}/runs" in unit.splitlines()
+    runner = RUNNER.read_text(encoding="utf-8")
+    assert "prepare-output-root" in runner
+
+    experiment_root = tmp_path / "gate-b-at-most-once"
+    experiment_root.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_PACKAGE_PARENT_V3",
+        experiment_root,
+    )
+    prepare = getattr(gate_b_v3, "prepare_gate_b_runner_output_root_v3")
+    assert "path" not in inspect.signature(prepare).parameters
+    assert "output_root" not in inspect.signature(prepare).parameters
+
+    runs_root = prepare(
+        expected_root_uid=os.geteuid(),
+        expected_hermes_uid=os.geteuid(),
+        expected_hermes_gid=os.getegid(),
+    )
+
+    assert runs_root == experiment_root / "runs"
+    metadata = runs_root.lstat()
+    assert stat.S_ISDIR(metadata.st_mode)
+    assert metadata.st_uid == os.geteuid()
+    assert metadata.st_gid == os.getegid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+    assert tuple(experiment_root.iterdir()) == (runs_root,)
 
 
 def test_consumed_loader_ignores_started_attempt_and_selects_new_recovery(

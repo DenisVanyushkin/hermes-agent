@@ -3845,6 +3845,82 @@ def _ensure_owned_directory_v3(
         raise GateBPackageErrorV3("launch_directory_authority_invalid")
 
 
+def prepare_gate_b_runner_output_root_v3(
+    *,
+    expected_root_uid: int = 0,
+    expected_hermes_uid: int | None = None,
+    expected_hermes_gid: int | None = None,
+) -> Path:
+    """Prepare the one fixed systemd-writable runs parent before launch."""
+    if os.geteuid() != expected_root_uid:
+        raise GateBPackageErrorV3("root_installer_required")
+    if expected_hermes_uid is None or expected_hermes_gid is None:
+        import grp
+        import pwd
+
+        if expected_hermes_uid is None:
+            expected_hermes_uid = pwd.getpwnam("hermes").pw_uid
+        if expected_hermes_gid is None:
+            expected_hermes_gid = grp.getgrnam("hermes").gr_gid
+    experiment_root = Path(_GATE_B_PACKAGE_PARENT_V3)
+    if not experiment_root.is_absolute() or experiment_root.name != (
+        "gate-b-at-most-once"
+    ):
+        raise GateBPackageErrorV3("runner_output_parent_invalid")
+    runs_root = experiment_root / "runs"
+    try:
+        experiment_descriptor = _open_directory_nofollow_v3(experiment_root)
+    except (GateBPackageErrorV3, OSError) as exc:
+        raise GateBPackageErrorV3("runner_output_parent_unsafe") from exc
+    runs_descriptor = -1
+    try:
+        experiment_metadata = os.fstat(experiment_descriptor)
+        if (
+            experiment_metadata.st_uid != expected_hermes_uid
+            or experiment_metadata.st_gid != expected_hermes_gid
+            or stat.S_IMODE(experiment_metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+        ):
+            raise GateBPackageErrorV3("runner_output_parent_unsafe")
+        try:
+            runs_descriptor = os.open(
+                "runs",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=experiment_descriptor,
+            )
+        except FileNotFoundError:
+            os.mkdir(
+                "runs",
+                _PRIVATE_DIRECTORY_MODE,
+                dir_fd=experiment_descriptor,
+            )
+            os.fsync(experiment_descriptor)
+            runs_descriptor = os.open(
+                "runs",
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=experiment_descriptor,
+            )
+        os.fchown(runs_descriptor, expected_hermes_uid, expected_hermes_gid)
+        os.fchmod(runs_descriptor, _PRIVATE_DIRECTORY_MODE)
+        os.fsync(runs_descriptor)
+        os.fsync(experiment_descriptor)
+        runs_metadata = os.fstat(runs_descriptor)
+        if (
+            not stat.S_ISDIR(runs_metadata.st_mode)
+            or runs_metadata.st_uid != expected_hermes_uid
+            or runs_metadata.st_gid != expected_hermes_gid
+            or runs_metadata.st_nlink < 2
+            or stat.S_IMODE(runs_metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+        ):
+            raise GateBPackageErrorV3("runner_output_root_unsafe")
+    except OSError as exc:
+        raise GateBPackageErrorV3("runner_output_root_prepare_failed") from exc
+    finally:
+        if runs_descriptor >= 0:
+            os.close(runs_descriptor)
+        os.close(experiment_descriptor)
+    return runs_root
+
+
 def _publish_owned_launch_file_v3(
     directory: Path,
     filename: str,
@@ -5509,6 +5585,9 @@ def _main_v3(arguments: list[str]) -> int:
     if len(arguments) == 3 and arguments[0] == "export-runtime-manifest":
         _export_runtime_manifest_v3(Path(arguments[1]), arguments[2])
         return 0
+    if arguments == ["prepare-output-root"]:
+        print(prepare_gate_b_runner_output_root_v3())
+        return 0
     if arguments == ["consume-launch-receipt"]:
         consumed = consume_gate_b_launch_receipt_v3()
         print(consumed)
@@ -5519,8 +5598,8 @@ def _main_v3(arguments: list[str]) -> int:
         return 0
     raise SystemExit(
         "usage: gate_b_benchmark_v3 "
-        "export-runtime-manifest ROOT COMMIT | consume-launch-receipt | "
-        "run-at-most-once"
+        "export-runtime-manifest ROOT COMMIT | prepare-output-root | "
+        "consume-launch-receipt | run-at-most-once"
     )
 
 
