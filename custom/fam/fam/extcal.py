@@ -3059,6 +3059,51 @@ def _export_reread_etag(cfg, url, request):
     return resp.headers.get("ETag") or resp.headers.get("Etag") or resp.headers.get("etag")
 
 
+def fetch_resource(cfg, href, request=None):
+    """GET one calendar resource and return its raw ICS text, or None.
+
+    Exists for the one case `REPORT sync-collection` leaves us blind in:
+    a delta entry that is NOT a tombstone yet carries no
+    `<C:calendar-data>` (a per-resource 403/500/507 inside an otherwise-200
+    multistatus, or a 200 whose calendar-data element is missing/empty).
+    Before this, such an entry was skipped for the round while its
+    sync-token was still persisted -- so the change it represented became
+    invisible until the next `periodic_full`, up to a full day later
+    (observed 2026-08-20: an event created at 12:34 UTC was still missing
+    five hours and twenty ticks later).
+
+    Same contract as every other transport-touching function here: never
+    raises, degrades to None. Reuses `_export_headers` for auth so there
+    is exactly one place that builds the Basic-auth header, and re-checks
+    `_scheme_and_host_ok` itself: `href` is SERVER-supplied (it comes
+    straight out of a multistatus `<D:href>`), and unlike the real
+    `_request` an injected transport carries no host guard of its own.
+    """
+    if not href or not _scheme_and_host_ok(href):
+        return None
+    if _auth_header(cfg) is None:
+        return None
+    request = request or _request
+    try:
+        resp = request("GET", href, headers=_export_headers(cfg),
+                       timeout=DEFAULT_TIMEOUT)
+    except Exception as e:
+        # `_request` itself never raises; an INJECTED transport (tests,
+        # future callers) might, and this function's callers -- the tick's
+        # per-resource loop -- must not learn to expect exceptions from a
+        # read that is, by design, best-effort. Type only, never str(e):
+        # same reasoning as `_request`'s own except-clause comment.
+        print(f"extcal: resource fetch failed ({type(e).__name__})", file=sys.stderr)
+        return None
+    if resp is None or not (200 <= getattr(resp, "status", 0) < 300):
+        return None
+    text = resp.text or ""
+    # Whitespace-only is "no body" here, exactly as it is in the tick's
+    # own `not (ics_text or "").strip()` guard (cli.py, fix-round 4) --
+    # returning "\n  " would just re-create the bug one layer up.
+    return text if text.strip() else None
+
+
 def _export_delete(cfg, url, etag, request):
     """One DELETE attempt. `(ok, status)`. A 404/410 (already gone on the
     server -- e.g. a previous tick's DELETE actually succeeded but this
