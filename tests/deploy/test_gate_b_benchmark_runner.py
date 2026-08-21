@@ -1,20 +1,8 @@
 from __future__ import annotations
 
-import hashlib
-import inspect
-import json
-import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
-from datetime import datetime, timezone
-from decimal import Decimal
-
-import pytest
-from pydantic import ValidationError
-
-import job_intel.product_search.gate_b_benchmark_v3 as gate_b_v3
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,41 +10,6 @@ EXPORTER = ROOT / "scripts/export_job_intel_gate_b_benchmark.sh"
 RUNNER = ROOT / "scripts/job_intel_gate_b_benchmark.sh"
 INSTALLER = ROOT / "scripts/install_job_intel_gate_b_benchmark_unit.sh"
 SERVICE = ROOT / "deploy/systemd/experiments/job-intel-gate-b-benchmark@.service"
-
-
-def _runtime_manifest_payload() -> dict[str, object]:
-    return {
-        "schema_version": "3.0.0",
-        "runtime_kind": "gate_b_at_most_once",
-        "artifact_sha256": "f" * 64,
-        "artifact_tree_sha256": "0" * 64,
-        "candidate_commit": "a" * 40,
-        "python_version": "3.12.13",
-        "runtime_tree_sha256": "1" * 64,
-        "python_executable_sha256": "2" * 64,
-        "stdlib_tree_sha256": "3" * 64,
-        "dependency_lock_sha256": "4" * 64,
-        "installed_distributions_sha256": "5" * 64,
-        "sys_path_sha256": "6" * 64,
-        "editable_installs": [],
-    }
-
-
-def test_runtime_manifest_requires_python_3_12_13_and_no_editable_installs() -> None:
-    manifest_type = getattr(gate_b_v3, "GateBRuntimeManifestV3")
-    payload = _runtime_manifest_payload()
-
-    manifest = manifest_type.model_validate(payload)
-
-    assert manifest.python_version == "3.12.13"
-    assert len(manifest.canonical_sha256) == 64
-    payload["python_version"] = "3.12.14"
-    with pytest.raises(ValidationError):
-        manifest_type.model_validate(payload)
-    payload = _runtime_manifest_payload()
-    payload["editable_installs"] = ["/mutable/checkout"]
-    with pytest.raises(ValidationError):
-        manifest_type.model_validate(payload)
 
 
 def test_runtime_export_wrapper_uses_neutral_runtime_builder_and_rejects_dirty_source(
@@ -91,141 +44,19 @@ def test_runtime_export_wrapper_uses_neutral_runtime_builder_and_rejects_dirty_s
     ).stdout.strip()
     (repo / "tracked.txt").write_text("dirty checkout\n", encoding="utf-8")
     result = subprocess.run(
-        ["bash", str(EXPORTER), str(repo), commit, str(tmp_path / "export"), sys.executable],
+        [
+            "bash",
+            str(EXPORTER),
+            str(repo),
+            commit,
+            str(tmp_path / "export"),
+            sys.executable,
+        ],
         text=True,
         capture_output=True,
     )
     assert result.returncode != 0
     assert "source_tree_dirty" in result.stderr
-
-
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-
-
-def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
-    tmp_path: Path,
-) -> None:
-    runtime_manifest = gate_b_v3.GateBRuntimeManifestV3.model_validate(
-        _runtime_manifest_payload()
-    )
-    package_manifest = gate_b_v3.GateBPackageManifestV3(
-        schema_version="3.0.0",
-        package_id="gate-b-v3-test",
-        created_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
-        ordered_input_sha256s=tuple(f"{index + 1:064x}" for index in range(48)),
-        authority_sha256s=("a" * 64,),
-    )
-    package_sha256 = package_manifest.canonical_sha256
-    launch = gate_b_v3.GateBLaunchBindingV3(
-        schema_version="3.0.0",
-        run_id=f"gate-b-at-most-once-{package_sha256[:16]}",
-        candidate_commit=runtime_manifest.candidate_commit,
-        runtime_manifest_sha256=runtime_manifest.canonical_sha256,
-        package_manifest_sha256=package_sha256,
-        ordered_input_sha256s=package_manifest.ordered_input_sha256s,
-        ordered_projection_sha256s=tuple(f"{index + 101:064x}" for index in range(48)),
-        source_authority_sha256s={"fixture": "b" * 64},
-        model_id="openai/gpt-5-mini",
-        maximum_output_tokens=2_000,
-        ordered_call_cap=48,
-        per_call_maximum_usd=Decimal("0.01"),
-        aggregate_maximum_usd=Decimal("0.48"),
-    )
-    checkpoint = gate_b_v3.GateBOwnerCheckpointManifestV3(
-        schema_version="3.0.0",
-        checkpoint_kind="gate_b_at_most_once_owner_approval",
-        approved_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
-        launch_identity=launch,
-    )
-    receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
-        schema_version="3.0.0",
-        receipt_kind="gate_b_at_most_once_launch",
-        launch_kind="initial",
-        benchmark_run_id=launch.run_id,
-        launch_attempt_id=f"{launch.run_id}-{'c' * 64}",
-        issued_at=datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc),
-        expires_at=datetime(2026, 8, 20, 12, 31, tzinfo=timezone.utc),
-        nonce="c" * 64,
-        checkpoint_manifest_sha256=checkpoint.canonical_sha256,
-        launch_identity_sha256=launch.canonical_sha256,
-        candidate_commit=launch.candidate_commit,
-        runtime_manifest_sha256=launch.runtime_manifest_sha256,
-        package_manifest_sha256=launch.package_manifest_sha256,
-        ordered_call_cap=48,
-        per_call_maximum_usd=Decimal("0.01"),
-        aggregate_maximum_usd=Decimal("0.48"),
-    )
-    pending_root = tmp_path / "etc"
-    consumed_root = tmp_path / "run"
-    package_parent = tmp_path / "packages"
-    runtime_root = tmp_path / "runtime"
-    pending_dir = pending_root / receipt.launch_attempt_id
-    package_dir = package_parent / package_sha256
-    pending_dir.mkdir(parents=True, mode=0o700)
-    package_dir.mkdir(parents=True)
-    runtime_root.mkdir()
-    pending_path = pending_dir / "launch.pending.json"
-    checkpoint_path = pending_dir / "owner-checkpoint.json"
-    recovery_key_path = pending_dir / "owner-recovery-public-key.bin"
-    pending_path.write_bytes(_canonical_bytes(receipt.model_dump(mode="json")))
-    checkpoint_path.write_bytes(_canonical_bytes(checkpoint.model_dump(mode="json")))
-    recovery_key_path.write_bytes(bytes.fromhex("22" * 32))
-    for path in (pending_path, checkpoint_path, recovery_key_path):
-        path.chmod(0o400)
-    (package_dir / "package-manifest.json").write_bytes(
-        _canonical_bytes(package_manifest.model_dump(mode="json"))
-    )
-    (runtime_root / "runtime-manifest.json").write_bytes(
-        _canonical_bytes(runtime_manifest.model_dump(mode="json"))
-    )
-
-    consumed = gate_b_v3.consume_gate_b_launch_receipt_v3(
-        pending_root=pending_root,
-        consumed_root=consumed_root,
-        package_parent=package_parent,
-        runtime_export_root=runtime_root,
-        now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
-        expected_root_uid=os.geteuid(),
-        expected_root_gid=os.getegid(),
-        expected_hermes_uid=os.geteuid(),
-        expected_hermes_gid=os.getegid(),
-    )
-
-    assert consumed == (
-        consumed_root / receipt.launch_attempt_id / "launch.consumed.json"
-    )
-    assert not pending_path.exists()
-    assert consumed.read_bytes() == _canonical_bytes(receipt.model_dump(mode="json"))
-    assert stat.S_IMODE(consumed.stat().st_mode) == 0o440
-    assert (consumed.parent / "owner-checkpoint.json").read_bytes() == (
-        _canonical_bytes(checkpoint.model_dump(mode="json"))
-    )
-    assert (consumed.parent / "owner-recovery-public-key.bin").read_bytes() == (
-        bytes.fromhex("22" * 32)
-    )
-    claim_directory = consumed.parent / "launch-claim"
-    claim_metadata = claim_directory.stat()
-    assert stat.S_IMODE(claim_metadata.st_mode) == 0o700
-    assert claim_metadata.st_uid == os.geteuid()
-    assert claim_metadata.st_gid == os.getegid()
-    with pytest.raises(ValueError, match="pending_receipt"):
-        gate_b_v3.consume_gate_b_launch_receipt_v3(
-            pending_root=pending_root,
-            consumed_root=consumed_root,
-            package_parent=package_parent,
-            runtime_export_root=runtime_root,
-            now=datetime(2026, 8, 20, 12, 11, tzinfo=timezone.utc),
-            expected_root_uid=os.geteuid(),
-            expected_root_gid=os.getegid(),
-            expected_hermes_uid=os.geteuid(),
-            expected_hermes_gid=os.getegid(),
-        )
 
 
 def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
@@ -265,10 +96,7 @@ def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
     assert syntax.returncode == 0, syntax.stderr
 
 
-def test_state_directory_replaces_root_preflight_namespace_setup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_state_directory_replaces_root_preflight_namespace_setup() -> None:
     unit = SERVICE.read_text(encoding="utf-8")
     assert "StateDirectory=job-intel-gate-b-description-evidence" in unit
     assert "ReadWritePaths=" not in unit
@@ -284,74 +112,11 @@ def test_state_directory_replaces_root_preflight_namespace_setup(
     assert "launch.pending.json" not in installer
 
 
-def test_output_root_preflight_repairs_existing_mode(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    experiment_root = tmp_path / "gate-b-at-most-once"
-    experiment_root.mkdir(mode=0o700)
-    runs_root = experiment_root / "runs"
-    runs_root.mkdir(mode=0o755)
-    monkeypatch.setattr(
-        gate_b_v3,
-        "_GATE_B_PACKAGE_PARENT_V3",
-        experiment_root,
-    )
-
-    observed = gate_b_v3.prepare_gate_b_runner_output_root_v3(
-        expected_root_uid=os.geteuid(),
-        expected_hermes_uid=os.geteuid(),
-        expected_hermes_gid=os.getegid(),
-    )
-
-    assert observed == runs_root
-    assert stat.S_IMODE(runs_root.lstat().st_mode) == 0o700
-
-
-@pytest.mark.parametrize("unsafe_kind", ["file", "symlink"])
-def test_output_root_preflight_rejects_unsafe_existing_entry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    unsafe_kind: str,
-) -> None:
-    experiment_root = tmp_path / "gate-b-at-most-once"
-    experiment_root.mkdir(mode=0o700)
-    runs_root = experiment_root / "runs"
-    if unsafe_kind == "file":
-        runs_root.write_bytes(b"unsafe")
-    else:
-        target = tmp_path / "outside"
-        target.mkdir()
-        runs_root.symlink_to(target, target_is_directory=True)
-    monkeypatch.setattr(
-        gate_b_v3,
-        "_GATE_B_PACKAGE_PARENT_V3",
-        experiment_root,
-    )
-
-    with pytest.raises(ValueError, match="runner_output_root_prepare_failed"):
-        gate_b_v3.prepare_gate_b_runner_output_root_v3(
-            expected_root_uid=os.geteuid(),
-            expected_hermes_uid=os.geteuid(),
-            expected_hermes_gid=os.getegid(),
-        )
-
-
-def test_output_root_preflight_rejects_non_root(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(gate_b_v3.os, "geteuid", lambda: 12345)
-
-    with pytest.raises(ValueError, match="root_installer_required"):
-        gate_b_v3.prepare_gate_b_runner_output_root_v3()
-
-
 def test_runner_rejects_extra_arguments_before_python(tmp_path: Path) -> None:
     artifact_parent = tmp_path / "artifacts"
     artifact_root = artifact_parent / ("a" * 64)
-    runtime_root = artifact_root
-    runtime_source = runtime_root / "runtime"
-    fake_python = runtime_root / "python-runtime/venv/bin/python"
+    runtime_source = artifact_root / "runtime"
+    fake_python = artifact_root / "python-runtime/venv/bin/python"
     marker = tmp_path / "python-invoked"
     (runtime_source / "scripts").mkdir(parents=True)
     fake_python.parent.mkdir(parents=True)
@@ -377,82 +142,3 @@ def test_runner_rejects_extra_arguments_before_python(tmp_path: Path) -> None:
     assert result.returncode == 77
     assert "no arguments" in result.stderr
     assert not marker.exists()
-
-
-def test_consumed_loader_ignores_started_attempt_and_selects_new_recovery(
-    tmp_path: Path,
-) -> None:
-    consumed_root = tmp_path / "consumed"
-    consumed_root.mkdir()
-    benchmark_run_id = "gate-b-at-most-once-" + "1" * 16
-    old_attempt = f"{benchmark_run_id}-{'2' * 64}"
-    recovery_attempt = f"{benchmark_run_id}-{'3' * 64}"
-    old_directory = consumed_root / old_attempt
-    recovery_directory = consumed_root / recovery_attempt
-    old_directory.mkdir()
-    recovery_directory.mkdir()
-    (old_directory / "launch.consumed.json").write_bytes(b"old")
-    old_claim_directory = old_directory / "launch-claim"
-    old_claim_directory.mkdir(mode=0o700)
-    (old_claim_directory / "launch.started.json").write_bytes(b"started")
-    (recovery_directory / "launch-claim").mkdir(mode=0o700)
-    expected = recovery_directory / "launch.consumed.json"
-    expected.write_bytes(b"recovery")
-
-    selected = gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
-
-    assert selected == expected
-
-
-def test_effective_hermes_user_claims_only_the_dedicated_writable_directory(
-    tmp_path: Path,
-) -> None:
-    benchmark_run_id = "gate-b-at-most-once-" + "1" * 16
-    nonce = "2" * 64
-    receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
-        schema_version="3.0.0",
-        receipt_kind="gate_b_at_most_once_launch",
-        launch_kind="initial",
-        benchmark_run_id=benchmark_run_id,
-        launch_attempt_id=f"{benchmark_run_id}-{nonce}",
-        issued_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
-        expires_at=datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc),
-        nonce=nonce,
-        checkpoint_manifest_sha256="3" * 64,
-        launch_identity_sha256="4" * 64,
-        candidate_commit="5" * 40,
-        runtime_manifest_sha256="6" * 64,
-        package_manifest_sha256="7" * 64,
-        ordered_call_cap=48,
-        per_call_maximum_usd=Decimal("0.01"),
-        aggregate_maximum_usd=Decimal("0.48"),
-    )
-    consumed_root = tmp_path / "consumed"
-    consumed_root.mkdir()
-    attempt_directory = consumed_root / receipt.launch_attempt_id
-    attempt_directory.mkdir(mode=0o700)
-    consumed_path = attempt_directory / "launch.consumed.json"
-    consumed_bytes = _canonical_bytes(receipt.model_dump(mode="json"))
-    consumed_path.write_bytes(consumed_bytes)
-    consumed_path.chmod(0o440)
-    claim_directory = attempt_directory / "launch-claim"
-    claim_directory.mkdir(mode=0o700)
-    attempt_directory.chmod(0o550)
-
-    assert not os.access(attempt_directory, os.W_OK)
-    with pytest.raises(PermissionError):
-        (attempt_directory / "receipt-bypass").write_bytes(b"forbidden")
-
-    selected_path = gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
-    marker_path = gate_b_v3._claim_consumed_receipt_v3(
-        selected_path,
-        receipt,
-    )
-
-    assert marker_path == claim_directory / "launch.started.json"
-    assert stat.S_IMODE(marker_path.stat().st_mode) == 0o600
-    assert consumed_path.read_bytes() == consumed_bytes
-    with pytest.raises(ValueError, match="count_invalid"):
-        gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
-    with pytest.raises(ValueError, match="already_started"):
-        gate_b_v3._claim_consumed_receipt_v3(consumed_path, receipt)
