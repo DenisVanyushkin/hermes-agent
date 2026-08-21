@@ -11,7 +11,11 @@ import sqlite3
 import pytest
 
 from job_intel.product_search import gate_b_evidence_v3 as evidence
-from job_intel.product_search.decision_v2 import canonical_decision_bytes, run_decision_v2
+from job_intel.product_search.decision_v2 import (
+    canonical_decision_bytes,
+    load_decision_policy,
+    run_decision_v2,
+)
 from job_intel.product_search.evidence_synthesis import (
     EvidenceClaimV1,
     EvidenceSynthesisMetadataV1,
@@ -262,14 +266,14 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         decision_request_factory=lambda payload, row: _decision_result(
             payload, row.input_sha256
         ),
+        decision_policy=load_decision_policy(),
     )
 
     assert len(calls) == 1
     assert result.validation_status is None
     assert result.decision.status.value == "assessed"
-    assert result.gate_decision.decision is GateDecisionKind.REVISE
-    assert result.gate_decision.measurement_status == "incomplete"
-    assert result.gate_decision.violated_rules == ("collection_incomplete",)
+    assert result.decision_ref.manifest_ref == result.manifest_ref
+    assert result.decision_ref.decision_sha256 == _sha256_bytes(result.decision_bytes)
     assert journal.state(0).value == "success"
 
     replay = recordings.replay(result.recording_ref, manifest)
@@ -282,7 +286,10 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     replayed_request = _decision_result(
         json.loads(replay.response_bytes), replay.manifest_ref.input_sha256
     )
-    replayed_decision = run_decision_v2(replayed_request)
+    replayed_decision = run_decision_v2(
+        replayed_request,
+        policy=load_decision_policy(),
+    )
     assert canonical_decision_bytes(replayed_decision) == canonical_decision_bytes(
         result.decision
     )

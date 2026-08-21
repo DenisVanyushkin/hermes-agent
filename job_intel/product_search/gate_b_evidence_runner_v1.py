@@ -8,7 +8,7 @@ later tasks.
 from __future__ import annotations
 
 import base64
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -20,7 +20,13 @@ from typing import Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from job_intel.product_search.decision_v2 import DecisionRequestV2, DecisionResultV2, run_decision_v2
+from job_intel.product_search.decision_v2 import (
+    DecisionRequestV2,
+    DecisionResultV2,
+    LoadedDecisionPolicyV2,
+    canonical_decision_bytes,
+    run_decision_v2,
+)
 from job_intel.product_search.evidence_synthesis import EvidenceSynthesisStatus
 from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
@@ -364,6 +370,70 @@ class RecordingRef(_StrictFrozenModel):
     recording_sha256: str = Field(pattern=SHA256_PATTERN)
 
 
+class DecisionEvidenceRef(_StrictFrozenModel):
+    manifest_ref: ManifestRef
+    decision_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+class DecisionEvidenceStore:
+    """Create-once canonical Decision v2 bytes for offline adjudication."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, decision_sha256: str) -> Path:
+        return self.root / f"{decision_sha256}.json"
+
+    def save_exclusive(
+        self,
+        manifest_ref: ManifestRef,
+        decision_bytes: bytes,
+    ) -> DecisionEvidenceRef:
+        decision_sha256 = _sha256(decision_bytes)
+        payload = {
+            "schema_version": "gate-b-decision-evidence-v1",
+            "manifest_ref": manifest_ref.model_dump(mode="json"),
+            "decision_b64": base64.b64encode(decision_bytes).decode("ascii"),
+        }
+        encoded = _canonical_bytes(payload)
+        path = self._path(decision_sha256)
+        try:
+            with path.open("xb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            if path.read_bytes() != encoded:
+                raise ValueError("decision hash collision with different bytes")
+        return DecisionEvidenceRef(
+            manifest_ref=manifest_ref,
+            decision_sha256=decision_sha256,
+        )
+
+    def bytes_for(self, ref: DecisionEvidenceRef) -> bytes:
+        encoded = self._path(ref.decision_sha256).read_bytes()
+        try:
+            payload = json.loads(encoded)
+            decision_bytes = base64.b64decode(payload["decision_b64"], validate=True)
+            loaded_ref = ManifestRef.model_validate(payload["manifest_ref"])
+        except Exception as exc:
+            raise ValueError("decision evidence is invalid") from exc
+        if (
+            _canonical_bytes(payload) != encoded
+            or payload.get("schema_version") != "gate-b-decision-evidence-v1"
+            or loaded_ref != ref.manifest_ref
+            or _sha256(decision_bytes) != ref.decision_sha256
+        ):
+            raise ValueError("decision evidence binding mismatch")
+        return decision_bytes
+
+    def verify(self, ref: DecisionEvidenceRef, manifest: EvidenceManifest) -> None:
+        if ref.manifest_ref != manifest.row_ref(ref.manifest_ref.ordinal):
+            raise ValueError("decision evidence manifest reference mismatch")
+        self.bytes_for(ref)
+
+
 class SealedRecording(_StrictFrozenModel):
     manifest_ref: ManifestRef
     request_bytes: bytes
@@ -596,7 +666,258 @@ class OneRowResult(_StrictFrozenModel):
     recording_ref: RecordingRef
     recording_bytes: bytes
     decision: DecisionResultV2
-    gate_decision: GateDecision
+    decision_ref: DecisionEvidenceRef
+    decision_bytes: bytes
+
+
+class CorpusRow(_StrictFrozenModel):
+    """One immutable corpus input before the v3 projector runs."""
+
+    ordinal: int = Field(ge=0, lt=48)
+    record: dict[str, object]
+    raw: dict[str, object]
+
+
+class CollectionRowResult(_StrictFrozenModel):
+    """Durable collection evidence; deliberately contains no decision."""
+
+    manifest_ref: ManifestRef
+    validation_status: EvidenceSynthesisStatus | None
+    recording_ref: RecordingRef
+    recording_bytes: bytes
+    outcome: TerminalOutcome
+    decision: DecisionResultV2
+    decision_ref: DecisionEvidenceRef
+    decision_bytes: bytes
+
+
+class CollectionMetrics(_StrictFrozenModel):
+    """Immutable collection counts consumed later by the separate evaluator."""
+
+    expected_row_count: int = Field(ge=1, le=48)
+    observed_row_count: int = Field(ge=0, le=48)
+    deliverable_count: int = Field(ge=0, le=48)
+    terminal_unknown_count: int = Field(ge=0, le=48)
+
+
+class CollectionReport(_StrictFrozenModel):
+    """Per-row evidence and metrics; gate thresholds are Task 8."""
+
+    run_id: str = Field(pattern=r"^gate-b-evidence-v1-[0-9a-f]{16}$")
+    manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    rows: tuple[CollectionRowResult, ...]
+    metrics: CollectionMetrics
+
+
+def load_gate_b_corpus_rows(
+    *,
+    package_root: Path,
+    gate_a_root: Path,
+    run_manifest_path: Path,
+    expected_sha256: str,
+    expected_corpus_sha256: str,
+) -> tuple[CorpusRow, ...]:
+    """Load and validate the pinned corpus without opening the live database."""
+    from job_intel.product_search import gate_b
+
+    payload = gate_b.load_gate_b_run_manifest(
+        run_manifest_path,
+        expected_sha256=expected_sha256,
+        expected_corpus_sha256=expected_corpus_sha256,
+    )
+    records = payload["records"]
+    if not isinstance(records, list):
+        raise ValueError("corpus manifest records are invalid")
+    loaded: list[CorpusRow] = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("corpus manifest row is invalid")
+        raw_reference = record.get("raw_reference")
+        if not isinstance(raw_reference, str):
+            raise ValueError("corpus raw reference is invalid")
+        raw_bytes = gate_b.read_contained_nofollow(gate_a_root, raw_reference)
+        try:
+            raw = json.loads(raw_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("corpus raw artifact is invalid") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("corpus raw artifact must be an object")
+        # This validates the existing package projection and its content hashes;
+        # the actual provider input below is still produced by the v3 projector.
+        gate_b.load_gate_b_task10_input(
+            package_root=package_root,
+            record=record,
+            gate_a_root=gate_a_root,
+        )
+        loaded.append(
+            CorpusRow(
+                ordinal=record.get("ordinal"),
+                record=record,
+                raw=raw,
+            )
+        )
+    if tuple(row.ordinal for row in loaded) != tuple(range(48)):
+        raise ValueError("corpus order does not match the 48-row manifest")
+    return tuple(loaded)
+
+
+def _default_binding_verifier(
+    manifest: EvidenceManifest,
+    *,
+    source_artifact: object,
+    runtime: object,
+    rows: tuple[EvidenceManifestRow, ...],
+    authorities: object,
+) -> None:
+    # Imported lazily because Task 4's runtime module imports these contracts.
+    from job_intel.product_search.gate_b_runtime_v1 import verify_manifest_binding
+
+    verify_manifest_binding(
+        manifest,
+        source_artifact=source_artifact,
+        runtime=runtime,
+        rows=rows,
+        authorities=authorities,
+    )
+
+
+def run_collection(
+    *,
+    manifest: EvidenceManifest,
+    corpus_rows: Sequence[CorpusRow],
+    reviewed_allowlist: ReviewedFragmentAllowlistV3 | None = None,
+    provider_factory: Callable[[], GovernedProvider],
+    journal: AppendOnlyJournal | None = None,
+    recordings: RecordingStore | None = None,
+    decision_evidence: DecisionEvidenceStore | None = None,
+    decision_policy: LoadedDecisionPolicyV2,
+    decision_request_factory: Callable[
+        [dict[str, object], ManifestRef], DecisionRequestV2
+    ] | None = None,
+    source_artifact: object | None = None,
+    runtime: object | None = None,
+    authorities: object | None = None,
+    binding_verifier: Callable[..., None] | None = None,
+) -> CollectionReport:
+    """Collect all supplied rows, then publish evidence metrics only.
+
+    Binding is checked immediately before provider construction and again after
+    the final recording is durable.  The returned object intentionally has no
+    GateDecision field; per-row Decision v2 is evidence and adjudication and
+    thresholds are a separate deterministic Task 8 operation.
+    """
+    rows = tuple(corpus_rows)
+    if len(rows) != manifest.row_count:
+        raise ValueError("collection row count does not match manifest")
+    if tuple(row.ordinal for row in rows) != tuple(range(manifest.row_count)):
+        raise ValueError("collection rows are not in manifest order")
+    if reviewed_allowlist is None:
+        raise ValueError("reviewed_allowlist_required")
+    if journal is None or recordings is None or decision_evidence is None:
+        raise ValueError("journal_recordings_and_decision_evidence_required")
+    if decision_policy is None or decision_request_factory is None:
+        raise ValueError("decision_policy_and_request_factory_required")
+    verifier = binding_verifier or _default_binding_verifier
+    verifier(
+        manifest,
+        source_artifact=source_artifact,
+        runtime=runtime,
+        rows=manifest.rows,
+        authorities=authorities,
+    )
+    provider = provider_factory()
+    results: list[CollectionRowResult] = []
+    for corpus_row in rows:
+        row = manifest.row(corpus_row.ordinal)
+        projected = project_vacancy_evidence_v3(
+            corpus_row.record,
+            corpus_row.raw,
+            reviewed_allowlist,
+        )
+        projection_sha256 = _sha256(
+            _canonical_bytes(projected.model_dump(mode="json"))
+        )
+        if projection_sha256 != row.projection_sha256:
+            raise ValueError("projection hash does not match manifest row")
+        request_payload = projected.provider_payload()
+        request_bytes = _canonical_bytes(request_payload)
+        if _sha256(request_bytes) != row.input_sha256:
+            raise ValueError("provider input hash does not match manifest row")
+        ref = manifest.row_ref(corpus_row.ordinal)
+        receipt = journal.append_pre_dispatch(ref)
+        response_payload = dict(provider.dispatch(request_payload))
+        response_bytes = _canonical_bytes(response_payload)
+        validation_status = validate_provider_payload_v3(
+            response_payload,
+            synthesis_input=projected,
+            reviewed_allowlist=reviewed_allowlist,
+        )
+        outcome = (
+            TerminalOutcome.TERMINAL_FAILURE
+            if validation_status is not None
+            else TerminalOutcome.SUCCESS
+        )
+        decision_request = decision_request_factory(response_payload, ref)
+        decision = run_decision_v2(decision_request, policy=decision_policy)
+        decision_bytes = canonical_decision_bytes(decision)
+        decision_ref = decision_evidence.save_exclusive(ref, decision_bytes)
+        recording_ref = recordings.save_exclusive(
+            SealedRecording(
+                manifest_ref=ref,
+                request_bytes=request_bytes,
+                response_bytes=response_bytes,
+                outcome=outcome,
+                metadata={
+                    "input_sha256": row.input_sha256,
+                    "projection_sha256": row.projection_sha256,
+                    "response_sha256": _sha256(response_bytes),
+                    "validator": "gate_b_evidence_v3",
+                },
+            )
+        )
+        journal.commit_terminal(
+            receipt,
+            outcome,
+            recording_ref.recording_sha256,
+            Decimal("0"),
+            manifest.limits.per_call_maximum_usd,
+        )
+        results.append(
+            CollectionRowResult(
+                manifest_ref=ref,
+                validation_status=validation_status,
+                recording_ref=recording_ref,
+                recording_bytes=recordings.bytes_for(recording_ref),
+                outcome=outcome,
+                decision=decision,
+                decision_ref=decision_ref,
+                decision_bytes=decision_evidence.bytes_for(decision_ref),
+            )
+        )
+    verifier(
+        manifest,
+        source_artifact=source_artifact,
+        runtime=runtime,
+        rows=manifest.rows,
+        authorities=authorities,
+    )
+    deliverable_count = sum(
+        result.outcome is TerminalOutcome.SUCCESS for result in results
+    )
+    terminal_unknown_count = sum(
+        result.outcome is TerminalOutcome.TERMINAL_UNKNOWN for result in results
+    )
+    return CollectionReport(
+        run_id=manifest.run_id,
+        manifest_sha256=manifest.manifest_sha256,
+        rows=tuple(results),
+        metrics=CollectionMetrics(
+            expected_row_count=manifest.row_count,
+            observed_row_count=len(results),
+            deliverable_count=deliverable_count,
+            terminal_unknown_count=terminal_unknown_count,
+        ),
+    )
 
 
 def run_one_row(
@@ -610,8 +931,9 @@ def run_one_row(
     journal: AppendOnlyJournal,
     recordings: RecordingStore,
     decision_request_factory: Callable[[dict[str, object], ManifestRef], DecisionRequestV2],
+    decision_policy: LoadedDecisionPolicyV2 | None = None,
 ) -> OneRowResult:
-    """Project, validate, record, replay-reference, and decide one row offline."""
+    """Task 3 compatibility skeleton with per-row Decision v2 evidence only."""
     row = manifest.row(ordinal)
     projected = project_vacancy_evidence_v3(record, raw, reviewed_allowlist)
     projection_sha256 = _sha256(_canonical_bytes(projected.model_dump(mode="json")))
@@ -661,26 +983,20 @@ def run_one_row(
         raise ValueError(f"provider payload rejected: {validation_status.value}")
 
     decision_request = decision_request_factory(response_payload, ref)
-    decision = run_decision_v2(decision_request)
-    measurements = MeasurementReport(
-        expected_row_count=manifest.row_count,
-        observed_row_count=1,
-        deliverable_count=1,
-        terminal_unknown_count=0,
-        adjudicated_count=1,
-        adjudication_denominator=1,
-        adjudicated_correct=1,
+    decision = run_decision_v2(
+        decision_request,
+        policy=decision_policy,
     )
-    gate_decision = GateEvaluator.evaluate(
-        manifest,
-        measurements,
-        AdjudicationSet(audited_count=1, denominator=1, correct_count=1),
-    )
+    decision_bytes = canonical_decision_bytes(decision)
     return OneRowResult(
         manifest_ref=ref,
         validation_status=validation_status,
         recording_ref=recording_ref,
         recording_bytes=recordings.bytes_for(recording_ref),
         decision=decision,
-        gate_decision=gate_decision,
+        decision_ref=DecisionEvidenceRef(
+            manifest_ref=ref,
+            decision_sha256=_sha256(decision_bytes),
+        ),
+        decision_bytes=decision_bytes,
     )
