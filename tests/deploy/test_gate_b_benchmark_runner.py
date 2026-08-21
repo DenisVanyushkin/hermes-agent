@@ -123,7 +123,8 @@ case "$1 $2" in
   "venv "*)
     destination="$2"
     mkdir -p "$destination/bin"
-    cp {str(fake_python)!r} "$destination/bin/python"
+    target="${{FAKE_UV_PYTHON_TARGET:-${{destination%/venv}}/cpython/bin/python3.12}}"
+    ln -s "$target" "$destination/bin/python"
     ;;
   "sync --project")
     ;;
@@ -164,6 +165,13 @@ esac
     assert not os.access(destination / "runtime/tracked.txt", os.W_OK)
     assert (destination / "runtime-manifest.json").exists()
     assert (destination / "export-observation.txt").read_text() == "manifest-created\n"
+    exported_python = destination / "python-runtime/venv/bin/python"
+    assert exported_python.is_file()
+    assert not exported_python.is_symlink()
+    assert (
+        hashlib.sha256(exported_python.read_bytes()).hexdigest()
+        == hashlib.sha256(fake_python.read_bytes()).hexdigest()
+    )
     forbidden = tuple(destination.rglob("*.service")) + tuple(
         destination.rglob("launch.pending.json")
     )
@@ -172,6 +180,27 @@ esac
         hashlib.sha256((destination / "runtime-manifest.json").read_bytes()).hexdigest()
         == (destination / "runtime-manifest.sha256").read_text().strip()
     )
+
+    unsafe_destination = tmp_path / "unsafe-export"
+    unsafe_env = dict(env)
+    unsafe_env["FAKE_UV_PYTHON_TARGET"] = str(fake_python)
+    unsafe = subprocess.run(
+        [
+            "bash",
+            str(EXPORTER),
+            str(repo),
+            commit,
+            str(unsafe_destination),
+            str(fake_python),
+        ],
+        cwd=tmp_path,
+        env=unsafe_env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert unsafe.returncode == 66
+    assert "venv Python target is not the copied interpreter" in unsafe.stderr
 
 
 def _canonical_bytes(value: object) -> bytes:
