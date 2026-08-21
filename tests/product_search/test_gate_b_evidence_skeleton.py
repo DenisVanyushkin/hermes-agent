@@ -29,6 +29,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 )
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
     AdjudicationSet,
+    AdjudicationVerdict,
     AppendOnlyJournal,
     AuthorityIdentity,
     EvidenceManifest,
@@ -309,9 +310,18 @@ def test_gate_evaluator_distinguishes_complete_negative_from_incomplete() -> Non
         adjudicated_count=48,
         adjudication_denominator=48,
         adjudicated_correct=48,
+        recording_sha256s=tuple(f"{index:064x}" for index in range(48)),
+        decision_sha256s=tuple(f"{index + 100:064x}" for index in range(48)),
     )
-    adjudication = AdjudicationSet(
-        audited_count=48, denominator=48, correct_count=48
+    adjudication = AdjudicationSet.from_verdicts(
+        tuple(
+            AdjudicationVerdict(
+                manifest_ref=manifest.row_ref(index),
+                decision_sha256=f"{index + 100:064x}",
+                correct=True,
+            )
+            for index in range(48)
+        )
     )
     decision = GateEvaluator.evaluate(manifest, complete, adjudication)
     assert decision.measurement_status == "complete"

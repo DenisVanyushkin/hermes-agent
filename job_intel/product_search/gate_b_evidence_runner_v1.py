@@ -574,6 +574,136 @@ class RecordingStore:
         )
 
 
+class AdjudicationVerdict(_StrictFrozenModel):
+    """One human judgment bound to the exact Decision v2 artifact reviewed."""
+
+    manifest_ref: ManifestRef
+    decision_sha256: str = Field(pattern=SHA256_PATTERN)
+    correct: bool
+
+
+class AdjudicationSet(_StrictFrozenModel):
+    schema_version: Literal["gate-b-adjudication-v1"]
+    verdicts: tuple[AdjudicationVerdict, ...]
+    adjudication_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @classmethod
+    def from_verdicts(
+        cls, verdicts: tuple[AdjudicationVerdict, ...]
+    ) -> AdjudicationSet:
+        body = {
+            "schema_version": "gate-b-adjudication-v1",
+            "verdicts": [verdict.model_dump(mode="json") for verdict in verdicts],
+        }
+        return cls(
+            schema_version="gate-b-adjudication-v1",
+            verdicts=verdicts,
+            adjudication_sha256=_sha256(_canonical_bytes(body)),
+        )
+
+    @model_validator(mode="after")
+    def validate_set_identity(self) -> AdjudicationSet:
+        ordinals = tuple(verdict.manifest_ref.ordinal for verdict in self.verdicts)
+        if ordinals != tuple(sorted(set(ordinals))):
+            raise ValueError("adjudication verdict ordinals must be sorted and unique")
+        body = self.model_dump(mode="json", exclude={"adjudication_sha256"})
+        if _sha256(_canonical_bytes(body)) != self.adjudication_sha256:
+            raise ValueError("adjudication_sha256 does not match verdict bytes")
+        return self
+
+    @property
+    def audited_count(self) -> int:
+        return len(self.verdicts)
+
+    @property
+    def denominator(self) -> int:
+        return len(self.verdicts)
+
+    @property
+    def correct_count(self) -> int:
+        return sum(verdict.correct for verdict in self.verdicts)
+
+    @property
+    def audited_ordinals(self) -> tuple[int, ...]:
+        return tuple(verdict.manifest_ref.ordinal for verdict in self.verdicts)
+
+
+class AdjudicationSetRef(_StrictFrozenModel):
+    run_id: str = Field(pattern=r"^gate-b-evidence-v1-[0-9a-f]{16}$")
+    manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+    adjudication_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+class AdjudicationSetStore:
+    """Create-once, manifest-bound human adjudication evidence."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, adjudication_sha256: str) -> Path:
+        return self.root / f"{adjudication_sha256}.json"
+
+    @staticmethod
+    def _validate_bindings(
+        adjudication: AdjudicationSet,
+        manifest: EvidenceManifest,
+        finalized_decision_sha256s: tuple[str, ...],
+    ) -> None:
+        if len(finalized_decision_sha256s) != manifest.row_count:
+            raise ValueError("finalized_decision_hashes_required")
+        for verdict in adjudication.verdicts:
+            ordinal = verdict.manifest_ref.ordinal
+            if verdict.manifest_ref != manifest.row_ref(ordinal):
+                raise ValueError("adjudication manifest reference mismatch")
+            if verdict.decision_sha256 != finalized_decision_sha256s[ordinal]:
+                raise ValueError("adjudication decision hash mismatch")
+
+    def save_exclusive(
+        self,
+        adjudication: AdjudicationSet,
+        manifest: EvidenceManifest,
+        finalized_decision_sha256s: tuple[str, ...],
+    ) -> AdjudicationSetRef:
+        self._validate_bindings(adjudication, manifest, finalized_decision_sha256s)
+        encoded = _canonical_bytes(adjudication.model_dump(mode="json"))
+        path = self._path(adjudication.adjudication_sha256)
+        try:
+            with path.open("xb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            if path.read_bytes() != encoded:
+                raise ValueError("adjudication hash collision with different bytes")
+        return AdjudicationSetRef(
+            run_id=manifest.run_id,
+            manifest_sha256=manifest.manifest_sha256,
+            adjudication_sha256=adjudication.adjudication_sha256,
+        )
+
+    def load(
+        self,
+        ref: AdjudicationSetRef,
+        manifest: EvidenceManifest,
+        finalized_decision_sha256s: tuple[str, ...],
+    ) -> AdjudicationSet:
+        if ref.run_id != manifest.run_id or ref.manifest_sha256 != manifest.manifest_sha256:
+            raise ValueError("adjudication set manifest binding mismatch")
+        encoded = self._path(ref.adjudication_sha256).read_bytes()
+        try:
+            payload = json.loads(encoded)
+            adjudication = AdjudicationSet.model_validate(payload)
+        except Exception as exc:
+            raise ValueError("adjudication set is invalid") from exc
+        if _canonical_bytes(payload) != encoded:
+            raise ValueError("adjudication set is not canonical")
+        if adjudication.adjudication_sha256 != ref.adjudication_sha256:
+            raise ValueError("adjudication set hash mismatch")
+        self._validate_bindings(adjudication, manifest, finalized_decision_sha256s)
+        return adjudication
+
+
 class MeasurementReport(_StrictFrozenModel):
     expected_row_count: int = Field(ge=1, le=48)
     observed_row_count: int = Field(ge=0, le=48)
@@ -582,12 +712,25 @@ class MeasurementReport(_StrictFrozenModel):
     adjudicated_count: int = Field(ge=0, le=48)
     adjudication_denominator: int = Field(ge=0, le=48)
     adjudicated_correct: int = Field(ge=0, le=48)
+    recording_sha256s: tuple[str, ...] = ()
+    decision_sha256s: tuple[str, ...] = ()
+    audited_ordinals: tuple[int, ...] = ()
+    adjudication_set_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
 
-
-class AdjudicationSet(_StrictFrozenModel):
-    audited_count: int = Field(ge=0, le=48)
-    denominator: int = Field(ge=0, le=48)
-    correct_count: int = Field(ge=0, le=48)
+    @model_validator(mode="after")
+    def validate_evidence_hashes(self) -> MeasurementReport:
+        for name, values in (
+            ("recording_sha256s", self.recording_sha256s),
+            ("decision_sha256s", self.decision_sha256s),
+        ):
+            if any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+                for value in values
+            ):
+                raise ValueError(f"{name} must contain lowercase SHA-256 values")
+        return self
 
 
 class GateDecisionKind(str, Enum):
@@ -605,7 +748,41 @@ class GateDecision(_StrictFrozenModel):
     violated_rules: tuple[str, ...]
 
 
+class GateEvaluationReport(_StrictFrozenModel):
+    """Published metrics plus the separate run-level gate decision."""
+
+    metrics: MeasurementReport
+    gate_decision: GateDecision
+
+
 class GateEvaluator:
+    @staticmethod
+    def evaluate_report(
+        manifest: EvidenceManifest,
+        measurements: MeasurementReport,
+        adjudication: AdjudicationSet,
+    ) -> GateEvaluationReport:
+        """Evaluate a finalized run while preserving all immutable metrics."""
+        if (
+            len(measurements.recording_sha256s) != manifest.row_count
+            or len(measurements.decision_sha256s) != manifest.row_count
+        ):
+            raise ValueError("finalized_evidence_hashes_required")
+        finalized_metrics = measurements.model_copy(
+            update={
+                "audited_ordinals": adjudication.audited_ordinals,
+                "adjudication_set_sha256": adjudication.adjudication_sha256,
+            }
+        )
+        return GateEvaluationReport(
+            metrics=finalized_metrics,
+            gate_decision=GateEvaluator.evaluate(
+                manifest,
+                finalized_metrics,
+                adjudication,
+            ),
+        )
+
     @staticmethod
     def evaluate(
         manifest: EvidenceManifest,
@@ -626,6 +803,12 @@ class GateEvaluator:
             or adjudication.denominator != measurements.adjudication_denominator
             or adjudication.correct_count != measurements.adjudicated_correct
             or adjudication.denominator != measurements.expected_row_count
+            or adjudication.audited_ordinals != tuple(range(measurements.expected_row_count))
+            or len(measurements.decision_sha256s) != measurements.expected_row_count
+            or any(
+                verdict.decision_sha256 != measurements.decision_sha256s[verdict.manifest_ref.ordinal]
+                for verdict in adjudication.verdicts
+            )
         ):
             return GateDecision(
                 run_id=manifest.run_id,
