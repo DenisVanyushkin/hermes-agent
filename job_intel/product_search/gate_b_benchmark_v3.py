@@ -2048,6 +2048,19 @@ _GATE_B_TASK10_POLICY_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "config/product_search/evidence_synthesis.v1.yaml"
 )
+_GATE_B_MUTABLE_DATABASE_PATHS_V3 = frozenset({
+    Path("/home/hermes/.hermes/state.db"),
+    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
+    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal"),
+    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm"),
+})
+_GATE_B_CREDENTIAL_PATHS_V3 = frozenset({
+    Path("/home/hermes/.hermes/hermes-agent/.env"),
+    Path("/etc/job-intel/job-intel.env"),
+})
+_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3 = (
+    _GATE_B_MUTABLE_DATABASE_PATHS_V3 | _GATE_B_CREDENTIAL_PATHS_V3
+)
 _GATE_B_PROTECTED_PATHS_V3 = (
     Path("/home/hermes/.hermes/state.db"),
     Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
@@ -4173,7 +4186,7 @@ def _snapshot_protected_paths_v3(
 ) -> tuple[tuple[object, ...], ...]:
     snapshot: list[tuple[object, ...]] = []
     for path in _GATE_B_PROTECTED_PATHS_V3:
-        credential_metadata_only = path.name in {".env", "job-intel.env"}
+        metadata_only = path in _GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3
         try:
             metadata = os.lstat(path)
         except FileNotFoundError:
@@ -4193,7 +4206,7 @@ def _snapshot_protected_paths_v3(
             kind = "file"
             content_sha256 = (
                 None
-                if credential_metadata_only
+                if metadata_only
                 else hashlib.sha256(_read_path_nofollow_v3(path)).hexdigest()
             )
         elif stat.S_ISDIR(metadata.st_mode):
@@ -4205,6 +4218,8 @@ def _snapshot_protected_paths_v3(
         snapshot.append((
             str(path),
             kind,
+            metadata.st_dev,
+            metadata.st_ino,
             metadata.st_mode,
             metadata.st_uid,
             metadata.st_gid,
@@ -4218,7 +4233,7 @@ def _snapshot_protected_paths_v3(
                 path=str(path),
                 detail=(
                     f"{phase}:{kind}:metadata_only"
-                    if credential_metadata_only
+                    if metadata_only
                     else f"{phase}:{kind}"
                 ),
             )

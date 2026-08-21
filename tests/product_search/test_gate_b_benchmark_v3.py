@@ -1593,6 +1593,11 @@ def test_materializer_never_reads_credential_file_contents(
     )
     monkeypatch.setattr(
         gate_b_v3,
+        "_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3",
+        frozenset(credential_paths),
+    )
+    monkeypatch.setattr(
+        gate_b_v3,
         "_read_path_nofollow_v3",
         reject_credential_read,
     )
@@ -1608,6 +1613,174 @@ def test_materializer_never_reads_credential_file_contents(
     assert all(
         "metadata_only" in operation.detail for operation in credential_operations
     )
+
+
+def test_materializer_snapshots_large_mutable_databases_without_content_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = _gate_b_source_bytes_v3()
+    package = gate_b_v3.validate_gate_b_package_pure_v3(sources)
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir(mode=0o700)
+    gate_a_root = tmp_path / "gate-a"
+    _write_gate_a_source_fixture_v3(gate_a_root, sources)
+
+    state_db = tmp_path / "state.db"
+    job_intel_db = tmp_path / "job_intel.sqlite3"
+    job_intel_wal = tmp_path / "job_intel.sqlite3-wal"
+    job_intel_shm = tmp_path / "job_intel.sqlite3-shm"
+    mutable_paths = {
+        state_db,
+        job_intel_db,
+        job_intel_wal,
+        job_intel_shm,
+    }
+    for path, size in (
+        (state_db, 1_714_511_872),
+        (job_intel_db, 98_000_000),
+        (job_intel_wal, 32_000_000),
+        (job_intel_shm, 65_536),
+    ):
+        path.touch(mode=0o600)
+        os.truncate(path, size)
+
+    credential_env = tmp_path / ".env"
+    credential_env.write_bytes(b"credential bytes must remain unread\n")
+    job_intel_env = tmp_path / "job-intel.env"
+    job_intel_env.write_bytes(b"second credential payload must remain unread\n")
+    credential_paths = {credential_env, job_intel_env}
+    immutable_config = tmp_path / "config.yml"
+    immutable_config.write_bytes(b"reviewed: immutable\n")
+    metadata_only_paths = mutable_paths | credential_paths
+    protected_paths = (*sorted(metadata_only_paths), immutable_config)
+    original_read = gate_b_v3._read_path_nofollow_v3
+    read_paths: list[Path] = []
+
+    def reject_metadata_only_read(path: Path, **kwargs: object) -> bytes:
+        if path in metadata_only_paths:
+            raise AssertionError(f"metadata-only protected path was read: {path}")
+        read_paths.append(path)
+        return original_read(path, **kwargs)
+
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(gate_b_v3, "_GATE_A_SOURCE_ROOT_V3", gate_a_root)
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PROTECTED_PATHS_V3", protected_paths)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3",
+        frozenset(metadata_only_paths),
+        raising=False,
+    )
+    monkeypatch.setattr(gate_b_v3, "_read_path_nofollow_v3", reject_metadata_only_read)
+
+    receipt = gate_b_v3.materialize_gate_b_package_v3(package)
+
+    metadata_operations = [
+        operation
+        for operation in receipt.observed_operations
+        if operation.path in {str(path) for path in metadata_only_paths}
+    ]
+    assert len(metadata_operations) == 2 * len(metadata_only_paths)
+    assert all("metadata_only" in operation.detail for operation in metadata_operations)
+    assert read_paths.count(immutable_config) == 2
+
+
+@pytest.mark.parametrize("mutation", ["mode", "inode", "size", "mtime"])
+def test_materializer_fails_closed_on_metadata_only_protected_stat_drift(
+    mutation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = _gate_b_source_bytes_v3()
+    package = gate_b_v3.validate_gate_b_package_pure_v3(sources)
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir(mode=0o700)
+    gate_a_root = tmp_path / "gate-a"
+    _write_gate_a_source_fixture_v3(gate_a_root, sources)
+    state_db = tmp_path / "state.db"
+    state_db.touch(mode=0o600)
+    os.truncate(state_db, 1_714_511_872)
+    initial = state_db.stat()
+    original_snapshot = gate_b_v3._snapshot_protected_paths_v3
+    snapshot_calls = 0
+
+    def mutate_after_before_snapshot(*args: object, **kwargs: object):
+        nonlocal snapshot_calls
+        snapshot = original_snapshot(*args, **kwargs)
+        snapshot_calls += 1
+        if snapshot_calls != 1:
+            return snapshot
+        if mutation == "mode":
+            state_db.chmod(0o640)
+        elif mutation == "inode":
+            replacement = state_db.with_suffix(".replacement")
+            replacement.touch(mode=0o600)
+            os.truncate(replacement, initial.st_size)
+            os.utime(replacement, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+            replacement.replace(state_db)
+        elif mutation == "size":
+            os.truncate(state_db, initial.st_size + 1)
+        elif mutation == "mtime":
+            os.utime(
+                state_db,
+                ns=(initial.st_atime_ns, initial.st_mtime_ns + 1_000_000),
+            )
+        else:  # pragma: no cover - parametrization is closed above
+            raise AssertionError(f"unexpected mutation: {mutation}")
+        return snapshot
+
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(gate_b_v3, "_GATE_A_SOURCE_ROOT_V3", gate_a_root)
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PROTECTED_PATHS_V3", (state_db,))
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3",
+        frozenset({state_db}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_snapshot_protected_paths_v3",
+        mutate_after_before_snapshot,
+    )
+
+    with pytest.raises(
+        gate_b_v3.GateBPackageErrorV3,
+        match="protected_paths_changed_during_materialization",
+    ):
+        gate_b_v3.materialize_gate_b_package_v3(package)
+
+
+def test_immutable_protected_config_retains_the_16_mb_content_hash_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources = _gate_b_source_bytes_v3()
+    package = gate_b_v3.validate_gate_b_package_pure_v3(sources)
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir(mode=0o700)
+    gate_a_root = tmp_path / "gate-a"
+    _write_gate_a_source_fixture_v3(gate_a_root, sources)
+    immutable_config = tmp_path / "config.yml"
+    immutable_config.touch(mode=0o600)
+    os.truncate(immutable_config, 16_000_001)
+
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(gate_b_v3, "_GATE_A_SOURCE_ROOT_V3", gate_a_root)
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PROTECTED_PATHS_V3", (immutable_config,))
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3",
+        frozenset(),
+        raising=False,
+    )
+
+    with pytest.raises(
+        gate_b_v3.GateBPackageErrorV3,
+        match="source_file_metadata_invalid",
+    ):
+        gate_b_v3.materialize_gate_b_package_v3(package)
 
 
 @pytest.fixture
