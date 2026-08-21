@@ -35,8 +35,17 @@ _DEFAULT_STATE = {"attempts": {}, "autobooked": {}, "waitlisted": [], "ban_notif
 
 @dataclass
 class TickResult:
+    """Результат тика с РАЗДЕЛЁННЫМИ аудиториями.
+
+    `messages` уходят Амине в WhatsApp (stdout кроновой джобы доставляется
+    на её `deliver` как есть), `alerts` — оператору в Telegram через
+    отдельную очередь. Класть инженерный текст в `messages` = писать
+    живому человеку про refresh-токены.
+    """
+
     booked: list[Booking] = field(default_factory=list)
-    messages: list[str] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)   # Амине, в WhatsApp
+    alerts: list[str] = field(default_factory=list)     # оператору, в Telegram
     api_calls: int = 0
 
 
@@ -113,9 +122,10 @@ def tick(*, client, rule_store: RuleStore, club_rules: ClubRules, now: datetime,
     if session is None or session.is_dead:
         if session is not None and session_store.should_notify_death(session, now):
             session_store.note_death_notified(session, now)
-            result.messages.append(
+            result.alerts.append(
                 "⚠️ Сессия Invictus недействительна — автозапись остановлена. "
-                "Нужен новый захват токена (авторизация подписывается на ресепшне)."
+                "Нужен headless-логин: fitness_login_request → код из SMS → "
+                "fitness_login_confirm."
             )
         return result
 
@@ -124,7 +134,7 @@ def tick(*, client, rule_store: RuleStore, club_rules: ClubRules, now: datetime,
 
     # Fail-closed только по фактам, которые в принципе познаваемы (ревизия 3).
     if club_rules.booking_opens_days_ahead is None or club_rules.cancel_deadline_hours is None:
-        result.messages.append(
+        result.alerts.append(
             "⚠️ Правила клуба не заданы — автозапись выключена fail-closed."
         )
         return result
@@ -228,7 +238,7 @@ def tick(*, client, rule_store: RuleStore, club_rules: ClubRules, now: datetime,
                 dead = session_store.mark_dead(dead, now, reason=str(exc))
             if dead and session_store.should_notify_death(dead, now):
                 session_store.note_death_notified(dead, now)
-                result.messages.append("⚠️ Сессия Invictus умерла во время автозаписи.")
+                result.alerts.append("⚠️ Сессия Invictus умерла во время автозаписи.")
             state["waitlisted"] = sorted(waitlisted)
             _save_state(state)
             return result

@@ -1,8 +1,16 @@
-"""Точки входа для cron. Печатают в stdout только когда есть что сказать."""
+"""Точки входа для cron.
+
+ВАЖНО: stdout `watch-tick` и `digest` — это буквально сообщения Амине в
+WhatsApp: cron/scheduler.py при returncode == 0 отдаёт stdout прямо на
+`deliver` джобы. Инженерный текст сюда печатать нельзя ни при каких
+обстоятельствах — он идёт в очередь оператору (fitness/alerts.py), а
+оттуда его выгребает отдельная джоба командой `alerts`.
+"""
 
 import sys
 from datetime import datetime, timedelta, timezone
 
+from fitness import alerts
 from fitness.club_config import load_club_rules
 from fitness.digest import render_digest
 from fitness.engine import tick
@@ -37,6 +45,13 @@ def _emit_reminders(client, now: datetime) -> None:
         state.write({"notified": sorted(notified)}, mode=0o644)
 
 
+def _queue_alerts(messages, now: datetime) -> None:
+    """Инженерное — в очередь оператору, НИКОГДА в stdout: stdout этих
+    точек входа доставляется Амине в WhatsApp (`deliver` джобы cron)."""
+    for text in messages:
+        alerts.push(text, now)
+
+
 def cmd_watch_tick() -> int:
     now = _now()
     result = tick(
@@ -48,6 +63,7 @@ def cmd_watch_tick() -> int:
     )
     if result.messages:
         print("\n".join(result.messages))
+    _queue_alerts(result.alerts, now)
     try:
         _emit_reminders(_client(), now)
     except SessionDead:
@@ -64,7 +80,10 @@ def cmd_digest() -> int:
         slots = client.schedule(today, today + timedelta(days=1))
         bookings = client.my_bookings()
     except SessionDead as exc:
-        print(f"⚠️ Сессия Invictus недействительна ({exc}).")
+        # Не в stdout: дайджест доставляется Амине, а чинить сессию ей нечем.
+        alerts.push(f"⚠️ Утренний дайджест Invictus не собран: сессия "
+                    f"недействительна ({exc}). Нужен headless-логин.",
+                    now, key="digest_session_dead")
         return 0
     text = render_digest(
         bookings=bookings,
@@ -87,7 +106,16 @@ def cmd_status() -> int:
     return 0
 
 
-COMMANDS = {"watch-tick": cmd_watch_tick, "digest": cmd_digest, "status": cmd_status}
+def cmd_alerts() -> int:
+    """Выгрести очередь инженерных алертов. Пустая очередь — ни строки."""
+    due = alerts.drain(_now())
+    if due:
+        print("\n".join(due))
+    return 0
+
+
+COMMANDS = {"watch-tick": cmd_watch_tick, "digest": cmd_digest,
+            "status": cmd_status, "alerts": cmd_alerts}
 
 
 def main(argv: list[str]) -> int:

@@ -177,8 +177,9 @@ def test_dead_session_stops_the_tick_and_reports_once(home):
     second = _tick(client)
 
     assert client.booked == []
-    assert any("сесси" in m.lower() for m in first.messages)
-    assert second.messages == []
+    assert any("сесси" in a.lower() for a in first.alerts)
+    assert first.messages == []
+    assert second.alerts == []
 
 
 def test_already_booked_slot_is_skipped(home):
@@ -332,7 +333,8 @@ def test_unknown_club_rules_disable_autobooking(home):
     result = _tick(client, club_rules=ClubRules())
 
     assert client.booked == []
-    assert any("правила клуба" in m.lower() for m in result.messages)
+    assert any("правила клуба" in a.lower() for a in result.alerts)
+    assert result.messages == []
 
 
 def test_missing_cancel_deadline_also_disables_autobooking(home):
@@ -342,7 +344,8 @@ def test_missing_cancel_deadline_also_disables_autobooking(home):
     result = _tick(client, club_rules=ClubRules(booking_opens_days_ahead=7))
 
     assert client.booked == []
-    assert result.messages
+    assert result.alerts
+    assert result.messages == []
 
 
 def test_unknown_active_booking_limit_does_not_disable_autobooking(home):
@@ -361,4 +364,96 @@ def test_session_death_during_the_tick_is_reported_once(home):
 
     result = _tick(client)
 
-    assert any("сесси" in m.lower() for m in result.messages)
+    assert any("сесси" in a.lower() for a in result.alerts)
+    assert result.messages == []
+
+
+# --- две аудитории: Амина в WhatsApp и оператор в Telegram -----------------
+# stdout кроновой джобы доставляется Амине как есть, поэтому «что попало в
+# messages» — это не косметика, а вопрос того, кому уйдёт сообщение.
+
+
+def test_dead_session_message_goes_to_operator_not_to_her(home):
+    """Мёртвая сессия — не её забота: в messages пусто, в alerts текст."""
+    RuleStore().add(_rule())
+    SessionStore().mark_dead(SessionStore().load(), NOW, reason="refresh 401")
+    client = FakeClient(slots=[_slot()])
+
+    result = _tick(client)
+
+    assert result.messages == []
+    assert any("Сессия Invictus" in a for a in result.alerts)
+
+
+def test_dead_session_alert_points_at_headless_login(home):
+    # Захват токена «на ресепшне» устарел: с 18.08 есть headless-логин по OTP.
+    RuleStore().add(_rule())
+    SessionStore().mark_dead(SessionStore().load(), NOW, reason="refresh 401")
+
+    result = _tick(FakeClient(slots=[_slot()]))
+
+    joined = " ".join(result.alerts)
+    assert "fitness_login_request" in joined
+    assert "ресепшн" not in joined.lower()
+
+
+def test_missing_club_rules_goes_to_operator(home):
+    RuleStore().add(_rule())
+    client = FakeClient(slots=[_slot()])
+
+    result = _tick(client, club_rules=ClubRules(booking_opens_days_ahead=None,
+                                                cancel_deadline_hours=None))
+
+    assert result.messages == []
+    assert any("Правила клуба" in a for a in result.alerts)
+
+
+def test_session_death_during_the_tick_goes_to_operator(home):
+    RuleStore().add(_rule())
+    client = FakeClient(slots=[_slot()], book_error=SessionDead("умерла"))
+
+    result = _tick(client)
+
+    assert result.messages == []
+    assert any("Сессия Invictus" in a for a in result.alerts)
+
+
+def test_ban_notice_still_goes_to_her(home):
+    # Санкция клуба — её санкция: ей и знать, оператору тут делать нечего.
+    RuleStore().add(_rule())
+    client = FakeClient(slots=[_slot()], banned_till=NOW + timedelta(days=2),
+                        ban_reason="Пропуск тренировки")
+
+    result = _tick(client)
+
+    assert any("заблокирована" in m for m in result.messages)
+    assert result.alerts == []
+
+
+def test_successful_booking_goes_to_her(home):
+    RuleStore().add(_rule())
+    client = FakeClient(slots=[_slot()])
+
+    result = _tick(client)
+
+    assert any("Записал" in m for m in result.messages)
+    assert result.alerts == []
+
+
+def test_waitlist_and_conflict_notices_go_to_her(home):
+    RuleStore().add(_rule(waitlist_ok=True))
+    result = _tick(FakeClient(slots=[_slot(taken=20)]))
+    assert any("лист ожидания" in m for m in result.messages)
+    assert result.alerts == []
+
+
+def test_no_user_message_ever_mentions_the_session(home):
+    """Инвариант: инженерный словарь не встречается в messages."""
+    RuleStore().add(_rule())
+    SessionStore().mark_dead(SessionStore().load(), NOW, reason="refresh 401")
+
+    result = _tick(FakeClient(slots=[_slot()]))
+
+    forbidden = ("сесси", "токен", "refresh", "401", "API", "fail-closed")
+    joined = " ".join(result.messages).lower()
+    assert not any(w.lower() in joined for w in forbidden)

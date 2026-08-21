@@ -22,6 +22,22 @@ def _isolate_prod_stores(tmp_path, monkeypatch):
     # would otherwise write into the LIVE ~/.hermes/diagnostics.
     monkeypatch.setattr(diag, "DEFAULT_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
 
+@pytest.fixture(autouse=True)
+def _isolate_icloud_credentials(monkeypatch):
+    # Same class of leak as _isolate_db/_isolate_prod_stores, for the ONE
+    # secret extcal reads straight out of the environment
+    # (ICLOUD_APP_PASSWORD -- it is env-only by design, never in
+    # fam-config.json). Since 2026-08-21 the cal-ext tick re-fetches an
+    # unreadable resource body itself (`extcal.fetch_resource`), so a
+    # test that stubs `discover`/`fetch_changes` but not `fetch_resource`
+    # would make a REAL request to iCloud if a developer happened to run
+    # pytest from a shell with the password exported. Without credentials
+    # `_auth_header` returns None and the fetch degrades to None before
+    # any socket is opened. A test that wants credentials still sets them
+    # with its own `monkeypatch.setenv`, which runs after this.
+    monkeypatch.delenv("ICLOUD_APP_PASSWORD", raising=False)
+
+
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
     dbfile = tmp_path / "assistant.db"
