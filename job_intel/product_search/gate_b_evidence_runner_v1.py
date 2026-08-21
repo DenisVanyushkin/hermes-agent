@@ -377,6 +377,7 @@ class ReplayObservation(_StrictFrozenModel):
     request_bytes: bytes
     response_bytes: bytes
     outcome: TerminalOutcome
+    metadata: dict[str, str]
 
 
 class RecordingStore:
@@ -425,16 +426,81 @@ class RecordingStore:
             raise ValueError("recording bytes do not match recording hash")
         return encoded
 
-    def replay(self, ref: RecordingRef) -> ReplayObservation:
-        payload = json.loads(self.bytes_for(ref))
+    def _payload(self, ref: RecordingRef) -> dict[str, object]:
+        encoded = self.bytes_for(ref)
+        try:
+            payload = json.loads(encoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("recording payload is invalid") from exc
+        if not isinstance(payload, dict) or _canonical_bytes(payload) != encoded:
+            raise ValueError("recording payload is not canonical")
+        if set(payload) != {
+            "schema_version", "manifest_ref", "request_b64", "response_b64",
+            "outcome", "metadata",
+        } or payload["schema_version"] != "gate-b-sealed-recording-v1":
+            raise ValueError("recording payload contract mismatch")
         loaded_ref = ManifestRef.model_validate(payload["manifest_ref"])
         if loaded_ref != ref.manifest_ref:
             raise ValueError("recording manifest reference mismatch")
+        return payload
+
+    def verify(self, ref: RecordingRef, manifest: EvidenceManifest) -> None:
+        payload = self._payload(ref)
+        expected_ref = manifest.row_ref(ref.manifest_ref.ordinal)
+        if ref.manifest_ref != expected_ref:
+            raise ValueError("recording manifest reference mismatch")
+        metadata = payload["metadata"]
+        if not isinstance(metadata, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in metadata.items()
+        ):
+            raise ValueError("recording metadata invalid")
+        try:
+            request_bytes = base64.b64decode(payload["request_b64"], validate=True)
+            response_bytes = base64.b64decode(payload["response_b64"], validate=True)
+        except Exception as exc:
+            raise ValueError("recording request/response invalid") from exc
+        if _sha256(request_bytes) != expected_ref.input_sha256:
+            raise ValueError("recording request hash mismatch")
+        if metadata.get("input_sha256") != expected_ref.input_sha256:
+            raise ValueError("recording input hash mismatch")
+        if metadata.get("projection_sha256") != expected_ref.projection_sha256:
+            raise ValueError("recording projection hash mismatch")
+        if metadata.get("response_sha256") != _sha256(response_bytes):
+            raise ValueError("recording response hash mismatch")
+        if TerminalOutcome(payload["outcome"]) is TerminalOutcome.TERMINAL_UNKNOWN:
+            if response_bytes:
+                raise ValueError("terminal unknown must have empty response")
+            try:
+                cost = Decimal(str(metadata["conservative_cost_usd"]))
+            except Exception as exc:
+                raise ValueError("terminal unknown cost missing") from exc
+            if not cost.is_finite() or cost < 0:
+                raise ValueError("terminal unknown cost invalid")
+
+    def replay(self, ref: RecordingRef, manifest: EvidenceManifest) -> ReplayObservation:
+        self.verify(ref, manifest)
+        payload = self._payload(ref)
+        metadata = payload["metadata"]
+        if not isinstance(metadata, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in metadata.items()
+        ):
+            raise ValueError("recording metadata invalid")
+        try:
+            request_bytes = base64.b64decode(payload["request_b64"], validate=True)
+            response_bytes = base64.b64decode(payload["response_b64"], validate=True)
+            outcome = TerminalOutcome(payload["outcome"])
+        except Exception as exc:
+            raise ValueError("recording payload invalid") from exc
+        if outcome is TerminalOutcome.TERMINAL_UNKNOWN and response_bytes:
+            raise ValueError("terminal unknown must have empty response")
         return ReplayObservation(
-            manifest_ref=loaded_ref,
-            request_bytes=base64.b64decode(payload["request_b64"]),
-            response_bytes=base64.b64decode(payload["response_b64"]),
-            outcome=TerminalOutcome(payload["outcome"]),
+            manifest_ref=ManifestRef.model_validate(payload["manifest_ref"]),
+            request_bytes=request_bytes,
+            response_bytes=response_bytes,
+            outcome=outcome,
+            metadata=dict(metadata),
         )
 
 

@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 from job_intel.product_search import gate_b_evidence_v3 as evidence
+from job_intel.product_search.decision_v2 import canonical_decision_bytes, run_decision_v2
 from job_intel.product_search.evidence_synthesis import (
     EvidenceClaimV1,
     EvidenceSynthesisMetadataV1,
@@ -271,12 +272,19 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     assert result.gate_decision.violated_rules == ("collection_incomplete",)
     assert journal.state(0).value == "success"
 
-    replay = recordings.replay(result.recording_ref)
+    replay = recordings.replay(result.recording_ref, manifest)
     assert replay.manifest_ref == result.manifest_ref
     assert replay.request_bytes == _canonical_bytes(projected.provider_payload())
     assert replay.response_bytes == _canonical_bytes(_provider_payload(projected))
     assert result.recording_ref.recording_sha256 == _sha256_bytes(
         result.recording_bytes
+    )
+    replayed_request = _decision_result(
+        json.loads(replay.response_bytes), replay.manifest_ref.input_sha256
+    )
+    replayed_decision = run_decision_v2(replayed_request)
+    assert canonical_decision_bytes(replayed_decision) == canonical_decision_bytes(
+        result.decision
     )
 
 
