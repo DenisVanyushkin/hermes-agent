@@ -1830,6 +1830,15 @@ _EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
 _EXTCAL_STREAK_DISCOVERY_KEY = "__discovery__"
 _EXTCAL_STREAK_APPLY_KEY = "__apply__"
 
+# Cap on how many bodies ONE tick may re-fetch one-by-one after a delta
+# entry arrived without <C:calendar-data> (see `_cal_ext_sync`). A
+# collection where every resource is unreadable must not turn every
+# 15-minute tick into a hundred-request storm against iCloud. Nothing
+# is lost by stopping at the cap: whatever is left over holds that
+# calendar's sync-token back, so the server repeats the very same
+# delta on the next tick instead of considering it acknowledged.
+_BAD_HREF_REFETCH_LIMIT = 20
+
 
 def _extcal_fail_streak_threshold(cfg):
     """`cfg["extcal_fail_streak_threshold"]` -> a valid int in `[1, 50]`,
@@ -2024,6 +2033,12 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     bad_hrefs = set()              # ONE resource's data is untrustworthy this round
                                     # (fix-round 2, findings N1/N2)
     tokens_to_persist = {}         # calendar url -> token (only clean, successful calendars)
+    token_unsafe_urls = set()      # 2026-08-21: calendars holding at least one delta
+                                    # entry we could not read AT ALL this round --
+                                    # their sync-token must NOT advance (see the
+                                    # "no calendar-data" branch below)
+    refetched = 0                  # bodies re-fetched this tick, capped by
+                                    # _BAD_HREF_REFETCH_LIMIT (whole tick, not per calendar)
     # Streak-alerting hardening: per-calendar error tracking THIS round,
     # keyed by calendar url -- fed to `cmd_tick_cal_ext`'s consecutive-
     # failure counters (`_extcal_record_failure`/`_extcal_record_success`)
@@ -2145,12 +2160,39 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # above -- exactly the "normal, empty VTODO" shape in
                 # sync_collection mode, silently clearing the way to the
                 # disappearance sweep. `.strip()` closes that.
+                #
+                # 2026-08-21: a missing body is no longer accepted as
+                # "nothing to do this round". The entry represents a REAL
+                # change the server told us about EXACTLY ONCE -- RFC 6578
+                # never repeats a delta whose sync-token we acknowledged --
+                # so skipping it while still persisting that token loses
+                # the change until the next `periodic_full`, a whole day
+                # by default. Observed live on 2026-08-20: a booking
+                # created in iCloud at 12:34 UTC was still absent from
+                # assistant.db five hours and twenty clean ticks later.
+                # The comment above is right that a local row must not be
+                # tombstoned on unreadable data -- but that only protects
+                # an UPDATE; an INSERT has no local row to protect, and
+                # was silently dropped.
+                #
+                # So: first try to read the resource directly (one plain
+                # GET, `extcal.fetch_resource`). Only if that fails too do
+                # we fall back to skipping it -- and then this calendar's
+                # sync-token is held back (`token_unsafe_urls`), so the
+                # server repeats the same delta on the next tick rather
+                # than considering it delivered.
+                if abs_href and refetched < _BAD_HREF_REFETCH_LIMIT:
+                    refetched += 1
+                    ics_text = extcal.fetch_resource(cfg, abs_href)
+            if not (ics_text or "").strip():
                 bad_hrefs.add(abs_href)
+                token_unsafe_urls.add(url)
                 _note_calendar_error(
                     url,
                     f"{calendar.get('name') or url}: no calendar-data "
-                    f"for {abs_href} (not marked deleted -- treated as "
-                    f"unreadable this round, not gone)")
+                    f"for {abs_href} (re-fetch failed too -- treated as "
+                    f"unreadable this round, not gone; sync-token held "
+                    f"back so this delta is asked for again)")
                 continue
             # Fix-round 4: `parse_ics_with_count` (extcal.py) -- NOT a
             # second, independent line-counter in this module (see the
@@ -2237,7 +2279,14 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # the malformed data self-heals on its own between ticks.
                 batch_wide_degraded = True
 
-        if batch_wide_degraded:
+        # `token_unsafe_urls` joins `batch_wide_degraded` here rather
+        # than getting a gate of its own: both mean the same thing to
+        # the token -- this round did NOT fully consume what the server
+        # handed us, so acknowledging it would lose data. Riding the
+        # same `degraded_urls` set also keeps `extcal_last_full` in
+        # step (`cmd_tick_cal_ext` gates that watermark on this very
+        # `tokens_to_persist` membership).
+        if batch_wide_degraded or url in token_unsafe_urls:
             degraded_urls.add(url)
         else:
             tokens_to_persist[url] = (
