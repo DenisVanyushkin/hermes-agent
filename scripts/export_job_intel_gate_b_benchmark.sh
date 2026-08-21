@@ -32,31 +32,37 @@ copied_python="$(find "$destination/python-runtime/cpython/bin" -maxdepth 1 -typ
 }
 
 uv venv "$destination/python-runtime/venv" --python "$copied_python"
-venv_python="$destination/python-runtime/venv/bin/python"
-resolved_venv_python="$(readlink -f -- "$venv_python")"
-[[ -L "$venv_python" && "$resolved_venv_python" == "$copied_python" ]] || {
-  echo "venv Python target is not the copied interpreter" >&2
-  exit 66
-}
-regular_venv_python="$destination/python-runtime/venv/bin/.python.regularizing"
-cp --no-clobber --preserve=mode,timestamps -- "$copied_python" "$regular_venv_python"
-[[ -f "$regular_venv_python" && ! -L "$regular_venv_python" ]] || {
-  echo "regular venv Python copy was not created" >&2
-  exit 66
-}
-[[ "$(stat -c '%h' -- "$regular_venv_python")" == "1" ]] || {
-  echo "regular venv Python copy has an unsafe link count" >&2
-  exit 66
-}
-mv -T -- "$regular_venv_python" "$venv_python"
-[[ -f "$venv_python" && ! -L "$venv_python" ]] || {
-  echo "venv Python regularization failed" >&2
-  exit 66
-}
-cmp --silent -- "$copied_python" "$venv_python" || {
-  echo "venv Python content differs from the copied interpreter" >&2
-  exit 66
-}
+venv_python_names=(python python3 python3.12)
+for venv_python_name in "${venv_python_names[@]}"; do
+  venv_python="$destination/python-runtime/venv/bin/$venv_python_name"
+  resolved_venv_python="$(readlink -f -- "$venv_python")"
+  [[ -L "$venv_python" && "$resolved_venv_python" == "$copied_python" ]] || {
+    echo "venv Python target is not the copied interpreter" >&2
+    exit 66
+  }
+done
+for venv_python_name in "${venv_python_names[@]}"; do
+  venv_python="$destination/python-runtime/venv/bin/$venv_python_name"
+  regular_venv_python="$destination/python-runtime/venv/bin/.$venv_python_name.regularizing"
+  cp --no-clobber --preserve=mode,timestamps -- "$copied_python" "$regular_venv_python"
+  [[ -f "$regular_venv_python" && ! -L "$regular_venv_python" ]] || {
+    echo "regular venv Python copy was not created" >&2
+    exit 66
+  }
+  [[ "$(stat -c '%h' -- "$regular_venv_python")" == "1" ]] || {
+    echo "regular venv Python copy has an unsafe link count" >&2
+    exit 66
+  }
+  mv -T -- "$regular_venv_python" "$venv_python"
+  [[ -f "$venv_python" && ! -L "$venv_python" ]] || {
+    echo "venv Python regularization failed" >&2
+    exit 66
+  }
+  cmp --silent -- "$copied_python" "$venv_python" || {
+    echo "venv Python content differs from the copied interpreter" >&2
+    exit 66
+  }
+done
 UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
   --project "$destination/runtime" \
   --frozen \

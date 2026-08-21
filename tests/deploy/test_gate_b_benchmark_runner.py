@@ -125,8 +125,14 @@ case "$1 $2" in
     mkdir -p "$destination/bin"
     target="${{FAKE_UV_PYTHON_TARGET:-${{destination%/venv}}/cpython/bin/python3.12}}"
     ln -s "$target" "$destination/bin/python"
+    ln -s python "$destination/bin/python3"
+    ln -s python "$destination/bin/python3.12"
     ;;
   "sync --project")
+    venv="${{UV_PROJECT_ENVIRONMENT:?}}"
+    for executable in python python3 python3.12; do
+      [[ -f "$venv/bin/$executable" && ! -L "$venv/bin/$executable" ]]
+    done
     touch "${{FAKE_UV_SYNC_MARKER:?}}"
     ;;
   "pip freeze")
@@ -176,6 +182,15 @@ esac
         hashlib.sha256(exported_python.read_bytes()).hexdigest()
         == hashlib.sha256(fake_python.read_bytes()).hexdigest()
     )
+    for alias in ("python3", "python3.12"):
+        exported_alias = exported_python.with_name(alias)
+        assert exported_alias.is_file()
+        assert not exported_alias.is_symlink()
+        assert exported_alias.stat().st_nlink == 1
+        assert (
+            hashlib.sha256(exported_alias.read_bytes()).hexdigest()
+            == hashlib.sha256(fake_python.read_bytes()).hexdigest()
+        )
     forbidden = tuple(destination.rglob("*.service")) + tuple(
         destination.rglob("launch.pending.json")
     )
