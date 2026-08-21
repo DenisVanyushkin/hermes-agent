@@ -19,6 +19,7 @@ import job_intel.product_search.gate_b_benchmark_v3 as gate_b_v3
 ROOT = Path(__file__).resolve().parents[2]
 EXPORTER = ROOT / "scripts/export_job_intel_gate_b_benchmark.sh"
 RUNNER = ROOT / "scripts/job_intel_gate_b_benchmark.sh"
+INSTALLER = ROOT / "scripts/install_job_intel_gate_b_benchmark_unit.sh"
 SERVICE = ROOT / "deploy/systemd/experiments/job-intel-gate-b-benchmark.service"
 
 
@@ -336,6 +337,14 @@ def test_root_preflight_prepares_exact_unit_namespace_runs_parent(
     assert f"ReadWritePaths={canonical_parent}/runs" in unit.splitlines()
     runner = RUNNER.read_text(encoding="utf-8")
     assert "prepare-output-root" in runner
+    assert INSTALLER.exists()
+    installer = INSTALLER.read_text(encoding="utf-8")
+    prepare_index = installer.index('"$runner" prepare-output-root')
+    install_index = installer.index("/usr/bin/install")
+    reload_index = installer.index("/usr/bin/systemctl daemon-reload")
+    assert prepare_index < install_index < reload_index
+    assert "systemctl start" not in installer
+    assert "launch.pending.json" not in installer
 
     experiment_root = tmp_path / "gate-b-at-most-once"
     experiment_root.mkdir(mode=0o700)
@@ -361,6 +370,101 @@ def test_root_preflight_prepares_exact_unit_namespace_runs_parent(
     assert metadata.st_gid == os.getegid()
     assert stat.S_IMODE(metadata.st_mode) == 0o700
     assert tuple(experiment_root.iterdir()) == (runs_root,)
+
+
+def test_output_root_preflight_repairs_existing_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_root = tmp_path / "gate-b-at-most-once"
+    experiment_root.mkdir(mode=0o700)
+    runs_root = experiment_root / "runs"
+    runs_root.mkdir(mode=0o755)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_PACKAGE_PARENT_V3",
+        experiment_root,
+    )
+
+    observed = gate_b_v3.prepare_gate_b_runner_output_root_v3(
+        expected_root_uid=os.geteuid(),
+        expected_hermes_uid=os.geteuid(),
+        expected_hermes_gid=os.getegid(),
+    )
+
+    assert observed == runs_root
+    assert stat.S_IMODE(runs_root.lstat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("unsafe_kind", ["file", "symlink"])
+def test_output_root_preflight_rejects_unsafe_existing_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_kind: str,
+) -> None:
+    experiment_root = tmp_path / "gate-b-at-most-once"
+    experiment_root.mkdir(mode=0o700)
+    runs_root = experiment_root / "runs"
+    if unsafe_kind == "file":
+        runs_root.write_bytes(b"unsafe")
+    else:
+        target = tmp_path / "outside"
+        target.mkdir()
+        runs_root.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_PACKAGE_PARENT_V3",
+        experiment_root,
+    )
+
+    with pytest.raises(ValueError, match="runner_output_root_prepare_failed"):
+        gate_b_v3.prepare_gate_b_runner_output_root_v3(
+            expected_root_uid=os.geteuid(),
+            expected_hermes_uid=os.geteuid(),
+            expected_hermes_gid=os.getegid(),
+        )
+
+
+def test_output_root_preflight_rejects_non_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gate_b_v3.os, "geteuid", lambda: 12345)
+
+    with pytest.raises(ValueError, match="root_installer_required"):
+        gate_b_v3.prepare_gate_b_runner_output_root_v3()
+
+
+def test_runner_rejects_extra_arguments_before_python(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "immutable-runtime"
+    runtime_source = runtime_root / "runtime"
+    fake_python = runtime_root / "python-runtime/venv/bin/python"
+    marker = tmp_path / "python-invoked"
+    runtime_source.mkdir(parents=True)
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text(
+        f"#!/usr/bin/env bash\ntouch {marker!s}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    wrapper = tmp_path / "runner.sh"
+    wrapper.write_text(
+        RUNNER.read_text(encoding="utf-8").replace(
+            "/home/hermes/.hermes/job_intel/experiments/"
+            "gate-b-at-most-once/immutable-runtime",
+            str(runtime_root),
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(wrapper), "run-at-most-once", "unexpected"],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 77
+    assert "no arguments" in result.stderr
+    assert not marker.exists()
 
 
 def test_consumed_loader_ignores_started_attempt_and_selects_new_recovery(
