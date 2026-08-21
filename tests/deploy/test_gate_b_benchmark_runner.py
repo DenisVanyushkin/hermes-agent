@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -58,10 +59,14 @@ def test_runtime_manifest_requires_python_3_12_13_and_no_editable_installs() -> 
         manifest_type.model_validate(payload)
 
 
-def test_runtime_export_uses_only_reviewed_commit_and_never_runs_benchmark(
+def test_runtime_export_wrapper_uses_neutral_runtime_builder_and_rejects_dirty_source(
     tmp_path: Path,
 ) -> None:
     assert EXPORTER.exists()
+    script = EXPORTER.read_text(encoding="utf-8")
+    assert "gate_b_runtime_v1" in script
+    assert "gate_b_benchmark_v3" not in script
+
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -85,157 +90,13 @@ def test_runtime_export_uses_only_reviewed_commit_and_never_runs_benchmark(
         capture_output=True,
     ).stdout.strip()
     (repo / "tracked.txt").write_text("dirty checkout\n", encoding="utf-8")
-    (repo / "untracked.txt").write_text("must not export\n", encoding="utf-8")
-
-    toolchain = tmp_path / "toolchain"
-    python_prefix = toolchain / "cpython"
-    fake_python = python_prefix / "bin/python3.12"
-    fake_bin = toolchain / "bin"
-    fake_bin.mkdir(parents=True)
-    fake_python.parent.mkdir(parents=True)
-    python_script = f"""#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${{1:-}}" == "-c" ]]; then
-  case "${{2:-}}" in
-    *sys.prefix*) printf '%s\\n' {str(python_prefix)!r} ;;
-    *sys.version_info*) printf '3.12.13\\n' ;;
-    *) exit 65 ;;
-  esac
-  exit 0
-fi
-if [[ "${{1:-}}" == "-m" && "${{2:-}}" == "job_intel.product_search.gate_b_benchmark_v3" ]]; then
-  [[ "${{PYTHONNOUSERSITE:-}}" == "1" ]]
-  [[ "${{PYTHONDONTWRITEBYTECODE:-}}" == "1" ]]
-  root="${{4}}"
-  commit_arg="${{5}}"
-  mkdir -p "$root/runtime-identity"
-  printf '{{"candidate_commit":"%s"}}' "$commit_arg" > "$root/runtime-manifest.json"
-  printf 'manifest-created\\n' > "$root/export-observation.txt"
-  exit 0
-fi
-exit 66
-"""
-    fake_python.write_text(python_script, encoding="utf-8")
-    fake_python.chmod(0o755)
-    fake_uv = fake_bin / "uv"
-    fake_uv.write_text(
-        f"""#!/usr/bin/env bash
-set -euo pipefail
-case "$1 $2" in
-  "venv "*)
-    destination="$2"
-    mkdir -p "$destination/bin"
-    target="${{FAKE_UV_PYTHON_TARGET:-${{destination%/venv}}/cpython/bin/python3.12}}"
-    ln -s "$target" "$destination/bin/python"
-    ln -s python "$destination/bin/python3"
-    ln -s python "$destination/bin/python3.12"
-    ;;
-  "sync --project")
-    venv="${{UV_PROJECT_ENVIRONMENT:?}}"
-    for executable in python python3 python3.12; do
-      [[ -L "$venv/bin/$executable" ]]
-    done
-    rm -- "$venv/bin/python" "$venv/bin/python3" "$venv/bin/python3.12"
-    ln -s "${{venv%/venv}}/cpython/bin/python3.12" "$venv/bin/python"
-    ln -s python "$venv/bin/python3"
-    ln -s python "$venv/bin/python3.12"
-    touch "${{FAKE_UV_SYNC_MARKER:?}}"
-    ;;
-  "pip freeze")
-    venv="${{4%/bin/python}}"
-    for executable in python python3 python3.12; do
-      [[ -L "$venv/bin/$executable" ]]
-    done
-    printf 'pydantic==2.11.7\\n'
-    ;;
-  *)
-    if [[ "$1" == "sync" ]]; then exit 0; fi
-    exit 67
-    ;;
-esac
-""",
-        encoding="utf-8",
-    )
-    fake_uv.chmod(0o755)
-    destination = tmp_path / "export"
-    sync_marker = tmp_path / "uv-sync-reached"
-    env = os.environ.copy()
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
-    env["FAKE_UV_SYNC_MARKER"] = str(sync_marker)
-
     result = subprocess.run(
-        [
-            "bash",
-            str(EXPORTER),
-            str(repo),
-            commit,
-            str(destination),
-            str(fake_python),
-        ],
-        cwd=tmp_path,
-        env=env,
+        ["bash", str(EXPORTER), str(repo), commit, str(tmp_path / "export"), sys.executable],
         text=True,
         capture_output=True,
     )
-
-    assert result.returncode == 0, result.stderr
-    assert (destination / "runtime/tracked.txt").read_text() == "reviewed\n"
-    assert not (destination / "runtime/untracked.txt").exists()
-    assert not os.access(destination / "runtime/tracked.txt", os.W_OK)
-    assert (destination / "runtime-manifest.json").exists()
-    assert (destination / "export-observation.txt").read_text() == "manifest-created\n"
-    exported_python = destination / "python-runtime/venv/bin/python"
-    assert exported_python.is_file()
-    assert not exported_python.is_symlink()
-    assert exported_python.stat().st_nlink == 1
-    assert (
-        hashlib.sha256(exported_python.read_bytes()).hexdigest()
-        == hashlib.sha256(fake_python.read_bytes()).hexdigest()
-    )
-    for alias in ("python3", "python3.12"):
-        exported_alias = exported_python.with_name(alias)
-        assert exported_alias.is_file()
-        assert not exported_alias.is_symlink()
-        assert exported_alias.stat().st_nlink == 1
-        assert (
-            hashlib.sha256(exported_alias.read_bytes()).hexdigest()
-            == hashlib.sha256(fake_python.read_bytes()).hexdigest()
-        )
-    forbidden = tuple(destination.rglob("*.service")) + tuple(
-        destination.rglob("launch.pending.json")
-    )
-    assert forbidden == ()
-    assert (
-        hashlib.sha256((destination / "runtime-manifest.json").read_bytes()).hexdigest()
-        == (destination / "runtime-manifest.sha256").read_text().strip()
-    )
-    assert sync_marker.exists()
-
-    unsafe_destination = tmp_path / "unsafe-export"
-    unsafe_sync_marker = tmp_path / "unsafe-uv-sync-reached"
-    unsafe_env = dict(env)
-    unsafe_env["FAKE_UV_PYTHON_TARGET"] = str(fake_python)
-    unsafe_env["FAKE_UV_SYNC_MARKER"] = str(unsafe_sync_marker)
-    unsafe = subprocess.run(
-        [
-            "bash",
-            str(EXPORTER),
-            str(repo),
-            commit,
-            str(unsafe_destination),
-            str(fake_python),
-        ],
-        cwd=tmp_path,
-        env=unsafe_env,
-        text=True,
-        capture_output=True,
-    )
-
-    assert unsafe.returncode == 66
-    assert "venv Python target is not the copied interpreter" in unsafe.stderr
-    assert not unsafe_sync_marker.exists()
-    assert not (unsafe_destination / "runtime-manifest.json").exists()
-    assert not (unsafe_destination / "export-observation.txt").exists()
+    assert result.returncode != 0
+    assert "source_tree_dirty" in result.stderr
 
 
 def _canonical_bytes(value: object) -> bytes:

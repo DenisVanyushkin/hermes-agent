@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+import argparse
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import sysconfig
 import tarfile
+import tempfile
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,6 +77,17 @@ class FrozenRuntime(_StrictFrozenModel):
     reproducibility: Literal["frozen_non_editable"]
 
 
+class AssembledArtifact(_StrictFrozenModel):
+    """The complete tree consumed by the content-addressed installer."""
+
+    root: Path
+    source_artifact: SourceArtifact
+    runtime: FrozenRuntime
+    artifact_tree_sha256: str = Field(pattern=SHA256_PATTERN)
+    manifest_path: Path
+    manifest_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
@@ -101,13 +114,19 @@ def _tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
-def _artifact_tree_hash(root: Path) -> str:
+def _artifact_tree_hash(
+    root: Path,
+    *,
+    excluded: frozenset[str] = frozenset(),
+) -> str:
     """Hash every entry in the materialized runtime, including symlink targets."""
     digest = hashlib.sha256()
     if not root.exists() or root.is_symlink():
         return digest.hexdigest()
     paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
     for path in paths:
+        if path.relative_to(root).as_posix() in excluded:
+            continue
         reference = path.relative_to(root).as_posix().encode("utf-8")
         if path.is_symlink():
             digest.update(b"L\0" + reference + b"\0")
@@ -122,6 +141,30 @@ def _artifact_tree_hash(root: Path) -> str:
         else:
             raise ArtifactBuildError("artifact_tree_entry_invalid")
     return digest.hexdigest()
+
+
+def _write_json(path: Path, payload: Mapping[str, object]) -> str:
+    data = _canonical_bytes(payload)
+    path.write_bytes(data)
+    return _sha256_bytes(data)
+
+
+def _installed_distribution_lines(python_executable: Path) -> bytes:
+    payload = subprocess.check_output(
+        [
+            str(python_executable),
+            "-c",
+            (
+                "import importlib.metadata; "
+                "items = sorted((d.metadata['Name'], d.version) "
+                "for d in importlib.metadata.distributions() "
+                "if d.metadata.get('Name')); "
+                "print(''.join(f'{name}=={version}\\n' for name, version in items), end='')"
+            ),
+        ],
+        text=True,
+    )
+    return payload.encode("utf-8")
 
 
 def _inventory_hash(root: Path, *, suffixes: frozenset[str] | None = None) -> str:
@@ -377,6 +420,114 @@ def build_frozen_runtime(
     )
 
 
+def build_assembled_artifact(
+    *,
+    repo_root: Path,
+    commit: str,
+    gateway_venv: Path,
+    destination: Path,
+    python_executable: Path | None = None,
+) -> AssembledArtifact:
+    """Materialize the exact tree that the Task 9 installer publishes.
+
+    The source archive and frozen interpreter are built by the neutral runtime
+    module.  The resulting tree is hashed only after all executable inputs
+    (including ``python-runtime``) have been assembled; the two manifest files
+    are deliberately excluded because they record that external hash.
+    """
+    destination = destination.resolve()
+    if destination.exists():
+        raise ArtifactBuildError("assembled_artifact_destination_exists")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".gate-b-source-", dir=str(destination.parent)
+    ) as temporary:
+        source_artifact = build_source_artifact(
+            repo_root=repo_root,
+            commit=commit,
+            destination=Path(temporary) / "source-artifact",
+        )
+        if any(path.is_symlink() for path in source_artifact.source_root.rglob("*")):
+            raise ArtifactBuildError("source_artifact_symlink")
+        runtime_root = destination / "runtime"
+        shutil.copytree(source_artifact.source_root, runtime_root, symlinks=True)
+        frozen_runtime = build_frozen_runtime(
+            artifact=source_artifact,
+            gateway_venv=gateway_venv,
+            destination=destination / "python-runtime" / "venv",
+            python_executable=python_executable,
+        )
+
+    distributions_path = destination / "python-runtime" / "installed-distributions.txt"
+    distributions_bytes = _installed_distribution_lines(frozen_runtime.python_executable)
+    distributions_path.write_bytes(distributions_bytes)
+
+    dependency_lock = runtime_root / "uv.lock"
+    if not dependency_lock.is_file() or dependency_lock.is_symlink():
+        raise ArtifactBuildError("dependency_lock_missing")
+
+    artifact_tree_sha256 = _artifact_tree_hash(
+        destination,
+        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+    )
+    runtime_identity = frozen_runtime.runtime_identity.model_copy(
+        update={"artifact_tree_sha256": artifact_tree_sha256}
+    )
+    manifest_payload: dict[str, object] = {
+        # Keep the accepted v3 field shape for the installer and for existing
+        # inspection tooling.  The value names the measurement, not the
+        # retired launch protocol.
+        "schema_version": "3.0.0",
+        "runtime_kind": "gate_b_description_evidence",
+        "artifact_sha256": source_artifact.artifact_sha256,
+        "artifact_tree_sha256": artifact_tree_sha256,
+        "candidate_commit": source_artifact.commit,
+        "python_version": frozen_runtime.parity.python_version,
+        "runtime_tree_sha256": _tree_hash(runtime_root),
+        "python_executable_sha256": _sha256_bytes(
+            frozen_runtime.python_executable.read_bytes()
+        ),
+        "stdlib_tree_sha256": runtime_identity.stdlib_inventory_sha256,
+        "dependency_lock_sha256": _sha256_bytes(dependency_lock.read_bytes()),
+        "installed_distributions_sha256": _sha256_bytes(distributions_bytes),
+        "sys_path_sha256": runtime_identity.sys_path_sha256,
+        "editable_installs": [],
+    }
+    manifest_path = destination / "runtime-manifest.json"
+    manifest_sha256 = _write_json(manifest_path, manifest_payload)
+    (destination / "runtime-manifest.sha256").write_text(
+        manifest_sha256 + "\n", encoding="ascii"
+    )
+
+    # The manifest is intentionally not included in the tree hash.  Recompute
+    # it as a guard against accidentally writing any other bytes after binding.
+    observed = _artifact_tree_hash(
+        destination,
+        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+    )
+    if observed != artifact_tree_sha256:
+        raise ArtifactBuildError("assembled_artifact_changed_after_binding")
+    runtime = frozen_runtime.model_copy(
+        update={"runtime_identity": runtime_identity}
+    )
+    for path in (destination / "runtime", destination / "python-runtime"):
+        for entry in path.rglob("*"):
+            if entry.is_file() and not entry.is_symlink():
+                entry.chmod(entry.stat().st_mode & ~0o222)
+    manifest_path.chmod(manifest_path.stat().st_mode & ~0o222)
+    (destination / "runtime-manifest.sha256").chmod(
+        (destination / "runtime-manifest.sha256").stat().st_mode & ~0o222
+    )
+    return AssembledArtifact(
+        root=destination,
+        source_artifact=source_artifact,
+        runtime=runtime,
+        artifact_tree_sha256=artifact_tree_sha256,
+        manifest_path=manifest_path,
+        manifest_sha256=manifest_sha256,
+    )
+
+
 def _authority_identity(authorities: AuthorityInputs) -> AuthorityIdentity:
     return AuthorityIdentity(
         model_sha256=_sha256_bytes(authorities.model_bytes),
@@ -449,3 +600,40 @@ def verify_manifest_binding(
         raise ArtifactBuildError("prompt_hash_mismatch")
     if expected != manifest.authorities:
         raise ArtifactBuildError("authority_hash_mismatch")
+
+
+def _main(arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gate_b_runtime_v1")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    build = subparsers.add_parser("build-artifact")
+    build.add_argument("repo_root", type=Path)
+    build.add_argument("commit")
+    build.add_argument("gateway_venv", type=Path)
+    build.add_argument("destination", type=Path)
+    build.add_argument("python_executable", type=Path)
+    args = parser.parse_args(arguments)
+    if args.command == "build-artifact":
+        artifact = build_assembled_artifact(
+            repo_root=args.repo_root,
+            commit=args.commit,
+            gateway_venv=args.gateway_venv,
+            destination=args.destination,
+            python_executable=args.python_executable,
+        )
+        print(
+            json.dumps(
+                {
+                    "artifact_tree_sha256": artifact.artifact_tree_sha256,
+                    "artifact_sha256": artifact.source_artifact.artifact_sha256,
+                    "manifest_sha256": artifact.manifest_sha256,
+                    "root": str(artifact.root),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

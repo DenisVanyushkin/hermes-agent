@@ -9,10 +9,16 @@ import sys
 
 import pytest
 
+import job_intel.product_search.gate_b_runtime_v1 as runtime_v1
 from job_intel.product_search.gate_b_evidence_runner_v1 import EvidenceManifestRow
 from job_intel.product_search.gate_b_runtime_v1 import (
     ArtifactBuildError,
     AuthorityInputs,
+    FrozenRuntime,
+    RuntimeIdentity,
+    SourceArtifact,
+    AssembledArtifact,
+    build_assembled_artifact,
     build_evidence_manifest,
     build_frozen_runtime,
     build_source_artifact,
@@ -70,6 +76,88 @@ def test_source_artifact_rejects_dirty_worktree_before_archiving(tmp_path: Path)
             commit=commit,
             destination=tmp_path / "artifact",
         )
+
+
+def test_assembled_artifact_hash_covers_runtime_and_uses_legacy_manifest_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "a" * 40
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "tracked.txt").write_text("reviewed\n", encoding="utf-8")
+    (source_root / "uv.lock").write_text("lock\n", encoding="utf-8")
+    source_hash = runtime_v1._tree_hash(source_root)
+    source = SourceArtifact(
+        commit=commit,
+        source_root=source_root,
+        archive_sha256="b" * 64,
+        artifact_sha256=source_hash,
+    )
+
+    def fake_source_artifact(**_: object) -> SourceArtifact:
+        return source
+
+    def fake_frozen_runtime(*, artifact: SourceArtifact, destination: Path, **_: object) -> FrozenRuntime:
+        python = destination / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"interpreter-bytes")
+        identity = RuntimeIdentity(
+            artifact_sha256=artifact.artifact_sha256,
+            artifact_tree_sha256="c" * 64,
+            shim_sha256="d" * 64,
+            interpreter_sha256=hashlib.sha256(python.read_bytes()).hexdigest(),
+            stdlib_inventory_sha256="e" * 64,
+            installed_distributions_sha256="f" * 64,
+            installed_files_sha256="0" * 64,
+            sys_path_sha256="1" * 64,
+            native_extensions_sha256="2" * 64,
+            shared_libraries_sha256="3" * 64,
+        )
+        return FrozenRuntime(
+            root=destination,
+            python_executable=python,
+            runtime_identity=identity,
+            parity=runtime_v1.RuntimeParity(
+                python_version="3.12.3",
+                sqlite_module="pysqlite3",
+                sqlite_version="3.53.4",
+            ),
+            shim_sha256="d" * 64,
+            reproducibility="frozen_non_editable",
+        )
+
+    monkeypatch.setattr(runtime_v1, "build_source_artifact", fake_source_artifact)
+    monkeypatch.setattr(runtime_v1, "build_frozen_runtime", fake_frozen_runtime)
+    monkeypatch.setattr(
+        runtime_v1,
+        "_installed_distribution_lines",
+        lambda _: b"pydantic==2.11.7\n",
+    )
+    assembled = build_assembled_artifact(
+        repo_root=tmp_path / "repo",
+        commit=commit,
+        gateway_venv=tmp_path / "gateway",
+        destination=tmp_path / "assembled",
+        python_executable=Path(sys.executable),
+    )
+
+    assert isinstance(assembled, AssembledArtifact)
+    assert (assembled.root / "runtime/tracked.txt").read_text() == "reviewed\n"
+    assert (assembled.root / "python-runtime/venv/bin/python").read_bytes() == b"interpreter-bytes"
+    payload = json.loads((assembled.root / "runtime-manifest.json").read_bytes())
+    assert payload["runtime_kind"] == "gate_b_description_evidence"
+    assert payload["artifact_tree_sha256"] == assembled.artifact_tree_sha256
+    assert runtime_v1._artifact_tree_hash(
+        assembled.root,
+        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+    ) == assembled.artifact_tree_sha256
+    tampered = assembled.root / "python-runtime/venv/bin/python"
+    tampered.chmod(0o600)
+    tampered.write_bytes(b"tampered")
+    assert runtime_v1._artifact_tree_hash(
+        assembled.root,
+        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+    ) != assembled.artifact_tree_sha256
 
 
 def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: Path) -> None:
