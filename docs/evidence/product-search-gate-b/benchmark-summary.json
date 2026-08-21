@@ -1,8 +1,10 @@
 {
   "schema_version": "1.0.0",
   "gate": "gate-b",
-  "status": "launch_ready_pending_owner_approval",
+  "status": "launch_failed_before_exec_start_pre",
   "prepared_at": "2026-08-17T12:00:00+05:00",
+  "last_attempt_at": "2026-08-21T13:38:18Z",
+  "authoritative_attempt_evidence": "docs/evidence/product-search-gate-b/task9-launch-attempt.json",
   "prepared_from_base": "09bd9daabbb12711230e3c6920486fa712634997",
   "gate_a_input": {
     "commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
@@ -190,11 +192,11 @@
     "urgent_eligible": null
   },
   "provider": {
-    "status": "not_run_pending_owner_approval",
-    "reason": "live_benchmark_not_authorized",
+    "status": "not_run_launch_failed_pre_transport",
+    "reason": "systemd_namespace_failed_before_exec_start_pre",
     "operational_counters": {
       "status": "observed",
-      "reason": "dry_preflight_forbids_provider_attempts",
+      "reason": "exec_start_and_provider_transport_not_reached",
       "calls_attempted": 0,
       "calls_succeeded": 0,
       "calls_failed": 0
@@ -203,7 +205,7 @@
       "status": "not_computable",
       "reason": "no_provider_attempts",
       "failures_by_reason": null,
-      "cost_usd": null,
+      "cost_usd": "0.00",
       "latency_ms": null
     }
   },
@@ -251,7 +253,7 @@
   },
   "side_effects": {
     "status": "observed",
-    "reason": "dry_preflight_enforced_no_forbidden_side_effects",
+    "reason": "one_shot_launch_failed_before_receipt_consumption_or_exec_start",
     "production_database_writes": 0,
     "product_store_writes": 0,
     "slack_calls": 0,
@@ -259,6 +261,22 @@
     "profile_writes": 0,
     "cache_writes": 0,
     "protected_source_writes": 0
+  },
+  "task_9_launch_attempt": {
+    "status": "launch_failed_before_exec_start_pre",
+    "attempted_at": "2026-08-21T13:38:18Z",
+    "systemctl_start_count_for_checkpoint": 1,
+    "systemd_status": "226/NAMESPACE",
+    "missing_namespace_path": "/run/job-intel/gate-b-at-most-once",
+    "receipt_consumed": false,
+    "exec_start_executed": false,
+    "provider_transport_reached": false,
+    "calls_attempted": 0,
+    "spend_usd": "0.00",
+    "unstarted_inputs": 48,
+    "retry_or_manual_redispatch": false,
+    "unit_and_unconsumed_receipt_removed": true,
+    "immutable_package_runtime_checkpoint_preserved": true
   },
   "owner_decision": "pending",
   "recommendation": "request_revision",
