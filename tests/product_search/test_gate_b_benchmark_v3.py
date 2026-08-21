@@ -1615,6 +1615,32 @@ def test_materializer_never_reads_credential_file_contents(
     )
 
 
+def test_production_protected_snapshot_policy_is_complete_and_partitioned() -> None:
+    mutable_databases = (
+        Path("/home/hermes/.hermes/state.db"),
+        Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
+        Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal"),
+        Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm"),
+    )
+    credentials = (
+        Path("/home/hermes/.hermes/hermes-agent/.env"),
+        Path("/etc/job-intel/job-intel.env"),
+    )
+    immutable_content = (Path("/home/hermes/.hermes/hermes-agent/config.yml"),)
+
+    assert gate_b_v3._GATE_B_MUTABLE_DATABASE_PATHS_V3 == mutable_databases
+    assert gate_b_v3._GATE_B_CREDENTIAL_PATHS_V3 == credentials
+    assert gate_b_v3._GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3 == frozenset((
+        *mutable_databases,
+        *credentials,
+    ))
+    assert gate_b_v3._GATE_B_PROTECTED_PATHS_V3 == (
+        *mutable_databases,
+        *credentials,
+        *immutable_content,
+    )
+
+
 def test_materializer_snapshots_large_mutable_databases_without_content_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

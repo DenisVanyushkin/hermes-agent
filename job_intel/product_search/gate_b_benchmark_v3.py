@@ -2048,27 +2048,27 @@ _GATE_B_TASK10_POLICY_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "config/product_search/evidence_synthesis.v1.yaml"
 )
-_GATE_B_MUTABLE_DATABASE_PATHS_V3 = frozenset({
+_GATE_B_MUTABLE_DATABASE_PATHS_V3 = (
     Path("/home/hermes/.hermes/state.db"),
     Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
     Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal"),
     Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm"),
-})
-_GATE_B_CREDENTIAL_PATHS_V3 = frozenset({
-    Path("/home/hermes/.hermes/hermes-agent/.env"),
-    Path("/etc/job-intel/job-intel.env"),
-})
-_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3 = (
-    _GATE_B_MUTABLE_DATABASE_PATHS_V3 | _GATE_B_CREDENTIAL_PATHS_V3
 )
-_GATE_B_PROTECTED_PATHS_V3 = (
-    Path("/home/hermes/.hermes/state.db"),
-    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3"),
-    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal"),
-    Path("/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm"),
+_GATE_B_CREDENTIAL_PATHS_V3 = (
     Path("/home/hermes/.hermes/hermes-agent/.env"),
-    Path("/home/hermes/.hermes/hermes-agent/config.yml"),
     Path("/etc/job-intel/job-intel.env"),
+)
+_GATE_B_IMMUTABLE_CONTENT_PATHS_V3 = (
+    Path("/home/hermes/.hermes/hermes-agent/config.yml"),
+)
+_GATE_B_METADATA_ONLY_PROTECTED_PATHS_V3 = frozenset((
+    *_GATE_B_MUTABLE_DATABASE_PATHS_V3,
+    *_GATE_B_CREDENTIAL_PATHS_V3,
+))
+_GATE_B_PROTECTED_PATHS_V3 = (
+    *_GATE_B_MUTABLE_DATABASE_PATHS_V3,
+    *_GATE_B_CREDENTIAL_PATHS_V3,
+    *_GATE_B_IMMUTABLE_CONTENT_PATHS_V3,
 )
 _GATE_B_PENDING_RECEIPT_ROOT_V3 = Path("/etc/job-intel/gate-b-at-most-once")
 _GATE_B_CONSUMED_RECEIPT_ROOT_V3 = Path("/run/job-intel/gate-b-at-most-once")
