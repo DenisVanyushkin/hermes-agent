@@ -262,5 +262,120 @@
   },
   "owner_decision": "pending",
   "recommendation": "request_revision",
-  "task_13_authorized": false
+  "task_13_authorized": false,
+  "v3_checkpoint_request": {
+    "status": "pending_owner_approval",
+    "prepared_at": "2026-08-21T07:20:00Z",
+    "candidate_commit": "21938df34b6a9976fddc27a80d008d4f60e76c6d",
+    "historical_task12b_base": "c7981218a03e616da8e4d60084c0bfb9633ca892",
+    "rebased_patch_equivalent_base": "b24c5f3f11c56a5705dab537bf63baf359a15b04",
+    "rebased_base_patch_id": "400e78ad23e34a89a172553c8853ed5b0904a8b2",
+    "prospective_package": {
+      "materialized": false,
+      "root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e",
+      "manifest_sha256": "6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e",
+      "ordered_input_count": 48,
+      "ordered_input_hashes_sha256": "a952f9188fb47f06f6cdb6925e48123ecb6da6eed4b24cf472f16530dfea736f",
+      "ordered_projection_hashes_sha256": "8c89aa27f3b48b464cb408d34b51bc7739b11d3a1f25cefd4b92178f64a8f243"
+    },
+    "prospective_runtime": {
+      "materialized": false,
+      "root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime",
+      "manifest_sha256": "03278316997f454b722ef5a8a9f52ca752f88a8687eaa63fa3840931beaf4cee",
+      "manifest": {
+        "schema_version": "3.0.0",
+        "runtime_kind": "gate_b_at_most_once",
+        "candidate_commit": "21938df34b6a9976fddc27a80d008d4f60e76c6d",
+        "python_version": "3.12.13",
+        "runtime_tree_sha256": "f0c5aa64693bd746fee8e4628cb27437147358531a9ec5dd6fa26e679d8bbdde",
+        "python_executable_sha256": "cd6a26a9b2367f36eda6fa4381373d96c96f155b0ef8fae505f9f5e923b1c162",
+        "stdlib_tree_sha256": "9575d6493bc5817e49175e251b9825125e771b21ecb3576feb180601872ad078",
+        "dependency_lock_sha256": "e262172c0285bdfa9b2be095e3a2481dd620593dd440339170fa484cda8602cd",
+        "installed_distributions_sha256": "8fddf51dcf13d58533601b6ee0578bce2b885c236b4a10eda4f0e7ebb9fc8267",
+        "sys_path_sha256": "8e63ea541c14f997b9ca4cb6dc417eef216a4003a17b2ad2214f0ad2f274cba8",
+        "editable_installs": []
+      },
+      "installed_distribution_count": 69
+    },
+    "launch": {
+      "run_id": "gate-b-at-most-once-6c3cbd6318e8e03e",
+      "launch_identity_sha256": "7dc08dc11e93fe97ad0f682da51a198f327c20691f2b8774cc0ef1c8351471b3",
+      "owner_checkpoint_sha256": "80590c6457b74316107aa4f694816cef327f0e9478eb8175b0a1bd3f58de6e5d",
+      "owner_approval_effective_at": "2026-08-21T07:50:00Z",
+      "model_id": "openai/gpt-5-mini",
+      "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
+      "input_usd_per_mtok": "0.25",
+      "output_usd_per_mtok": "2.00",
+      "maximum_input_tokens": 24000,
+      "maximum_output_tokens": 2000,
+      "ordered_call_cap": 48,
+      "per_call_maximum_usd": "0.01",
+      "aggregate_maximum_usd": "0.48"
+    },
+    "root_owned_receipt": {
+      "installed": false,
+      "launch_kind": "initial",
+      "pending_path": "/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da/launch.pending.json",
+      "consumed_root": "/run/job-intel/gate-b-at-most-once",
+      "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da",
+      "content_sha256": "f0080a3cdda9b35d36639a2d37883ee4ed44f890e6e8f3822a25c28f3081a35c",
+      "issued_at": "2026-08-21T07:50:00Z",
+      "expires_at": "2026-08-21T08:20:00Z",
+      "exact_window_minutes": 30,
+      "pending_owner_mode": "root:root 0400",
+      "consumed_owner_mode": "root:hermes 0440"
+    },
+    "unit": {
+      "installed": false,
+      "path": "/etc/systemd/system/job-intel-gate-b-benchmark.service",
+      "source_sha256": "95ef9ce28e32dc96a469ff539c2dd897d75ccd921ce3837982b8f7599109272c",
+      "type": "oneshot",
+      "restart": "no"
+    },
+    "state": {
+      "run_root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e",
+      "ledger_path": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e/ledger/ledger.jsonl",
+      "recordings_root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e/provider-recordings",
+      "summary_path": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e/summary.json",
+      "historical_gate_b_authoritative": false
+    },
+    "legacy_runtime": {
+      "job-intel-daily.timer": "masked/inactive",
+      "job-intel-daily.service": "masked/inactive",
+      "job-intel-weekly-kpi.timer": "masked/inactive",
+      "job-intel-weekly-kpi.service": "masked/inactive",
+      "restoration_authorized": false
+    },
+    "verification": {
+      "python": "3.12.13",
+      "venv_created_or_mutated": false,
+      "tests_passed": 632,
+      "tests_failed": 0,
+      "pytest_seconds": "404.62",
+      "ruff_check": "passed",
+      "ruff_format_named_files": "6 already formatted",
+      "scope_guard": "passed",
+      "systemd_analyze_verify": "passed",
+      "bash_syntax": "passed",
+      "diff_check": "passed",
+      "credential_literal_scan": "passed",
+      "whole_diff_review": "no Critical or Important findings",
+      "worktree_clean_before_evidence_update": true
+    },
+    "authorization": {
+      "materialization": false,
+      "receipt_installation": false,
+      "unit_installation": false,
+      "provider_calls": false,
+      "network": false,
+      "spend": false,
+      "task_9": false
+    },
+    "void_if": [
+      "owner approval is not explicit before 2026-08-21T07:50:00Z",
+      "launch is outside 2026-08-21T07:50:00Z through 2026-08-21T08:20:00Z",
+      "any prospective hash differs when reproduced",
+      "candidate code is substituted"
+    ]
+  }
 }

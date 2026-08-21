@@ -195,3 +195,122 @@ field in `benchmark-summary.json` remains explicitly `not_run` or
 The additive v3 at-most-once benchmark policy governs only future Gate B
 execution. It neither rewrites nor authorizes historical packages, journals,
 or results. This preparation remains non-live: `record_run_authorized=false`.
+
+## Task 8 v3 owner checkpoint request (2026-08-21)
+
+The independently reviewed code candidate is
+`21938df34b6a9976fddc27a80d008d4f60e76c6d`.  It is the code pin; this
+evidence-only commit follows it and does not replace the runtime candidate.
+The historical Task 12B commit
+`c7981218a03e616da8e4d60084c0bfb9633ca892` is pre-rebase.  Its
+patch-equivalent rebased base is
+`b24c5f3f11c56a5705dab537bf63baf359a15b04` (identical stable patch-id
+`400e78ad23e34a89a172553c8853ed5b0904a8b2` and identical changed paths),
+and the complete 17-file feature delta from that base was reviewed.
+
+No Critical or Important finding remains within the stated trust model.  The
+review rechecked the six earlier blockers: only independently reviewed role
+responsibility/requirement fragments can be admitted; owner recovery is
+mandatory for every stranded `reserved`/`dispatched` row; ambiguous
+post-dispatch outcomes are terminal, non-retryable, and conservatively charged
+USD 0.01; the namespace is fixed and separate from historical Gate B; every
+runtime/package/source/prompt/schema/model/pricing/projection identity is
+recomputed from the current immutable export; and the public pure preflight
+accepts only plain byte mappings with no path, callback, provider, or I/O
+capability.  State transitions, dispatch-marker/ledger/recording disagreement,
+torn state, exact recovery inventory/signature binding, one-shot receipt
+claiming, and recovery launch identities were mutation-checked.  A crash after
+claim but before ledger creation consumes that attempt but cannot dispatch; a
+fresh initial attempt is allowed only while no ledger exists.  Once a ledger
+exists, a new launch requires the exact owner-signed recovery manifest.
+
+The pure builder computed, without canonical-host materialization:
+
+- prospective package manifest SHA-256:
+  `6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e`;
+- prospective package root:
+  `/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e`;
+- 48 ordered input-hash digest:
+  `a952f9188fb47f06f6cdb6925e48123ecb6da6eed4b24cf472f16530dfea736f`;
+- 48 ordered projection-hash digest:
+  `8c89aa27f3b48b464cb408d34b51bc7739b11d3a1f25cefd4b92178f64a8f243`;
+- prospective immutable runtime manifest SHA-256:
+  `03278316997f454b722ef5a8a9f52ca752f88a8687eaa63fa3840931beaf4cee`;
+- full launch identity SHA-256:
+  `7dc08dc11e93fe97ad0f682da51a198f327c20691f2b8774cc0ef1c8351471b3`;
+- one-shot unit SHA-256:
+  `95ef9ce28e32dc96a469ff539c2dd897d75ccd921ce3837982b8f7599109272c`.
+
+The prospective runtime manifest binds Python `3.12.13`, runtime tree
+`f0c5aa64693bd746fee8e4628cb27437147358531a9ec5dd6fa26e679d8bbdde`,
+interpreter
+`cd6a26a9b2367f36eda6fa4381373d96c96f155b0ef8fae505f9f5e923b1c162`,
+stdlib tree
+`9575d6493bc5817e49175e251b9825125e771b21ecb3576feb180601872ad078`,
+lock file
+`e262172c0285bdfa9b2be095e3a2481dd620593dd440339170fa484cda8602cd`,
+69 non-editable installed distributions
+`8fddf51dcf13d58533601b6ee0578bce2b885c236b4a10eda4f0e7ebb9fc8267`,
+and fixed `sys.path`
+`8e63ea541c14f997b9ca4cb6dc417eef216a4003a17b2ad2214f0ad2f274cba8`.
+Task 9 must reproduce the canonical runtime manifest byte-for-byte at
+`/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime`;
+any mismatch voids approval.
+
+The launch binds `openai/gpt-5-mini`, pricing identity
+`openrouter-openai-gpt5-mini-2026-08-17` (USD 0.25/M input tokens, USD 2.00/M
+output tokens), maximum 24,000 input and 2,000 output tokens, exactly 48 calls,
+USD 0.01 maximum per call, and USD 0.48 aggregate.  The owner-checkpoint
+manifest offered for approval is
+`80590c6457b74316107aa4f694816cef327f0e9478eb8175b0a1bd3f58de6e5d`
+and becomes effective at `2026-08-21T07:50:00Z` only if explicitly approved
+before that instant.  Its initial root-owned receipt is:
+
+- pending path:
+  `/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da/launch.pending.json`;
+- canonical content SHA-256:
+  `f0080a3cdda9b35d36639a2d37883ee4ed44f890e6e8f3822a25c28f3081a35c`;
+- validity: `2026-08-21T07:50:00Z` through `2026-08-21T08:20:00Z`
+  (12:50–13:20 Asia/Almaty), exactly 30 minutes;
+- pending ownership/mode `root:root 0400`; consumed ownership/mode
+  `root:hermes 0440` under the matching attempt directory in
+  `/run/job-intel/gate-b-at-most-once`.
+
+Approval received at or after `2026-08-21T07:50:00Z`, launch outside the stated
+window, or any candidate/runtime/package/checkpoint/receipt/unit hash drift
+voids this request and requires a newly reviewed checkpoint.  No v3 package,
+runtime, receipt, unit, provider call, network call, or spend exists yet.
+
+The only state/output root is
+`/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e`.
+It contains `ledger/ledger.jsonl`, `provider-recordings/`, the per-attempt launch
+claim, and `summary.json`.  Historical
+`/home/hermes/.hermes/job_intel/experiments/gate-b` remains read-only and
+non-authoritative.  The legacy daily and weekly Job Intel service/timer pairs
+were freshly verified `masked` and `inactive`; no new Gate B unit is installed.
+
+If Task 9 fails after privileged installation, the bounded rollback is:
+
+```bash
+sudo systemctl stop job-intel-gate-b-benchmark.service
+sudo systemctl disable job-intel-gate-b-benchmark.service
+sudo rm -f /etc/systemd/system/job-intel-gate-b-benchmark.service
+sudo systemctl daemon-reload
+sudo rm -rf /etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da
+sudo rm -rf /run/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da
+sudo systemctl mask job-intel-daily.timer job-intel-daily.service job-intel-weekly-kpi.timer job-intel-weekly-kpi.service
+```
+
+The immutable package, runtime, ledger, recordings, and summary are retained as
+evidence; deleting them requires a separate retention decision.  Rollback does
+not restart any legacy collector.
+
+Fresh pre-checkpoint verification used the existing Gate A Python `3.12.13`
+without creating or mutating a venv: 632 tests passed in 404.62 seconds; Ruff
+lint passed; all six named files were already Ruff-formatted; the scope guard,
+systemd unit verification, shell syntax, `git diff --check`, JSON parsing,
+credential/private-marker review, and clean-worktree check passed.  Credential
+literal scanning found no credential value; the only email literal was
+`test@example.invalid`, and fixed private source paths contain no private
+payload.  The legacy exporter process is read-only observability and is not a
+collector.
