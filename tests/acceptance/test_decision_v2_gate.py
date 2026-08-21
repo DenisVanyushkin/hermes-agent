@@ -251,7 +251,7 @@ def test_ready_gate_b_package_preserves_denominators_and_no_fake_results() -> No
     summary = _load_summary()
     assert summary["schema_version"] == "1.0.0"
     assert summary["gate"] == "gate-b"
-    assert summary["status"] == "ready_for_record_approval"
+    assert summary["status"] == "blocked_pending_provider_authority"
     assert summary["gate_a_input"] == {
         "commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
         "manifest_sha256": GATE_A_MANIFEST_SHA256,
@@ -303,8 +303,8 @@ def test_ready_gate_b_accounts_for_provider_replay_audit_cost_and_side_effects()
     """Break caught: absent calls or audits are hidden, or a side effect is tolerated."""
     summary = _load_summary()
     assert summary["provider"] == {
-        "status": "not_run_pending_owner_approval",
-        "reason": "live_benchmark_not_authorized",
+        "status": "not_run_pending_owner_secret_authority",
+        "reason": "slack_blind_provider_value_and_live_hash_not_authorized",
         "operational_counters": {
             "status": "observed",
             "reason": "dry_preflight_forbids_provider_attempts",

@@ -196,7 +196,7 @@ The additive v3 at-most-once benchmark policy governs only future Gate B
 execution. It neither rewrites nor authorizes historical packages, journals,
 or results. This preparation remains non-live: `record_run_authorized=false`.
 
-## Task 8 v3 owner checkpoint request (2026-08-21)
+## Task 8 v3 pending owner checkpoint request (2026-08-21)
 
 The independently reviewed code candidate is
 `21938df34b6a9976fddc27a80d008d4f60e76c6d`.  It is the code pin; this
@@ -260,26 +260,59 @@ any mismatch voids approval.
 The launch binds `openai/gpt-5-mini`, pricing identity
 `openrouter-openai-gpt5-mini-2026-08-17` (USD 0.25/M input tokens, USD 2.00/M
 output tokens), maximum 24,000 input and 2,000 output tokens, exactly 48 calls,
-USD 0.01 maximum per call, and USD 0.48 aggregate.  The owner-checkpoint
-manifest offered for approval is
-`80590c6457b74316107aa4f694816cef327f0e9478eb8175b0a1bd3f58de6e5d`
-and becomes effective at `2026-08-21T07:50:00Z` only if explicitly approved
-before that instant.  Its initial root-owned receipt is:
+USD 0.01 maximum per call, and USD 0.48 aggregate. The recomputed launch
+identity remains
+`7dc08dc11e93fe97ad0f682da51a198f327c20691f2b8774cc0ef1c8351471b3`.
+The prospective owner-checkpoint manifest is
+`964d29683b4e19c04b4b005ef04236bd3134933038b887d730deeca4ede9f53b`.
+It is deliberately **not launch-ready**: the required provider value and its
+raw live-file SHA-256 have no owner authority and were not read, copied,
+hashed, or printed.
+
+The Slack-blind provider environment is specified by
+[`provider-env-contract.json`](provider-env-contract.json), file SHA-256
+`b9d924123c8d5a75c1a4df048db1ef4b0c9e4da549ae6e86c562789deb20a6d2`.
+The future runtime path is exactly `/etc/job-intel/gate-b-provider.env`, a
+single regular file owned `root:root` with mode `0400`. Its only permitted
+keys, in order, are `HERMES_HOME=/var/empty` and `OPENROUTER_API_KEY=<owner
+approved value>`. The placeholder template SHA-256 is
+`92d46371aa237956959b9a9b2657ca274bac09986556000fa76457e98695e856`.
+`HERMES_HOME=/var/empty` is load-bearing: the reviewed resolver otherwise
+loads the whole mixed `/home/hermes/.hermes/.env`, which contains Slack and
+other authorities even though the runner unsets `SLACK_BOT_TOKEN`,
+`SLACK_APP_TOKEN`, `JOB_INTEL_DB_PATH`, and `JOB_INTEL_OUTBOX_PATH`.
+
+No Slack key, Slack webhook/channel key, production DB path, or outbox path is
+permitted. The only proposed provider-value source is the existing
+`OPENROUTER_API_KEY` assignment in `/home/hermes/.hermes/.env`; only its key
+name and uniqueness were observed. Exact missing owner input is authorization
+for root to read only that value, install it without logging it under the
+contract above, and compute the raw installed content SHA-256 locally. Until
+that input is explicit and a launch-ready checkpoint binds the resulting raw
+hash, root must not install the env file or any launch artifact.
+
+The pending prospective approval time is `2026-08-22T08:00:00Z`, scheduled
+more than 23 hours after preparation to leave time for explicit owner review.
+The model-enforced receipt window remains exactly 30 minutes. The prospective,
+non-materialized initial receipt is:
 
 - pending path:
-  `/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da/launch.pending.json`;
+  `/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1/launch.pending.json`;
 - canonical content SHA-256:
-  `f0080a3cdda9b35d36639a2d37883ee4ed44f890e6e8f3822a25c28f3081a35c`;
-- validity: `2026-08-21T07:50:00Z` through `2026-08-21T08:20:00Z`
-  (12:50–13:20 Asia/Almaty), exactly 30 minutes;
+  `899c2308a15a21305cca483e9ba71674ad2643cd0bf43cc2c76581c1f772724c`;
+- validity: `2026-08-22T08:00:00Z` through `2026-08-22T08:30:00Z`
+  (13:00–13:30 Asia/Almaty), exactly 30 minutes;
 - pending ownership/mode `root:root 0400`; consumed ownership/mode
   `root:hermes 0440` under the matching attempt directory in
   `/run/job-intel/gate-b-at-most-once`.
 
-Approval received at or after `2026-08-21T07:50:00Z`, launch outside the stated
-window, or any candidate/runtime/package/checkpoint/receipt/unit hash drift
-voids this request and requires a newly reviewed checkpoint.  No v3 package,
-runtime, receipt, unit, provider call, network call, or spend exists yet.
+This future window is informational while provider authority is missing; it
+does not itself authorize launch. Approval received at or after
+`2026-08-22T08:00:00Z`, launch outside the stated window, missing or changed
+provider-env authority/hash, or any candidate/runtime/package/checkpoint/
+receipt/unit hash drift voids this request and requires a newly reviewed
+checkpoint. No provider env, v3 package, runtime, receipt, unit, provider call,
+network call, or spend exists yet.
 
 The only state/output root is
 `/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e`.
@@ -295,9 +328,10 @@ If Task 9 fails after privileged installation, the bounded rollback is:
 sudo systemctl stop job-intel-gate-b-benchmark.service
 sudo systemctl disable job-intel-gate-b-benchmark.service
 sudo rm -f /etc/systemd/system/job-intel-gate-b-benchmark.service
+sudo rm -f /etc/job-intel/gate-b-provider.env
 sudo systemctl daemon-reload
-sudo rm -rf /etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da
-sudo rm -rf /run/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da
+sudo rm -rf /etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1
+sudo rm -rf /run/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1
 sudo systemctl mask job-intel-daily.timer job-intel-daily.service job-intel-weekly-kpi.timer job-intel-weekly-kpi.service
 ```
 
@@ -306,11 +340,12 @@ evidence; deleting them requires a separate retention decision.  Rollback does
 not restart any legacy collector.
 
 Fresh pre-checkpoint verification used the existing Gate A Python `3.12.13`
-without creating or mutating a venv: 632 tests passed in 404.62 seconds; Ruff
-lint passed; all six named files were already Ruff-formatted; the scope guard,
-systemd unit verification, shell syntax, `git diff --check`, JSON parsing,
-credential/private-marker review, and clean-worktree check passed.  Credential
-literal scanning found no credential value; the only email literal was
-`test@example.invalid`, and fixed private source paths contain no private
-payload.  The legacy exporter process is read-only observability and is not a
+without creating or mutating a venv: the complete 632-test matrix passed in
+427.93 seconds. Ruff lint passed; all six named files were already
+Ruff-formatted; the scope guard, systemd unit verification, shell syntax,
+`git diff --check`, JSON parsing, credential/private-marker review, and
+clean-worktree check passed.
+Credential literal scanning found no credential value; the only email literal
+was `test@example.invalid`, and fixed private source paths contain no private
+payload. The legacy exporter process is read-only observability and is not a
 collector.

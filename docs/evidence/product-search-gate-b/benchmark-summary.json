@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "gate": "gate-b",
-  "status": "ready_for_record_approval",
+  "status": "blocked_pending_provider_authority",
   "prepared_at": "2026-08-17T12:00:00+05:00",
   "prepared_from_base": "09bd9daabbb12711230e3c6920486fa712634997",
   "gate_a_input": {
@@ -190,8 +190,8 @@
     "urgent_eligible": null
   },
   "provider": {
-    "status": "not_run_pending_owner_approval",
-    "reason": "live_benchmark_not_authorized",
+    "status": "not_run_pending_owner_secret_authority",
+    "reason": "slack_blind_provider_value_and_live_hash_not_authorized",
     "operational_counters": {
       "status": "observed",
       "reason": "dry_preflight_forbids_provider_attempts",
@@ -264,8 +264,8 @@
   "recommendation": "request_revision",
   "task_13_authorized": false,
   "v3_checkpoint_request": {
-    "status": "pending_owner_approval",
-    "prepared_at": "2026-08-21T07:20:00Z",
+    "status": "prospective_pending_owner_secret_authority",
+    "prepared_at": "2026-08-21T08:42:34Z",
     "candidate_commit": "21938df34b6a9976fddc27a80d008d4f60e76c6d",
     "historical_task12b_base": "c7981218a03e616da8e4d60084c0bfb9633ca892",
     "rebased_patch_equivalent_base": "b24c5f3f11c56a5705dab537bf63baf359a15b04",
@@ -297,11 +297,38 @@
       },
       "installed_distribution_count": 69
     },
+    "provider_environment_contract": {
+      "status": "pending_owner_secret_authority",
+      "contract_path": "docs/evidence/product-search-gate-b/provider-env-contract.json",
+      "contract_file_sha256": "b9d924123c8d5a75c1a4df048db1ef4b0c9e4da549ae6e86c562789deb20a6d2",
+      "runtime_path": "/etc/job-intel/gate-b-provider.env",
+      "installed": false,
+      "owner_mode": "root:root 0400",
+      "permitted_keys_in_order": [
+        "HERMES_HOME",
+        "OPENROUTER_API_KEY"
+      ],
+      "hermes_home_literal": "/var/empty",
+      "provider_value_source_path": "/home/hermes/.hermes/.env",
+      "provider_value_source_key": "OPENROUTER_API_KEY",
+      "provider_value_observed": false,
+      "provider_value_copy_authorized": false,
+      "canonical_template_sha256": "92d46371aa237956959b9a9b2657ca274bac09986556000fa76457e98695e856",
+      "live_content_sha256": null,
+      "live_content_sha256_status": "not_computable_without_owner_authority",
+      "forbidden_authorities": [
+        "Slack credentials, channel ids, or webhook URLs",
+        "production Job Intel DB paths",
+        "production Job Intel outbox paths"
+      ],
+      "missing_owner_input": "authorize root to read only OPENROUTER_API_KEY from /home/hermes/.hermes/.env, install it without exposure under the exact contract, and compute the raw live content SHA-256; any other source requires a new checkpoint"
+    },
     "launch": {
+      "status": "prospective_pending_owner_secret_authority",
       "run_id": "gate-b-at-most-once-6c3cbd6318e8e03e",
       "launch_identity_sha256": "7dc08dc11e93fe97ad0f682da51a198f327c20691f2b8774cc0ef1c8351471b3",
-      "owner_checkpoint_sha256": "80590c6457b74316107aa4f694816cef327f0e9478eb8175b0a1bd3f58de6e5d",
-      "owner_approval_effective_at": "2026-08-21T07:50:00Z",
+      "owner_checkpoint_sha256": "964d29683b4e19c04b4b005ef04236bd3134933038b887d730deeca4ede9f53b",
+      "owner_approval_effective_at": "2026-08-22T08:00:00Z",
       "model_id": "openai/gpt-5-mini",
       "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
       "input_usd_per_mtok": "0.25",
@@ -313,14 +340,15 @@
       "aggregate_maximum_usd": "0.48"
     },
     "root_owned_receipt": {
+      "status": "prospective_not_installable_until_provider_authority_is_bound",
       "installed": false,
       "launch_kind": "initial",
-      "pending_path": "/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da/launch.pending.json",
+      "pending_path": "/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1/launch.pending.json",
       "consumed_root": "/run/job-intel/gate-b-at-most-once",
-      "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-3ff636e021976407c5bf78ba1b890d9d190d7e32d0946cc7c05f69a9cd0cc1da",
-      "content_sha256": "f0080a3cdda9b35d36639a2d37883ee4ed44f890e6e8f3822a25c28f3081a35c",
-      "issued_at": "2026-08-21T07:50:00Z",
-      "expires_at": "2026-08-21T08:20:00Z",
+      "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1",
+      "content_sha256": "899c2308a15a21305cca483e9ba71674ad2643cd0bf43cc2c76581c1f772724c",
+      "issued_at": "2026-08-22T08:00:00Z",
+      "expires_at": "2026-08-22T08:30:00Z",
       "exact_window_minutes": 30,
       "pending_owner_mode": "root:root 0400",
       "consumed_owner_mode": "root:hermes 0440"
@@ -351,7 +379,7 @@
       "venv_created_or_mutated": false,
       "tests_passed": 632,
       "tests_failed": 0,
-      "pytest_seconds": "404.62",
+      "pytest_seconds": "427.93",
       "ruff_check": "passed",
       "ruff_format_named_files": "6 already formatted",
       "scope_guard": "passed",
@@ -363,6 +391,8 @@
       "worktree_clean_before_evidence_update": true
     },
     "authorization": {
+      "provider_value_access": false,
+      "provider_env_live_hash": false,
       "materialization": false,
       "receipt_installation": false,
       "unit_installation": false,
@@ -372,8 +402,10 @@
       "task_9": false
     },
     "void_if": [
-      "owner approval is not explicit before 2026-08-21T07:50:00Z",
-      "launch is outside 2026-08-21T07:50:00Z through 2026-08-21T08:20:00Z",
+      "owner approval is not explicit before 2026-08-22T08:00:00Z",
+      "launch is outside 2026-08-22T08:00:00Z through 2026-08-22T08:30:00Z",
+      "provider value authority or raw live environment-file SHA-256 remains absent",
+      "provider environment contains any key outside the exact two-key contract",
       "any prospective hash differs when reproduced",
       "candidate code is substituted"
     ]

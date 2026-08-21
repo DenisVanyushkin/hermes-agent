@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0.0",
+  "contract_kind": "gate_b_slack_blind_provider_environment",
+  "status": "pending_owner_secret_authority",
+  "runtime_path": "/etc/job-intel/gate-b-provider.env",
+  "ownership": {
+    "owner": "root",
+    "group": "root",
+    "mode": "0400",
+    "regular_file_required": true,
+    "single_link_required": true,
+    "symlink_allowed": false
+  },
+  "canonical_template_text": "HERMES_HOME=/var/empty\nOPENROUTER_API_KEY=<OWNER_APPROVED_OPENROUTER_API_KEY>\n",
+  "canonical_template_sha256": "92d46371aa237956959b9a9b2657ca274bac09986556000fa76457e98695e856",
+  "permitted_keys_in_order": [
+    "HERMES_HOME",
+    "OPENROUTER_API_KEY"
+  ],
+  "values": {
+    "HERMES_HOME": {
+      "literal": "/var/empty",
+      "reason": "prevent the reviewed resolver from loading the mixed /home/hermes/.hermes/.env or auth pool"
+    },
+    "OPENROUTER_API_KEY": {
+      "source_path": "/home/hermes/.hermes/.env",
+      "source_key": "OPENROUTER_API_KEY",
+      "source_observation": "exactly one key name exists; its value was not read, copied, hashed, or printed",
+      "owner_authority_required": true,
+      "alternate_source_allowed": false
+    }
+  },
+  "forbidden_keys": [
+    "SLACK_APP_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_HOME_CHANNEL",
+    "JOB_INTEL_DB_PATH",
+    "JOB_INTEL_OUTBOX_PATH",
+    "JOB_INTEL_SLACK_WEBHOOK_URL"
+  ],
+  "live_content_sha256": null,
+  "live_content_sha256_status": "not_computable_without_owner_authority_to_access_the_provider_value",
+  "installation": {
+    "authorized": false,
+    "actor": "root",
+    "phase": "Task 9 only after a launch-ready checkpoint binds the non-secret structural contract and the root-computed live content SHA-256",
+    "before": "receipt installation and receipt consumption",
+    "requirements": [
+      "use umask 077 and a new temporary regular file in /etc/job-intel",
+      "write the literal HERMES_HOME line first",
+      "copy exactly one non-empty OPENROUTER_API_KEY value from the approved source without logging or printing it",
+      "write exactly one newline-terminated OPENROUTER_API_KEY assignment and no other assignment",
+      "reject a missing, empty, duplicate, multiline, or extra-key source",
+      "redact only the provider value back to the canonical placeholder and require canonical_template_sha256 to match",
+      "compute the raw live file SHA-256 locally without displaying file content",
+      "set root:root 0400, require one regular-file link, then atomically rename to runtime_path",
+      "verify the installed raw SHA-256 and metadata before receipt installation or consumption"
+    ]
+  },
+  "authorization": {
+    "provider_value_access": false,
+    "provider_value_copy": false,
+    "provider_calls": false,
+    "network": false,
+    "task_9": false
+  },
+  "missing_owner_input": "Explicitly authorize root to read only OPENROUTER_API_KEY from /home/hermes/.hermes/.env, install it under this exact contract, and compute its live content SHA-256 without exposing the value. Any other source requires a new checkpoint."
+}
