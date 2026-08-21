@@ -5,6 +5,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "fitness_host_wrapper.sh"
+ALERTS_SCRIPT = REPO / "scripts" / "fitness_alerts.sh"
 
 
 def test_wrapper_exists_and_is_executable():
@@ -36,7 +37,7 @@ def test_wrapper_fails_loudly_when_repo_not_found():
 def test_main_dispatches_known_commands():
     from fitness.__main__ import COMMANDS
 
-    assert set(COMMANDS) == {"watch-tick", "digest", "status"}
+    assert set(COMMANDS) == {"watch-tick", "digest", "status", "alerts"}
 
 
 def test_main_rejects_unknown_command(capsys):
@@ -158,3 +159,99 @@ def test_watch_tick_survives_a_dead_session_without_traceback(home, monkeypatch,
     monkeypatch.setattr(entry, "tick", lambda **kw: TickResult())
 
     assert entry.cmd_watch_tick() == 0
+
+
+# --- две аудитории: stdout крона = сообщение Амине -------------------------
+# cron/scheduler.py при returncode == 0 отдаёт stdout прямо на `deliver`
+# джобы, а deliver у fitness-джоб — WhatsApp Амины. Значит любая лишняя
+# строка здесь — это сообщение живому человеку.
+
+
+def test_alerts_entry_script_exists_and_is_executable():
+    assert ALERTS_SCRIPT.exists()
+    assert ALERTS_SCRIPT.stat().st_mode & 0o111
+    assert "alerts" in ALERTS_SCRIPT.read_text(encoding="utf-8")
+
+
+def test_watch_tick_does_not_print_engineering_text(home, monkeypatch, capsys):
+    import fitness.__main__ as entry
+    from fitness import alerts
+    from fitness.engine import TickResult
+
+    monkeypatch.setattr(entry, "tick", lambda **kw: TickResult(
+        messages=["✅ Записал: «HIIT» 21.08 10:00"],
+        alerts=["⚠️ Сессия Invictus недействительна — автозапись остановлена."]))
+    monkeypatch.setattr(entry, "_emit_reminders", lambda client, now: None)
+    monkeypatch.setattr(entry, "_client", lambda: object())
+    monkeypatch.setattr(entry, "_now", lambda: NOW)
+
+    assert entry.cmd_watch_tick() == 0
+    out = capsys.readouterr().out
+    assert "Записал" in out
+    assert "Сессия" not in out
+    assert alerts.pending(NOW) == [
+        "⚠️ Сессия Invictus недействительна — автозапись остановлена."]
+
+
+def test_alerts_command_prints_and_clears(home, monkeypatch, capsys):
+    import fitness.__main__ as entry
+    from fitness import alerts
+
+    monkeypatch.setattr(entry, "_now", lambda: NOW)
+    alerts.push("⚠️ Сессия Invictus недействительна.", NOW)
+
+    assert entry.cmd_alerts() == 0
+    assert "Сессия Invictus" in capsys.readouterr().out
+    assert entry.cmd_alerts() == 0
+    assert capsys.readouterr().out == ""      # пустая очередь молчит
+
+
+def test_alerts_command_on_empty_queue_is_silent(home, monkeypatch, capsys):
+    import fitness.__main__ as entry
+
+    monkeypatch.setattr(entry, "_now", lambda: NOW)
+
+    assert entry.cmd_alerts() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_digest_session_error_goes_to_the_queue(home, monkeypatch, capsys):
+    import fitness.__main__ as entry
+    from fitness import alerts
+    from fitness.invictus_client import SessionDead
+
+    class _Dead:
+        def schedule(self, *a, **kw):
+            raise SessionDead("refresh 401")
+
+        def my_bookings(self):
+            raise SessionDead("refresh 401")
+
+    monkeypatch.setattr(entry, "_client", lambda: _Dead())
+    monkeypatch.setattr(entry, "_now", lambda: NOW)
+
+    assert entry.cmd_digest() == 0
+    assert capsys.readouterr().out == ""       # Амине — ничего
+    assert alerts.pending(NOW)                 # оператору — есть
+
+
+def test_digest_alert_is_not_repeated_every_morning_run(home, monkeypatch, capsys):
+    import fitness.__main__ as entry
+    from fitness import alerts
+    from fitness.invictus_client import SessionDead
+
+    class _Dead:
+        def schedule(self, *a, **kw):
+            raise SessionDead("refresh 401")
+
+        def my_bookings(self):
+            raise SessionDead("refresh 401")
+
+    monkeypatch.setattr(entry, "_client", lambda: _Dead())
+    monkeypatch.setattr(entry, "_now", lambda: NOW)
+
+    entry.cmd_digest()
+    entry.cmd_digest()
+
+    assert len(alerts.pending(NOW)) == 1
+    assert capsys.readouterr().out == ""
