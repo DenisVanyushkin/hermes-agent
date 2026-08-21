@@ -14,6 +14,7 @@ from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
 
@@ -177,33 +178,118 @@ class JournalEntry(_StrictFrozenModel):
 
 
 class AppendOnlyJournal:
-    """Small append/fsync journal used by the walking skeleton."""
+    """Durable append-only dispatch state for exactly one manifest."""
 
     def __init__(self, manifest: EvidenceManifest, path: Path) -> None:
         self.manifest = manifest
         self.path = path
         self._entries: dict[int, JournalEntry] = {}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            raise ValueError("walking-skeleton journal must start empty")
-        self.path.touch(mode=0o600, exist_ok=False)
+        if not self.path.exists():
+            raise ValueError("journal missing")
+        self._load()
+
+    @classmethod
+    def create(cls, manifest: EvidenceManifest, path: Path) -> AppendOnlyJournal:
+        """Create the first journal; never replace an existing state file."""
+        # This protects against accidental or confused-deputy replay (a
+        # rerun, stale unit, or script must inherit state). It is not a
+        # boundary against hermes: passwordless sudo means a malicious
+        # operator can still alter files, so this is an operational safety
+        # primitive only.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise ValueError("journal already exists") from exc
+        else:
+            os.close(descriptor)
+        return cls(manifest, path)
 
     @classmethod
     def open(cls, manifest: EvidenceManifest, path: Path) -> AppendOnlyJournal:
+        """Open only an existing journal; missing is a recovery error."""
+        if not path.exists():
+            raise ValueError("journal missing")
         return cls(manifest, path)
 
     def _validate_ref(self, ref: ManifestRef) -> None:
         if ref != self.manifest.row_ref(ref.ordinal):
             raise ValueError("journal manifest reference mismatch")
 
+    def _parse_entry(self, payload: object) -> tuple[str, JournalEntry]:
+        if not isinstance(payload, dict):
+            raise ValueError("journal corrupt")
+        event = payload.get("event")
+        body = {key: value for key, value in payload.items() if key != "event"}
+        try:
+            entry = JournalEntry.model_validate(body)
+        except Exception as exc:
+            raise ValueError("journal corrupt") from exc
+        if event not in {"dispatch", "terminal"}:
+            raise ValueError("journal corrupt")
+        return str(event), entry
+
+    def _load(self) -> None:
+        payload = self.path.read_bytes()
+        entries: dict[int, JournalEntry] = {}
+        valid_end = 0
+        for line in payload.splitlines(keepends=True):
+            if not line.endswith(b"\n"):
+                break
+            try:
+                event, entry = self._parse_entry(json.loads(line))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise ValueError("journal corrupt") from exc
+            self._validate_ref(entry.manifest_ref)
+            ordinal = entry.manifest_ref.ordinal
+            if event == "dispatch":
+                if (
+                    entry.state is not JournalState.DISPATCHED
+                    or ordinal in entries
+                    or entry.sequence != len(entries)
+                ):
+                    raise ValueError("journal corrupt")
+            else:
+                previous = entries.get(ordinal)
+                if (
+                    previous is None
+                    or previous.state is not JournalState.DISPATCHED
+                    or entry.sequence != previous.sequence
+                    or entry.state
+                    not in {
+                        JournalState.SUCCESS,
+                        JournalState.TERMINAL_FAILURE,
+                        JournalState.TERMINAL_UNKNOWN,
+                    }
+                    or entry.recording_sha256 is None
+                ):
+                    if previous is not None and previous == entry:
+                        valid_end += len(line)
+                        continue
+                    raise ValueError("journal corrupt")
+            entries[ordinal] = entry
+            valid_end += len(line)
+        if valid_end < len(payload):
+            with self.path.open("r+b") as stream:
+                stream.truncate(valid_end)
+                stream.flush()
+                os.fsync(stream.fileno())
+        self._entries = entries
+
+    def verify(self) -> None:
+        self._entries = {}
+        self._load()
+
     def _append(self, payload: dict[str, Any]) -> None:
         encoded = _canonical_bytes(payload) + b"\n"
-        with self.path.open("ab") as stream:
-            stream.write(encoded)
-            stream.flush()
-            import os
-
-            os.fsync(stream.fileno())
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND)
+        try:
+            written = 0
+            while written < len(encoded):
+                written += os.write(descriptor, encoded[written:])
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def state(self, ordinal: int) -> JournalState:
         entry = self._entries.get(ordinal)
@@ -213,12 +299,18 @@ class AppendOnlyJournal:
         self._validate_ref(ref)
         if self.state(ref.ordinal) is not JournalState.PENDING:
             raise ValueError("journal row is already claimed")
+        if len(self._entries) >= self.manifest.limits.ordered_call_cap:
+            raise ValueError("call_cap_exhausted")
+        conservative_cost = self.manifest.limits.per_call_maximum_usd
+        reserved = sum(entry.conservative_cost_usd for entry in self._entries.values())
+        if reserved + conservative_cost > self.manifest.limits.aggregate_maximum_usd:
+            raise ValueError("spend_cap_exhausted")
         sequence = len(self._entries)
         entry = JournalEntry(
             manifest_ref=ref,
             sequence=sequence,
             state=JournalState.DISPATCHED,
-            conservative_cost_usd=Decimal("0"),
+            conservative_cost_usd=conservative_cost,
         )
         self._append({"event": "dispatch", **entry.model_dump(mode="json")})
         self._entries[ref.ordinal] = entry
@@ -233,7 +325,8 @@ class AppendOnlyJournal:
         conservative_cost_usd: Decimal,
     ) -> None:
         self._validate_ref(receipt.manifest_ref)
-        if self.state(receipt.manifest_ref.ordinal) is not JournalState.DISPATCHED:
+        current = self._entries.get(receipt.manifest_ref.ordinal)
+        if current is None or current.state is JournalState.PENDING:
             raise ValueError("journal terminal commit requires dispatched state")
         entry = JournalEntry(
             manifest_ref=receipt.manifest_ref,
@@ -243,11 +336,27 @@ class AppendOnlyJournal:
             measured_cost_usd=measured_cost_usd,
             conservative_cost_usd=conservative_cost_usd,
         )
+        if current.state is not JournalState.DISPATCHED:
+            if current == entry:
+                return
+            raise ValueError("terminal commit conflict")
+        if measured_cost_usd is not None and measured_cost_usd > conservative_cost_usd:
+            raise ValueError("measured cost exceeds conservative cost")
+        other_cost = sum(
+            item.conservative_cost_usd
+            for ordinal, item in self._entries.items()
+            if ordinal != receipt.manifest_ref.ordinal
+        )
+        if other_cost + conservative_cost_usd > self.manifest.limits.aggregate_maximum_usd:
+            raise ValueError("spend_cap_exhausted")
         self._append({"event": "terminal", **entry.model_dump(mode="json")})
         self._entries[receipt.manifest_ref.ordinal] = entry
 
     def entries(self) -> tuple[JournalEntry, ...]:
         return tuple(self._entries[index] for index in sorted(self._entries))
+
+    def snapshot(self) -> tuple[JournalEntry, ...]:
+        return self.entries()
 
 
 class RecordingRef(_StrictFrozenModel):

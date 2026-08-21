@@ -103,6 +103,7 @@ The journal is durable, append-only state for one manifest. It is the accounting
 boundary, not an owner-approval or launch-authorization mechanism.
 
 ```text
+Journal.create(manifest: EvidenceManifest, store: JournalStore) -> Journal
 Journal.open(manifest: EvidenceManifest, store: JournalStore) -> Journal
 Journal.append_pre_dispatch(ref: ManifestRef) -> DispatchReceipt
 Journal.commit_terminal(
@@ -115,6 +116,13 @@ Journal.commit_terminal(
 Journal.snapshot() -> tuple[JournalEntry, ...]
 Journal.verify() -> None
 ```
+
+`create` is only for first publication and fails if the path already
+exists. `open` is only for an existing journal and fails if the path is absent;
+it never initializes, truncates, or replaces state. A missing journal therefore
+requires the explicit offline recovery operation and can never reset the cap.
+This is an operational defense against accidental or confused-deputy replay,
+not a tamper boundary against the hermes user, who has passwordless sudo.
 
 `append_pre_dispatch` must fsync the `DISPATCHED` intent before entering the
 provider transport. It is the durable point after which a crash is ambiguous

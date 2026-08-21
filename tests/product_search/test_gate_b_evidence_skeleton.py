@@ -239,7 +239,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         raw_sha256=candidates.vacancy_artifact_sha256,
     )
 
-    journal = AppendOnlyJournal.open(manifest, tmp_path / "journal.jsonl")
+    journal = AppendOnlyJournal.create(manifest, tmp_path / "journal.jsonl")
     recordings = RecordingStore(tmp_path / "recordings")
     calls: list[dict[str, object]] = []
 
