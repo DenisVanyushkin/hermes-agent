@@ -45,9 +45,7 @@ def _package_and_launch() -> tuple[object, object, object, object]:
     index = json.loads(package.artifacts["package-index.json"])
     projections: list[str] = []
     for input_sha256 in package.ordered_input_sha256s:
-        payload = json.loads(
-            package.artifacts[f"task10-inputs/{input_sha256}.json"]
-        )
+        payload = json.loads(package.artifacts[f"task10-inputs/{input_sha256}.json"])
         projection = project_vacancy_evidence_v3(
             payload["source_record"],
             payload["raw"],
@@ -125,16 +123,14 @@ def _valid_payload(user_payload: dict[str, object]) -> dict[str, object]:
                 break
         assert selected is not None
         fragment, allowed = selected
-        claims.append(
-            {
-                "claim_id": f"claim-{dimension}",
-                "dimension": dimension,
-                "status": allowed["status"],
-                "claim_code": allowed["claim_code"],
-                "statement": allowed["statement"],
-                "citations": [fragment["fragment_id"]],
-            }
-        )
+        claims.append({
+            "claim_id": f"claim-{dimension}",
+            "dimension": dimension,
+            "status": allowed["status"],
+            "claim_code": allowed["claim_code"],
+            "statement": allowed["statement"],
+            "citations": [fragment["fragment_id"]],
+        })
     return {
         "schema_version": "2.0.0",
         "claims": claims,
@@ -149,7 +145,9 @@ class _DeterministicProvider:
         self.dispatches = dispatches
         self.last_call_metadata: dict[str, object] = {}
 
-    def governed_structured_call(self, *, request: object, capability: object) -> object:
+    def governed_structured_call(
+        self, *, request: object, capability: object
+    ) -> object:
         assert capability is self.capability
         ordinal = len(self.dispatches)
         input_hash = request.input_hash
@@ -211,7 +209,9 @@ class _CrashAfterDispatchProvider:
     def __init__(self, capability: object) -> None:
         self.capability = capability
 
-    def governed_structured_call(self, *, request: object, capability: object) -> object:
+    def governed_structured_call(
+        self, *, request: object, capability: object
+    ) -> object:
         assert capability is self.capability
         reservation_id = capability.reserve(request.input_hash)
         capability.mark_dispatching(reservation_id)
@@ -229,14 +229,18 @@ def test_gate_b_runner_dispatches_each_of_48_inputs_at_most_once_and_continues(
     package_parent = tmp_path / "gate-b-at-most-once"
     package_parent.mkdir()
 
-    def recompute(package_arg: object, checkpoint_arg: object, receipt_arg: object) -> object:
+    def recompute(
+        package_arg: object, checkpoint_arg: object, receipt_arg: object
+    ) -> object:
         assert package_arg is package
         assert checkpoint_arg == checkpoint.model_dump(mode="json")
         assert receipt_arg == receipt.model_dump(mode="json")
         preflight_events.append("preflight")
         return launch
 
-    def provider_factory(*, recordings_root: Path, capability: object, **_: object) -> object:
+    def provider_factory(
+        *, recordings_root: Path, capability: object, **_: object
+    ) -> object:
         assert preflight_events
         assert recordings_root == (
             package_parent
@@ -256,9 +260,10 @@ def test_gate_b_runner_dispatches_each_of_48_inputs_at_most_once_and_continues(
         package=package,
         owner_checkpoint_payload=checkpoint.model_dump(mode="json"),
         launch_receipt_payload=receipt.model_dump(mode="json"),
-        owner_recovery_public_key=gate_b_v3.Ed25519PrivateKey.from_private_bytes(
-            OWNER_PRIVATE_KEY
-        ).public_key().public_bytes_raw(),
+        owner_recovery_public_key=gate_b_v3.Ed25519PrivateKey
+        .from_private_bytes(OWNER_PRIVATE_KEY)
+        .public_key()
+        .public_bytes_raw(),
         now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
     )
 
@@ -291,17 +296,16 @@ def test_reserved_row_requires_owner_recovery_before_provider_construction(
         issued_at=checkpoint.approved_at,
         package_manifest_sha256=package.package_sha256,
     )
-    public_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(
-        OWNER_PRIVATE_KEY
-    ).public_key().public_bytes_raw()
+    public_key = (
+        gate_b_v3.Ed25519PrivateKey
+        .from_private_bytes(OWNER_PRIVATE_KEY)
+        .public_key()
+        .public_bytes_raw()
+    )
     package_parent = tmp_path / "gate-b-at-most-once"
     package_parent.mkdir()
     ledger_root = (
-        package_parent
-        / "runs"
-        / package.package_sha256
-        / launch.run_id
-        / "ledger"
+        package_parent / "runs" / package.package_sha256 / launch.run_id / "ledger"
     )
     for directory in (
         package_parent / "runs",
@@ -351,9 +355,7 @@ def test_dispatched_recovery_is_owner_approved_terminal_unknown_at_max_cost(
         issued_at=_checkpoint.approved_at,
         package_manifest_sha256=package.package_sha256,
     )
-    private_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(
-        OWNER_PRIVATE_KEY
-    )
+    private_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(OWNER_PRIVATE_KEY)
     public_key = private_key.public_key().public_bytes_raw()
     with gate_b_v3.GateBLedgerV3(
         tmp_path / "ledger",
@@ -422,9 +424,12 @@ def test_crash_relaunch_uses_a_new_attempt_and_signed_exact_recovery_manifest(
         "_build_gate_b_provider_v3",
         lambda *, capability, **_kwargs: _CrashAfterDispatchProvider(capability),
     )
-    public_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(
-        OWNER_PRIVATE_KEY
-    ).public_key().public_bytes_raw()
+    public_key = (
+        gate_b_v3.Ed25519PrivateKey
+        .from_private_bytes(OWNER_PRIVATE_KEY)
+        .public_key()
+        .public_bytes_raw()
+    )
 
     with pytest.raises(_SimulatedProcessCrash):
         gate_b_v3.run_gate_b_at_most_once_v3(
@@ -435,12 +440,7 @@ def test_crash_relaunch_uses_a_new_attempt_and_signed_exact_recovery_manifest(
             now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
         )
 
-    run_root = (
-        package_parent
-        / "runs"
-        / package.package_sha256
-        / launch.run_id
-    )
+    run_root = package_parent / "runs" / package.package_sha256 / launch.run_id
     manifest = gate_b_v3.GateBPackageManifestV3.model_validate_json(
         package.manifest_bytes
     )

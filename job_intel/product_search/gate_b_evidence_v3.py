@@ -14,7 +14,13 @@ from pathlib import Path
 import re
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, StringConstraints, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    StringConstraints,
+    model_validator,
+)
 import yaml
 
 from job_intel.product_search.contracts import (
@@ -62,7 +68,9 @@ class ReviewedFragmentEntryV3(_StrictFrozenModel):
     vacancy_artifact_sha256: Annotated[
         str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
     ]
-    source_locator: Annotated[str, StringConstraints(pattern=r"^/description#[0-9]{3}$")]
+    source_locator: Annotated[
+        str, StringConstraints(pattern=r"^/description#[0-9]{3}$")
+    ]
     text_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     decision: ReviewedFragmentDecisionV3
     reviewer_role: Literal["independent_gate_b_evidence_reviewer"]
@@ -177,7 +185,9 @@ class CandidateTupleV3(_StrictFrozenModel):
     vacancy_artifact_sha256: Annotated[
         str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
     ]
-    source_locator: Annotated[str, StringConstraints(pattern=r"^/description#[0-9]{3}$")]
+    source_locator: Annotated[
+        str, StringConstraints(pattern=r"^/description#[0-9]{3}$")
+    ]
     text_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     section: Literal[
         "responsibilities",
@@ -219,7 +229,9 @@ def serialize_candidate_tuple_table_v3(
 
 
 class DescriptionCandidateV3(_StrictFrozenModel):
-    source_locator: Annotated[str, StringConstraints(pattern=r"^/description#[0-9]{3}$")]
+    source_locator: Annotated[
+        str, StringConstraints(pattern=r"^/description#[0-9]{3}$")
+    ]
     section: Literal[
         "responsibilities",
         "what_you_will_do",
@@ -265,9 +277,7 @@ def serialize_provider_payload_v3(
     return {
         "schema_version": synthesis_input.schema_version,
         "assessment_input": synthesis_input.assessment_input.model_dump(mode="json"),
-        "company_authority": synthesis_input.company_authority.model_dump(
-            mode="json"
-        ),
+        "company_authority": synthesis_input.company_authority.model_dump(mode="json"),
         "vacancy_evidence_ref": synthesis_input.vacancy_evidence_ref.model_dump(
             mode="json"
         ),
@@ -369,9 +379,7 @@ class _SectionedDescriptionParser(HTMLParser):
         self._block_has_text = False
         self._block_has_non_emphasis_text = False
 
-    def handle_starttag(
-        self, tag: str, attrs: list[tuple[str, str | None]]
-    ) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         del attrs
         lowered = tag.casefold()
         if lowered in self._HEADING_TAGS:
@@ -405,9 +413,7 @@ class _SectionedDescriptionParser(HTMLParser):
                 heading_section = _classify_section(text)
                 if heading_section is not None:
                     self._section = (
-                        heading_section
-                        if prior_section in ALLOWED_SECTIONS
-                        else None
+                        heading_section if prior_section in ALLOWED_SECTIONS else None
                     )
             self._active_block_tag = None
             self._block_prior_section = None
@@ -505,7 +511,9 @@ def _authority_references(vacancy_ref: ImmutableArtifactRef) -> AssessmentRefere
         profile = yaml.safe_load(_PROFILE_PATH.read_text(encoding="utf-8"))
         authorities = profile["authorities"]
     except (OSError, TypeError, KeyError) as exc:
-        raise ProjectionBlockedV3("candidate and profile authority is unavailable") from exc
+        raise ProjectionBlockedV3(
+            "candidate and profile authority is unavailable"
+        ) from exc
     return AssessmentReferences(
         profile_ref=ImmutableArtifactRef(
             artifact_id="career-profile-v2",
@@ -627,7 +635,9 @@ def _review_entries(
     }
     entry_keys = set(entries)
     if candidate_keys - entry_keys:
-        raise ProjectionBlockedV3("reviewed decision is missing for a description candidate")
+        raise ProjectionBlockedV3(
+            "reviewed decision is missing for a description candidate"
+        )
     if entry_keys - candidate_keys:
         raise ProjectionBlockedV3("reviewed allowlist contains a non-candidate entry")
     return entries
@@ -669,7 +679,8 @@ def _build_projection_v3(
         sha256=candidates.vacancy_artifact_sha256,
     )
     candidate_by_locator = {
-        candidate.source_locator: candidate for candidate in candidates.description_candidates
+        candidate.source_locator: candidate
+        for candidate in candidates.description_candidates
     }
     fragments: list[EvidenceFragmentV1] = []
     dimension_refs: dict[EvidenceDimension, list[str]] = defaultdict(list)
@@ -721,9 +732,17 @@ def _build_projection_v3(
                 text_sha256=candidate.text_sha256,
             )
             entry = review_entries[key]
-            denied = any(pattern.search(candidate.text) for pattern in compiled_deny_patterns)
-            if denied or entry.decision is ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT:
-                if entry.decision is not ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT:
+            denied = any(
+                pattern.search(candidate.text) for pattern in compiled_deny_patterns
+            )
+            if (
+                denied
+                or entry.decision is ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT
+            ):
+                if (
+                    entry.decision
+                    is not ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT
+                ):
                     raise ProjectionBlockedV3(
                         "company or marketing candidate has an unsafe review decision"
                     )

@@ -18,10 +18,7 @@ import job_intel.product_search.gate_b_benchmark_v3 as gate_b_v3
 ROOT = Path(__file__).resolve().parents[2]
 EXPORTER = ROOT / "scripts/export_job_intel_gate_b_benchmark.sh"
 RUNNER = ROOT / "scripts/job_intel_gate_b_benchmark.sh"
-SERVICE = (
-    ROOT
-    / "deploy/systemd/experiments/job-intel-gate-b-benchmark.service"
-)
+SERVICE = ROOT / "deploy/systemd/experiments/job-intel-gate-b-benchmark.service"
 
 
 def _runtime_manifest_payload() -> dict[str, object]:
@@ -169,9 +166,10 @@ esac
         destination.rglob("launch.pending.json")
     )
     assert forbidden == ()
-    assert hashlib.sha256(
-        (destination / "runtime-manifest.json").read_bytes()
-    ).hexdigest() == (destination / "runtime-manifest.sha256").read_text().strip()
+    assert (
+        hashlib.sha256((destination / "runtime-manifest.json").read_bytes()).hexdigest()
+        == (destination / "runtime-manifest.sha256").read_text().strip()
+    )
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -204,9 +202,7 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
         runtime_manifest_sha256=runtime_manifest.canonical_sha256,
         package_manifest_sha256=package_sha256,
         ordered_input_sha256s=package_manifest.ordered_input_sha256s,
-        ordered_projection_sha256s=tuple(
-            f"{index + 101:064x}" for index in range(48)
-        ),
+        ordered_projection_sha256s=tuple(f"{index + 101:064x}" for index in range(48)),
         source_authority_sha256s={"fixture": "b" * 64},
         model_id="openai/gpt-5-mini",
         maximum_output_tokens=2_000,
@@ -251,9 +247,7 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
     checkpoint_path = pending_dir / "owner-checkpoint.json"
     recovery_key_path = pending_dir / "owner-recovery-public-key.bin"
     pending_path.write_bytes(_canonical_bytes(receipt.model_dump(mode="json")))
-    checkpoint_path.write_bytes(
-        _canonical_bytes(checkpoint.model_dump(mode="json"))
-    )
+    checkpoint_path.write_bytes(_canonical_bytes(checkpoint.model_dump(mode="json")))
     recovery_key_path.write_bytes(bytes.fromhex("22" * 32))
     for path in (pending_path, checkpoint_path, recovery_key_path):
         path.chmod(0o400)

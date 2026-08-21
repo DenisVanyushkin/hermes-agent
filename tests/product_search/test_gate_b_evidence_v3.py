@@ -27,8 +27,7 @@ from job_intel.product_search.input_materialization import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PINNED_ALLOWLIST_PATH = (
-    REPOSITORY_ROOT
-    / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
+    REPOSITORY_ROOT / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
 )
 CORRECTED_TUPLE_TABLE_SHA256 = (
     "8ed0e1d719acd872a5aa931f157c7b7812a977220f8d4db721ce3aa7062e4c65"
@@ -163,10 +162,7 @@ def test_role_statement_needs_an_exact_independent_review_entry() -> None:
         "location": "Almaty",
         "salary": "$100k",
         "posted_at": "2026-08-20",
-        "description": (
-            "<h2>Responsibilities</h2><p>"
-            f"{role_statement}</p>"
-        ),
+        "description": (f"<h2>Responsibilities</h2><p>{role_statement}</p>"),
     }
     candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
     candidate = candidates.description_candidates[0]
@@ -372,7 +368,9 @@ def test_v3_synthesis_dispatch_receives_only_admitted_provider_payload() -> None
 
     assert synthesis_result.status is synthesis.EvidenceSynthesisStatus.DELIVERABLE
     assert provider.input_payload is not None
-    serialized = json.dumps(provider.input_payload, sort_keys=True, separators=(",", ":"))
+    serialized = json.dumps(
+        provider.input_payload, sort_keys=True, separators=(",", ":")
+    )
     assert "vacancy_evidence" not in provider.input_payload
     for excluded in (company_statement, ambiguous_statement):
         assert excluded not in serialized
@@ -418,7 +416,9 @@ def test_company_section_is_not_a_candidate_and_cannot_be_allowlisted() -> None:
         evidence.project_vacancy_evidence_v3(_record(), raw, invented)
 
 
-def test_structured_qualified_requirement_heading_is_not_coerced_to_responsibility() -> None:
+def test_structured_qualified_requirement_heading_is_not_coerced_to_responsibility() -> (
+    None
+):
     """Mutation caught: a literal qualified heading inherits the prior role section."""
     responsibility = "Lead quarterly roadmap planning with engineering and design."
     heading = "Minimum Qualifications"
@@ -501,14 +501,15 @@ def test_who_you_are_heading_maps_to_qualifications_without_relabeling_review() 
     assert any(fragment.text == requirement for fragment in result.fragments)
 
 
-def test_structured_heading_requires_an_exact_review_before_provider_admission() -> None:
+def test_structured_heading_requires_an_exact_review_before_provider_admission() -> (
+    None
+):
     """Mutation caught: a genuine role section bypasses the exact-review gate."""
     requirement = "Seven years of product management experience are required."
     raw = {
         "title": "Head of Product",
         "description": (
-            "<p><strong>Qualifications</strong></p>"
-            f"<ul><li>{requirement}</li></ul>"
+            f"<p><strong>Qualifications</strong></p><ul><li>{requirement}</li></ul>"
         ),
     }
 
@@ -542,7 +543,9 @@ def test_emphasized_company_heading_excludes_the_following_description() -> None
 
     candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
 
-    assert all(candidate.text != statement for candidate in candidates.description_candidates)
+    assert all(
+        candidate.text != statement for candidate in candidates.description_candidates
+    )
 
 
 def test_long_description_bullet_is_preserved_as_bounded_exact_continuations() -> None:
@@ -557,20 +560,28 @@ def test_long_description_bullet_is_preserved_as_bounded_exact_continuations() -
     candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
 
     assert len(candidates.description_candidates) == 2
-    assert [candidate.source_locator for candidate in candidates.description_candidates] == [
+    assert [
+        candidate.source_locator for candidate in candidates.description_candidates
+    ] == [
         "/description#000",
         "/description#001",
     ]
-    assert all(len(candidate.text) <= 500 for candidate in candidates.description_candidates)
-    assert " ".join(candidate.text for candidate in candidates.description_candidates) == (
-        " ".join(long_bullet.split())
+    assert all(
+        len(candidate.text) <= 500 for candidate in candidates.description_candidates
     )
+    assert " ".join(
+        candidate.text for candidate in candidates.description_candidates
+    ) == (" ".join(long_bullet.split()))
 
 
-def test_v3_provider_validation_binds_non_unknown_claims_to_reviewed_fragments() -> None:
+def test_v3_provider_validation_binds_non_unknown_claims_to_reviewed_fragments() -> (
+    None
+):
     """Mutation caught: a provider relabels an excluded company fact as mandate evidence."""
     role_statement = "Lead quarterly roadmap planning with engineering and design."
-    company_statement = "More than $100 billion in merchant volume flows through our platform."
+    company_statement = (
+        "More than $100 billion in merchant volume flows through our platform."
+    )
     raw = {
         "title": "Head of Product",
         "location": "Almaty",
@@ -636,11 +647,14 @@ def test_v3_provider_validation_binds_non_unknown_claims_to_reviewed_fragments()
 
     invented = deepcopy(payload)
     invented["claims"][0]["statement"] = "Invented product mandate."
-    assert evidence.validate_provider_payload_v3(
-        invented,
-        synthesis_input=synthesis_input,
-        reviewed_allowlist=allowlist,
-    ) is evidence.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    assert (
+        evidence.validate_provider_payload_v3(
+            invented,
+            synthesis_input=synthesis_input,
+            reviewed_allowlist=allowlist,
+        )
+        is evidence.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    )
 
     company_fragment = next(
         item
@@ -665,7 +679,9 @@ def test_v3_provider_validation_binds_non_unknown_claims_to_reviewed_fragments()
         ),
     )
     unsafe_input = synthesis_input.model_copy(deep=True)
-    object.__setattr__(unsafe_input, "fragments", (*unsafe_input.fragments, unsafe_fragment))
+    object.__setattr__(
+        unsafe_input, "fragments", (*unsafe_input.fragments, unsafe_fragment)
+    )
     unsafe = deepcopy(payload)
     mandate_claim = next(
         claim for claim in unsafe["claims"] if claim["dimension"] == "mandate_fit"
@@ -676,16 +692,22 @@ def test_v3_provider_validation_binds_non_unknown_claims_to_reviewed_fragments()
         "citations": [unsafe_fragment.fragment_id],
     })
 
-    assert evidence.validate_provider_payload_v3(
-        unsafe,
-        synthesis_input=unsafe_input,
-        reviewed_allowlist=allowlist,
-    ) is evidence.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
-    assert synthesis.validate_provider_payload_v3(
-        unsafe,
-        synthesis_input=unsafe_input,
-        reviewed_description_claims=reviewed_description_claims,
-    ) is evidence.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    assert (
+        evidence.validate_provider_payload_v3(
+            unsafe,
+            synthesis_input=unsafe_input,
+            reviewed_allowlist=allowlist,
+        )
+        is evidence.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    )
+    assert (
+        synthesis.validate_provider_payload_v3(
+            unsafe,
+            synthesis_input=unsafe_input,
+            reviewed_description_claims=reviewed_description_claims,
+        )
+        is evidence.EvidenceSynthesisStatus.UNSUPPORTED_CLAIM
+    )
 
 
 def _pinned_raw_records() -> tuple[tuple[dict[str, object], dict[str, object]], ...]:
@@ -762,12 +784,17 @@ def test_corrected_review_allowlist_projects_all_48_without_company_claims() -> 
                     fragment.source_locator,
                     fragment.text_sha256,
                 )
-                reviewed = next(entry for entry in allowlist.entries if (
-                    entry.selection_key,
-                    entry.vacancy_artifact_sha256,
-                    entry.source_locator,
-                    entry.text_sha256,
-                ) == key)
+                reviewed = next(
+                    entry
+                    for entry in allowlist.entries
+                    if (
+                        entry.selection_key,
+                        entry.vacancy_artifact_sha256,
+                        entry.source_locator,
+                        entry.text_sha256,
+                    )
+                    == key
+                )
                 assert reviewed.decision in {
                     ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY,
                     ReviewedFragmentDecisionV3.ALLOW_ROLE_REQUIREMENT,

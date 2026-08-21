@@ -46,7 +46,8 @@ ROOT = Path(__file__).resolve().parents[2]
 POLICY_PATH = ROOT / "config/product_search/gate_b_benchmark.v3.yaml"
 OWNER_PRIVATE_KEY = bytes.fromhex("11" * 32)
 OWNER_PUBLIC_KEY = (
-    Ed25519PrivateKey.from_private_bytes(OWNER_PRIVATE_KEY)
+    Ed25519PrivateKey
+    .from_private_bytes(OWNER_PRIVATE_KEY)
     .public_key()
     .public_bytes(
         encoding=serialization.Encoding.Raw,
@@ -86,8 +87,7 @@ def _gate_b_source_bytes_v3() -> dict[str, object]:
             ROOT / "config/product_search/decision_contract.v2.yaml"
         ).read_bytes(),
         "product_sot": (
-            ROOT
-            / "docs/superpowers/specs/"
+            ROOT / "docs/superpowers/specs/"
             "2026-08-10-job-intel-search-product-redesign-design.md"
         ).read_bytes(),
         "search_contract": (
@@ -130,7 +130,9 @@ def _path_snapshot_v3(paths: tuple[Path, ...]) -> dict[str, tuple[int, int, str]
         candidates = (root, *sorted(root.rglob("*"))) if root.is_dir() else (root,)
         for path in candidates:
             metadata = path.lstat()
-            digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+            digest = (
+                hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+            )
             snapshot[str(path)] = (metadata.st_mode, metadata.st_size, digest)
     return snapshot
 
@@ -165,7 +167,9 @@ def test_v3_call_state_is_closed() -> None:
     ],
 )
 def test_v3_transition_matrix(source: str, target: str, allowed: bool) -> None:
-    actor = "owner_recovery" if (source, target) == ("reserved", "pending") else "runner"
+    actor = (
+        "owner_recovery" if (source, target) == ("reserved", "pending") else "runner"
+    )
     assert transition_allowed(source, target, actor=actor) is allowed
 
 
@@ -703,7 +707,9 @@ def test_invalid_inventory_does_not_truncate_a_torn_ledger_tail(
 
 
 @pytest.mark.parametrize("artifact_kind", ["ledger", "marker", "recording"])
-@pytest.mark.parametrize("fault_stage", ["before_write", "during_write", "before_fsync"])
+@pytest.mark.parametrize(
+    "fault_stage", ["before_write", "during_write", "before_fsync"]
+)
 def test_create_once_artifact_fault_never_publishes_empty_or_partial_final_name(
     tmp_path: Path,
     v3_identity: tuple[GateBPackageManifestV3, GateBLaunchIdentityV3],
@@ -722,17 +728,20 @@ def test_create_once_artifact_fault_never_publishes_empty_or_partial_final_name(
     original_write_all = gate_b_v3._write_all
     original_prepared_fsync = gate_b_v3._fsync_prepared_file
     if fault_stage == "before_write":
+
         def fail_write(_descriptor: int, _payload: bytes) -> None:
             raise OSError("fault after anonymous inode create")
 
         monkeypatch.setattr(gate_b_v3, "_write_all", fail_write)
     elif fault_stage == "during_write":
+
         def fail_during_write(descriptor: int, payload: bytes) -> None:
             os.write(descriptor, payload[:5])
             raise OSError("fault during anonymous inode write")
 
         monkeypatch.setattr(gate_b_v3, "_write_all", fail_during_write)
     else:
+
         def fail_fsync(_descriptor: int) -> None:
             raise OSError("fault before prepared inode fsync")
 
@@ -794,9 +803,7 @@ def test_absent_root_parent_fsync_precedes_ledger_publication(
             events.append("parent_fsync")
         original_fsync(descriptor)
 
-    def observe_publish(
-        *args: object, **kwargs: object
-    ) -> tuple[int, tuple[int, int]]:
+    def observe_publish(*args: object, **kwargs: object) -> tuple[int, tuple[int, int]]:
         events.append("ledger_publish")
         assert "parent_fsync" in events
         return original_publish(*args, **kwargs)
@@ -831,9 +838,7 @@ def test_absent_root_parent_fsync_failure_prevents_ledger_initialization(
             events.append("parent_fsync")
         original_fsync(descriptor)
 
-    def observe_publish(
-        *args: object, **kwargs: object
-    ) -> tuple[int, tuple[int, int]]:
+    def observe_publish(*args: object, **kwargs: object) -> tuple[int, tuple[int, int]]:
         events.append("ledger_publish")
         assert "parent_fsync" in events
         return original_publish(*args, **kwargs)
@@ -1067,7 +1072,10 @@ def test_ledger_rejects_inconsistent_or_unsafe_marker_inventory(
     marker = _marker_path(ledger)
     ledger.close()
 
-    if mutation in {"ledger_dispatch_without_marker", "terminal_recording_without_marker"}:
+    if mutation in {
+        "ledger_dispatch_without_marker",
+        "terminal_recording_without_marker",
+    }:
         marker.unlink()
     elif mutation == "marker_for_another_ordinal":
         marker.rename(marker.with_name(f"1-{'2' * 64}.json"))
@@ -1131,7 +1139,8 @@ def test_ledger_rejects_reordered_package_and_mixed_run_identity(
         )
 
     foreign_public_key = (
-        Ed25519PrivateKey.from_private_bytes(bytes.fromhex("22" * 32))
+        Ed25519PrivateKey
+        .from_private_bytes(bytes.fromhex("22" * 32))
         .public_key()
         .public_bytes(
             encoding=serialization.Encoding.Raw,
@@ -1337,8 +1346,7 @@ def test_public_gate_b_v3_package_apis_accept_no_io_capabilities() -> None:
     for api in (load, validate, materialize):
         parameters = inspect.signature(api).parameters.values()
         assert all(
-            parameter.kind
-            not in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}
+            parameter.kind not in {parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD}
             for parameter in parameters
         )
         assert not {
@@ -1417,30 +1425,28 @@ def test_materialize_gate_b_package_v3_is_atomic_scoped_and_idempotent(
     assert set(receipt.artifact_sha256s) == set(package.artifacts)
     assert receipt.observed_operations
     assert sum(
-        operation.kind == "artifact_write"
-        for operation in receipt.observed_operations
+        operation.kind == "artifact_write" for operation in receipt.observed_operations
     ) == len(package.artifacts)
     assert sum(
-        operation.kind == "artifact_rehash"
-        for operation in receipt.observed_operations
+        operation.kind == "artifact_rehash" for operation in receipt.observed_operations
     ) == len(package.artifacts)
     assert all(
         Path(operation.path).is_relative_to(package_parent)
         for operation in receipt.observed_operations
         if operation.path is not None and operation.kind.startswith("artifact_")
     )
-    assert not any(path.name.endswith(".materializing") for path in package_parent.iterdir())
+    assert not any(
+        path.name.endswith(".materializing") for path in package_parent.iterdir()
+    )
 
     second = materialize(package)
 
     assert second.created is False
     assert not any(
-        operation.kind == "artifact_write"
-        for operation in second.observed_operations
+        operation.kind == "artifact_write" for operation in second.observed_operations
     )
     assert sum(
-        operation.kind == "artifact_rehash"
-        for operation in second.observed_operations
+        operation.kind == "artifact_rehash" for operation in second.observed_operations
     ) == len(package.artifacts)
     assert _path_snapshot_v3(protected_paths) == protected_before
 
@@ -1473,9 +1479,7 @@ def test_materialize_gate_b_package_v3_rejects_existing_unknown_content(
 def test_materialize_gate_b_package_v3_rejects_forged_source_inventory_before_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = gate_b_v3.validate_gate_b_package_pure_v3(
-        _gate_b_source_bytes_v3()
-    )
+    package = gate_b_v3.validate_gate_b_package_pure_v3(_gate_b_source_bytes_v3())
     forged = type(package)(
         package_sha256=package.package_sha256,
         manifest_sha256=package.manifest_sha256,
@@ -1526,9 +1530,7 @@ def test_pure_package_rejects_missing_invented_or_misbound_review_candidates() -
 def test_materializer_rejects_forged_index_not_bound_by_manifest_before_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    package = gate_b_v3.validate_gate_b_package_pure_v3(
-        _gate_b_source_bytes_v3()
-    )
+    package = gate_b_v3.validate_gate_b_package_pure_v3(_gate_b_source_bytes_v3())
     index = json.loads(package.artifacts["package-index.json"])
     index["source_authority_sha256s"]["benchmark_policy"] = "f" * 64
     index_bytes = json.dumps(
@@ -1603,7 +1605,9 @@ def test_materializer_never_reads_credential_file_contents(
         if operation.path in {str(credential_env), str(job_intel_env)}
     ]
     assert len(credential_operations) == 4
-    assert all("metadata_only" in operation.detail for operation in credential_operations)
+    assert all(
+        "metadata_only" in operation.detail for operation in credential_operations
+    )
 
 
 @pytest.fixture
@@ -1613,15 +1617,11 @@ def _actual_runtime_identity_fixture_v3(
 ) -> tuple[dict[str, Path], object, dict[str, bytes]]:
     export_root = tmp_path / "gate-b-runtime"
     runtime_root = export_root / "runtime"
-    module_path = (
-        runtime_root / "job_intel/product_search/gate_b_benchmark_v3.py"
-    )
+    module_path = runtime_root / "job_intel/product_search/gate_b_benchmark_v3.py"
     python_executable = export_root / "python-runtime/venv/bin/python"
     stdlib_root = export_root / "python-runtime/stdlib"
     dependency_lock = runtime_root / "uv.lock"
-    installed_distributions = (
-        export_root / "python-runtime/installed-distributions.txt"
-    )
+    installed_distributions = export_root / "python-runtime/installed-distributions.txt"
     module_path.parent.mkdir(parents=True)
     python_executable.parent.mkdir(parents=True)
     stdlib_root.mkdir(parents=True)
@@ -1634,9 +1634,7 @@ def _actual_runtime_identity_fixture_v3(
     runtime_payloads = {
         "runtime_tree_manifest": gate_b_v3._tree_manifest_bytes_v3(runtime_root),
         "python_executable": python_executable.read_bytes(),
-        "stdlib_tree_manifest": gate_b_v3._stdlib_tree_manifest_bytes_v3(
-            stdlib_root
-        ),
+        "stdlib_tree_manifest": gate_b_v3._stdlib_tree_manifest_bytes_v3(stdlib_root),
         "dependency_lock": dependency_lock.read_bytes(),
         "installed_distributions": installed_distributions.read_bytes(),
         "sys_path": json.dumps(
@@ -1731,9 +1729,7 @@ def _projection_hashes_v3(package: object) -> tuple[str, ...]:
     )
     hashes: list[str] = []
     for input_sha256 in package.ordered_input_sha256s:
-        payload = json.loads(
-            package.artifacts[f"task10-inputs/{input_sha256}.json"]
-        )
+        payload = json.loads(package.artifacts[f"task10-inputs/{input_sha256}.json"])
         projection = project_vacancy_evidence_v3(
             payload["source_record"],
             payload["raw"],
@@ -1840,9 +1836,7 @@ def test_launch_identity_recomputation_binds_current_package_runtime_and_approva
         checkpoint,
         receipt,
         expected,
-    ) = _launch_approval_fixture_v3(
-        (actual_runtime_manifest, actual_runtime_payloads)
-    )
+    ) = _launch_approval_fixture_v3((actual_runtime_manifest, actual_runtime_payloads))
 
     observed = getattr(gate_b_v3, "recompute_launch_identity_v3")(
         package,
@@ -1921,9 +1915,7 @@ def test_launch_identity_rejects_stale_approval_after_authority_drift(
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3(
-        (actual_runtime_manifest, actual_runtime_payloads)
-    )
+    ) = _launch_approval_fixture_v3((actual_runtime_manifest, actual_runtime_payloads))
     changed_sources = deepcopy(sources)
     changed_sources[source_name] += b"\n"
 
@@ -1971,9 +1963,7 @@ def test_launch_identity_rejects_runtime_payload_drift(
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3(
-        (actual_runtime_manifest, actual_runtime_payloads)
-    )
+    ) = _launch_approval_fixture_v3((actual_runtime_manifest, actual_runtime_payloads))
     if runtime_payload_name == "sys_path":
         gate_b_v3.sys.path.append(str(runtime_paths["export_root"] / "drift"))
     else:
@@ -2004,9 +1994,7 @@ def test_launch_identity_rejects_candidate_commit_and_input_order_drift(
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3(
-        (actual_runtime_manifest, actual_runtime_payloads)
-    )
+    ) = _launch_approval_fixture_v3((actual_runtime_manifest, actual_runtime_payloads))
     changed_runtime_manifest = runtime_manifest.model_copy(
         update={"candidate_commit": "b" * 40}
     )
@@ -2021,9 +2009,7 @@ def test_launch_identity_rejects_candidate_commit_and_input_order_drift(
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-    (runtime_paths["export_root"] / "runtime-manifest.json").write_bytes(
-        manifest_bytes
-    )
+    (runtime_paths["export_root"] / "runtime-manifest.json").write_bytes(manifest_bytes)
     (runtime_paths["export_root"] / "runtime-manifest.sha256").write_text(
         hashlib.sha256(manifest_bytes).hexdigest() + "\n",
         encoding="ascii",
@@ -2088,9 +2074,7 @@ def test_launch_identity_rejects_derived_prompt_schema_model_pricing_or_cap_drif
         checkpoint,
         receipt,
         _expected,
-    ) = _launch_approval_fixture_v3(
-        (actual_runtime_manifest, actual_runtime_payloads)
-    )
+    ) = _launch_approval_fixture_v3((actual_runtime_manifest, actual_runtime_payloads))
     original = gate_b_v3._derive_launch_authority_sha256s_v3
 
     def changed(source_bytes: dict[str, object]) -> dict[str, str]:
@@ -2115,9 +2099,7 @@ def test_one_time_launch_receipt_rejects_long_expiry_or_extra_authority() -> Non
         "receipt_kind": "gate_b_at_most_once_launch",
         "launch_kind": "initial",
         "benchmark_run_id": "gate-b-at-most-once-" + "1" * 16,
-        "launch_attempt_id": (
-            "gate-b-at-most-once-" + "1" * 16 + "-" + "2" * 64
-        ),
+        "launch_attempt_id": ("gate-b-at-most-once-" + "1" * 16 + "-" + "2" * 64),
         "issued_at": datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
         "expires_at": datetime(2026, 8, 20, 12, 30, 1, tzinfo=timezone.utc),
         "nonce": "2" * 64,
@@ -2133,9 +2115,7 @@ def test_one_time_launch_receipt_rejects_long_expiry_or_extra_authority() -> Non
 
     with pytest.raises(ValidationError, match="30 minutes"):
         receipt_type.model_validate(payload)
-    payload["expires_at"] = datetime(
-        2026, 8, 20, 12, 29, 59, tzinfo=timezone.utc
-    )
+    payload["expires_at"] = datetime(2026, 8, 20, 12, 29, 59, tzinfo=timezone.utc)
     with pytest.raises(ValidationError, match="exactly 30 minutes"):
         receipt_type.model_validate(payload)
     payload["expires_at"] = datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc)

@@ -113,9 +113,9 @@ class GateBTerminalKindV3(str, Enum):
 
 _TRANSITION_ACTORS = {
     (GateBCallStateV3.PENDING, GateBCallStateV3.RESERVED): frozenset({"runner"}),
-    (GateBCallStateV3.RESERVED, GateBCallStateV3.PENDING): frozenset(
-        {"owner_recovery"}
-    ),
+    (GateBCallStateV3.RESERVED, GateBCallStateV3.PENDING): frozenset({
+        "owner_recovery"
+    }),
     (GateBCallStateV3.RESERVED, GateBCallStateV3.DISPATCHED): frozenset({"runner"}),
     (GateBCallStateV3.DISPATCHED, GateBCallStateV3.SUCCESS): frozenset({"runner"}),
     (
@@ -292,13 +292,11 @@ def load_gate_b_benchmark_policy_v3(
 _ZERO_SHA256 = "0" * 64
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
-_TERMINAL_STATES = frozenset(
-    {
-        GateBCallStateV3.SUCCESS,
-        GateBCallStateV3.TERMINAL_FAILURE,
-        GateBCallStateV3.TERMINAL_UNKNOWN,
-    }
-)
+_TERMINAL_STATES = frozenset({
+    GateBCallStateV3.SUCCESS,
+    GateBCallStateV3.TERMINAL_FAILURE,
+    GateBCallStateV3.TERMINAL_UNKNOWN,
+})
 _AT_FDCWD = -100
 _AT_SYMLINK_FOLLOW = 0x400
 _OWNER_SIGNATURE_DOMAIN = b"gate-b-owner-recovery-v3\0"
@@ -334,18 +332,14 @@ def _recovery_inventory_sha256(
     ledger_head_sha256: str,
     rows: tuple[GateBLedgerRowV3, ...],
 ) -> str:
-    return canonical_json_sha256(
-        {
-            "schema_version": "3.0.0",
-            "run_id": run_id,
-            "package_manifest_sha256": package_manifest_sha256,
-            "owner_recovery_public_key_sha256": (
-                owner_recovery_public_key_sha256
-            ),
-            "ledger_head_sha256": ledger_head_sha256,
-            "rows": [row.model_dump(mode="json") for row in rows],
-        }
-    )
+    return canonical_json_sha256({
+        "schema_version": "3.0.0",
+        "run_id": run_id,
+        "package_manifest_sha256": package_manifest_sha256,
+        "owner_recovery_public_key_sha256": (owner_recovery_public_key_sha256),
+        "ledger_head_sha256": ledger_head_sha256,
+        "rows": [row.model_dump(mode="json") for row in rows],
+    })
 
 
 class GateBRecoveryRequestV3(_StrictFrozenModel):
@@ -379,9 +373,7 @@ class GateBRecoveryRequestV3(_StrictFrozenModel):
         if self.inventory_sha256 != _recovery_inventory_sha256(
             run_id=self.run_id,
             package_manifest_sha256=self.package_manifest_sha256,
-            owner_recovery_public_key_sha256=(
-                self.owner_recovery_public_key_sha256
-            ),
+            owner_recovery_public_key_sha256=(self.owner_recovery_public_key_sha256),
             ledger_head_sha256=self.ledger_head_sha256,
             rows=self.rows,
         ):
@@ -592,10 +584,7 @@ class GateBLedgerV3:
         owner_recovery_public_key: bytes,
         expected_uid: int | None = None,
     ) -> None:
-        if (
-            launch_identity.package_manifest_sha256
-            != package_manifest.canonical_sha256
-        ):
+        if launch_identity.package_manifest_sha256 != package_manifest.canonical_sha256:
             raise GateBLedgerErrorV3("ledger_identity_package_mismatch")
         try:
             Ed25519PublicKey.from_public_bytes(owner_recovery_public_key)
@@ -663,9 +652,7 @@ class GateBLedgerV3:
         return _recovery_inventory_sha256(
             run_id=self.launch_identity.run_id,
             package_manifest_sha256=self.package_manifest.canonical_sha256,
-            owner_recovery_public_key_sha256=(
-                self.owner_recovery_public_key_sha256
-            ),
+            owner_recovery_public_key_sha256=(self.owner_recovery_public_key_sha256),
             ledger_head_sha256=self.ledger_head_sha256,
             rows=self.rows(),
         )
@@ -838,9 +825,7 @@ class GateBLedgerV3:
             try:
                 os.fsync(root_parent_descriptor)
             except OSError as exc:
-                raise GateBLedgerErrorV3(
-                    "ledger_root_parent_fsync_failed"
-                ) from exc
+                raise GateBLedgerErrorV3("ledger_root_parent_fsync_failed") from exc
             try:
                 self._root_descriptor = os.open(
                     root_name,
@@ -877,14 +862,12 @@ class GateBLedgerV3:
             persisted_initial["entry_sha256"] = initial_sha256
             prepared_initial = _canonical_json_bytes(persisted_initial) + b"\n"
             try:
-                self._ledger_descriptor, self._ledger_identity = (
-                    _publish_prepared_file(
-                        self._root_descriptor,
-                        self.ledger_filename,
-                        prepared_initial,
-                        expected_uid=self.expected_uid,
-                        error_prefix="ledger",
-                    )
+                self._ledger_descriptor, self._ledger_identity = _publish_prepared_file(
+                    self._root_descriptor,
+                    self.ledger_filename,
+                    prepared_initial,
+                    expected_uid=self.expected_uid,
+                    error_prefix="ledger",
                 )
                 self._ledger_head_sha256 = initial_sha256
                 self._sequence = 1
@@ -941,9 +924,7 @@ class GateBLedgerV3:
         except OSError as exc:
             raise GateBLedgerErrorV3(f"ledger_{name}_unsafe") from exc
         try:
-            identity = self._validate_directory_descriptor(
-                descriptor, f"ledger_{name}"
-            )
+            identity = self._validate_directory_descriptor(descriptor, f"ledger_{name}")
         except Exception:
             os.close(descriptor)
             raise
@@ -1087,12 +1068,8 @@ class GateBLedgerV3:
             "previous_entry_sha256": _ZERO_SHA256,
             "run_id": self.launch_identity.run_id,
             "package_manifest_sha256": self.package_manifest.canonical_sha256,
-            "owner_recovery_public_key_sha256": (
-                self.owner_recovery_public_key_sha256
-            ),
-            "ordered_input_sha256s": list(
-                self.package_manifest.ordered_input_sha256s
-            ),
+            "owner_recovery_public_key_sha256": (self.owner_recovery_public_key_sha256),
+            "ordered_input_sha256s": list(self.package_manifest.ordered_input_sha256s),
         }
 
     def _append_transition(
@@ -1114,37 +1091,37 @@ class GateBLedgerV3:
         if not transition_allowed(source, target, actor=actor):
             raise GateBLedgerErrorV3("ledger_transition_not_allowed")
         row = self._mutable_row(ordinal)
-        self._append_entry(
-            {
-                "schema_version": "3.0.0",
-                "kind": "transition",
-                "sequence": self._sequence,
-                "previous_entry_sha256": self._ledger_head_sha256,
-                "run_id": self.launch_identity.run_id,
-                "package_manifest_sha256": self.package_manifest.canonical_sha256,
-                "ordinal": ordinal,
-                "input_sha256": row["input_sha256"],
-                "source_state": source.value,
-                "target_state": target.value,
-                "actor": actor,
-                "dispatch_id": dispatch_id,
-                "dispatch_marker_sha256": marker_sha256,
-                "recording_sha256": recording_sha256,
-                "measured_cost_usd": (
-                    None if measured_cost_usd is None else str(measured_cost_usd)
-                ),
-                "conservative_cost_usd": str(conservative_cost_usd),
-                "owner_decision_sha256": owner_decision_sha256,
-                "owner_decision": (
-                    None if owner_decision is None else owner_decision.model_dump(mode="json")
-                ),
-                "owner_recovery_request": (
-                    None
-                    if owner_recovery_request is None
-                    else owner_recovery_request.model_dump(mode="json")
-                ),
-            }
-        )
+        self._append_entry({
+            "schema_version": "3.0.0",
+            "kind": "transition",
+            "sequence": self._sequence,
+            "previous_entry_sha256": self._ledger_head_sha256,
+            "run_id": self.launch_identity.run_id,
+            "package_manifest_sha256": self.package_manifest.canonical_sha256,
+            "ordinal": ordinal,
+            "input_sha256": row["input_sha256"],
+            "source_state": source.value,
+            "target_state": target.value,
+            "actor": actor,
+            "dispatch_id": dispatch_id,
+            "dispatch_marker_sha256": marker_sha256,
+            "recording_sha256": recording_sha256,
+            "measured_cost_usd": (
+                None if measured_cost_usd is None else str(measured_cost_usd)
+            ),
+            "conservative_cost_usd": str(conservative_cost_usd),
+            "owner_decision_sha256": owner_decision_sha256,
+            "owner_decision": (
+                None
+                if owner_decision is None
+                else owner_decision.model_dump(mode="json")
+            ),
+            "owner_recovery_request": (
+                None
+                if owner_recovery_request is None
+                else owner_recovery_request.model_dump(mode="json")
+            ),
+        })
 
     def _append_entry(self, entry: dict[str, Any]) -> None:
         self._assert_mutation_safe()
@@ -1162,9 +1139,7 @@ class GateBLedgerV3:
         self._sequence += 1
         current_ledger_bytes = _read_all(self._ledger_descriptor)
         self._ledger_size = len(current_ledger_bytes)
-        self._ledger_content_sha256 = hashlib.sha256(
-            current_ledger_bytes
-        ).hexdigest()
+        self._ledger_content_sha256 = hashlib.sha256(current_ledger_bytes).hexdigest()
 
     def _load_existing(self) -> None:
         raw_payload = _read_all(self._ledger_descriptor)
@@ -1225,12 +1200,8 @@ class GateBLedgerV3:
             "previous_entry_sha256": _ZERO_SHA256,
             "run_id": self.launch_identity.run_id,
             "package_manifest_sha256": self.package_manifest.canonical_sha256,
-            "owner_recovery_public_key_sha256": (
-                self.owner_recovery_public_key_sha256
-            ),
-            "ordered_input_sha256s": list(
-                self.package_manifest.ordered_input_sha256s
-            ),
+            "owner_recovery_public_key_sha256": (self.owner_recovery_public_key_sha256),
+            "ordered_input_sha256s": list(self.package_manifest.ordered_input_sha256s),
         }
         if initial != expected_initial:
             raise GateBLedgerErrorV3("ledger_identity_mismatch")
@@ -1307,9 +1278,7 @@ class GateBLedgerV3:
                     if entry["measured_cost_usd"] is None
                     else self._parse_cost(entry["measured_cost_usd"])
                 ),
-                conservative_cost_usd=self._parse_cost(
-                    entry["conservative_cost_usd"]
-                ),
+                conservative_cost_usd=self._parse_cost(entry["conservative_cost_usd"]),
             )
 
     def _validate_transition_evidence(
@@ -1354,26 +1323,33 @@ class GateBLedgerV3:
         if conservative < 0 or conservative > _PER_CALL_MAXIMUM_USD:
             raise GateBLedgerErrorV3("ledger_cost_invalid")
         if source is GateBCallStateV3.PENDING:
-            if any(
-                entry[field] is not None
-                for field in (
-                    "dispatch_id",
-                    "dispatch_marker_sha256",
-                    "recording_sha256",
-                    "measured_cost_usd",
+            if (
+                any(
+                    entry[field] is not None
+                    for field in (
+                        "dispatch_id",
+                        "dispatch_marker_sha256",
+                        "recording_sha256",
+                        "measured_cost_usd",
+                    )
                 )
-            ) or conservative != 0:
+                or conservative != 0
+            ):
                 raise GateBLedgerErrorV3("ledger_reservation_evidence_invalid")
         elif target is GateBCallStateV3.PENDING:
-            if entry["actor"] != "owner_recovery" or any(
-                entry[field] is not None
-                for field in (
-                    "dispatch_id",
-                    "dispatch_marker_sha256",
-                    "recording_sha256",
-                    "measured_cost_usd",
+            if (
+                entry["actor"] != "owner_recovery"
+                or any(
+                    entry[field] is not None
+                    for field in (
+                        "dispatch_id",
+                        "dispatch_marker_sha256",
+                        "recording_sha256",
+                        "measured_cost_usd",
+                    )
                 )
-            ) or conservative != 0:
+                or conservative != 0
+            ):
                 raise GateBLedgerErrorV3("ledger_recovery_evidence_invalid")
         elif target is GateBCallStateV3.DISPATCHED:
             if (
@@ -1433,8 +1409,7 @@ class GateBLedgerV3:
             or request_row.input_sha256 != exact_transition.input_sha256
             or request_row.state is not exact_transition.source_state
             or request.run_id != self.launch_identity.run_id
-            or request.package_manifest_sha256
-            != self.package_manifest.canonical_sha256
+            or request.package_manifest_sha256 != self.package_manifest.canonical_sha256
             or request.owner_recovery_public_key_sha256
             != self.owner_recovery_public_key_sha256
         ):
@@ -1494,17 +1469,14 @@ class GateBLedgerV3:
                 if recording_payload["measured_cost_usd"] is None
                 else self._parse_cost(recording_payload["measured_cost_usd"])
             )
-            conservative = self._parse_cost(
-                recording_payload["conservative_cost_usd"]
-            )
+            conservative = self._parse_cost(recording_payload["conservative_cost_usd"])
             if state in _TERMINAL_STATES and state is not target:
                 raise GateBLedgerErrorV3("recording_terminal_conflict")
             if row["recording_sha256"] not in {None, recording["sha256"]}:
                 raise GateBLedgerErrorV3("recording_hash_conflict")
             self._validate_recording_cost(target, measured, conservative)
             if (
-                recording_payload["record_kind"]
-                == "owner_recovery_terminal_unknown"
+                recording_payload["record_kind"] == "owner_recovery_terminal_unknown"
                 and state not in _TERMINAL_STATES
             ):
                 exact_transition = GateBRecoveryTransitionV3(
@@ -1516,9 +1488,7 @@ class GateBLedgerV3:
                 _decision, request = self._validate_owner_recovery_evidence(
                     decision_payload=recording_payload["owner_decision"],
                     request_payload=recording_payload["owner_recovery_request"],
-                    owner_decision_sha256=(
-                        recording_payload["owner_decision_sha256"]
-                    ),
+                    owner_decision_sha256=(recording_payload["owner_decision_sha256"]),
                     exact_transition=exact_transition,
                 )
                 if not self._owner_recording_matches_replayed_prefix(
@@ -1526,9 +1496,7 @@ class GateBLedgerV3:
                     request=request,
                     exact_transition=exact_transition,
                 ):
-                    raise GateBLedgerErrorV3(
-                        "recording_owner_decision_head_mismatch"
-                    )
+                    raise GateBLedgerErrorV3("recording_owner_decision_head_mismatch")
             row.update(
                 state=target,
                 recording_sha256=recording["sha256"],
@@ -1544,9 +1512,7 @@ class GateBLedgerV3:
         exact_transition: GateBRecoveryTransitionV3,
     ) -> bool:
         try:
-            transition_index = decision.requested_transitions.index(
-                exact_transition
-            )
+            transition_index = decision.requested_transitions.index(exact_transition)
         except ValueError:
             return False
         if request.ledger_head_sha256 == self.ledger_head_sha256:
@@ -1556,10 +1522,7 @@ class GateBLedgerV3:
         request_head_found = False
         for entry in self._replayed_entries[1:]:
             if not request_head_found:
-                if (
-                    entry["previous_entry_sha256"]
-                    != request.ledger_head_sha256
-                ):
+                if entry["previous_entry_sha256"] != request.ledger_head_sha256:
                     continue
                 request_head_found = True
             replayed_suffix.append(entry)
@@ -1568,8 +1531,7 @@ class GateBLedgerV3:
         for entry, transition in zip(replayed_suffix, expected_prefix, strict=True):
             if (
                 entry["actor"] != "owner_recovery"
-                or entry["owner_decision_sha256"]
-                != decision.owner_approval_sha256
+                or entry["owner_decision_sha256"] != decision.owner_approval_sha256
                 or entry["ordinal"] != transition.ordinal
                 or entry["input_sha256"] != transition.input_sha256
                 or entry["source_state"] != transition.source_state.value
@@ -1578,7 +1540,9 @@ class GateBLedgerV3:
                 return False
         return True
 
-    def _scan_inventory(self, kind: Literal["marker", "recording"]) -> dict[int, dict[str, Any]]:
+    def _scan_inventory(
+        self, kind: Literal["marker", "recording"]
+    ) -> dict[int, dict[str, Any]]:
         descriptor = (
             self._marker_directory_descriptor
             if kind == "marker"
@@ -1743,9 +1707,7 @@ class GateBLedgerV3:
                     != payload["dispatch_marker_sha256"]
                     or request_row.recording_sha256 is not None
                 ):
-                    raise GateBLedgerErrorV3(
-                        "recording_recovery_inventory_mismatch"
-                    )
+                    raise GateBLedgerErrorV3("recording_recovery_inventory_mismatch")
             else:
                 raise GateBLedgerErrorV3("recording_kind_invalid")
 
@@ -1802,7 +1764,9 @@ class GateBLedgerV3:
             "conservative_cost_usd": str(conservative),
             "owner_decision_sha256": owner_decision_sha256,
             "owner_decision": (
-                None if owner_decision is None else owner_decision.model_dump(mode="json")
+                None
+                if owner_decision is None
+                else owner_decision.model_dump(mode="json")
             ),
             "owner_recovery_request": (
                 None
@@ -1882,7 +1846,9 @@ class GateBLedgerV3:
 
     @staticmethod
     def _valid_sha(value: object) -> bool:
-        return isinstance(value, str) and re.fullmatch(SHA256_PATTERN, value) is not None
+        return (
+            isinstance(value, str) and re.fullmatch(SHA256_PATTERN, value) is not None
+        )
 
     @staticmethod
     def _valid_text(value: object) -> bool:
@@ -1953,9 +1919,7 @@ def build_recovery_request_v3(
         schema_version="3.0.0",
         run_id=ledger.launch_identity.run_id,
         package_manifest_sha256=ledger.package_manifest.canonical_sha256,
-        owner_recovery_public_key_sha256=(
-            ledger.owner_recovery_public_key_sha256
-        ),
+        owner_recovery_public_key_sha256=(ledger.owner_recovery_public_key_sha256),
         ledger_head_sha256=ledger.ledger_head_sha256,
         inventory_sha256=ledger.inventory_sha256,
         rows=ledger.rows(),
@@ -2044,8 +2008,7 @@ _GATE_B_ALLOWLIST_SHA256_V3 = (
     "bc22330c9a17b3d6f325d75ab96712011e892de8a8bf66d06b9ff2ba12fa179c"
 )
 _GATE_A_SOURCE_ROOT_V3 = Path(
-    "/home/hermes/.hermes/job_intel/experiments/gate-a/"
-    f"{_GATE_A_COMMIT_V3}"
+    f"/home/hermes/.hermes/job_intel/experiments/gate-a/{_GATE_A_COMMIT_V3}"
 )
 _GATE_B_CORPUS_MANIFEST_PATH_V3 = Path(
     "/home/hermes/.hermes/job_intel/experiments/gate-b/"
@@ -2054,28 +2017,23 @@ _GATE_B_CORPUS_MANIFEST_PATH_V3 = Path(
 _GATE_B_PACKAGE_PARENT_V3 = Path(
     "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once"
 )
-_GATE_B_RUNTIME_EXPORT_ROOT_V3 = (
-    _GATE_B_PACKAGE_PARENT_V3 / "immutable-runtime"
-)
+_GATE_B_RUNTIME_EXPORT_ROOT_V3 = _GATE_B_PACKAGE_PARENT_V3 / "immutable-runtime"
 _GATE_B_ALLOWLIST_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
 )
 _GATE_B_PROFILE_PATH_V3 = (
-    Path(__file__).resolve().parents[2]
-    / "config/product_search/career_profile.v2.yaml"
+    Path(__file__).resolve().parents[2] / "config/product_search/career_profile.v2.yaml"
 )
 _GATE_B_CANDIDATE_FACTS_PATH_V3 = Path(
-    "/home/hermes/.hermes/private/career/"
-    "denis_vanyushkin_structured_resume_v1_1.json"
+    "/home/hermes/.hermes/private/career/denis_vanyushkin_structured_resume_v1_1.json"
 )
 _GATE_B_DECISION_CONTRACT_PATH_V3 = (
     Path(__file__).resolve().parents[2]
     / "config/product_search/decision_contract.v2.yaml"
 )
 _GATE_B_PRODUCT_SOT_PATH_V3 = (
-    Path(__file__).resolve().parents[2]
-    / "docs/superpowers/specs/"
+    Path(__file__).resolve().parents[2] / "docs/superpowers/specs/"
     "2026-08-10-job-intel-search-product-redesign-design.md"
 )
 _GATE_B_SEARCH_CONTRACT_PATH_V3 = (
@@ -2099,12 +2057,8 @@ _GATE_B_PROTECTED_PATHS_V3 = (
     Path("/home/hermes/.hermes/hermes-agent/config.yml"),
     Path("/etc/job-intel/job-intel.env"),
 )
-_GATE_B_PENDING_RECEIPT_ROOT_V3 = Path(
-    "/etc/job-intel/gate-b-at-most-once"
-)
-_GATE_B_CONSUMED_RECEIPT_ROOT_V3 = Path(
-    "/run/job-intel/gate-b-at-most-once"
-)
+_GATE_B_PENDING_RECEIPT_ROOT_V3 = Path("/etc/job-intel/gate-b-at-most-once")
+_GATE_B_CONSUMED_RECEIPT_ROOT_V3 = Path("/run/job-intel/gate-b-at-most-once")
 _GATE_B_RUNS_ROOT_V3 = _GATE_B_PACKAGE_PARENT_V3 / "runs"
 _GATE_B_OWNER_CHECKPOINT_FILENAME_V3 = "owner-checkpoint.json"
 _GATE_B_OWNER_RECOVERY_KEY_FILENAME_V3 = "owner-recovery-public-key.bin"
@@ -2113,41 +2067,35 @@ _GATE_B_PENDING_RECEIPT_FILENAME_V3 = "launch.pending.json"
 _GATE_B_CONSUMED_RECEIPT_FILENAME_V3 = "launch.consumed.json"
 _GATE_B_CLAIM_DIRECTORY_V3 = "launch-claim"
 _GATE_B_STARTED_FILENAME_V3 = "launch.started.json"
-_GATE_B_SOURCE_KEYS_V3 = frozenset(
-    {
-        "corpus_manifest",
-        "gate_a_manifest",
-        "benchmark_policy",
-        "reviewed_fragment_allowlist",
-        "career_profile",
-        "candidate_facts",
-        "decision_contract",
-        "product_sot",
-        "search_contract",
-        "semantic_contract",
-        "task10_policy",
-        "raw_artifacts",
-    }
-)
-_GATE_B_REVIEW_DECISIONS_V3 = frozenset(
-    {
-        "allow_role_responsibility",
-        "allow_role_requirement",
-        "exclude_company_fact",
-        "exclude_ambiguous",
-    }
-)
+_GATE_B_SOURCE_KEYS_V3 = frozenset({
+    "corpus_manifest",
+    "gate_a_manifest",
+    "benchmark_policy",
+    "reviewed_fragment_allowlist",
+    "career_profile",
+    "candidate_facts",
+    "decision_contract",
+    "product_sot",
+    "search_contract",
+    "semantic_contract",
+    "task10_policy",
+    "raw_artifacts",
+})
+_GATE_B_REVIEW_DECISIONS_V3 = frozenset({
+    "allow_role_responsibility",
+    "allow_role_requirement",
+    "exclude_company_fact",
+    "exclude_ambiguous",
+})
 _GATE_B_DIRECT_FIELDS_V3 = ("title", "location", "salary", "posted_at")
-_GATE_B_ALLOWED_SECTIONS_V3 = frozenset(
-    {
-        "responsibilities",
-        "what_you_will_do",
-        "requirements",
-        "qualifications",
-        "skills",
-        "experience",
-    }
-)
+_GATE_B_ALLOWED_SECTIONS_V3 = frozenset({
+    "responsibilities",
+    "what_you_will_do",
+    "requirements",
+    "qualifications",
+    "skills",
+    "experience",
+})
 _GATE_B_MAX_SOURCE_BYTES_V3 = 16_000_000
 _RENAME_NOREPLACE = 1
 _MAPPING_PROXY_TYPE_V3 = type(MappingProxyType({}))
@@ -2302,8 +2250,7 @@ class GateBLaunchBindingV3(_StrictFrozenModel):
     @classmethod
     def validate_source_authorities(cls, value: dict[str, str]) -> dict[str, str]:
         if not value or any(
-            not name
-            or re.fullmatch(SHA256_PATTERN, sha256) is None
+            not name or re.fullmatch(SHA256_PATTERN, sha256) is None
             for name, sha256 in value.items()
         ):
             raise ValueError("source authority identity is invalid")
@@ -2348,13 +2295,9 @@ class GateBOneTimeLaunchReceiptV3(_StrictFrozenModel):
     schema_version: Literal["3.0.0"]
     receipt_kind: Literal["gate_b_at_most_once_launch"]
     launch_kind: Literal["initial", "recovery"]
-    benchmark_run_id: str = Field(
-        pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$"
-    )
+    benchmark_run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
     launch_attempt_id: str = Field(
-        pattern=(
-            r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$"
-        )
+        pattern=(r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$")
     )
     issued_at: AwareDatetime
     expires_at: AwareDatetime
@@ -2403,9 +2346,7 @@ class GateBOneTimeLaunchReceiptV3(_StrictFrozenModel):
         if (self.launch_kind == "recovery") != (
             self.recovery_manifest_sha256 is not None
         ):
-            raise ValueError(
-                "recovery launch must bind exactly one recovery manifest"
-            )
+            raise ValueError("recovery launch must bind exactly one recovery manifest")
         return self
 
     @property
@@ -2416,13 +2357,9 @@ class GateBOneTimeLaunchReceiptV3(_StrictFrozenModel):
 class GateBRecoveryLaunchManifestV3(_StrictFrozenModel):
     schema_version: Literal["3.0.0"]
     manifest_kind: Literal["gate_b_at_most_once_recovery_launch"]
-    benchmark_run_id: str = Field(
-        pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$"
-    )
+    benchmark_run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
     previous_launch_attempt_id: str = Field(
-        pattern=(
-            r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$"
-        )
+        pattern=(r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$")
     )
     recovery_request: GateBRecoveryRequestV3
     recovery_decision: GateBRecoveryDecisionV3
@@ -2579,19 +2516,11 @@ def load_gate_b_source_bytes_v3() -> dict[str, bytes | dict[str, bytes]]:
             _GATE_B_ALLOWLIST_PATH_V3
         ),
         "career_profile": _read_path_nofollow_v3(_GATE_B_PROFILE_PATH_V3),
-        "candidate_facts": _read_path_nofollow_v3(
-            _GATE_B_CANDIDATE_FACTS_PATH_V3
-        ),
-        "decision_contract": _read_path_nofollow_v3(
-            _GATE_B_DECISION_CONTRACT_PATH_V3
-        ),
+        "candidate_facts": _read_path_nofollow_v3(_GATE_B_CANDIDATE_FACTS_PATH_V3),
+        "decision_contract": _read_path_nofollow_v3(_GATE_B_DECISION_CONTRACT_PATH_V3),
         "product_sot": _read_path_nofollow_v3(_GATE_B_PRODUCT_SOT_PATH_V3),
-        "search_contract": _read_path_nofollow_v3(
-            _GATE_B_SEARCH_CONTRACT_PATH_V3
-        ),
-        "semantic_contract": _read_path_nofollow_v3(
-            _GATE_B_SEMANTIC_CONTRACT_PATH_V3
-        ),
+        "search_contract": _read_path_nofollow_v3(_GATE_B_SEARCH_CONTRACT_PATH_V3),
+        "semantic_contract": _read_path_nofollow_v3(_GATE_B_SEMANTIC_CONTRACT_PATH_V3),
         "task10_policy": _read_path_nofollow_v3(_GATE_B_TASK10_POLICY_PATH_V3),
         "raw_artifacts": raw_artifacts,
     }
@@ -2731,9 +2660,7 @@ def _derive_launch_authority_sha256s_v3(
     )
     semantic_contract_data = semantic_payload.get("semantic_fact_contract")
     try:
-        semantic_contract = SemanticFactContract.model_validate(
-            semantic_contract_data
-        )
+        semantic_contract = SemanticFactContract.model_validate(semantic_contract_data)
         task10_policy = EvidenceSynthesisPolicyV1.model_validate(
             _decode_yaml_mapping_v3(
                 task10_policy_bytes,
@@ -2779,9 +2706,7 @@ def _derive_launch_authority_sha256s_v3(
         "task10_prompt_version": hashlib.sha256(
             TASK10_PROMPT_VERSION_V2.encode("utf-8")
         ).hexdigest(),
-        "semantic_prompt": hashlib.sha256(
-            semantic_prompt.encode("utf-8")
-        ).hexdigest(),
+        "semantic_prompt": hashlib.sha256(semantic_prompt.encode("utf-8")).hexdigest(),
         "semantic_prompt_version": hashlib.sha256(
             task10_policy.semantic_prompt_version.encode("utf-8")
         ).hexdigest(),
@@ -2791,10 +2716,7 @@ def _derive_launch_authority_sha256s_v3(
         "model_id": hashlib.sha256(task10_policy.model_id.encode("utf-8")).hexdigest(),
         "pricing": pricing.identity_sha256,
         "launch_limits": canonical_json_sha256(launch_limits),
-        **{
-            f"profile_{name}": sha256
-            for name, sha256 in profile_authorities.items()
-        },
+        **{f"profile_{name}": sha256 for name, sha256 in profile_authorities.items()},
     }
     if any(re.fullmatch(SHA256_PATTERN, value) is None for value in result.values()):
         raise GateBPackageErrorV3("launch_authority_identity_invalid")
@@ -2896,9 +2818,7 @@ class _GateBSectionedDescriptionParserV3(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
         if lowered in self._HEADING_TAGS:
-            heading = _gate_b_canonical_text_v3(
-                " ".join(self._heading_buffer or ())
-            )
+            heading = _gate_b_canonical_text_v3(" ".join(self._heading_buffer or ()))
             self._section = _gate_b_classify_section_v3(heading)
             self._heading_buffer = None
         elif lowered in {"p", "div", "li"}:
@@ -3008,9 +2928,10 @@ def _gate_b_candidate_contract_v3(
     for field_name in _GATE_B_DIRECT_FIELDS_V3:
         text = _gate_b_canonical_text_v3(raw.get(field_name))
         if text:
-            artifact_fragments.append(
-                {"source_locator": f"/{field_name}#000", "text": text}
-            )
+            artifact_fragments.append({
+                "source_locator": f"/{field_name}#000",
+                "text": text,
+            })
     description_index = 0
     for block in _gate_b_description_blocks_v3(raw.get("description")):
         for text in _gate_b_exact_fragments_v3(block.text):
@@ -3114,14 +3035,12 @@ def _validate_corpus_v3(
             or record.get("run_id") != _GATE_A_RUN_ID_V3
         ):
             raise GateBPackageErrorV3("corpus_record_identity_invalid")
-        expected_selection_key = canonical_json_sha256(
-            {
-                "run_id": record.get("run_id"),
-                "source_family": record.get("source_family"),
-                "source_id": record.get("source_id"),
-                "raw_content_sha256": raw_sha256,
-            }
-        )
+        expected_selection_key = canonical_json_sha256({
+            "run_id": record.get("run_id"),
+            "source_family": record.get("source_family"),
+            "source_id": record.get("source_id"),
+            "raw_content_sha256": raw_sha256,
+        })
         if selection_key != expected_selection_key:
             raise GateBPackageErrorV3("corpus_selection_key_mismatch")
         identities.add(selection_key)
@@ -3257,9 +3176,7 @@ def validate_gate_b_package_pure_v3(
                 entry.decision,
             ),
         )
-        reviewed_artifact_sha256 = artifact_by_selection[
-            str(record["selection_key"])
-        ]
+        reviewed_artifact_sha256 = artifact_by_selection[str(record["selection_key"])]
         input_payload = {
             "schema_version": "3.0.0",
             "input_kind": "gate_b_projector_source",
@@ -3284,18 +3201,16 @@ def validate_gate_b_package_pure_v3(
             raise GateBPackageErrorV3("ordered_input_hashes_not_unique")
         artifacts[input_reference] = input_bytes
         ordered_input_sha256s.append(input_sha256)
-        index_records.append(
-            {
-                "ordinal": ordinal,
-                "selection_key": record["selection_key"],
-                "raw_reference": reference,
-                "raw_content_sha256": raw_sha256,
-                "reviewed_vacancy_artifact_sha256": reviewed_artifact_sha256,
-                "reviewed_fragment_entry_count": len(selected_entries),
-                "task10_input_reference": input_reference,
-                "task10_input_sha256": input_sha256,
-            }
-        )
+        index_records.append({
+            "ordinal": ordinal,
+            "selection_key": record["selection_key"],
+            "raw_reference": reference,
+            "raw_content_sha256": raw_sha256,
+            "reviewed_vacancy_artifact_sha256": reviewed_artifact_sha256,
+            "reviewed_fragment_entry_count": len(selected_entries),
+            "task10_input_reference": input_reference,
+            "task10_input_sha256": input_sha256,
+        })
     if len(set(ordered_input_sha256s)) != _ORDERED_CALL_CAP:
         raise GateBPackageErrorV3("ordered_input_hashes_not_unique")
 
@@ -3314,9 +3229,7 @@ def validate_gate_b_package_pure_v3(
     index_bytes = _canonical_json_bytes(index_payload)
     index_sha256 = hashlib.sha256(index_bytes).hexdigest()
     artifacts["package-index.json"] = index_bytes
-    authority_sha256s = tuple(
-        sorted({*source_authorities.values(), index_sha256})
-    )
+    authority_sha256s = tuple(sorted({*source_authorities.values(), index_sha256}))
     manifest = GateBPackageManifestV3(
         schema_version="3.0.0",
         package_id=f"gate-b-at-most-once-v3:{corpus_sha256}",
@@ -3360,8 +3273,7 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
         re.fullmatch(SHA256_PATTERN, package.package_sha256) is None
         or package.package_sha256 != package.manifest_sha256
         or package.manifest_bytes != package.artifacts.get("package-manifest.json")
-        or hashlib.sha256(package.manifest_bytes).hexdigest()
-        != package.package_sha256
+        or hashlib.sha256(package.manifest_bytes).hexdigest() != package.package_sha256
         or set(package.artifacts) != set(package.artifact_sha256s)
     ):
         raise GateBPackageErrorV3("validated_package_identity_invalid")
@@ -3372,19 +3284,14 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
     if (
         manifest.canonical_sha256 != package.package_sha256
         or manifest.ordered_input_sha256s != package.ordered_input_sha256s
-        or manifest.package_id
-        != f"gate-b-at-most-once-v3:{_GATE_B_CORPUS_SHA256_V3}"
-        or manifest.created_at
-        != datetime(2026, 8, 16, 14, 13, 44, tzinfo=timezone.utc)
+        or manifest.package_id != f"gate-b-at-most-once-v3:{_GATE_B_CORPUS_SHA256_V3}"
+        or manifest.created_at != datetime(2026, 8, 16, 14, 13, 44, tzinfo=timezone.utc)
     ):
         raise GateBPackageErrorV3("validated_package_manifest_mismatch")
     expected_references = {
         "package-index.json",
         "package-manifest.json",
-        *{
-            f"task10-inputs/{sha256}.json"
-            for sha256 in package.ordered_input_sha256s
-        },
+        *{f"task10-inputs/{sha256}.json" for sha256 in package.ordered_input_sha256s},
     }
     if set(package.artifacts) != expected_references:
         raise GateBPackageErrorV3("validated_package_inventory_invalid")
@@ -3418,14 +3325,11 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
         error="validated_package_index_invalid",
     )
     if not source_authorities or any(
-        not isinstance(value, str)
-        or re.fullmatch(SHA256_PATTERN, value) is None
+        not isinstance(value, str) or re.fullmatch(SHA256_PATTERN, value) is None
         for value in source_authorities.values()
     ):
         raise GateBPackageErrorV3("validated_package_index_invalid")
-    index_sha256 = hashlib.sha256(
-        package.artifacts["package-index.json"]
-    ).hexdigest()
+    index_sha256 = hashlib.sha256(package.artifacts["package-index.json"]).hexdigest()
     if set(manifest.authority_sha256s) != {
         *source_authorities.values(),
         index_sha256,
@@ -3444,10 +3348,7 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
     for reference, payload in package.artifacts.items():
         if type(payload) is not bytes:
             raise GateBPackageErrorV3("validated_package_artifact_not_bytes")
-        if (
-            hashlib.sha256(payload).hexdigest()
-            != trusted_artifact_sha256s[reference]
-        ):
+        if hashlib.sha256(payload).hexdigest() != trusted_artifact_sha256s[reference]:
             raise GateBPackageErrorV3("validated_package_artifact_hash_mismatch")
     index_records = index.get("records")
     if not isinstance(index_records, list) or len(index_records) != _ORDERED_CALL_CAP:
@@ -3472,16 +3373,14 @@ def _validate_package_in_memory_v3(package: GateBValidatedPackageV3) -> None:
         raise GateBPackageErrorV3("validated_package_source_inventory_invalid")
 
 
-_GATE_B_RUNTIME_PAYLOAD_KEYS_V3 = frozenset(
-    {
-        "runtime_tree_manifest",
-        "python_executable",
-        "stdlib_tree_manifest",
-        "dependency_lock",
-        "installed_distributions",
-        "sys_path",
-    }
-)
+_GATE_B_RUNTIME_PAYLOAD_KEYS_V3 = frozenset({
+    "runtime_tree_manifest",
+    "python_executable",
+    "stdlib_tree_manifest",
+    "dependency_lock",
+    "installed_distributions",
+    "sys_path",
+})
 
 
 def _validate_runtime_payloads_v3(
@@ -3562,9 +3461,7 @@ def _load_current_runtime_identity_v3() -> GateBRuntimeManifestV3:
     python_executable = Path(sys.executable).resolve()
     stdlib_root = Path(sysconfig.get_path("stdlib")).resolve()
     dependency_lock_path = runtime_root / "uv.lock"
-    installed_distributions_path = (
-        python_root / "installed-distributions.txt"
-    )
+    installed_distributions_path = python_root / "installed-distributions.txt"
     executing_module = Path(__file__).resolve()
     if (
         not export_root.is_absolute()
@@ -3595,9 +3492,7 @@ def _load_current_runtime_identity_v3() -> GateBRuntimeManifestV3:
         manifest_payload,
         error="runtime_manifest_invalid",
     )
-    current_python_version = ".".join(
-        str(item) for item in sys.version_info[:3]
-    )
+    current_python_version = ".".join(str(item) for item in sys.version_info[:3])
     if current_python_version != runtime_manifest.python_version:
         raise GateBPackageErrorV3("runtime_python_version_identity_mismatch")
     normalized_sys_path = tuple(
@@ -3612,9 +3507,7 @@ def _load_current_runtime_identity_v3() -> GateBRuntimeManifestV3:
         "python_executable": _read_path_nofollow_v3(python_executable),
         "stdlib_tree_manifest": _stdlib_tree_manifest_bytes_v3(stdlib_root),
         "dependency_lock": _read_path_nofollow_v3(dependency_lock_path),
-        "installed_distributions": _read_path_nofollow_v3(
-            installed_distributions_path
-        ),
+        "installed_distributions": _read_path_nofollow_v3(installed_distributions_path),
         "sys_path": _canonical_json_bytes(list(normalized_sys_path)),
     }
     _validate_runtime_payloads_v3(runtime_manifest, runtime_payloads)
@@ -3627,7 +3520,9 @@ def _load_current_runtime_identity_v3() -> GateBRuntimeManifestV3:
         ),
         "sys_path": _read_path_nofollow_v3(identity_root / "sys-path.json"),
     }
-    if any(runtime_payloads[name] != payload for name, payload in stored_payloads.items()):
+    if any(
+        runtime_payloads[name] != payload for name, payload in stored_payloads.items()
+    ):
         raise GateBPackageErrorV3("runtime_identity_artifact_mismatch")
     return runtime_manifest
 
@@ -3687,8 +3582,7 @@ def _recompute_projection_sha256s_v3(
             or record.get("task10_input_reference") != reference
             or record.get("task10_input_sha256") != input_sha256
             or input_payload.get("selection_key") != record.get("selection_key")
-            or input_payload.get("source_authority_sha256s")
-            != dict(source_authorities)
+            or input_payload.get("source_authority_sha256s") != dict(source_authorities)
         ):
             raise GateBPackageErrorV3("launch_package_row_identity_mismatch")
         source_record = _plain_mapping_v3(
@@ -3755,9 +3649,7 @@ def recompute_launch_identity_v3(
         index.get("source_authority_sha256s"),
         error="launch_package_authority_invalid",
     )
-    derived_authorities = _derive_launch_authority_sha256s_v3(
-        current_source_bytes
-    )
+    derived_authorities = _derive_launch_authority_sha256s_v3(current_source_bytes)
     expected_authorities = {
         **derived_authorities,
         "corpus_manifest": hashlib.sha256(
@@ -4032,9 +3924,7 @@ def consume_gate_b_launch_receipt_v3(
         expected_mode=0o400,
     )
     checkpoint_path = pending_directory / _GATE_B_OWNER_CHECKPOINT_FILENAME_V3
-    recovery_key_path = (
-        pending_directory / _GATE_B_OWNER_RECOVERY_KEY_FILENAME_V3
-    )
+    recovery_key_path = pending_directory / _GATE_B_OWNER_RECOVERY_KEY_FILENAME_V3
     checkpoint_bytes = _read_owned_launch_file_v3(
         checkpoint_path,
         expected_uid=expected_root_uid,
@@ -4075,9 +3965,7 @@ def consume_gate_b_launch_receipt_v3(
     ):
         raise GateBPackageErrorV3("launch_receipt_run_id_invalid")
     package_manifest_path = (
-        Path(package_parent)
-        / receipt.package_manifest_sha256
-        / "package-manifest.json"
+        Path(package_parent) / receipt.package_manifest_sha256 / "package-manifest.json"
     )
     package_manifest_bytes = _read_path_nofollow_v3(package_manifest_path)
     package_manifest = _validate_canonical_model_bytes_v3(
@@ -4112,8 +4000,7 @@ def consume_gate_b_launch_receipt_v3(
         or launch.candidate_commit != receipt.candidate_commit
         or launch.runtime_manifest_sha256 != receipt.runtime_manifest_sha256
         or launch.package_manifest_sha256 != receipt.package_manifest_sha256
-        or launch.ordered_input_sha256s
-        != package_manifest.ordered_input_sha256s
+        or launch.ordered_input_sha256s != package_manifest.ordered_input_sha256s
         or launch.ordered_call_cap != receipt.ordered_call_cap
         or launch.per_call_maximum_usd != receipt.per_call_maximum_usd
         or launch.aggregate_maximum_usd != receipt.aggregate_maximum_usd
@@ -4121,9 +4008,7 @@ def consume_gate_b_launch_receipt_v3(
         raise GateBPackageErrorV3("launch_receipt_identity_mismatch")
     recovery_manifest_bytes: bytes | None = None
     recovery_manifest: GateBRecoveryLaunchManifestV3 | None = None
-    recovery_manifest_path = (
-        pending_directory / _GATE_B_RECOVERY_MANIFEST_FILENAME_V3
-    )
+    recovery_manifest_path = pending_directory / _GATE_B_RECOVERY_MANIFEST_FILENAME_V3
     if receipt.launch_kind == "recovery":
         recovery_manifest_bytes = _read_owned_launch_file_v3(
             recovery_manifest_path,
@@ -4137,14 +4022,11 @@ def consume_gate_b_launch_receipt_v3(
             error="recovery_launch_manifest_invalid",
         )
         if (
-            recovery_manifest.canonical_sha256
-            != receipt.recovery_manifest_sha256
-            or recovery_manifest.benchmark_run_id
-            != receipt.benchmark_run_id
+            recovery_manifest.canonical_sha256 != receipt.recovery_manifest_sha256
+            or recovery_manifest.benchmark_run_id != receipt.benchmark_run_id
             or recovery_manifest.recovery_request.package_manifest_sha256
             != receipt.package_manifest_sha256
-            or recovery_manifest.recovery_decision.approved_at
-            > receipt.issued_at
+            or recovery_manifest.recovery_decision.approved_at > receipt.issued_at
         ):
             raise GateBPackageErrorV3("recovery_launch_manifest_mismatch")
         try:
@@ -4156,8 +4038,7 @@ def consume_gate_b_launch_receipt_v3(
                 "recovery_launch_owner_signature_invalid"
             ) from exc
         previous_directory = (
-            Path(consumed_root)
-            / recovery_manifest.previous_launch_attempt_id
+            Path(consumed_root) / recovery_manifest.previous_launch_attempt_id
         )
         previous_receipt_bytes = _read_owned_launch_file_v3(
             previous_directory / _GATE_B_CONSUMED_RECEIPT_FILENAME_V3,
@@ -4181,8 +4062,7 @@ def consume_gate_b_launch_receipt_v3(
         if (
             previous_receipt.launch_attempt_id
             != recovery_manifest.previous_launch_attempt_id
-            or previous_receipt.benchmark_run_id
-            != receipt.benchmark_run_id
+            or previous_receipt.benchmark_run_id != receipt.benchmark_run_id
             or previous_receipt.package_manifest_sha256
             != receipt.package_manifest_sha256
         ):
@@ -4193,9 +4073,7 @@ def consume_gate_b_launch_receipt_v3(
         except FileNotFoundError:
             pass
         else:
-            raise GateBPackageErrorV3(
-                "initial_launch_recovery_manifest_forbidden"
-            )
+            raise GateBPackageErrorV3("initial_launch_recovery_manifest_forbidden")
     destination_directory = Path(consumed_root) / receipt.launch_attempt_id
     _ensure_owned_directory_v3(
         Path(consumed_root),
@@ -4324,18 +4202,16 @@ def _snapshot_protected_paths_v3(
         else:
             kind = "other"
             content_sha256 = None
-        snapshot.append(
-            (
-                str(path),
-                kind,
-                metadata.st_mode,
-                metadata.st_uid,
-                metadata.st_gid,
-                metadata.st_size,
-                metadata.st_mtime_ns,
-                content_sha256,
-            )
-        )
+        snapshot.append((
+            str(path),
+            kind,
+            metadata.st_mode,
+            metadata.st_uid,
+            metadata.st_gid,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            content_sha256,
+        ))
         operations.append(
             GateBObservedOperationV3(
                 kind="protected_snapshot",
@@ -4498,9 +4374,7 @@ def _verify_materialized_root_v3(
     if input_descriptor is None:
         raise GateBPackageErrorV3("package_existing_unknown_content")
     try:
-        expected_inputs = {
-            f"{sha256}.json" for sha256 in package.ordered_input_sha256s
-        }
+        expected_inputs = {f"{sha256}.json" for sha256 in package.ordered_input_sha256s}
         if set(os.listdir(input_descriptor)) != expected_inputs:
             raise GateBPackageErrorV3("package_existing_unknown_content")
         for reference, expected_payload in sorted(package.artifacts.items()):
@@ -4523,7 +4397,9 @@ def _verify_materialized_root_v3(
             operations.append(
                 GateBObservedOperationV3(
                     kind="artifact_rehash",
-                    path=str(_GATE_B_PACKAGE_PARENT_V3 / package.package_sha256 / reference),
+                    path=str(
+                        _GATE_B_PACKAGE_PARENT_V3 / package.package_sha256 / reference
+                    ),
                     detail=package.artifact_sha256s[reference],
                 )
             )
@@ -4548,13 +4424,19 @@ def materialize_gate_b_package_v3(
     root_descriptor = -1
     staging_descriptor = -1
     try:
-        root_descriptor = _open_child_directory_optional_v3(
-            parent_descriptor,
-            package.package_sha256,
-        ) or -1
+        root_descriptor = (
+            _open_child_directory_optional_v3(
+                parent_descriptor,
+                package.package_sha256,
+            )
+            or -1
+        )
         if root_descriptor < 0:
             staging_name = f".{package.package_sha256}.materializing"
-            if _open_child_directory_optional_v3(parent_descriptor, staging_name) is not None:
+            if (
+                _open_child_directory_optional_v3(parent_descriptor, staging_name)
+                is not None
+            ):
                 raise GateBPackageErrorV3("package_staging_unknown_content")
             try:
                 os.mkdir(
@@ -4572,10 +4454,13 @@ def materialize_gate_b_package_v3(
                     detail="mode=0700",
                 )
             )
-            staging_descriptor = _open_child_directory_optional_v3(
-                parent_descriptor,
-                staging_name,
-            ) or -1
+            staging_descriptor = (
+                _open_child_directory_optional_v3(
+                    parent_descriptor,
+                    staging_name,
+                )
+                or -1
+            )
             if staging_descriptor < 0:
                 raise GateBPackageErrorV3("package_staging_open_failed")
             try:
@@ -4586,7 +4471,9 @@ def materialize_gate_b_package_v3(
                 )
                 os.fsync(staging_descriptor)
             except OSError as exc:
-                raise GateBPackageErrorV3("package_input_directory_create_failed") from exc
+                raise GateBPackageErrorV3(
+                    "package_input_directory_create_failed"
+                ) from exc
             input_descriptor = _open_child_directory_optional_v3(
                 staging_descriptor,
                 "task10-inputs",
@@ -4630,17 +4517,18 @@ def materialize_gate_b_package_v3(
             operations.append(
                 GateBObservedOperationV3(
                     kind="artifact_atomic_publish",
-                    path=str(
-                        _GATE_B_PACKAGE_PARENT_V3 / package.package_sha256
-                    ),
+                    path=str(_GATE_B_PACKAGE_PARENT_V3 / package.package_sha256),
                     detail=package.package_sha256,
                 )
             )
             created = True
-            root_descriptor = _open_child_directory_optional_v3(
-                parent_descriptor,
-                package.package_sha256,
-            ) or -1
+            root_descriptor = (
+                _open_child_directory_optional_v3(
+                    parent_descriptor,
+                    package.package_sha256,
+                )
+                or -1
+            )
             if root_descriptor < 0:
                 raise GateBPackageErrorV3("package_published_root_missing")
         _verify_materialized_root_v3(root_descriptor, package, operations)
@@ -4688,9 +4576,7 @@ class GateBRunnerSummaryV3(_StrictFrozenModel):
     schema_version: Literal["3.0.0"]
     run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
     launch_attempt_id: str = Field(
-        pattern=(
-            r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$"
-        )
+        pattern=(r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$")
     )
     attempted_count: int = Field(ge=0, le=_ORDERED_CALL_CAP)
     success_count: int = Field(ge=0, le=_ORDERED_CALL_CAP)
@@ -4714,10 +4600,8 @@ class GateBRunnerSummaryV3(_StrictFrozenModel):
         }
         if (
             self.success_count != counts[GateBCallStateV3.SUCCESS]
-            or self.terminal_failure_count
-            != counts[GateBCallStateV3.TERMINAL_FAILURE]
-            or self.terminal_unknown_count
-            != counts[GateBCallStateV3.TERMINAL_UNKNOWN]
+            or self.terminal_failure_count != counts[GateBCallStateV3.TERMINAL_FAILURE]
+            or self.terminal_unknown_count != counts[GateBCallStateV3.TERMINAL_UNKNOWN]
             or self.pending_count != counts[GateBCallStateV3.PENDING]
             or counts[GateBCallStateV3.RESERVED]
             or counts[GateBCallStateV3.DISPATCHED]
@@ -4763,14 +4647,12 @@ class _GateBRunnerCapabilityBridgeV3:
             raise GateBRunnerErrorV3("runner_reservation_invalid")
         self.ledger.reserve(ordinal)
         self.reservation_id = hashlib.sha256(
-            _canonical_json_bytes(
-                {
-                    "run_id": self.launch_identity.run_id,
-                    "nonce": self.nonce,
-                    "ordinal": ordinal,
-                    "projection_sha256": input_hash,
-                }
-            )
+            _canonical_json_bytes({
+                "run_id": self.launch_identity.run_id,
+                "nonce": self.nonce,
+                "ordinal": ordinal,
+                "projection_sha256": input_hash,
+            })
         ).hexdigest()
         return self.reservation_id
 
@@ -4795,7 +4677,8 @@ class _GateBRunnerCapabilityBridgeV3:
             reservation_id != self.reservation_id
             or self.ledger.state(ordinal) is not GateBCallStateV3.DISPATCHED
             or self.reconciled is not None
-            or outcome not in {
+            or outcome
+            not in {
                 "success",
                 "terminal_failure",
                 "terminal_unknown",
@@ -4804,10 +4687,7 @@ class _GateBRunnerCapabilityBridgeV3:
             or not actual_cost.is_finite()
             or actual_cost < 0
             or actual_cost > _PER_CALL_MAXIMUM_USD
-            or (
-                outcome == "terminal_unknown"
-                and actual_cost != _PER_CALL_MAXIMUM_USD
-            )
+            or (outcome == "terminal_unknown" and actual_cost != _PER_CALL_MAXIMUM_USD)
         ):
             raise GateBRunnerErrorV3("runner_reconciliation_invalid")
         self.reconciled = outcome, actual_cost
@@ -4926,29 +4806,21 @@ def _runner_summary_v3(
         run_id=ledger.launch_identity.run_id,
         launch_attempt_id=launch_attempt_id,
         attempted_count=attempted_count,
-        success_count=sum(
-            row.state is GateBCallStateV3.SUCCESS for row in rows
-        ),
+        success_count=sum(row.state is GateBCallStateV3.SUCCESS for row in rows),
         terminal_failure_count=sum(
             row.state is GateBCallStateV3.TERMINAL_FAILURE for row in rows
         ),
         terminal_unknown_count=sum(
             row.state is GateBCallStateV3.TERMINAL_UNKNOWN for row in rows
         ),
-        pending_count=sum(
-            row.state is GateBCallStateV3.PENDING for row in rows
-        ),
+        pending_count=sum(row.state is GateBCallStateV3.PENDING for row in rows),
         conservative_spend_usd=ledger.conservative_spend_usd,
         rows=summaries,
     )
 
 
 def _paths_overlap_v3(left: Path, right: Path) -> bool:
-    return (
-        left == right
-        or left.is_relative_to(right)
-        or right.is_relative_to(left)
-    )
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
 
 
 def _approved_runner_paths_v3(
@@ -4973,10 +4845,7 @@ def _approved_runner_paths_v3(
     else:
         os.close(experiment_descriptor)
     run_root = (
-        experiment_root
-        / "runs"
-        / package.package_sha256
-        / launch_identity.run_id
+        experiment_root / "runs" / package.package_sha256 / launch_identity.run_id
     )
     ledger_root = run_root / "ledger"
     recordings_root = run_root / "provider-recordings"
@@ -5038,9 +4907,7 @@ def _runner_recovery_manifest_v3(
 ) -> GateBRecoveryLaunchManifestV3 | None:
     if receipt.launch_kind == "initial":
         if payload is not None:
-            raise GateBRunnerErrorV3(
-                "initial_launch_recovery_manifest_forbidden"
-            )
+            raise GateBRunnerErrorV3("initial_launch_recovery_manifest_forbidden")
         return None
     if payload is None:
         raise GateBRunnerErrorV3("recovery_launch_manifest_required")
@@ -5048,9 +4915,7 @@ def _runner_recovery_manifest_v3(
         manifest = GateBRecoveryLaunchManifestV3.model_validate_json(
             _canonical_json_bytes(dict(payload))
         )
-        manifest.recovery_decision.verify_owner_signature(
-            owner_recovery_public_key
-        )
+        manifest.recovery_decision.verify_owner_signature(owner_recovery_public_key)
     except (ValidationError, ValueError, TypeError) as exc:
         raise GateBRunnerErrorV3("recovery_launch_manifest_invalid") from exc
     if (
@@ -5152,11 +5017,10 @@ def run_gate_b_at_most_once_v3(
                     recovery_manifest.recovery_decision,
                 )
             except GateBLedgerErrorV3 as exc:
-                raise GateBRunnerErrorV3(
-                    "recovery_launch_manifest_stale"
-                ) from exc
+                raise GateBRunnerErrorV3("recovery_launch_manifest_stale") from exc
         if any(
-            row.state in {
+            row.state
+            in {
                 GateBCallStateV3.RESERVED,
                 GateBCallStateV3.DISPATCHED,
             }
@@ -5182,18 +5046,14 @@ def run_gate_b_at_most_once_v3(
             reconcile=bridge.reconcile,
         )
         provider: object | None = None
-        if any(
-            row.state is GateBCallStateV3.PENDING for row in ledger.rows()
-        ):
+        if any(row.state is GateBCallStateV3.PENDING for row in ledger.rows()):
             provider = _build_gate_b_provider_v3(
                 recordings_root=recordings_path,
                 capability=capability,
                 launch_identity=launch_identity,
             )
         attempted_count = 0
-        for ordinal, package_input_sha256 in enumerate(
-            package.ordered_input_sha256s
-        ):
+        for ordinal, package_input_sha256 in enumerate(package.ordered_input_sha256s):
             observed_identity = recompute_launch_identity_v3(
                 package,
                 checkpoint_payload,
@@ -5232,9 +5092,7 @@ def run_gate_b_at_most_once_v3(
             projection_sha256 = hashlib.sha256(
                 _canonical_json_bytes(provider_payload)
             ).hexdigest()
-            if projection_sha256 != launch_identity.ordered_projection_sha256s[
-                ordinal
-            ]:
+            if projection_sha256 != launch_identity.ordered_projection_sha256s[ordinal]:
                 raise GateBRunnerErrorV3("runner_projection_identity_mismatch")
             bridge.begin(ordinal, projection_sha256)
             request = _runner_response_request_v3(
@@ -5257,9 +5115,7 @@ def run_gate_b_at_most_once_v3(
             try:
                 outcome = post_dispatch_outcome_v3(provider)
             except (ValueError, AttributeError) as exc:
-                raise GateBRunnerErrorV3(
-                    "runner_provider_outcome_unsealed"
-                ) from exc
+                raise GateBRunnerErrorV3("runner_provider_outcome_unsealed") from exc
             if outcome.terminal == "success":
                 if provider_error is not None or not isinstance(
                     result, GovernedStructuredResult
@@ -5293,9 +5149,7 @@ def run_gate_b_at_most_once_v3(
                 ledger.record_success(
                     ordinal,
                     dispatch_id=dispatch_id,
-                    provider_record_sha256=(
-                        outcome.sealed_provider_record_sha256
-                    ),
+                    provider_record_sha256=(outcome.sealed_provider_record_sha256),
                     measured_cost_usd=outcome.measured_cost_usd,
                 )
             elif outcome.terminal == "terminal_failure":
@@ -5303,9 +5157,7 @@ def run_gate_b_at_most_once_v3(
                 ledger.record_failure(
                     ordinal,
                     dispatch_id=dispatch_id,
-                    provider_record_sha256=(
-                        outcome.sealed_provider_record_sha256
-                    ),
+                    provider_record_sha256=(outcome.sealed_provider_record_sha256),
                     measured_cost_usd=outcome.measured_cost_usd,
                 )
             else:
@@ -5353,12 +5205,9 @@ def _one_consumed_receipt_path_v3(consumed_root: Path) -> Path:
             or not stat.S_ISDIR(claim_metadata.st_mode)
             or claim_metadata.st_uid != os.geteuid()
             or claim_metadata.st_gid != os.getegid()
-            or stat.S_IMODE(claim_metadata.st_mode)
-            != _PRIVATE_DIRECTORY_MODE
+            or stat.S_IMODE(claim_metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
         ):
-            raise GateBRunnerErrorV3(
-                "consumed_receipt_claim_directory_invalid"
-            )
+            raise GateBRunnerErrorV3("consumed_receipt_claim_directory_invalid")
         try:
             (claim_directory / _GATE_B_STARTED_FILENAME_V3).lstat()
         except FileNotFoundError:
@@ -5385,8 +5234,7 @@ def _claim_consumed_receipt_v3(
             or not stat.S_ISDIR(claim_metadata.st_mode)
             or claim_metadata.st_uid != os.geteuid()
             or claim_metadata.st_gid != os.getegid()
-            or stat.S_IMODE(claim_metadata.st_mode)
-            != _PRIVATE_DIRECTORY_MODE
+            or stat.S_IMODE(claim_metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
         ):
             raise GateBRunnerErrorV3("launch_claim_directory_unsafe")
         directory_descriptor = os.open(
@@ -5398,15 +5246,13 @@ def _claim_consumed_receipt_v3(
     except OSError as exc:
         raise GateBRunnerErrorV3("launch_claim_directory_unsafe") from exc
     marker_path = claim_directory / _GATE_B_STARTED_FILENAME_V3
-    marker_payload = _canonical_json_bytes(
-        {
-            "schema_version": "3.0.0",
-            "artifact_kind": "gate_b_launch_started",
-            "benchmark_run_id": receipt.benchmark_run_id,
-            "launch_attempt_id": receipt.launch_attempt_id,
-            "receipt_sha256": receipt.canonical_sha256,
-        }
-    )
+    marker_payload = _canonical_json_bytes({
+        "schema_version": "3.0.0",
+        "artifact_kind": "gate_b_launch_started",
+        "benchmark_run_id": receipt.benchmark_run_id,
+        "launch_attempt_id": receipt.launch_attempt_id,
+        "receipt_sha256": receipt.canonical_sha256,
+    })
     descriptor = -1
     try:
         try:
@@ -5417,9 +5263,7 @@ def _claim_consumed_receipt_v3(
                 dir_fd=directory_descriptor,
             )
         except FileExistsError as exc:
-            raise GateBRunnerErrorV3(
-                "launch_attempt_already_started"
-            ) from exc
+            raise GateBRunnerErrorV3("launch_attempt_already_started") from exc
         except OSError as exc:
             raise GateBRunnerErrorV3("launch_claim_create_failed") from exc
         metadata = os.fstat(descriptor)
@@ -5471,9 +5315,7 @@ def _write_runner_summary_create_once_v3(
 
 def run_gate_b_from_consumed_receipt_v3() -> GateBRunnerSummaryV3:
     """Load the fixed consumed handoff and execute from immutable artifacts."""
-    consumed_path = _one_consumed_receipt_path_v3(
-        _GATE_B_CONSUMED_RECEIPT_ROOT_V3
-    )
+    consumed_path = _one_consumed_receipt_path_v3(_GATE_B_CONSUMED_RECEIPT_ROOT_V3)
     receipt_bytes = _read_owned_launch_file_v3(
         consumed_path,
         expected_uid=0,
