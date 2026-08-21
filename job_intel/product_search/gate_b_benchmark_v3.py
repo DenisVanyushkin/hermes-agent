@@ -2110,6 +2110,7 @@ _GATE_B_ALLOWED_SECTIONS_V3 = frozenset({
     "experience",
 })
 _GATE_B_MAX_SOURCE_BYTES_V3 = 16_000_000
+_GATE_B_MAX_RUNTIME_EXECUTABLE_BYTES_V3 = 64_000_000
 _RENAME_NOREPLACE = 1
 _MAPPING_PROXY_TYPE_V3 = type(MappingProxyType({}))
 
@@ -3517,7 +3518,10 @@ def _load_current_runtime_identity_v3() -> GateBRuntimeManifestV3:
         raise GateBPackageErrorV3("runtime_sys_path_outside_fixed_export")
     runtime_payloads = {
         "runtime_tree_manifest": _tree_manifest_bytes_v3(runtime_root),
-        "python_executable": _read_path_nofollow_v3(python_executable),
+        "python_executable": _read_path_nofollow_v3(
+            python_executable,
+            maximum_bytes=_GATE_B_MAX_RUNTIME_EXECUTABLE_BYTES_V3,
+        ),
         "stdlib_tree_manifest": _stdlib_tree_manifest_bytes_v3(stdlib_root),
         "dependency_lock": _read_path_nofollow_v3(dependency_lock_path),
         "installed_distributions": _read_path_nofollow_v3(installed_distributions_path),

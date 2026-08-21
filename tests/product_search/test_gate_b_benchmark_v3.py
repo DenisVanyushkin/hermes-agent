@@ -1916,6 +1916,70 @@ def _actual_runtime_identity_fixture_v3(
     )
 
 
+def _resize_runtime_python_fixture_v3(
+    runtime_paths: dict[str, Path],
+    manifest: object,
+    *,
+    size: int,
+) -> object:
+    python_executable = runtime_paths["python_executable"]
+    os.truncate(python_executable, size)
+    with python_executable.open("rb") as stream:
+        executable_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+    updated = manifest.model_copy(
+        update={"python_executable_sha256": executable_sha256}
+    )
+    manifest_bytes = json.dumps(
+        updated.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    export_root = runtime_paths["export_root"]
+    (export_root / "runtime-manifest.json").write_bytes(manifest_bytes)
+    (export_root / "runtime-manifest.sha256").write_text(
+        hashlib.sha256(manifest_bytes).hexdigest() + "\n",
+        encoding="ascii",
+    )
+    return updated
+
+
+def test_runtime_identity_allows_pinned_30_mb_python_with_explicit_cap(
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
+) -> None:
+    runtime_paths, manifest, _runtime_payloads = _actual_runtime_identity_fixture_v3
+    expected = _resize_runtime_python_fixture_v3(
+        runtime_paths,
+        manifest,
+        size=30_845_896,
+    )
+
+    observed = gate_b_v3._load_current_runtime_identity_v3()
+
+    assert observed == expected
+
+
+def test_runtime_identity_rejects_python_above_explicit_64_mb_cap(
+    _actual_runtime_identity_fixture_v3: tuple[
+        dict[str, Path], object, dict[str, bytes]
+    ],
+) -> None:
+    runtime_paths, manifest, _runtime_payloads = _actual_runtime_identity_fixture_v3
+    _resize_runtime_python_fixture_v3(
+        runtime_paths,
+        manifest,
+        size=64_000_001,
+    )
+
+    with pytest.raises(
+        gate_b_v3.GateBPackageErrorV3,
+        match="source_file_metadata_invalid",
+    ):
+        gate_b_v3._load_current_runtime_identity_v3()
+
+
 def _projection_hashes_v3(package: object) -> tuple[str, ...]:
     from job_intel.product_search.gate_b_evidence_v3 import (
         ReviewedFragmentAllowlistV3,
