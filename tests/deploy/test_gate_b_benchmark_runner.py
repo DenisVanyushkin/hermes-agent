@@ -288,6 +288,11 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
     assert (consumed.parent / "owner-recovery-public-key.bin").read_bytes() == (
         bytes.fromhex("22" * 32)
     )
+    claim_directory = consumed.parent / "launch-claim"
+    claim_metadata = claim_directory.stat()
+    assert stat.S_IMODE(claim_metadata.st_mode) == 0o700
+    assert claim_metadata.st_uid == os.geteuid()
+    assert claim_metadata.st_gid == os.getegid()
     with pytest.raises(ValueError, match="pending_receipt"):
         gate_b_v3.consume_gate_b_launch_receipt_v3(
             pending_root=pending_root,
@@ -340,10 +345,67 @@ def test_consumed_loader_ignores_started_attempt_and_selects_new_recovery(
     old_directory.mkdir()
     recovery_directory.mkdir()
     (old_directory / "launch.consumed.json").write_bytes(b"old")
-    (old_directory / "launch.started.json").write_bytes(b"started")
+    old_claim_directory = old_directory / "launch-claim"
+    old_claim_directory.mkdir(mode=0o700)
+    (old_claim_directory / "launch.started.json").write_bytes(b"started")
+    (recovery_directory / "launch-claim").mkdir(mode=0o700)
     expected = recovery_directory / "launch.consumed.json"
     expected.write_bytes(b"recovery")
 
     selected = gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
 
     assert selected == expected
+
+
+def test_effective_hermes_user_claims_only_the_dedicated_writable_directory(
+    tmp_path: Path,
+) -> None:
+    benchmark_run_id = "gate-b-at-most-once-" + "1" * 16
+    nonce = "2" * 64
+    receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
+        schema_version="3.0.0",
+        receipt_kind="gate_b_at_most_once_launch",
+        launch_kind="initial",
+        benchmark_run_id=benchmark_run_id,
+        launch_attempt_id=f"{benchmark_run_id}-{nonce}",
+        issued_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc),
+        nonce=nonce,
+        checkpoint_manifest_sha256="3" * 64,
+        launch_identity_sha256="4" * 64,
+        candidate_commit="5" * 40,
+        runtime_manifest_sha256="6" * 64,
+        package_manifest_sha256="7" * 64,
+        ordered_call_cap=48,
+        per_call_maximum_usd=Decimal("0.01"),
+        aggregate_maximum_usd=Decimal("0.48"),
+    )
+    consumed_root = tmp_path / "consumed"
+    consumed_root.mkdir()
+    attempt_directory = consumed_root / receipt.launch_attempt_id
+    attempt_directory.mkdir(mode=0o700)
+    consumed_path = attempt_directory / "launch.consumed.json"
+    consumed_bytes = _canonical_bytes(receipt.model_dump(mode="json"))
+    consumed_path.write_bytes(consumed_bytes)
+    consumed_path.chmod(0o440)
+    claim_directory = attempt_directory / "launch-claim"
+    claim_directory.mkdir(mode=0o700)
+    attempt_directory.chmod(0o550)
+
+    assert not os.access(attempt_directory, os.W_OK)
+    with pytest.raises(PermissionError):
+        (attempt_directory / "receipt-bypass").write_bytes(b"forbidden")
+
+    selected_path = gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
+    marker_path = gate_b_v3._claim_consumed_receipt_v3(
+        selected_path,
+        receipt,
+    )
+
+    assert marker_path == claim_directory / "launch.started.json"
+    assert stat.S_IMODE(marker_path.stat().st_mode) == 0o600
+    assert consumed_path.read_bytes() == consumed_bytes
+    with pytest.raises(ValueError, match="count_invalid"):
+        gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
+    with pytest.raises(ValueError, match="already_started"):
+        gate_b_v3._claim_consumed_receipt_v3(consumed_path, receipt)

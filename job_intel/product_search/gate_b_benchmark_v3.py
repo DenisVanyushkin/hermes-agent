@@ -2111,6 +2111,7 @@ _GATE_B_OWNER_RECOVERY_KEY_FILENAME_V3 = "owner-recovery-public-key.bin"
 _GATE_B_RECOVERY_MANIFEST_FILENAME_V3 = "recovery-launch-manifest.json"
 _GATE_B_PENDING_RECEIPT_FILENAME_V3 = "launch.pending.json"
 _GATE_B_CONSUMED_RECEIPT_FILENAME_V3 = "launch.consumed.json"
+_GATE_B_CLAIM_DIRECTORY_V3 = "launch-claim"
 _GATE_B_STARTED_FILENAME_V3 = "launch.started.json"
 _GATE_B_SOURCE_KEYS_V3 = frozenset(
     {
@@ -4170,7 +4171,9 @@ def consume_gate_b_launch_receipt_v3(
             error="previous_launch_receipt_invalid",
         )
         _read_owned_launch_file_v3(
-            previous_directory / _GATE_B_STARTED_FILENAME_V3,
+            previous_directory
+            / _GATE_B_CLAIM_DIRECTORY_V3
+            / _GATE_B_STARTED_FILENAME_V3,
             expected_uid=expected_hermes_uid,
             expected_gid=expected_hermes_gid,
             expected_mode=0o600,
@@ -4205,6 +4208,12 @@ def consume_gate_b_launch_receipt_v3(
         uid=expected_root_uid,
         gid=expected_hermes_gid,
         mode=0o750,
+    )
+    _ensure_owned_directory_v3(
+        destination_directory / _GATE_B_CLAIM_DIRECTORY_V3,
+        uid=expected_hermes_uid,
+        gid=expected_hermes_gid,
+        mode=_PRIVATE_DIRECTORY_MODE,
     )
     consumed_path = _publish_owned_launch_file_v3(
         destination_directory,
@@ -5332,8 +5341,26 @@ def _one_consumed_receipt_path_v3(consumed_root: Path) -> Path:
             candidate.lstat()
         except FileNotFoundError:
             continue
+        claim_directory = Path(entry.path) / _GATE_B_CLAIM_DIRECTORY_V3
         try:
-            (Path(entry.path) / _GATE_B_STARTED_FILENAME_V3).lstat()
+            claim_metadata = claim_directory.lstat()
+        except OSError as exc:
+            raise GateBRunnerErrorV3(
+                "consumed_receipt_claim_directory_invalid"
+            ) from exc
+        if (
+            claim_directory.is_symlink()
+            or not stat.S_ISDIR(claim_metadata.st_mode)
+            or claim_metadata.st_uid != os.geteuid()
+            or claim_metadata.st_gid != os.getegid()
+            or stat.S_IMODE(claim_metadata.st_mode)
+            != _PRIVATE_DIRECTORY_MODE
+        ):
+            raise GateBRunnerErrorV3(
+                "consumed_receipt_claim_directory_invalid"
+            )
+        try:
+            (claim_directory / _GATE_B_STARTED_FILENAME_V3).lstat()
         except FileNotFoundError:
             pass
         else:
@@ -5350,7 +5377,27 @@ def _claim_consumed_receipt_v3(
 ) -> Path:
     if receipt_path.parent.name != receipt.launch_attempt_id:
         raise GateBRunnerErrorV3("consumed_receipt_attempt_mismatch")
-    marker_path = receipt_path.parent / _GATE_B_STARTED_FILENAME_V3
+    claim_directory = receipt_path.parent / _GATE_B_CLAIM_DIRECTORY_V3
+    try:
+        claim_metadata = claim_directory.lstat()
+        if (
+            claim_directory.is_symlink()
+            or not stat.S_ISDIR(claim_metadata.st_mode)
+            or claim_metadata.st_uid != os.geteuid()
+            or claim_metadata.st_gid != os.getegid()
+            or stat.S_IMODE(claim_metadata.st_mode)
+            != _PRIVATE_DIRECTORY_MODE
+        ):
+            raise GateBRunnerErrorV3("launch_claim_directory_unsafe")
+        directory_descriptor = os.open(
+            claim_directory,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except GateBRunnerErrorV3:
+        raise
+    except OSError as exc:
+        raise GateBRunnerErrorV3("launch_claim_directory_unsafe") from exc
+    marker_path = claim_directory / _GATE_B_STARTED_FILENAME_V3
     marker_payload = _canonical_json_bytes(
         {
             "schema_version": "3.0.0",
@@ -5360,26 +5407,36 @@ def _claim_consumed_receipt_v3(
             "receipt_sha256": receipt.canonical_sha256,
         }
     )
+    descriptor = -1
     try:
-        descriptor = os.open(
-            marker_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            _PRIVATE_FILE_MODE,
-        )
-    except OSError as exc:
-        raise GateBRunnerErrorV3("launch_attempt_already_started") from exc
-    try:
+        try:
+            descriptor = os.open(
+                _GATE_B_STARTED_FILENAME_V3,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                _PRIVATE_FILE_MODE,
+                dir_fd=directory_descriptor,
+            )
+        except FileExistsError as exc:
+            raise GateBRunnerErrorV3(
+                "launch_attempt_already_started"
+            ) from exc
+        except OSError as exc:
+            raise GateBRunnerErrorV3("launch_claim_create_failed") from exc
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_gid != os.getegid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+        ):
+            raise GateBRunnerErrorV3("launch_claim_file_unsafe")
         _write_all(descriptor, marker_payload)
         os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    directory_descriptor = os.open(
-        receipt_path.parent,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-    )
-    try:
         os.fsync(directory_descriptor)
     finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         os.close(directory_descriptor)
     return marker_path
 
