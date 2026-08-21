@@ -1798,7 +1798,9 @@ def _launch_approval_fixture_v3(
     receipt = receipt_type(
         schema_version="3.0.0",
         receipt_kind="gate_b_at_most_once_launch",
-        run_id=launch.run_id,
+        launch_kind="initial",
+        benchmark_run_id=launch.run_id,
+        launch_attempt_id=f"{launch.run_id}-{'3' * 64}",
         issued_at=datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc),
         expires_at=datetime(2026, 8, 20, 12, 31, tzinfo=timezone.utc),
         nonce="3" * 64,
@@ -2111,7 +2113,11 @@ def test_one_time_launch_receipt_rejects_long_expiry_or_extra_authority() -> Non
     payload = {
         "schema_version": "3.0.0",
         "receipt_kind": "gate_b_at_most_once_launch",
-        "run_id": "gate-b-at-most-once-" + "1" * 16,
+        "launch_kind": "initial",
+        "benchmark_run_id": "gate-b-at-most-once-" + "1" * 16,
+        "launch_attempt_id": (
+            "gate-b-at-most-once-" + "1" * 16 + "-" + "2" * 64
+        ),
         "issued_at": datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
         "expires_at": datetime(2026, 8, 20, 12, 30, 1, tzinfo=timezone.utc),
         "nonce": "2" * 64,

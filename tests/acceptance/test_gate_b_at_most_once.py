@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -79,7 +80,9 @@ def _package_and_launch() -> tuple[object, object, object, object]:
     receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
         schema_version="3.0.0",
         receipt_kind="gate_b_at_most_once_launch",
-        run_id=launch.run_id,
+        launch_kind="initial",
+        benchmark_run_id=launch.run_id,
+        launch_attempt_id=f"{launch.run_id}-{'3' * 64}",
         issued_at=datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc),
         expires_at=datetime(2026, 8, 20, 12, 31, tzinfo=timezone.utc),
         nonce="3" * 64,
@@ -200,6 +203,21 @@ class _DeterministicProvider:
         )
 
 
+class _SimulatedProcessCrash(BaseException):
+    pass
+
+
+class _CrashAfterDispatchProvider:
+    def __init__(self, capability: object) -> None:
+        self.capability = capability
+
+    def governed_structured_call(self, *, request: object, capability: object) -> object:
+        assert capability is self.capability
+        reservation_id = capability.reserve(request.input_hash)
+        capability.mark_dispatching(reservation_id)
+        raise _SimulatedProcessCrash
+
+
 def test_gate_b_runner_dispatches_each_of_48_inputs_at_most_once_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -208,6 +226,8 @@ def test_gate_b_runner_dispatches_each_of_48_inputs_at_most_once_and_continues(
     preflight_events: list[str] = []
     dispatches: list[str] = []
     provider_factories: list[str] = []
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir()
 
     def recompute(package_arg: object, checkpoint_arg: object, receipt_arg: object) -> object:
         assert package_arg is package
@@ -218,19 +238,24 @@ def test_gate_b_runner_dispatches_each_of_48_inputs_at_most_once_and_continues(
 
     def provider_factory(*, recordings_root: Path, capability: object, **_: object) -> object:
         assert preflight_events
-        assert recordings_root == tmp_path / "provider-recordings"
+        assert recordings_root == (
+            package_parent
+            / "runs"
+            / package.package_sha256
+            / launch.run_id
+            / "provider-recordings"
+        )
         provider_factories.append("factory")
         return _DeterministicProvider(capability, dispatches)
 
     monkeypatch.setattr(gate_b_v3, "recompute_launch_identity_v3", recompute)
     monkeypatch.setattr(gate_b_v3, "_build_gate_b_provider_v3", provider_factory)
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
 
     summary = gate_b_v3.run_gate_b_at_most_once_v3(
         package=package,
         owner_checkpoint_payload=checkpoint.model_dump(mode="json"),
         launch_receipt_payload=receipt.model_dump(mode="json"),
-        ledger_root=tmp_path / "ledger",
-        recordings_root=tmp_path / "provider-recordings",
         owner_recovery_public_key=gate_b_v3.Ed25519PrivateKey.from_private_bytes(
             OWNER_PRIVATE_KEY
         ).public_key().public_bytes_raw(),
@@ -263,14 +288,29 @@ def test_reserved_row_requires_owner_recovery_before_provider_construction(
     ledger_identity = gate_b_v3.GateBLaunchIdentityV3(
         schema_version="3.0.0",
         run_id=launch.run_id,
-        issued_at=receipt.issued_at,
+        issued_at=checkpoint.approved_at,
         package_manifest_sha256=package.package_sha256,
     )
     public_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(
         OWNER_PRIVATE_KEY
     ).public_key().public_bytes_raw()
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir()
+    ledger_root = (
+        package_parent
+        / "runs"
+        / package.package_sha256
+        / launch.run_id
+        / "ledger"
+    )
+    for directory in (
+        package_parent / "runs",
+        package_parent / "runs" / package.package_sha256,
+        ledger_root.parent,
+    ):
+        directory.mkdir(mode=0o700)
     with gate_b_v3.GateBLedgerV3(
-        tmp_path / "ledger",
+        ledger_root,
         ledger_identity,
         manifest,
         owner_recovery_public_key=public_key,
@@ -286,14 +326,13 @@ def test_reserved_row_requires_owner_recovery_before_provider_construction(
         "_build_gate_b_provider_v3",
         lambda **_kwargs: pytest.fail("provider must not be constructed"),
     )
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
 
-    with pytest.raises(ValueError, match="owner_recovery_required"):
+    with pytest.raises(ValueError, match="recovery_manifest_required"):
         gate_b_v3.run_gate_b_at_most_once_v3(
             package=package,
             owner_checkpoint_payload=checkpoint.model_dump(mode="json"),
             launch_receipt_payload=receipt.model_dump(mode="json"),
-            ledger_root=tmp_path / "ledger",
-            recordings_root=tmp_path / "provider-recordings",
             owner_recovery_public_key=public_key,
             now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
         )
@@ -309,7 +348,7 @@ def test_dispatched_recovery_is_owner_approved_terminal_unknown_at_max_cost(
     ledger_identity = gate_b_v3.GateBLaunchIdentityV3(
         schema_version="3.0.0",
         run_id=launch.run_id,
-        issued_at=receipt.issued_at,
+        issued_at=_checkpoint.approved_at,
         package_manifest_sha256=package.package_sha256,
     )
     private_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(
@@ -359,3 +398,198 @@ def test_v3_runner_import_does_not_load_blocked_runner() -> None:
         capture_output=True,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_crash_relaunch_uses_a_new_attempt_and_signed_exact_recovery_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, launch, checkpoint, initial_receipt = _package_and_launch()
+    recovery_manifest_type = getattr(
+        gate_b_v3,
+        "GateBRecoveryLaunchManifestV3",
+    )
+    package_parent = tmp_path / "gate-b-at-most-once"
+    package_parent.mkdir()
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", package_parent)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "recompute_launch_identity_v3",
+        lambda *_args, **_kwargs: launch,
+    )
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_build_gate_b_provider_v3",
+        lambda *, capability, **_kwargs: _CrashAfterDispatchProvider(capability),
+    )
+    public_key = gate_b_v3.Ed25519PrivateKey.from_private_bytes(
+        OWNER_PRIVATE_KEY
+    ).public_key().public_bytes_raw()
+
+    with pytest.raises(_SimulatedProcessCrash):
+        gate_b_v3.run_gate_b_at_most_once_v3(
+            package=package,
+            owner_checkpoint_payload=checkpoint.model_dump(mode="json"),
+            launch_receipt_payload=initial_receipt.model_dump(mode="json"),
+            owner_recovery_public_key=public_key,
+            now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
+        )
+
+    run_root = (
+        package_parent
+        / "runs"
+        / package.package_sha256
+        / launch.run_id
+    )
+    manifest = gate_b_v3.GateBPackageManifestV3.model_validate_json(
+        package.manifest_bytes
+    )
+    ledger_identity = gate_b_v3.GateBLaunchIdentityV3(
+        schema_version="3.0.0",
+        run_id=launch.run_id,
+        issued_at=checkpoint.approved_at,
+        package_manifest_sha256=package.package_sha256,
+    )
+    with gate_b_v3.GateBLedgerV3(
+        run_root / "ledger",
+        ledger_identity,
+        manifest,
+        owner_recovery_public_key=public_key,
+    ) as ledger:
+        assert ledger.state(0) is gate_b_v3.GateBCallStateV3.DISPATCHED
+        request = gate_b_v3.build_recovery_request_v3(
+            ledger,
+            {0: gate_b_v3.GateBCallStateV3.TERMINAL_UNKNOWN},
+        )
+        decision = gate_b_v3.GateBRecoveryDecisionV3.approve(
+            request,
+            approved_by="gate-b-owner",
+            approved_at=datetime(2026, 8, 20, 12, 20, tzinfo=timezone.utc),
+            owner_private_key=OWNER_PRIVATE_KEY,
+        )
+
+    recovery_manifest = recovery_manifest_type(
+        schema_version="3.0.0",
+        manifest_kind="gate_b_at_most_once_recovery_launch",
+        benchmark_run_id=launch.run_id,
+        previous_launch_attempt_id=initial_receipt.launch_attempt_id,
+        recovery_request=request,
+        recovery_decision=decision,
+    )
+    recovery_nonce = "4" * 64
+    recovery_receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
+        schema_version="3.0.0",
+        receipt_kind="gate_b_at_most_once_launch",
+        launch_kind="recovery",
+        benchmark_run_id=launch.run_id,
+        launch_attempt_id=f"{launch.run_id}-{recovery_nonce}",
+        issued_at=datetime(2026, 8, 20, 12, 21, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 8, 20, 12, 51, tzinfo=timezone.utc),
+        nonce=recovery_nonce,
+        recovery_manifest_sha256=recovery_manifest.canonical_sha256,
+        checkpoint_manifest_sha256=checkpoint.canonical_sha256,
+        launch_identity_sha256=launch.canonical_sha256,
+        candidate_commit=launch.candidate_commit,
+        runtime_manifest_sha256=launch.runtime_manifest_sha256,
+        package_manifest_sha256=launch.package_manifest_sha256,
+        ordered_call_cap=48,
+        per_call_maximum_usd=Decimal("0.01"),
+        aggregate_maximum_usd=Decimal("0.48"),
+    )
+    recovery_dispatches: list[str] = []
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_build_gate_b_provider_v3",
+        lambda *, capability, **_kwargs: _DeterministicProvider(
+            capability,
+            recovery_dispatches,
+        ),
+    )
+
+    summary = gate_b_v3.run_gate_b_at_most_once_v3(
+        package=package,
+        owner_checkpoint_payload=checkpoint.model_dump(mode="json"),
+        launch_receipt_payload=recovery_receipt.model_dump(mode="json"),
+        recovery_manifest_payload=recovery_manifest.model_dump(mode="json"),
+        owner_recovery_public_key=public_key,
+        now=datetime(2026, 8, 20, 12, 30, tzinfo=timezone.utc),
+    )
+
+    assert initial_receipt.launch_attempt_id != recovery_receipt.launch_attempt_id
+    assert initial_receipt.launch_attempt_id.endswith(initial_receipt.nonce)
+    assert recovery_receipt.launch_attempt_id.endswith(recovery_receipt.nonce)
+    assert summary.run_id == launch.run_id
+    assert summary.launch_attempt_id == recovery_receipt.launch_attempt_id
+    assert summary.rows[0].state is gate_b_v3.GateBCallStateV3.TERMINAL_UNKNOWN
+    assert summary.rows[0].conservative_cost_usd == Decimal("0.01")
+    assert len(recovery_dispatches) == len(set(recovery_dispatches)) == 47
+    assert launch.ordered_projection_sha256s[0] not in recovery_dispatches
+
+
+def test_public_runner_has_no_caller_controlled_output_roots() -> None:
+    parameters = inspect.signature(gate_b_v3.run_gate_b_at_most_once_v3).parameters
+
+    assert "ledger_root" not in parameters
+    assert "recordings_root" not in parameters
+
+
+@pytest.mark.parametrize(
+    "protected_kind",
+    ["production", "gate_a", "historical_gate_b", "runtime"],
+)
+def test_runner_rejects_every_protected_output_root_escape(
+    protected_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, launch, _checkpoint, _receipt = _package_and_launch()
+    experiment_root = tmp_path / "gate-b-at-most-once"
+    experiment_root.mkdir()
+    monkeypatch.setattr(gate_b_v3, "_GATE_B_PACKAGE_PARENT_V3", experiment_root)
+    if protected_kind == "production":
+        monkeypatch.setattr(
+            gate_b_v3,
+            "_GATE_B_PROTECTED_PATHS_V3",
+            (experiment_root,),
+        )
+    elif protected_kind == "gate_a":
+        monkeypatch.setattr(
+            gate_b_v3,
+            "_GATE_A_SOURCE_ROOT_V3",
+            experiment_root,
+        )
+    elif protected_kind == "historical_gate_b":
+        monkeypatch.setattr(
+            gate_b_v3,
+            "_GATE_B_CORPUS_MANIFEST_PATH_V3",
+            experiment_root / "corpus-manifest.json",
+        )
+    else:
+        monkeypatch.setattr(
+            gate_b_v3,
+            "_GATE_B_RUNTIME_EXPORT_ROOT_V3",
+            experiment_root,
+        )
+
+    with pytest.raises(ValueError, match="protected"):
+        gate_b_v3._approved_runner_paths_v3(package, launch)
+
+
+def test_runner_rejects_an_ancestor_symlink_output_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, launch, _checkpoint, _receipt = _package_and_launch()
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    (real_parent / "gate-b-at-most-once").mkdir()
+    alias_parent = tmp_path / "alias"
+    alias_parent.symlink_to(real_parent, target_is_directory=True)
+    monkeypatch.setattr(
+        gate_b_v3,
+        "_GATE_B_PACKAGE_PARENT_V3",
+        alias_parent / "gate-b-at-most-once",
+    )
+
+    with pytest.raises(ValueError, match="unsafe|invalid"):
+        gate_b_v3._approved_runner_paths_v3(package, launch)

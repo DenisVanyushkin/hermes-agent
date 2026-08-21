@@ -2108,8 +2108,10 @@ _GATE_B_CONSUMED_RECEIPT_ROOT_V3 = Path(
 _GATE_B_RUNS_ROOT_V3 = _GATE_B_PACKAGE_PARENT_V3 / "runs"
 _GATE_B_OWNER_CHECKPOINT_FILENAME_V3 = "owner-checkpoint.json"
 _GATE_B_OWNER_RECOVERY_KEY_FILENAME_V3 = "owner-recovery-public-key.bin"
+_GATE_B_RECOVERY_MANIFEST_FILENAME_V3 = "recovery-launch-manifest.json"
 _GATE_B_PENDING_RECEIPT_FILENAME_V3 = "launch.pending.json"
 _GATE_B_CONSUMED_RECEIPT_FILENAME_V3 = "launch.consumed.json"
+_GATE_B_STARTED_FILENAME_V3 = "launch.started.json"
 _GATE_B_SOURCE_KEYS_V3 = frozenset(
     {
         "corpus_manifest",
@@ -2344,10 +2346,22 @@ class GateBOwnerCheckpointManifestV3(_StrictFrozenModel):
 class GateBOneTimeLaunchReceiptV3(_StrictFrozenModel):
     schema_version: Literal["3.0.0"]
     receipt_kind: Literal["gate_b_at_most_once_launch"]
-    run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
+    launch_kind: Literal["initial", "recovery"]
+    benchmark_run_id: str = Field(
+        pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$"
+    )
+    launch_attempt_id: str = Field(
+        pattern=(
+            r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$"
+        )
+    )
     issued_at: AwareDatetime
     expires_at: AwareDatetime
     nonce: str = Field(pattern=SHA256_PATTERN)
+    recovery_manifest_sha256: str | None = Field(
+        default=None,
+        pattern=SHA256_PATTERN,
+    )
     checkpoint_manifest_sha256: str = Field(pattern=SHA256_PATTERN)
     launch_identity_sha256: str = Field(pattern=SHA256_PATTERN)
     candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -2382,6 +2396,72 @@ class GateBOneTimeLaunchReceiptV3(_StrictFrozenModel):
             raise ValueError("launch receipt expiry must follow issuance")
         if self.expires_at - self.issued_at != timedelta(minutes=30):
             raise ValueError("launch receipt expiry must be exactly 30 minutes")
+        expected_attempt_id = f"{self.benchmark_run_id}-{self.nonce}"
+        if self.launch_attempt_id != expected_attempt_id:
+            raise ValueError("launch attempt id must bind benchmark id and nonce")
+        if (self.launch_kind == "recovery") != (
+            self.recovery_manifest_sha256 is not None
+        ):
+            raise ValueError(
+                "recovery launch must bind exactly one recovery manifest"
+            )
+        return self
+
+    @property
+    def canonical_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+
+class GateBRecoveryLaunchManifestV3(_StrictFrozenModel):
+    schema_version: Literal["3.0.0"]
+    manifest_kind: Literal["gate_b_at_most_once_recovery_launch"]
+    benchmark_run_id: str = Field(
+        pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$"
+    )
+    previous_launch_attempt_id: str = Field(
+        pattern=(
+            r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$"
+        )
+    )
+    recovery_request: GateBRecoveryRequestV3
+    recovery_decision: GateBRecoveryDecisionV3
+
+    @model_validator(mode="after")
+    def validate_exact_owner_approved_recovery(self) -> Self:
+        request = self.recovery_request
+        decision = self.recovery_decision
+        expected_transitions = tuple(
+            GateBRecoveryTransitionV3(
+                ordinal=row.ordinal,
+                input_sha256=row.input_sha256,
+                source_state=row.state,
+                target_state=(
+                    GateBCallStateV3.PENDING
+                    if row.state is GateBCallStateV3.RESERVED
+                    else GateBCallStateV3.TERMINAL_UNKNOWN
+                ),
+            )
+            for row in request.rows
+            if row.state
+            in {
+                GateBCallStateV3.RESERVED,
+                GateBCallStateV3.DISPATCHED,
+            }
+        )
+        if (
+            request.run_id != self.benchmark_run_id
+            or not self.previous_launch_attempt_id.startswith(
+                self.benchmark_run_id + "-"
+            )
+            or request.requested_transitions != expected_transitions
+            or decision.request_sha256 != request.canonical_sha256
+            or decision.ledger_head_sha256 != request.ledger_head_sha256
+            or decision.inventory_sha256 != request.inventory_sha256
+            or decision.requested_transitions != request.requested_transitions
+        ):
+            raise ValueError(
+                "recovery launch must bind the exact complete owner decision"
+            )
         return self
 
     @property
@@ -3736,7 +3816,7 @@ def recompute_launch_identity_v3(
         error="launch_receipt_invalid",
     )
     receipt_identity = {
-        "run_id": observed.run_id,
+        "benchmark_run_id": observed.run_id,
         "checkpoint_manifest_sha256": checkpoint.canonical_sha256,
         "launch_identity_sha256": observed.canonical_sha256,
         "candidate_commit": observed.candidate_commit,
@@ -3811,7 +3891,13 @@ def _one_pending_receipt_path_v3(pending_root: Path) -> Path:
     for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             raise GateBPackageErrorV3("pending_receipt_root_unknown_entry")
-        if re.fullmatch(r"gate-b-at-most-once-[0-9a-f]{16}", entry.name) is None:
+        if (
+            re.fullmatch(
+                r"gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}",
+                entry.name,
+            )
+            is None
+        ):
             raise GateBPackageErrorV3("pending_receipt_run_id_invalid")
         candidate = Path(entry.path) / _GATE_B_PENDING_RECEIPT_FILENAME_V3
         try:
@@ -3912,15 +3998,20 @@ def consume_gate_b_launch_receipt_v3(
     now: datetime | None = None,
     expected_root_uid: int = 0,
     expected_root_gid: int = 0,
+    expected_hermes_uid: int | None = None,
     expected_hermes_gid: int | None = None,
 ) -> Path:
     """Consume one root-owned launch receipt before the hermes process starts."""
     if os.geteuid() != expected_root_uid:
         raise GateBPackageErrorV3("root_launcher_required")
-    if expected_hermes_gid is None:
+    if expected_hermes_uid is None or expected_hermes_gid is None:
         import grp
+        import pwd
 
-        expected_hermes_gid = grp.getgrnam("hermes").gr_gid
+        if expected_hermes_uid is None:
+            expected_hermes_uid = pwd.getpwnam("hermes").pw_uid
+        if expected_hermes_gid is None:
+            expected_hermes_gid = grp.getgrnam("hermes").gr_gid
     current_time = now or datetime.now(timezone.utc)
     current_time = _require_utc(current_time)
     pending_path = _one_pending_receipt_path_v3(Path(pending_root))
@@ -3972,13 +4063,13 @@ def consume_gate_b_launch_receipt_v3(
         checkpoint_bytes,
         error="owner_checkpoint_invalid",
     )
-    if pending_directory.name != receipt.run_id:
+    if pending_directory.name != receipt.launch_attempt_id:
         raise GateBPackageErrorV3("launch_receipt_run_path_mismatch")
     if not receipt.issued_at <= current_time <= receipt.expires_at:
         raise GateBPackageErrorV3("launch_receipt_expired_or_not_yet_valid")
     if receipt.expires_at - receipt.issued_at != timedelta(minutes=30):
         raise GateBPackageErrorV3("launch_receipt_window_not_exact")
-    if receipt.run_id != (
+    if receipt.benchmark_run_id != (
         f"gate-b-at-most-once-{receipt.package_manifest_sha256[:16]}"
     ):
         raise GateBPackageErrorV3("launch_receipt_run_id_invalid")
@@ -4016,7 +4107,7 @@ def consume_gate_b_launch_receipt_v3(
     if (
         checkpoint.canonical_sha256 != receipt.checkpoint_manifest_sha256
         or launch.canonical_sha256 != receipt.launch_identity_sha256
-        or launch.run_id != receipt.run_id
+        or launch.run_id != receipt.benchmark_run_id
         or launch.candidate_commit != receipt.candidate_commit
         or launch.runtime_manifest_sha256 != receipt.runtime_manifest_sha256
         or launch.package_manifest_sha256 != receipt.package_manifest_sha256
@@ -4027,7 +4118,82 @@ def consume_gate_b_launch_receipt_v3(
         or launch.aggregate_maximum_usd != receipt.aggregate_maximum_usd
     ):
         raise GateBPackageErrorV3("launch_receipt_identity_mismatch")
-    destination_directory = Path(consumed_root) / receipt.run_id
+    recovery_manifest_bytes: bytes | None = None
+    recovery_manifest: GateBRecoveryLaunchManifestV3 | None = None
+    recovery_manifest_path = (
+        pending_directory / _GATE_B_RECOVERY_MANIFEST_FILENAME_V3
+    )
+    if receipt.launch_kind == "recovery":
+        recovery_manifest_bytes = _read_owned_launch_file_v3(
+            recovery_manifest_path,
+            expected_uid=expected_root_uid,
+            expected_gid=expected_root_gid,
+            expected_mode=0o400,
+        )
+        recovery_manifest = _validate_canonical_model_bytes_v3(
+            GateBRecoveryLaunchManifestV3,
+            recovery_manifest_bytes,
+            error="recovery_launch_manifest_invalid",
+        )
+        if (
+            recovery_manifest.canonical_sha256
+            != receipt.recovery_manifest_sha256
+            or recovery_manifest.benchmark_run_id
+            != receipt.benchmark_run_id
+            or recovery_manifest.recovery_request.package_manifest_sha256
+            != receipt.package_manifest_sha256
+            or recovery_manifest.recovery_decision.approved_at
+            > receipt.issued_at
+        ):
+            raise GateBPackageErrorV3("recovery_launch_manifest_mismatch")
+        try:
+            recovery_manifest.recovery_decision.verify_owner_signature(
+                recovery_public_key
+            )
+        except GateBLedgerErrorV3 as exc:
+            raise GateBPackageErrorV3(
+                "recovery_launch_owner_signature_invalid"
+            ) from exc
+        previous_directory = (
+            Path(consumed_root)
+            / recovery_manifest.previous_launch_attempt_id
+        )
+        previous_receipt_bytes = _read_owned_launch_file_v3(
+            previous_directory / _GATE_B_CONSUMED_RECEIPT_FILENAME_V3,
+            expected_uid=expected_root_uid,
+            expected_gid=expected_hermes_gid,
+            expected_mode=0o440,
+        )
+        previous_receipt = _validate_canonical_model_bytes_v3(
+            GateBOneTimeLaunchReceiptV3,
+            previous_receipt_bytes,
+            error="previous_launch_receipt_invalid",
+        )
+        _read_owned_launch_file_v3(
+            previous_directory / _GATE_B_STARTED_FILENAME_V3,
+            expected_uid=expected_hermes_uid,
+            expected_gid=expected_hermes_gid,
+            expected_mode=0o600,
+        )
+        if (
+            previous_receipt.launch_attempt_id
+            != recovery_manifest.previous_launch_attempt_id
+            or previous_receipt.benchmark_run_id
+            != receipt.benchmark_run_id
+            or previous_receipt.package_manifest_sha256
+            != receipt.package_manifest_sha256
+        ):
+            raise GateBPackageErrorV3("previous_launch_receipt_mismatch")
+    else:
+        try:
+            recovery_manifest_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise GateBPackageErrorV3(
+                "initial_launch_recovery_manifest_forbidden"
+            )
+    destination_directory = Path(consumed_root) / receipt.launch_attempt_id
     _ensure_owned_directory_v3(
         Path(consumed_root),
         uid=expected_root_uid,
@@ -4064,6 +4230,15 @@ def consume_gate_b_launch_receipt_v3(
         gid=expected_hermes_gid,
         mode=0o440,
     )
+    if recovery_manifest_bytes is not None:
+        _publish_owned_launch_file_v3(
+            destination_directory,
+            _GATE_B_RECOVERY_MANIFEST_FILENAME_V3,
+            recovery_manifest_bytes,
+            uid=expected_root_uid,
+            gid=expected_hermes_gid,
+            mode=0o440,
+        )
     pending_descriptor = os.open(
         pending_directory,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
@@ -4503,6 +4678,11 @@ class GateBRunnerRowSummaryV3(_StrictFrozenModel):
 class GateBRunnerSummaryV3(_StrictFrozenModel):
     schema_version: Literal["3.0.0"]
     run_id: str = Field(pattern=r"^gate-b-at-most-once-[0-9a-f]{16}$")
+    launch_attempt_id: str = Field(
+        pattern=(
+            r"^gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}$"
+        )
+    )
     attempted_count: int = Field(ge=0, le=_ORDERED_CALL_CAP)
     success_count: int = Field(ge=0, le=_ORDERED_CALL_CAP)
     terminal_failure_count: int = Field(ge=0, le=_ORDERED_CALL_CAP)
@@ -4718,6 +4898,7 @@ def _validate_receipt_time_v3(
 def _runner_summary_v3(
     ledger: GateBLedgerV3,
     *,
+    launch_attempt_id: str,
     attempted_count: int,
 ) -> GateBRunnerSummaryV3:
     rows = ledger.rows()
@@ -4734,6 +4915,7 @@ def _runner_summary_v3(
     return GateBRunnerSummaryV3(
         schema_version="3.0.0",
         run_id=ledger.launch_identity.run_id,
+        launch_attempt_id=launch_attempt_id,
         attempted_count=attempted_count,
         success_count=sum(
             row.state is GateBCallStateV3.SUCCESS for row in rows
@@ -4752,13 +4934,134 @@ def _runner_summary_v3(
     )
 
 
+def _paths_overlap_v3(left: Path, right: Path) -> bool:
+    return (
+        left == right
+        or left.is_relative_to(right)
+        or right.is_relative_to(left)
+    )
+
+
+def _approved_runner_paths_v3(
+    package: GateBValidatedPackageV3,
+    launch_identity: GateBLaunchBindingV3,
+) -> tuple[Path, Path, Path]:
+    experiment_root = Path(_GATE_B_PACKAGE_PARENT_V3)
+    if (
+        not experiment_root.is_absolute()
+        or experiment_root.name != "gate-b-at-most-once"
+        or experiment_root.is_symlink()
+        or not experiment_root.is_dir()
+        or launch_identity.run_id
+        != f"gate-b-at-most-once-{package.package_sha256[:16]}"
+        or launch_identity.package_manifest_sha256 != package.package_sha256
+    ):
+        raise GateBRunnerErrorV3("runner_output_root_invalid")
+    try:
+        experiment_descriptor = _open_directory_nofollow_v3(experiment_root)
+    except (GateBPackageErrorV3, OSError) as exc:
+        raise GateBRunnerErrorV3("runner_output_root_unsafe") from exc
+    else:
+        os.close(experiment_descriptor)
+    run_root = (
+        experiment_root
+        / "runs"
+        / package.package_sha256
+        / launch_identity.run_id
+    )
+    ledger_root = run_root / "ledger"
+    recordings_root = run_root / "provider-recordings"
+    protected_roots = (
+        *_GATE_B_PROTECTED_PATHS_V3,
+        _GATE_A_SOURCE_ROOT_V3,
+        _GATE_B_CORPUS_MANIFEST_PATH_V3.parent,
+        _GATE_B_RUNTIME_EXPORT_ROOT_V3,
+        _GATE_B_CANDIDATE_FACTS_PATH_V3,
+    )
+    if any(
+        _paths_overlap_v3(candidate, protected)
+        for candidate in (run_root, ledger_root, recordings_root)
+        for protected in protected_roots
+    ):
+        raise GateBRunnerErrorV3("runner_output_path_protected")
+    current_uid = os.geteuid()
+    for directory in (
+        experiment_root / "runs",
+        experiment_root / "runs" / package.package_sha256,
+        run_root,
+    ):
+        try:
+            directory.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise GateBRunnerErrorV3("runner_output_root_create_failed") from exc
+        metadata = directory.lstat()
+        if (
+            directory.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != current_uid
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+        ):
+            raise GateBRunnerErrorV3("runner_output_root_unsafe")
+    try:
+        recordings_root.mkdir(mode=_PRIVATE_DIRECTORY_MODE)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise GateBRunnerErrorV3("runner_recordings_root_create_failed") from exc
+    recordings_metadata = recordings_root.lstat()
+    if (
+        recordings_root.is_symlink()
+        or not stat.S_ISDIR(recordings_metadata.st_mode)
+        or recordings_metadata.st_uid != current_uid
+        or stat.S_IMODE(recordings_metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+    ):
+        raise GateBRunnerErrorV3("runner_recordings_root_unsafe")
+    return run_root, ledger_root, recordings_root
+
+
+def _runner_recovery_manifest_v3(
+    receipt: GateBOneTimeLaunchReceiptV3,
+    payload: Mapping[str, object] | None,
+    *,
+    owner_recovery_public_key: bytes,
+) -> GateBRecoveryLaunchManifestV3 | None:
+    if receipt.launch_kind == "initial":
+        if payload is not None:
+            raise GateBRunnerErrorV3(
+                "initial_launch_recovery_manifest_forbidden"
+            )
+        return None
+    if payload is None:
+        raise GateBRunnerErrorV3("recovery_launch_manifest_required")
+    try:
+        manifest = GateBRecoveryLaunchManifestV3.model_validate_json(
+            _canonical_json_bytes(dict(payload))
+        )
+        manifest.recovery_decision.verify_owner_signature(
+            owner_recovery_public_key
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise GateBRunnerErrorV3("recovery_launch_manifest_invalid") from exc
+    if (
+        manifest.canonical_sha256 != receipt.recovery_manifest_sha256
+        or manifest.benchmark_run_id != receipt.benchmark_run_id
+        or manifest.previous_launch_attempt_id == receipt.launch_attempt_id
+        or manifest.recovery_request.package_manifest_sha256
+        != receipt.package_manifest_sha256
+        or manifest.recovery_decision.approved_at > receipt.issued_at
+    ):
+        raise GateBRunnerErrorV3("recovery_launch_manifest_mismatch")
+    return manifest
+
+
 def run_gate_b_at_most_once_v3(
     *,
     package: GateBValidatedPackageV3,
     owner_checkpoint_payload: Mapping[str, object],
     launch_receipt_payload: Mapping[str, object],
-    ledger_root: Path,
-    recordings_root: Path,
+    recovery_manifest_payload: Mapping[str, object] | None = None,
     owner_recovery_public_key: bytes,
     now: datetime | None = None,
 ) -> GateBRunnerSummaryV3:
@@ -4779,16 +5082,22 @@ def run_gate_b_at_most_once_v3(
         receipt_payload,
     )
     if (
-        receipt.run_id != launch_identity.run_id
+        receipt.benchmark_run_id != launch_identity.run_id
         or receipt.launch_identity_sha256 != launch_identity.canonical_sha256
         or receipt.package_manifest_sha256 != package.package_sha256
     ):
         raise GateBRunnerErrorV3("runner_launch_identity_mismatch")
+    try:
+        checkpoint = GateBOwnerCheckpointManifestV3.model_validate_json(
+            _canonical_json_bytes(checkpoint_payload)
+        )
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise GateBRunnerErrorV3("owner_checkpoint_invalid") from exc
     manifest = GateBPackageManifestV3.model_validate_json(package.manifest_bytes)
     ledger_identity = GateBLaunchIdentityV3(
         schema_version="3.0.0",
         run_id=launch_identity.run_id,
-        issued_at=receipt.issued_at,
+        issued_at=checkpoint.approved_at,
         package_manifest_sha256=package.package_sha256,
     )
     source_bytes = load_gate_b_source_bytes_v3()
@@ -4805,20 +5114,38 @@ def run_gate_b_at_most_once_v3(
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise GateBRunnerErrorV3("runner_reviewed_allowlist_invalid") from exc
-    ledger_path = Path(ledger_root)
-    recordings_path = Path(recordings_root)
-    if (
-        not ledger_path.is_absolute()
-        or not recordings_path.is_absolute()
-        or ledger_path == recordings_path
-    ):
-        raise GateBRunnerErrorV3("runner_output_path_invalid")
+    recovery_manifest = _runner_recovery_manifest_v3(
+        receipt,
+        recovery_manifest_payload,
+        owner_recovery_public_key=owner_recovery_public_key,
+    )
+    _run_root, ledger_path, recordings_path = _approved_runner_paths_v3(
+        package,
+        launch_identity,
+    )
+    ledger_existed = (ledger_path / GateBLedgerV3.ledger_filename).exists()
+    if ledger_existed != (recovery_manifest is not None):
+        raise GateBRunnerErrorV3(
+            "recovery_manifest_required"
+            if ledger_existed
+            else "recovery_ledger_missing"
+        )
     with GateBLedgerV3(
         ledger_path,
         ledger_identity,
         manifest,
         owner_recovery_public_key=owner_recovery_public_key,
     ) as ledger:
+        if recovery_manifest is not None:
+            try:
+                apply_owner_recovery_v3(
+                    ledger,
+                    recovery_manifest.recovery_decision,
+                )
+            except GateBLedgerErrorV3 as exc:
+                raise GateBRunnerErrorV3(
+                    "recovery_launch_manifest_stale"
+                ) from exc
         if any(
             row.state in {
                 GateBCallStateV3.RESERVED,
@@ -4845,11 +5172,15 @@ def run_gate_b_at_most_once_v3(
             mark_dispatching=bridge.mark_dispatching,
             reconcile=bridge.reconcile,
         )
-        provider = _build_gate_b_provider_v3(
-            recordings_root=recordings_path,
-            capability=capability,
-            launch_identity=launch_identity,
-        )
+        provider: object | None = None
+        if any(
+            row.state is GateBCallStateV3.PENDING for row in ledger.rows()
+        ):
+            provider = _build_gate_b_provider_v3(
+                recordings_root=recordings_path,
+                capability=capability,
+                launch_identity=launch_identity,
+            )
         attempted_count = 0
         for ordinal, package_input_sha256 in enumerate(
             package.ordered_input_sha256s
@@ -4906,6 +5237,8 @@ def run_gate_b_at_most_once_v3(
             provider_error: LLMProviderError | None = None
             result: object | None = None
             try:
+                if provider is None:
+                    raise GateBRunnerErrorV3("runner_provider_missing")
                 result = provider.governed_structured_call(
                     request=request,
                     capability=capability,
@@ -4970,7 +5303,11 @@ def run_gate_b_at_most_once_v3(
                 ledger.record_unknown(ordinal, dispatch_id=dispatch_id)
             ledger.validate_snapshot()
             attempted_count += 1
-        return _runner_summary_v3(ledger, attempted_count=attempted_count)
+        return _runner_summary_v3(
+            ledger,
+            launch_attempt_id=receipt.launch_attempt_id,
+            attempted_count=attempted_count,
+        )
 
 
 def _one_consumed_receipt_path_v3(consumed_root: Path) -> Path:
@@ -4982,15 +5319,69 @@ def _one_consumed_receipt_path_v3(consumed_root: Path) -> Path:
     for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             raise GateBRunnerErrorV3("consumed_receipt_root_unknown_entry")
+        if (
+            re.fullmatch(
+                r"gate-b-at-most-once-[0-9a-f]{16}-[0-9a-f]{64}",
+                entry.name,
+            )
+            is None
+        ):
+            raise GateBRunnerErrorV3("consumed_receipt_attempt_id_invalid")
         candidate = Path(entry.path) / _GATE_B_CONSUMED_RECEIPT_FILENAME_V3
         try:
             candidate.lstat()
         except FileNotFoundError:
             continue
+        try:
+            (Path(entry.path) / _GATE_B_STARTED_FILENAME_V3).lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            continue
         candidates.append(candidate)
     if len(candidates) != 1:
         raise GateBRunnerErrorV3("consumed_receipt_count_invalid")
     return candidates[0]
+
+
+def _claim_consumed_receipt_v3(
+    receipt_path: Path,
+    receipt: GateBOneTimeLaunchReceiptV3,
+) -> Path:
+    if receipt_path.parent.name != receipt.launch_attempt_id:
+        raise GateBRunnerErrorV3("consumed_receipt_attempt_mismatch")
+    marker_path = receipt_path.parent / _GATE_B_STARTED_FILENAME_V3
+    marker_payload = _canonical_json_bytes(
+        {
+            "schema_version": "3.0.0",
+            "artifact_kind": "gate_b_launch_started",
+            "benchmark_run_id": receipt.benchmark_run_id,
+            "launch_attempt_id": receipt.launch_attempt_id,
+            "receipt_sha256": receipt.canonical_sha256,
+        }
+    )
+    try:
+        descriptor = os.open(
+            marker_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            _PRIVATE_FILE_MODE,
+        )
+    except OSError as exc:
+        raise GateBRunnerErrorV3("launch_attempt_already_started") from exc
+    try:
+        _write_all(descriptor, marker_payload)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    directory_descriptor = os.open(
+        receipt_path.parent,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+    return marker_path
 
 
 def _write_runner_summary_create_once_v3(
@@ -5050,6 +5441,7 @@ def run_gate_b_from_consumed_receipt_v3() -> GateBRunnerSummaryV3:
         receipt_bytes,
         error="launch_receipt_invalid",
     )
+    _claim_consumed_receipt_v3(consumed_path, receipt)
     checkpoint = _validate_canonical_model_bytes_v3(
         GateBOwnerCheckpointManifestV3,
         checkpoint_bytes,
@@ -5065,21 +5457,30 @@ def run_gate_b_from_consumed_receipt_v3() -> GateBRunnerSummaryV3:
         _verify_materialized_root_v3(package_descriptor, package, [])
     finally:
         os.close(package_descriptor)
-    run_root = _GATE_B_RUNS_ROOT_V3 / receipt.run_id
-    try:
-        run_root.mkdir(mode=_PRIVATE_DIRECTORY_MODE, parents=False)
-    except FileExistsError:
-        if run_root.is_symlink() or not run_root.is_dir():
-            raise GateBRunnerErrorV3("runner_root_unsafe")
-    except OSError as exc:
-        raise GateBRunnerErrorV3("runner_root_create_failed") from exc
+    recovery_manifest_payload: Mapping[str, object] | None = None
+    if receipt.launch_kind == "recovery":
+        recovery_manifest_bytes = _read_owned_launch_file_v3(
+            consumed_path.parent / _GATE_B_RECOVERY_MANIFEST_FILENAME_V3,
+            expected_uid=0,
+            expected_gid=os.getegid(),
+            expected_mode=0o440,
+        )
+        recovery_manifest = _validate_canonical_model_bytes_v3(
+            GateBRecoveryLaunchManifestV3,
+            recovery_manifest_bytes,
+            error="recovery_launch_manifest_invalid",
+        )
+        recovery_manifest_payload = recovery_manifest.model_dump(mode="json")
     summary = run_gate_b_at_most_once_v3(
         package=package,
         owner_checkpoint_payload=checkpoint.model_dump(mode="json"),
         launch_receipt_payload=receipt.model_dump(mode="json"),
-        ledger_root=run_root / "ledger",
-        recordings_root=run_root / "provider-recordings",
+        recovery_manifest_payload=recovery_manifest_payload,
         owner_recovery_public_key=owner_recovery_public_key,
+    )
+    run_root, _ledger_root, _recordings_root = _approved_runner_paths_v3(
+        package,
+        checkpoint.launch_identity,
     )
     _write_runner_summary_create_once_v3(run_root / "summary.json", summary)
     return summary

@@ -223,7 +223,9 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
     receipt = gate_b_v3.GateBOneTimeLaunchReceiptV3(
         schema_version="3.0.0",
         receipt_kind="gate_b_at_most_once_launch",
-        run_id=launch.run_id,
+        launch_kind="initial",
+        benchmark_run_id=launch.run_id,
+        launch_attempt_id=f"{launch.run_id}-{'c' * 64}",
         issued_at=datetime(2026, 8, 20, 12, 1, tzinfo=timezone.utc),
         expires_at=datetime(2026, 8, 20, 12, 31, tzinfo=timezone.utc),
         nonce="c" * 64,
@@ -240,7 +242,7 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
     consumed_root = tmp_path / "run"
     package_parent = tmp_path / "packages"
     runtime_root = tmp_path / "runtime"
-    pending_dir = pending_root / launch.run_id
+    pending_dir = pending_root / receipt.launch_attempt_id
     package_dir = package_parent / package_sha256
     pending_dir.mkdir(parents=True, mode=0o700)
     package_dir.mkdir(parents=True)
@@ -270,10 +272,13 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
         now=datetime(2026, 8, 20, 12, 10, tzinfo=timezone.utc),
         expected_root_uid=os.geteuid(),
         expected_root_gid=os.getegid(),
+        expected_hermes_uid=os.geteuid(),
         expected_hermes_gid=os.getegid(),
     )
 
-    assert consumed == consumed_root / launch.run_id / "launch.consumed.json"
+    assert consumed == (
+        consumed_root / receipt.launch_attempt_id / "launch.consumed.json"
+    )
     assert not pending_path.exists()
     assert consumed.read_bytes() == _canonical_bytes(receipt.model_dump(mode="json"))
     assert stat.S_IMODE(consumed.stat().st_mode) == 0o440
@@ -292,6 +297,7 @@ def test_root_launcher_consumes_one_exact_expiring_receipt_before_user_run(
             now=datetime(2026, 8, 20, 12, 11, tzinfo=timezone.utc),
             expected_root_uid=os.geteuid(),
             expected_root_gid=os.getegid(),
+            expected_hermes_uid=os.geteuid(),
             expected_hermes_gid=os.getegid(),
         )
 
@@ -319,3 +325,25 @@ def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
         capture_output=True,
     )
     assert syntax.returncode == 0, syntax.stderr
+
+
+def test_consumed_loader_ignores_started_attempt_and_selects_new_recovery(
+    tmp_path: Path,
+) -> None:
+    consumed_root = tmp_path / "consumed"
+    consumed_root.mkdir()
+    benchmark_run_id = "gate-b-at-most-once-" + "1" * 16
+    old_attempt = f"{benchmark_run_id}-{'2' * 64}"
+    recovery_attempt = f"{benchmark_run_id}-{'3' * 64}"
+    old_directory = consumed_root / old_attempt
+    recovery_directory = consumed_root / recovery_attempt
+    old_directory.mkdir()
+    recovery_directory.mkdir()
+    (old_directory / "launch.consumed.json").write_bytes(b"old")
+    (old_directory / "launch.started.json").write_bytes(b"started")
+    expected = recovery_directory / "launch.consumed.json"
+    expected.write_bytes(b"recovery")
+
+    selected = gate_b_v3._one_consumed_receipt_path_v3(consumed_root)
+
+    assert selected == expected
