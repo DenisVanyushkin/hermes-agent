@@ -2107,6 +2107,8 @@ class GateBMaterializationReceiptV3:
 class GateBRuntimeManifestV3(_StrictFrozenModel):
     schema_version: Literal["3.0.0"]
     runtime_kind: Literal["gate_b_at_most_once"]
+    artifact_sha256: str = Field(pattern=SHA256_PATTERN)
+    artifact_tree_sha256: str = Field(pattern=SHA256_PATTERN)
     candidate_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     python_version: Literal["3.12.13"]
     runtime_tree_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -5426,6 +5428,51 @@ def _stdlib_tree_manifest_bytes_v3(root: Path) -> bytes:
     return _canonical_json_bytes(inventory)
 
 
+def _artifact_tree_hash_v3(root: Path) -> str:
+    """Hash every executable artifact byte, excluding self-referential manifests."""
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise GateBPackageErrorV3("artifact_tree_root_invalid")
+    excluded = {"runtime-manifest.json", "runtime-manifest.sha256"}
+    digest = hashlib.sha256()
+    paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    for path in paths:
+        reference = path.relative_to(root).as_posix()
+        if reference in excluded:
+            continue
+        reference_bytes = reference.encode("utf-8")
+        if path.is_symlink():
+            digest.update(b"L\0")
+            digest.update(reference_bytes)
+            digest.update(b"\0")
+            digest.update(os.readlink(path).encode("utf-8"))
+            digest.update(b"\0")
+        elif path.is_dir():
+            digest.update(b"D\0")
+            digest.update(reference_bytes)
+            digest.update(b"\0")
+        elif path.is_file():
+            digest.update(b"F\0")
+            digest.update(reference_bytes)
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        else:
+            raise GateBPackageErrorV3("artifact_tree_entry_invalid")
+    return digest.hexdigest()
+
+
+def _source_artifact_hash_v3(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        if path.is_symlink() or not path.is_file():
+            raise GateBPackageErrorV3("source_artifact_entry_invalid")
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _export_runtime_manifest_v3(root: Path, candidate_commit: str) -> Path:
     root = root.resolve()
     runtime_root = root / "runtime"
@@ -5462,9 +5509,18 @@ def _export_runtime_manifest_v3(root: Path, candidate_commit: str) -> Path:
     if any(not Path(item).is_absolute() for item in normalized_sys_path):
         raise GateBPackageErrorV3("runtime_sys_path_invalid")
     sys_path_bytes = _canonical_json_bytes(list(normalized_sys_path))
+    identity_root = root / "runtime-identity"
+    identity_root.mkdir(mode=0o700)
+    (identity_root / "runtime-tree.json").write_bytes(runtime_tree_bytes)
+    (identity_root / "stdlib-tree.json").write_bytes(stdlib_tree_bytes)
+    (identity_root / "sys-path.json").write_bytes(sys_path_bytes)
+    artifact_tree_sha256 = _artifact_tree_hash_v3(root)
+    artifact_sha256 = _source_artifact_hash_v3(runtime_root)
     manifest = GateBRuntimeManifestV3(
         schema_version="3.0.0",
         runtime_kind="gate_b_at_most_once",
+        artifact_sha256=artifact_sha256,
+        artifact_tree_sha256=artifact_tree_sha256,
         candidate_commit=candidate_commit,
         python_version="3.12.13",
         runtime_tree_sha256=hashlib.sha256(runtime_tree_bytes).hexdigest(),
@@ -5477,11 +5533,6 @@ def _export_runtime_manifest_v3(root: Path, candidate_commit: str) -> Path:
         sys_path_sha256=hashlib.sha256(sys_path_bytes).hexdigest(),
         editable_installs=editable_installs,
     )
-    identity_root = root / "runtime-identity"
-    identity_root.mkdir(mode=0o700)
-    (identity_root / "runtime-tree.json").write_bytes(runtime_tree_bytes)
-    (identity_root / "stdlib-tree.json").write_bytes(stdlib_tree_bytes)
-    (identity_root / "sys-path.json").write_bytes(sys_path_bytes)
     manifest_path = root / "runtime-manifest.json"
     manifest_path.write_bytes(_canonical_json_bytes(manifest.model_dump(mode="json")))
     return manifest_path

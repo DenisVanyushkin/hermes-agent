@@ -1847,6 +1847,8 @@ def _actual_runtime_identity_fixture_v3(
     manifest = manifest_type(
         schema_version="3.0.0",
         runtime_kind="gate_b_at_most_once",
+        artifact_sha256=hashlib.sha256(b"source-artifact").hexdigest(),
+        artifact_tree_sha256=hashlib.sha256(b"artifact-tree").hexdigest(),
         candidate_commit="a" * 40,
         python_version="3.12.13",
         runtime_tree_sha256=hashlib.sha256(

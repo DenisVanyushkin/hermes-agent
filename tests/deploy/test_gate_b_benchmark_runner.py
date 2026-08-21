@@ -20,13 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 EXPORTER = ROOT / "scripts/export_job_intel_gate_b_benchmark.sh"
 RUNNER = ROOT / "scripts/job_intel_gate_b_benchmark.sh"
 INSTALLER = ROOT / "scripts/install_job_intel_gate_b_benchmark_unit.sh"
-SERVICE = ROOT / "deploy/systemd/experiments/job-intel-gate-b-benchmark.service"
+SERVICE = ROOT / "deploy/systemd/experiments/job-intel-gate-b-benchmark@.service"
 
 
 def _runtime_manifest_payload() -> dict[str, object]:
     return {
         "schema_version": "3.0.0",
         "runtime_kind": "gate_b_at_most_once",
+        "artifact_sha256": "f" * 64,
+        "artifact_tree_sha256": "0" * 64,
         "candidate_commit": "a" * 40,
         "python_version": "3.12.13",
         "runtime_tree_sha256": "1" * 64,
@@ -378,7 +380,19 @@ def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
     assert "Type=oneshot" in unit
     assert "User=hermes" in unit
     assert "Restart=no" in unit
-    assert "ExecStartPre=+" in unit
+    assert "ExecStartPre=+" not in unit
+    assert "StateDirectory=job-intel-gate-b-description-evidence" in unit
+    assert "ExecStartPre=/usr/bin/test -d ${STATE_DIRECTORY}" in unit
+    assert "ReadWritePaths=" not in unit
+    assert "gate-b-at-most-once" not in unit
+    assert "/var/lib/job-intel-gate-b-artifacts/%i/" in unit
+    exec_start = next(
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    )
+    assert "gate-b-at-most-once" not in exec_start
+    assert exec_start.startswith(
+        "ExecStart=/usr/bin/env /var/lib/job-intel-gate-b-artifacts/%i/"
+    )
     assert "launch.pending.json" not in unit
     assert "SLACK" not in unit.upper()
     assert "job_intel.sqlite3" in unit
@@ -390,48 +404,23 @@ def test_one_shot_unit_has_no_restart_or_slack_authority() -> None:
     assert syntax.returncode == 0, syntax.stderr
 
 
-def test_root_preflight_prepares_exact_unit_namespace_runs_parent(
+def test_state_directory_replaces_root_preflight_namespace_setup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    canonical_parent = gate_b_v3._GATE_B_PACKAGE_PARENT_V3
     unit = SERVICE.read_text(encoding="utf-8")
-    assert f"ReadWritePaths={canonical_parent}/runs" in unit.splitlines()
+    assert "StateDirectory=job-intel-gate-b-description-evidence" in unit
+    assert "ReadWritePaths=" not in unit
     runner = RUNNER.read_text(encoding="utf-8")
-    assert "prepare-output-root" in runner
+    assert "prepare-output-root" not in runner
+    assert "run-description-evidence" in runner
     assert INSTALLER.exists()
     installer = INSTALLER.read_text(encoding="utf-8")
-    prepare_index = installer.index('"$runner" prepare-output-root')
-    install_index = installer.index("/usr/bin/install")
-    reload_index = installer.index("/usr/bin/systemctl daemon-reload")
-    assert prepare_index < install_index < reload_index
+    assert "prepare-output-root" not in installer
+    assert "/usr/bin/install" in installer
+    assert "/usr/bin/systemctl daemon-reload" in installer
     assert "systemctl start" not in installer
     assert "launch.pending.json" not in installer
-
-    experiment_root = tmp_path / "gate-b-at-most-once"
-    experiment_root.mkdir(mode=0o700)
-    monkeypatch.setattr(
-        gate_b_v3,
-        "_GATE_B_PACKAGE_PARENT_V3",
-        experiment_root,
-    )
-    prepare = getattr(gate_b_v3, "prepare_gate_b_runner_output_root_v3")
-    assert "path" not in inspect.signature(prepare).parameters
-    assert "output_root" not in inspect.signature(prepare).parameters
-
-    runs_root = prepare(
-        expected_root_uid=os.geteuid(),
-        expected_hermes_uid=os.geteuid(),
-        expected_hermes_gid=os.getegid(),
-    )
-
-    assert runs_root == experiment_root / "runs"
-    metadata = runs_root.lstat()
-    assert stat.S_ISDIR(metadata.st_mode)
-    assert metadata.st_uid == os.geteuid()
-    assert metadata.st_gid == os.getegid()
-    assert stat.S_IMODE(metadata.st_mode) == 0o700
-    assert tuple(experiment_root.iterdir()) == (runs_root,)
 
 
 def test_output_root_preflight_repairs_existing_mode(
@@ -497,29 +486,29 @@ def test_output_root_preflight_rejects_non_root(
 
 
 def test_runner_rejects_extra_arguments_before_python(tmp_path: Path) -> None:
-    runtime_root = tmp_path / "immutable-runtime"
+    artifact_parent = tmp_path / "artifacts"
+    artifact_root = artifact_parent / ("a" * 64)
+    runtime_root = artifact_root
     runtime_source = runtime_root / "runtime"
     fake_python = runtime_root / "python-runtime/venv/bin/python"
     marker = tmp_path / "python-invoked"
-    runtime_source.mkdir(parents=True)
+    (runtime_source / "scripts").mkdir(parents=True)
     fake_python.parent.mkdir(parents=True)
     fake_python.write_text(
         f"#!/usr/bin/env bash\ntouch {marker!s}\n",
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
-    wrapper = tmp_path / "runner.sh"
+    wrapper = runtime_source / "scripts/runner.sh"
     wrapper.write_text(
         RUNNER.read_text(encoding="utf-8").replace(
-            "/home/hermes/.hermes/job_intel/experiments/"
-            "gate-b-at-most-once/immutable-runtime",
-            str(runtime_root),
+            "/var/lib/job-intel-gate-b-artifacts", str(artifact_parent)
         ),
         encoding="utf-8",
     )
 
     result = subprocess.run(
-        ["bash", str(wrapper), "run-at-most-once", "unexpected"],
+        ["bash", str(wrapper), "run-description-evidence", "unexpected"],
         text=True,
         capture_output=True,
     )

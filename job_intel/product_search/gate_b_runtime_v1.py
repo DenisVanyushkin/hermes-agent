@@ -101,6 +101,29 @@ def _tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _artifact_tree_hash(root: Path) -> str:
+    """Hash every entry in the materialized runtime, including symlink targets."""
+    digest = hashlib.sha256()
+    if not root.exists() or root.is_symlink():
+        return digest.hexdigest()
+    paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    for path in paths:
+        reference = path.relative_to(root).as_posix().encode("utf-8")
+        if path.is_symlink():
+            digest.update(b"L\0" + reference + b"\0")
+            digest.update(os.readlink(path).encode("utf-8"))
+            digest.update(b"\0")
+        elif path.is_dir():
+            digest.update(b"D\0" + reference + b"\0")
+        elif path.is_file():
+            digest.update(b"F\0" + reference + b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        else:
+            raise ArtifactBuildError("artifact_tree_entry_invalid")
+    return digest.hexdigest()
+
+
 def _inventory_hash(root: Path, *, suffixes: frozenset[str] | None = None) -> str:
     digest = hashlib.sha256()
     if not root.exists():
@@ -327,8 +350,10 @@ def build_frozen_runtime(
     )
     native_suffixes = frozenset({".so", ".dylib", ".dll"})
     shim_sha256 = _sha256_bytes((target_site / SHIM_NAME).read_bytes())
+    artifact_tree_sha256 = _artifact_tree_hash(destination)
     runtime_identity = RuntimeIdentity(
         artifact_sha256=artifact.artifact_sha256,
+        artifact_tree_sha256=artifact_tree_sha256,
         shim_sha256=shim_sha256,
         interpreter_sha256=_sha256_bytes(target_python.read_bytes()),
         stdlib_inventory_sha256=_tree_hash(stdlib_root),
