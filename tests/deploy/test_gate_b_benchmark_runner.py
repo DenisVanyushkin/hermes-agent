@@ -127,6 +127,7 @@ case "$1 $2" in
     ln -s "$target" "$destination/bin/python"
     ;;
   "sync --project")
+    touch "${{FAKE_UV_SYNC_MARKER:?}}"
     ;;
   "pip freeze")
     printf 'pydantic==2.11.7\\n'
@@ -141,8 +142,10 @@ esac
     )
     fake_uv.chmod(0o755)
     destination = tmp_path / "export"
+    sync_marker = tmp_path / "uv-sync-reached"
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["FAKE_UV_SYNC_MARKER"] = str(sync_marker)
 
     result = subprocess.run(
         [
@@ -168,6 +171,7 @@ esac
     exported_python = destination / "python-runtime/venv/bin/python"
     assert exported_python.is_file()
     assert not exported_python.is_symlink()
+    assert exported_python.stat().st_nlink == 1
     assert (
         hashlib.sha256(exported_python.read_bytes()).hexdigest()
         == hashlib.sha256(fake_python.read_bytes()).hexdigest()
@@ -180,10 +184,13 @@ esac
         hashlib.sha256((destination / "runtime-manifest.json").read_bytes()).hexdigest()
         == (destination / "runtime-manifest.sha256").read_text().strip()
     )
+    assert sync_marker.exists()
 
     unsafe_destination = tmp_path / "unsafe-export"
+    unsafe_sync_marker = tmp_path / "unsafe-uv-sync-reached"
     unsafe_env = dict(env)
     unsafe_env["FAKE_UV_PYTHON_TARGET"] = str(fake_python)
+    unsafe_env["FAKE_UV_SYNC_MARKER"] = str(unsafe_sync_marker)
     unsafe = subprocess.run(
         [
             "bash",
@@ -201,6 +208,9 @@ esac
 
     assert unsafe.returncode == 66
     assert "venv Python target is not the copied interpreter" in unsafe.stderr
+    assert not unsafe_sync_marker.exists()
+    assert not (unsafe_destination / "runtime-manifest.json").exists()
+    assert not (unsafe_destination / "export-observation.txt").exists()
 
 
 def _canonical_bytes(value: object) -> bytes:
