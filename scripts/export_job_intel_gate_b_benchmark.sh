@@ -41,6 +41,22 @@ for venv_python_name in "${venv_python_names[@]}"; do
     exit 66
   }
 done
+UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
+  --project "$destination/runtime" \
+  --frozen \
+  --no-install-project \
+  --no-dev \
+  --python "$destination/python-runtime/venv/bin/python"
+uv pip freeze --python "$destination/python-runtime/venv/bin/python" \
+  >"$destination/python-runtime/installed-distributions.txt"
+for venv_python_name in "${venv_python_names[@]}"; do
+  venv_python="$destination/python-runtime/venv/bin/$venv_python_name"
+  resolved_venv_python="$(readlink -f -- "$venv_python")"
+  [[ -L "$venv_python" && "$resolved_venv_python" == "$copied_python" ]] || {
+    echo "venv Python target changed during dependency installation" >&2
+    exit 66
+  }
+done
 for venv_python_name in "${venv_python_names[@]}"; do
   venv_python="$destination/python-runtime/venv/bin/$venv_python_name"
   regular_venv_python="$destination/python-runtime/venv/bin/.$venv_python_name.regularizing"
@@ -63,14 +79,6 @@ for venv_python_name in "${venv_python_names[@]}"; do
     exit 66
   }
 done
-UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
-  --project "$destination/runtime" \
-  --frozen \
-  --no-install-project \
-  --no-dev \
-  --python "$destination/python-runtime/venv/bin/python"
-uv pip freeze --python "$destination/python-runtime/venv/bin/python" \
-  >"$destination/python-runtime/installed-distributions.txt"
 
 (
   cd "$destination/runtime"

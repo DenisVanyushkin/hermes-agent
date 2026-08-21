@@ -131,11 +131,19 @@ case "$1 $2" in
   "sync --project")
     venv="${{UV_PROJECT_ENVIRONMENT:?}}"
     for executable in python python3 python3.12; do
-      [[ -f "$venv/bin/$executable" && ! -L "$venv/bin/$executable" ]]
+      [[ -L "$venv/bin/$executable" ]]
     done
+    rm -- "$venv/bin/python" "$venv/bin/python3" "$venv/bin/python3.12"
+    ln -s "${{venv%/venv}}/cpython/bin/python3.12" "$venv/bin/python"
+    ln -s python "$venv/bin/python3"
+    ln -s python "$venv/bin/python3.12"
     touch "${{FAKE_UV_SYNC_MARKER:?}}"
     ;;
   "pip freeze")
+    venv="${{4%/bin/python}}"
+    for executable in python python3 python3.12; do
+      [[ -L "$venv/bin/$executable" ]]
+    done
     printf 'pydantic==2.11.7\\n'
     ;;
   *)
