@@ -139,6 +139,7 @@ def _manifest(*, input_sha256: str, projection_sha256: str, raw_sha256: str) -> 
         "rows": [row.model_dump(mode="json") for row in rows],
         "runtime": RuntimeIdentity(
             artifact_sha256="1" * 64,
+            shim_sha256="0" * 64,
             interpreter_sha256="2" * 64,
             stdlib_inventory_sha256="3" * 64,
             installed_distributions_sha256="4" * 64,

@@ -46,6 +46,7 @@ ref:
 
 ```text
 artifact_sha256
+shim_sha256                    # explicit reviewed pysqlite3 runtime input
 interpreter_sha256
 stdlib_inventory_sha256
 installed_distributions_sha256

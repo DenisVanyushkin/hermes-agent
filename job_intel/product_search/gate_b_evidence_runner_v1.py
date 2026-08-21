@@ -53,6 +53,7 @@ def _sha256(value: bytes) -> str:
 
 class RuntimeIdentity(_StrictFrozenModel):
     artifact_sha256: str = Field(pattern=SHA256_PATTERN)
+    shim_sha256: str = Field(pattern=SHA256_PATTERN)
     interpreter_sha256: str = Field(pattern=SHA256_PATTERN)
     stdlib_inventory_sha256: str = Field(pattern=SHA256_PATTERN)
     installed_distributions_sha256: str = Field(pattern=SHA256_PATTERN)
