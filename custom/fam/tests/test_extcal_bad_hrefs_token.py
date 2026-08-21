@@ -19,6 +19,7 @@ Two layers close it, and both are pinned here:
 Conventions (fixtures, `_cfg`, `_args`) follow tests/test_extcal_tick.py
 -- this is the same tick, exercised through the same seam.
 """
+import json
 import types
 
 from fam import cli, extcal, gate
@@ -166,7 +167,6 @@ def test_unfetchable_body_is_still_reported(db, monkeypatch):
     rows = db.execute(
         "SELECT payload FROM audit_log WHERE kind='cal.ext.sync' ORDER BY id"
     ).fetchall()
-    import json
     errs = json.loads(rows[0]["payload"])["sync_errors"]
     assert any("no calendar-data" in e for e in errs)
     # Redaction still applies: no absolute iCloud href in the audit row.
@@ -227,3 +227,13 @@ def test_refetch_is_capped_per_tick(db, monkeypatch):
 
     assert len(called) == cli._BAD_HREF_REFETCH_LIMIT
     assert _stored_token(db) == "TOKEN-1"
+
+    # "we could not read this resource" and "this tick ran out of its
+    # re-fetch budget" hold the token back for the same reason but mean
+    # very different things to whoever reads the audit row -- only the
+    # first is a reason to go look at the server.
+    errs = json.loads(db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.sync' ORDER BY id"
+    ).fetchone()["payload"])["sync_errors"]
+    assert any("re-fetch failed too" in e for e in errs)
+    assert any("cap of 20 reached" in e for e in errs)

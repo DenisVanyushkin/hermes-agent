@@ -2134,6 +2134,13 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             if item.get("deleted"):
                 continue  # tombstone: no ICS to parse -- disappearance below handles it
             ics_text = item.get("ics")
+            # Whether the "no calendar-data" branch below actually got
+            # to try a re-fetch, so its error message can tell the two
+            # very different situations apart: the resource is truly
+            # unreadable, or this tick simply ran out of its re-fetch
+            # budget. Both hold the token back; only the first is a
+            # reason to go look at the server.
+            refetch_attempted = False
             if not (ics_text or "").strip():
                 # Fix-round 3, finding R2: extcal.fetch_changes' OWN
                 # docstring used to claim `ics=None` only ever happens for
@@ -2183,16 +2190,20 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
                 # than considering it delivered.
                 if abs_href and refetched < _BAD_HREF_REFETCH_LIMIT:
                     refetched += 1
+                    refetch_attempted = True
                     ics_text = extcal.fetch_resource(cfg, abs_href)
             if not (ics_text or "").strip():
                 bad_hrefs.add(abs_href)
                 token_unsafe_urls.add(url)
+                why = ("re-fetch failed too" if refetch_attempted else
+                       f"not re-fetched, per-tick cap of "
+                       f"{_BAD_HREF_REFETCH_LIMIT} reached")
                 _note_calendar_error(
                     url,
                     f"{calendar.get('name') or url}: no calendar-data "
-                    f"for {abs_href} (re-fetch failed too -- treated as "
-                    f"unreadable this round, not gone; sync-token held "
-                    f"back so this delta is asked for again)")
+                    f"for {abs_href} ({why} -- treated as unreadable "
+                    f"this round, not gone; sync-token held back so "
+                    f"this delta is asked for again)")
                 continue
             # Fix-round 4: `parse_ics_with_count` (extcal.py) -- NOT a
             # second, independent line-counter in this module (see the
