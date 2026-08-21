@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -152,6 +153,56 @@ def test_v3_policy_has_the_exact_company_deny_prefilter() -> None:
         r"\bexpansion\b",
         r"\bfastest[- ]growing\b",
     )
+
+
+def test_evidence_module_does_not_import_benchmark_module() -> None:
+    source = Path(evidence.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    }
+    imported_modules.update(
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+    assert "job_intel.product_search.gate_b_benchmark_v3" not in imported_modules
+
+
+def test_projector_characterization_keeps_role_direct_and_unknown_dimensions() -> None:
+    role_statement = "Lead quarterly roadmap planning with engineering and design."
+    raw = {
+        "title": "Head of Product",
+        "location": "Almaty",
+        "description": f"<h2>Responsibilities</h2><p>{role_statement}</p>",
+    }
+    candidates = evidence.build_vacancy_projection_candidates_v3(_record(), raw)
+    allowlist = _allowlist(
+        candidates,
+        decisions={
+            role_statement: ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY,
+        },
+    )
+
+    projected = evidence.project_vacancy_evidence_v3(_record(), raw, allowlist)
+
+    assert [fragment.source_locator for fragment in projected.fragments] == [
+        "/title#000",
+        "/location#000",
+        "/description#000",
+        "company_authority_unavailable:unresolved_company_identity",
+        "candidate_profile_evidence_not_materialized",
+    ]
+    assert projected.assessment_input.dimensions.mandate_fit.state == (
+        evidence.DimensionEvidenceState.EVIDENCE_AVAILABLE
+    )
+    assert projected.assessment_input.dimensions.company_fit.state == (
+        evidence.DimensionEvidenceState.UNKNOWN
+    )
+    assert projected.prohibited_company_claim_text_sha256s == ()
 
 
 def test_role_statement_needs_an_exact_independent_review_entry() -> None:

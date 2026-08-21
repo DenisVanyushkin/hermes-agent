@@ -45,7 +45,7 @@ from job_intel.product_search.evidence_synthesis import (
     VacancyEvidenceArtifactV1,
     validate_provider_payload_v3 as validate_provider_payload_v3_contract,
 )
-from job_intel.product_search.gate_b_benchmark_v3 import (
+from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     DEFAULT_GATE_B_BENCHMARK_POLICY_V3_PATH,
     GateBBenchmarkPolicyV3,
     load_gate_b_benchmark_policy_v3,
