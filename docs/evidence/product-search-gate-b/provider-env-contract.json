@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "contract_kind": "gate_b_slack_blind_provider_environment",
-  "status": "pending_owner_secret_authority",
+  "status": "installed_verified",
   "runtime_path": "/etc/job-intel/gate-b-provider.env",
   "ownership": {
     "owner": "root",
@@ -25,8 +25,9 @@
     "OPENROUTER_API_KEY": {
       "source_path": "/home/hermes/.hermes/.env",
       "source_key": "OPENROUTER_API_KEY",
-      "source_observation": "exactly one key name exists; its value was not read, copied, hashed, or printed",
+      "source_observation": "owner-authorized root copy completed from exactly one non-empty assignment without printing or logging the value",
       "owner_authority_required": true,
+      "owner_authority_satisfied": true,
       "alternate_source_allowed": false
     }
   },
@@ -38,12 +39,14 @@
     "JOB_INTEL_OUTBOX_PATH",
     "JOB_INTEL_SLACK_WEBHOOK_URL"
   ],
-  "live_content_sha256": null,
-  "live_content_sha256_status": "not_computable_without_owner_authority_to_access_the_provider_value",
+  "live_content_sha256": "bd26b7b07417f068efa14ef223108bf953328ccfa4c278c7e122e8ca994ed450",
+  "live_content_sha256_status": "computed_and_verified_from_installed_raw_bytes",
   "installation": {
-    "authorized": false,
+    "authorized": true,
+    "completed": true,
+    "installed_at": "2026-08-21T09:33:07Z",
     "actor": "root",
-    "phase": "Task 9 only after a launch-ready checkpoint binds the non-secret structural contract and the root-computed live content SHA-256",
+    "phase": "Task 8 owner-authorized provider contract installation; Task 9 still requires separate explicit approval of the launch-ready checkpoint",
     "before": "receipt installation and receipt consumption",
     "requirements": [
       "use umask 077 and a new temporary regular file in /etc/job-intel",
@@ -55,14 +58,24 @@
       "compute the raw live file SHA-256 locally without displaying file content",
       "set root:root 0400, require one regular-file link, then atomically rename to runtime_path",
       "verify the installed raw SHA-256 and metadata before receipt installation or consumption"
-    ]
+    ],
+    "requirements_satisfied": true,
+    "observed_metadata": {
+      "owner": "root",
+      "group": "root",
+      "mode": "0400",
+      "regular_file": true,
+      "link_count": 1,
+      "symlink": false,
+      "atomic_rename_completed": true
+    }
   },
   "authorization": {
-    "provider_value_access": false,
-    "provider_value_copy": false,
+    "provider_value_access": true,
+    "provider_value_copy": true,
     "provider_calls": false,
     "network": false,
     "task_9": false
   },
-  "missing_owner_input": "Explicitly authorize root to read only OPENROUTER_API_KEY from /home/hermes/.hermes/.env, install it under this exact contract, and compute its live content SHA-256 without exposing the value. Any other source requires a new checkpoint."
+  "remaining_owner_input": "Explicitly approve the exact launch-ready checkpoint before its effective time. This installed provider contract does not itself authorize Task 9, receipt or unit installation, network, provider calls, or spend."
 }

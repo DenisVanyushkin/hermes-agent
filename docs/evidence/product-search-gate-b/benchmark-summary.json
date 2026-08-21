@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "gate": "gate-b",
-  "status": "blocked_pending_provider_authority",
+  "status": "launch_ready_pending_owner_approval",
   "prepared_at": "2026-08-17T12:00:00+05:00",
   "prepared_from_base": "09bd9daabbb12711230e3c6920486fa712634997",
   "gate_a_input": {
@@ -190,8 +190,8 @@
     "urgent_eligible": null
   },
   "provider": {
-    "status": "not_run_pending_owner_secret_authority",
-    "reason": "slack_blind_provider_value_and_live_hash_not_authorized",
+    "status": "not_run_pending_owner_approval",
+    "reason": "live_benchmark_not_authorized",
     "operational_counters": {
       "status": "observed",
       "reason": "dry_preflight_forbids_provider_attempts",
@@ -264,8 +264,8 @@
   "recommendation": "request_revision",
   "task_13_authorized": false,
   "v3_checkpoint_request": {
-    "status": "prospective_pending_owner_secret_authority",
-    "prepared_at": "2026-08-21T08:42:34Z",
+    "status": "launch_ready_pending_owner_approval",
+    "prepared_at": "2026-08-21T09:39:29Z",
     "candidate_commit": "21938df34b6a9976fddc27a80d008d4f60e76c6d",
     "historical_task12b_base": "c7981218a03e616da8e4d60084c0bfb9633ca892",
     "rebased_patch_equivalent_base": "b24c5f3f11c56a5705dab537bf63baf359a15b04",
@@ -298,12 +298,16 @@
       "installed_distribution_count": 69
     },
     "provider_environment_contract": {
-      "status": "pending_owner_secret_authority",
+      "status": "installed_verified",
       "contract_path": "docs/evidence/product-search-gate-b/provider-env-contract.json",
-      "contract_file_sha256": "b9d924123c8d5a75c1a4df048db1ef4b0c9e4da549ae6e86c562789deb20a6d2",
+      "contract_file_sha256": "6b6385155673eaa564664bc166687787f08922707ac8829dc8e378d6a2186ee6",
       "runtime_path": "/etc/job-intel/gate-b-provider.env",
-      "installed": false,
+      "installed": true,
+      "installed_at": "2026-08-21T09:33:07Z",
       "owner_mode": "root:root 0400",
+      "regular_file": true,
+      "link_count": 1,
+      "symlink": false,
       "permitted_keys_in_order": [
         "HERMES_HOME",
         "OPENROUTER_API_KEY"
@@ -311,23 +315,31 @@
       "hermes_home_literal": "/var/empty",
       "provider_value_source_path": "/home/hermes/.hermes/.env",
       "provider_value_source_key": "OPENROUTER_API_KEY",
-      "provider_value_observed": false,
-      "provider_value_copy_authorized": false,
+      "provider_value_observed": true,
+      "provider_value_copy_authorized": true,
       "canonical_template_sha256": "92d46371aa237956959b9a9b2657ca274bac09986556000fa76457e98695e856",
-      "live_content_sha256": null,
-      "live_content_sha256_status": "not_computable_without_owner_authority",
+      "live_content_sha256": "bd26b7b07417f068efa14ef223108bf953328ccfa4c278c7e122e8ca994ed450",
+      "live_content_sha256_status": "computed_and_verified_from_installed_raw_bytes",
       "forbidden_authorities": [
         "Slack credentials, channel ids, or webhook URLs",
         "production Job Intel DB paths",
         "production Job Intel outbox paths"
       ],
-      "missing_owner_input": "authorize root to read only OPENROUTER_API_KEY from /home/hermes/.hermes/.env, install it without exposure under the exact contract, and compute the raw live content SHA-256; any other source requires a new checkpoint"
+      "remaining_owner_input": "explicitly approve the exact launch-ready checkpoint before 2026-08-22T08:00:00Z"
     },
     "launch": {
-      "status": "prospective_pending_owner_secret_authority",
+      "status": "launch_ready_pending_owner_approval",
       "run_id": "gate-b-at-most-once-6c3cbd6318e8e03e",
       "launch_identity_sha256": "7dc08dc11e93fe97ad0f682da51a198f327c20691f2b8774cc0ef1c8351471b3",
       "owner_checkpoint_sha256": "964d29683b4e19c04b4b005ef04236bd3134933038b887d730deeca4ede9f53b",
+      "launch_ready_checkpoint_bundle": {
+        "schema_version": "1.0.0",
+        "checkpoint_kind": "gate_b_launch_ready_checkpoint_bundle",
+        "canonical_sha256": "efc2335bed52860a96b3cf6c6c6bfd4365dd58169988ecbe6872c859291d477e",
+        "owner_checkpoint_sha256": "964d29683b4e19c04b4b005ef04236bd3134933038b887d730deeca4ede9f53b",
+        "provider_environment_contract_file_sha256": "6b6385155673eaa564664bc166687787f08922707ac8829dc8e378d6a2186ee6",
+        "provider_environment_live_content_sha256": "bd26b7b07417f068efa14ef223108bf953328ccfa4c278c7e122e8ca994ed450"
+      },
       "owner_approval_effective_at": "2026-08-22T08:00:00Z",
       "model_id": "openai/gpt-5-mini",
       "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
@@ -340,13 +352,15 @@
       "aggregate_maximum_usd": "0.48"
     },
     "root_owned_receipt": {
-      "status": "prospective_not_installable_until_provider_authority_is_bound",
+      "status": "prospective_ready_after_explicit_owner_approval",
       "installed": false,
       "launch_kind": "initial",
-      "pending_path": "/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1/launch.pending.json",
+      "pending_path": "/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-15e5ca368239b6ef63146fc129fa31dca14905af103f5bc9b219295cacbfc9ed/launch.pending.json",
       "consumed_root": "/run/job-intel/gate-b-at-most-once",
-      "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-34d11e791c0154131e1811cd992f4e7bb88c4903654a4f7dde6586016db6cda1",
-      "content_sha256": "899c2308a15a21305cca483e9ba71674ad2643cd0bf43cc2c76581c1f772724c",
+      "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-15e5ca368239b6ef63146fc129fa31dca14905af103f5bc9b219295cacbfc9ed",
+      "content_sha256": "1f4fdcfb5dac2848095aa924ffbbfe05fcd1e41302057e78e55241d902134b39",
+      "nonce_policy": "gate-b-launch-ready-provider-authority-v1",
+      "nonce_material_sha256": "15e5ca368239b6ef63146fc129fa31dca14905af103f5bc9b219295cacbfc9ed",
       "issued_at": "2026-08-22T08:00:00Z",
       "expires_at": "2026-08-22T08:30:00Z",
       "exact_window_minutes": 30,
@@ -379,7 +393,7 @@
       "venv_created_or_mutated": false,
       "tests_passed": 632,
       "tests_failed": 0,
-      "pytest_seconds": "427.93",
+      "pytest_seconds": "403.75",
       "ruff_check": "passed",
       "ruff_format_named_files": "6 already formatted",
       "scope_guard": "passed",
@@ -387,12 +401,14 @@
       "bash_syntax": "passed",
       "diff_check": "passed",
       "credential_literal_scan": "passed",
+      "provider_env_metadata": "passed",
+      "provider_env_live_hash": "passed",
       "whole_diff_review": "no Critical or Important findings",
       "worktree_clean_before_evidence_update": true
     },
     "authorization": {
-      "provider_value_access": false,
-      "provider_env_live_hash": false,
+      "provider_value_access": true,
+      "provider_env_live_hash": true,
       "materialization": false,
       "receipt_installation": false,
       "unit_installation": false,
@@ -404,7 +420,7 @@
     "void_if": [
       "owner approval is not explicit before 2026-08-22T08:00:00Z",
       "launch is outside 2026-08-22T08:00:00Z through 2026-08-22T08:30:00Z",
-      "provider value authority or raw live environment-file SHA-256 remains absent",
+      "installed provider environment raw SHA-256 or metadata differs from the exact checkpoint bundle",
       "provider environment contains any key outside the exact two-key contract",
       "any prospective hash differs when reproduced",
       "candidate code is substituted"
