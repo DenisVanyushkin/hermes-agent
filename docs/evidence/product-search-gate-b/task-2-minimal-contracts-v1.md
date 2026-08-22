@@ -211,6 +211,10 @@ terminal-unknown records.
 
 Collection always emits immutable measurements. Promotion is a separate pure
 step after all evidence and, when required, human adjudication are complete.
+The collection runner derives binding rows from the loaded corpus and projected
+bytes before each binding check; it never passes `manifest.rows` as the observed
+value. Binding compares independently derived ordinal, raw, input, and projection
+hashes against the manifest.
 
 ```text
 GateEvaluator.evaluate(

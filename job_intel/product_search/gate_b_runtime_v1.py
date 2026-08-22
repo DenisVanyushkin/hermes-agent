@@ -703,7 +703,25 @@ def verify_manifest_binding(
     rows: tuple[EvidenceManifestRow, ...],
     authorities: AuthorityInputs,
 ) -> None:
-    if rows != manifest.rows:
+    observed_row_identity = tuple(
+        (
+            row.ordinal,
+            row.raw_sha256,
+            row.input_sha256,
+            row.projection_sha256,
+        )
+        for row in rows
+    )
+    expected_row_identity = tuple(
+        (
+            row.ordinal,
+            row.raw_sha256,
+            row.input_sha256,
+            row.projection_sha256,
+        )
+        for row in manifest.rows
+    )
+    if observed_row_identity != expected_row_identity:
         raise ArtifactBuildError("corpus_order_mismatch")
     if source_artifact.artifact_sha256 != manifest.runtime.artifact_sha256:
         raise ArtifactBuildError("artifact_hash_mismatch")

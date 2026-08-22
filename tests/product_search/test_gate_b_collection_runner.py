@@ -76,12 +76,13 @@ def test_decision_evidence_missing_ref_fails_with_named_error(tmp_path: Path) ->
 def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     tmp_path: Path, monkeypatch: object, provider_outcome: str,
 ) -> None:
-    input_hash = "1" * 64
-    projection_hash = "2" * 64
+    input_hash = hashlib.sha256(runner._canonical_bytes({})).hexdigest()
+    projection_hash = input_hash
+    raw_hash = input_hash
     row = EvidenceManifestRow(
         ordinal=0,
         corpus_key="k",
-        raw_sha256="3" * 64,
+        raw_sha256=raw_hash,
         input_sha256=input_hash,
         projection_sha256=projection_hash,
     )
@@ -179,18 +180,6 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     projection.provider_payload.return_value = {}
     monkeypatch.setattr(runner, "project_vacancy_evidence_v3", lambda *args: projection)
     monkeypatch.setattr(runner, "validate_provider_payload_v3", lambda *args, **kwargs: None)
-    reservation_hash = hashlib.sha256(
-        runner._canonical_bytes(ref.model_dump(mode="json"))
-    ).hexdigest()
-    hashes = iter((reservation_hash, projection_hash, input_hash, reservation_hash))
-
-    def fake_sha256(value: bytes) -> str:
-        try:
-            return next(hashes)
-        except StopIteration:
-            return hashlib.sha256(value).hexdigest()
-
-    monkeypatch.setattr(runner, "_sha256", fake_sha256)
     decision = DecisionResultV2(
         status=DecisionRunStatus.FAIL_CLOSED,
         failure_reason="test",
@@ -215,12 +204,17 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
         decision_evidence=decision_store,
         decision_policy=pinned_policy,
         decision_request_factory=lambda payload, row: Mock(),
+        source_artifact=Mock(),
+        runtime=Mock(),
+        authorities=Mock(),
         binding_verifier=verifier,
     )
 
     assert isinstance(report, CollectionReport)
     assert verifier.call_count == 2
     assert verifier.call_args_list[0] == verifier.call_args_list[1]
+    assert verifier.call_args_list[0].kwargs["rows"] is not manifest.rows
+    assert verifier.call_args_list[0].kwargs["rows"][0] is not row
     provider_factory.assert_called_once_with()
     assert report.metrics.observed_row_count == 1
     assert report.rows[0].outcome is TerminalOutcome(provider_outcome)
@@ -565,6 +559,9 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         decision_evidence=decision_store,
         decision_policy=Mock(),
         decision_request_factory=lambda payload, ref: Mock(),
+        source_artifact=Mock(),
+        runtime=Mock(),
+        authorities=Mock(),
         binding_verifier=Mock(),
     )
 

@@ -14,9 +14,16 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from job_intel.product_search.gate_b_runtime_v1 import (
+        AuthorityInputs,
+        FrozenRuntime,
+        SourceArtifact,
+    )
 
 from job_intel.product_search.decision_v2 import (
     DecisionRequestV2,
@@ -1455,13 +1462,41 @@ def load_gate_b_corpus_rows(
     return tuple(loaded)
 
 
+def _derive_binding_rows(
+    rows: Sequence[CorpusRow],
+    reviewed_allowlist: ReviewedFragmentAllowlistV3,
+) -> tuple[EvidenceManifestRow, ...]:
+    """Derive binding identities from the loaded corpus, never from the manifest."""
+    derived: list[EvidenceManifestRow] = []
+    for corpus_row in rows:
+        projected = project_vacancy_evidence_v3(
+            corpus_row.record,
+            corpus_row.raw,
+            reviewed_allowlist,
+        )
+        derived.append(
+            EvidenceManifestRow(
+                ordinal=corpus_row.ordinal,
+                corpus_key=f"loaded-corpus-row-{corpus_row.ordinal}",
+                raw_sha256=_sha256(_canonical_bytes(corpus_row.raw)),
+                input_sha256=_sha256(
+                    _canonical_bytes(projected.provider_payload())
+                ),
+                projection_sha256=_sha256(
+                    _canonical_bytes(projected.model_dump(mode="json"))
+                ),
+            )
+        )
+    return tuple(derived)
+
+
 def _default_binding_verifier(
     manifest: EvidenceManifest,
     *,
-    source_artifact: object,
-    runtime: object,
+    source_artifact: SourceArtifact,
+    runtime: FrozenRuntime,
     rows: tuple[EvidenceManifestRow, ...],
-    authorities: object,
+    authorities: AuthorityInputs,
 ) -> None:
     # Imported lazily because Task 4's runtime module imports these contracts.
     from job_intel.product_search.gate_b_runtime_v1 import verify_manifest_binding
@@ -1802,9 +1837,9 @@ def run_collection(
     decision_request_factory: Callable[
         [dict[str, object], ManifestRef], DecisionRequestV2
     ] | None = None,
-    source_artifact: object | None = None,
-    runtime: object | None = None,
-    authorities: object | None = None,
+    source_artifact: SourceArtifact,
+    runtime: FrozenRuntime,
+    authorities: AuthorityInputs,
     binding_verifier: Callable[..., None] | None = None,
 ) -> CollectionReport:
     """Collect all supplied rows, then publish evidence metrics only.
@@ -1826,11 +1861,12 @@ def run_collection(
     if decision_policy is None or decision_request_factory is None:
         raise ValueError("decision_policy_and_request_factory_required")
     verifier = binding_verifier or _default_binding_verifier
+    binding_rows = _derive_binding_rows(rows, reviewed_allowlist)
     verifier(
         manifest,
         source_artifact=source_artifact,
         runtime=runtime,
-        rows=manifest.rows,
+        rows=binding_rows,
         authorities=authorities,
     )
     provider = provider_factory()
@@ -1997,7 +2033,7 @@ def run_collection(
         manifest,
         source_artifact=source_artifact,
         runtime=runtime,
-        rows=manifest.rows,
+        rows=binding_rows,
         authorities=authorities,
     )
     deliverable_count = sum(

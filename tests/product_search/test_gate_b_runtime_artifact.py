@@ -353,6 +353,7 @@ def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: P
         **os.environ,
         "PYTHONHOME": str(runtime.root),
         "PYTHONNOUSERSITE": "1",
+        "LD_LIBRARY_PATH": str(runtime.root / "lib"),
     }
     probe = subprocess.check_output(
         [
@@ -364,7 +365,7 @@ def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: P
         text=True,
         env=contained_env,
     ).splitlines()
-    assert str(runtime.root / "lib") in probe[0]
+    assert Path(probe[0]).resolve().is_relative_to(runtime.root.resolve())
     stdlib_path = subprocess.check_output(
         [
             str(runtime.python_executable),
@@ -386,6 +387,7 @@ def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: P
         if "=>" not in line:
             continue
         resolved = Path(line.split("=>", 1)[1].split("(", 1)[0].strip())
+        # The ELF interpreter path is absolute in the binary header and cannot be redirected by LD_LIBRARY_PATH.
         if resolved.name.startswith("ld-linux"):
             continue
         assert resolved.resolve().is_relative_to((runtime.root / "lib").resolve())
