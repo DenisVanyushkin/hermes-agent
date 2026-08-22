@@ -46,6 +46,7 @@ ref:
 
 ```text
 artifact_sha256
+artifact_tree_sha256           # external whole-tree anchor and systemd instance name
 shim_sha256                    # explicit reviewed pysqlite3 runtime input
 interpreter_sha256
 stdlib_inventory_sha256
@@ -54,6 +55,7 @@ installed_files_sha256       # includes every .pth and editable-install file
 sys_path_sha256
 native_extensions_sha256
 shared_libraries_sha256
+shared_library_provenance   # soname -> resolved source filename, covered by the artifact anchor
 ```
 
 `AuthorityIdentity` records the exact model, prompt, response schema, profile,

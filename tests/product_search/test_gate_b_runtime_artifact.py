@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -78,7 +79,7 @@ def test_source_artifact_rejects_dirty_worktree_before_archiving(tmp_path: Path)
         )
 
 
-def test_assembled_artifact_hash_covers_runtime_and_uses_legacy_manifest_shape(
+def test_assembled_artifact_hash_covers_runtime_and_manifest_body(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     commit = "a" * 40
@@ -131,7 +132,7 @@ def test_assembled_artifact_hash_covers_runtime_and_uses_legacy_manifest_shape(
     monkeypatch.setattr(
         runtime_v1,
         "_installed_distribution_lines",
-        lambda _: b"pydantic==2.11.7\n",
+        lambda *_args, **_kwargs: b"pydantic==2.11.7\n",
     )
     assembled = build_assembled_artifact(
         repo_root=tmp_path / "repo",
@@ -149,15 +150,135 @@ def test_assembled_artifact_hash_covers_runtime_and_uses_legacy_manifest_shape(
     assert payload["artifact_tree_sha256"] == assembled.artifact_tree_sha256
     assert runtime_v1._artifact_tree_hash(
         assembled.root,
-        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+        excluded=frozenset({"runtime-manifest.sha256"}),
     ) == assembled.artifact_tree_sha256
     tampered = assembled.root / "python-runtime/venv/bin/python"
     tampered.chmod(0o600)
     tampered.write_bytes(b"tampered")
     assert runtime_v1._artifact_tree_hash(
         assembled.root,
-        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+        excluded=frozenset({"runtime-manifest.sha256"}),
     ) != assembled.artifact_tree_sha256
+
+
+def test_artifact_tree_hash_rejects_symlink_entries(tmp_path: Path) -> None:
+    root = tmp_path / "artifact"
+    root.mkdir()
+    (root / "target.txt").write_text("bytes\n", encoding="utf-8")
+    (root / "link.txt").symlink_to("target.txt")
+
+    with pytest.raises(ArtifactBuildError, match="artifact_tree_symlink"):
+        runtime_v1._artifact_tree_hash(root)
+
+
+def test_materialize_linked_libraries_resolves_versioned_soname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "system-lib"
+    source_root.mkdir()
+    target = source_root / "libz.so.1.3"
+    target.write_bytes(b"versioned-library")
+    soname = source_root / "libz.so.1"
+    soname.symlink_to(target.name)
+    monkeypatch.setattr(runtime_v1, "_linked_library_paths", lambda _: (soname,))
+
+    provenance = runtime_v1._materialize_linked_libraries(
+        Path("/usr/bin/python3"), tmp_path / "runtime"
+    )
+
+    materialized = tmp_path / "runtime" / "lib" / "libz.so.1"
+    assert materialized.read_bytes() == target.read_bytes()
+    assert not materialized.is_symlink()
+    assert provenance == {"libz.so.1": "libz.so.1.3"}
+
+
+def test_materialize_linked_libraries_rejects_soname_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "system-lib"
+    source_root.mkdir()
+    outside = tmp_path / "outside.so"
+    outside.write_bytes(b"outside")
+    soname = source_root / "libescape.so.1"
+    soname.symlink_to(outside)
+    monkeypatch.setattr(runtime_v1, "_linked_library_paths", lambda _: (soname,))
+
+    with pytest.raises(ArtifactBuildError, match="runtime_shared_library_escape"):
+        runtime_v1._materialize_linked_libraries(
+            Path("/usr/bin/python3"), tmp_path / "runtime"
+        )
+
+
+def test_manifest_body_is_covered_by_external_tree_anchor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "a" * 40
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "uv.lock").write_text("lock\n", encoding="utf-8")
+    source = SourceArtifact(
+        commit=commit,
+        source_root=source_root,
+        archive_sha256="b" * 64,
+        artifact_sha256=runtime_v1._tree_hash(source_root),
+    )
+
+    def fake_source_artifact(**_: object) -> SourceArtifact:
+        return source
+
+    def fake_frozen_runtime(*, artifact: SourceArtifact, destination: Path, **_: object) -> FrozenRuntime:
+        python = destination / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"interpreter-bytes")
+        identity = RuntimeIdentity(
+            artifact_sha256=artifact.artifact_sha256,
+            artifact_tree_sha256="c" * 64,
+            shim_sha256="d" * 64,
+            interpreter_sha256=hashlib.sha256(python.read_bytes()).hexdigest(),
+            stdlib_inventory_sha256="e" * 64,
+            installed_distributions_sha256="f" * 64,
+            installed_files_sha256="0" * 64,
+            sys_path_sha256="1" * 64,
+            native_extensions_sha256="2" * 64,
+            shared_libraries_sha256="3" * 64,
+        )
+        return FrozenRuntime(
+            root=destination,
+            python_executable=python,
+            runtime_identity=identity,
+            parity=runtime_v1.RuntimeParity(
+                python_version="3.12.3",
+                sqlite_module="pysqlite3",
+                sqlite_version="3.53.4",
+            ),
+            shim_sha256="d" * 64,
+            reproducibility="frozen_non_editable",
+        )
+
+    monkeypatch.setattr(runtime_v1, "build_source_artifact", fake_source_artifact)
+    monkeypatch.setattr(runtime_v1, "build_frozen_runtime", fake_frozen_runtime)
+    monkeypatch.setattr(
+        runtime_v1,
+        "_installed_distribution_lines",
+        lambda *_args, **_kwargs: b"pydantic==2.11.7\n",
+    )
+    assembled = build_assembled_artifact(
+        repo_root=tmp_path / "repo",
+        commit=commit,
+        gateway_venv=tmp_path / "gateway",
+        destination=tmp_path / "assembled",
+        python_executable=Path(sys.executable),
+    )
+    before = assembled.artifact_tree_sha256
+    manifest_path = assembled.root / "runtime-manifest.json"
+    payload = json.loads(manifest_path.read_bytes())
+    payload["candidate_commit"] = "f" * 40
+    manifest_path.chmod(0o600)
+    manifest_path.write_bytes(runtime_v1._canonical_bytes(payload))
+    assert runtime_v1._artifact_tree_hash(
+        assembled.root,
+        excluded=frozenset({"runtime-manifest.sha256"}),
+    ) != before
 
 
 def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: Path) -> None:
@@ -212,6 +333,17 @@ def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: P
         python_executable=Path(sys.executable),
     )
     assert not runtime.python_executable.is_symlink()
+    contained_stdlib = runtime.root / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    assert (contained_stdlib / "os.py").is_file()
+    contained_libraries = {
+        path.name for path in (runtime.root / "lib").iterdir() if path.is_file()
+    }
+    assert any(name.startswith("libc.so") for name in contained_libraries)
+    contained_env = {
+        **os.environ,
+        "PYTHONHOME": str(runtime.root),
+        "PYTHONNOUSERSITE": "1",
+    }
     probe = subprocess.check_output(
         [
             str(runtime.python_executable),
@@ -220,8 +352,33 @@ def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: P
         ],
         cwd=runtime.root,
         text=True,
+        env=contained_env,
     ).splitlines()
     assert str(runtime.root / "lib") in probe[0]
+    stdlib_path = subprocess.check_output(
+        [
+            str(runtime.python_executable),
+            "-c",
+            "import sysconfig; print(sysconfig.get_paths()['stdlib'])",
+        ],
+        cwd=runtime.root,
+        text=True,
+        env=contained_env,
+    ).strip()
+    assert Path(stdlib_path).resolve().is_relative_to(runtime.root.resolve())
+    ldd_output = subprocess.check_output(
+        ["ldd", str(runtime.python_executable)],
+        cwd=runtime.root,
+        text=True,
+        env=contained_env,
+    )
+    for line in ldd_output.splitlines():
+        if "=>" not in line:
+            continue
+        resolved = Path(line.split("=>", 1)[1].split("(", 1)[0].strip())
+        if resolved.name.startswith("ld-linux"):
+            continue
+        assert resolved.resolve().is_relative_to((runtime.root / "lib").resolve())
     assert probe[2:] == ["pysqlite3", "3.53.4"]
     sys_path = json.loads(
         subprocess.check_output(

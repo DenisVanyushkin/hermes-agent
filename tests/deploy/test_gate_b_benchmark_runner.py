@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -105,6 +106,8 @@ def test_state_directory_replaces_root_preflight_namespace_setup() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
     assert "prepare-output-root" not in runner
     assert "run-description-evidence" in runner
+    assert 'PYTHONHOME="$artifact_root/python-runtime/venv"' in runner
+    assert 'LD_LIBRARY_PATH="$artifact_root/python-runtime/venv/lib' in runner
     assert INSTALLER.exists()
     installer = INSTALLER.read_text(encoding="utf-8")
     assert "prepare-output-root" not in installer
@@ -165,6 +168,8 @@ def test_runner_module_has_a_fail_closed_cli() -> None:
 def test_installer_preserves_executable_artifact_files() -> None:
     installer = INSTALLER.read_text(encoding="utf-8")
     assert "chmod u=rwX,g=rX,o=" in installer
+    assert "artifact contains symlink" in installer
+    assert 'excluded = {"runtime-manifest.sha256"}' in installer
 
 
 def test_wrapper_reaches_cli_and_fails_closed_without_collection_config(
@@ -216,6 +221,12 @@ def test_wrapper_reaches_cli_and_fails_closed_without_collection_config(
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
+    shutil.copytree(
+        Path(sysconfig.get_paths()["stdlib"]),
+        artifact_root / "python-runtime/venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}",
+        symlinks=False,
+        dirs_exist_ok=True,
+    )
     wrapper = runtime_source / "scripts/runner.sh"
     wrapper.write_text(
         wrapper.read_text(encoding="utf-8").replace(
@@ -293,6 +304,12 @@ def test_published_wrapper_runs_positive_collection_with_anchored_fake_provider(
         encoding="utf-8",
     )
     fake_python.chmod(0o755)
+    shutil.copytree(
+        Path(sysconfig.get_paths()["stdlib"]),
+        artifact_root / "python-runtime/venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}",
+        symlinks=False,
+        dirs_exist_ok=True,
+    )
     wrapper = runtime_source / "scripts/runner.sh"
     wrapper.write_text(
         wrapper.read_text(encoding="utf-8").replace(

@@ -75,6 +75,7 @@ class RuntimeIdentity(_StrictFrozenModel):
     sys_path_sha256: str = Field(pattern=SHA256_PATTERN)
     native_extensions_sha256: str = Field(pattern=SHA256_PATTERN)
     shared_libraries_sha256: str = Field(pattern=SHA256_PATTERN)
+    shared_library_provenance: dict[str, str] = Field(default_factory=dict)
 
 
 class AuthorityIdentity(_StrictFrozenModel):

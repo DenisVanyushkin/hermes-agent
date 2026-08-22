@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -119,7 +120,14 @@ def _artifact_tree_hash(
     *,
     excluded: frozenset[str] = frozenset(),
 ) -> str:
-    """Hash every entry in the materialized runtime, including symlink targets."""
+    """Hash every materialized byte, with only the checksum sidecar excluded.
+
+    ``runtime-manifest.json`` is included after removing its self-referential
+    ``artifact_tree_sha256`` field.  Symlinks are refused: hashing a target
+    pathname would attest metadata rather than the bytes the process executes.
+    """
+    if "runtime-manifest.json" in excluded:
+        raise ArtifactBuildError("runtime_manifest_must_be_anchored")
     digest = hashlib.sha256()
     if not root.exists() or root.is_symlink():
         return digest.hexdigest()
@@ -129,14 +137,18 @@ def _artifact_tree_hash(
             continue
         reference = path.relative_to(root).as_posix().encode("utf-8")
         if path.is_symlink():
-            digest.update(b"L\0" + reference + b"\0")
-            digest.update(os.readlink(path).encode("utf-8"))
-            digest.update(b"\0")
+            raise ArtifactBuildError("artifact_tree_symlink")
         elif path.is_dir():
             digest.update(b"D\0" + reference + b"\0")
         elif path.is_file():
             digest.update(b"F\0" + reference + b"\0")
-            digest.update(path.read_bytes())
+            if path.relative_to(root).as_posix() == "runtime-manifest.json":
+                payload = json.loads(path.read_bytes())
+                payload.pop("artifact_tree_sha256", None)
+                data = _canonical_bytes(payload)
+            else:
+                data = path.read_bytes()
+            digest.update(data)
             digest.update(b"\0")
         else:
             raise ArtifactBuildError("artifact_tree_entry_invalid")
@@ -149,7 +161,69 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> str:
     return _sha256_bytes(data)
 
 
-def _installed_distribution_lines(python_executable: Path) -> bytes:
+def _contained_python_env(python_executable: Path, python_home: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if python_home is not None:
+        env["PYTHONHOME"] = str(python_home)
+        library_path = python_home / "lib"
+        env["LD_LIBRARY_PATH"] = str(library_path) + (
+            os.pathsep + env["LD_LIBRARY_PATH"]
+            if env.get("LD_LIBRARY_PATH")
+            else ""
+        )
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def _linked_library_paths(python_executable: Path) -> tuple[Path, ...]:
+    try:
+        output = subprocess.check_output(
+            ["ldd", str(python_executable)], text=True, stderr=subprocess.STDOUT
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ArtifactBuildError("runtime_shared_library_probe_failed") from exc
+    paths: list[Path] = []
+    for line in output.splitlines():
+        match = re.search(r"=>\s+(\S+)\s+\(", line)
+        if match is None:
+            continue
+        path = Path(match.group(1))
+        if path.name.startswith("ld-linux"):
+            continue
+        paths.append(path)
+    return tuple(sorted(set(paths)))
+
+
+def _materialize_linked_libraries(
+    python_executable: Path, destination: Path
+) -> dict[str, str]:
+    library_root = destination / "lib"
+    library_root.mkdir(parents=True, exist_ok=True)
+    provenance: dict[str, str] = {}
+    for soname in _linked_library_paths(python_executable):
+        try:
+            resolved = soname.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ArtifactBuildError("runtime_shared_library_unavailable") from exc
+        # A soname symlink is acceptable at the source boundary, but only when
+        # it resolves within its library directory.  The artifact itself gets
+        # regular bytes under the soname, never a link or an escaped target.
+        if resolved.parent != soname.parent.resolve():
+            raise ArtifactBuildError("runtime_shared_library_escape")
+        if not resolved.is_file() or resolved.is_symlink():
+            raise ArtifactBuildError("runtime_shared_library_unavailable")
+        target = library_root / soname.name
+        previous = provenance.get(soname.name)
+        if previous is not None and previous != resolved.name:
+            raise ArtifactBuildError("runtime_shared_library_name_collision")
+        shutil.copy2(resolved, target)
+        provenance[soname.name] = resolved.name
+    return provenance
+
+
+def _installed_distribution_lines(
+    python_executable: Path, *, python_home: Path | None = None
+) -> bytes:
     payload = subprocess.check_output(
         [
             str(python_executable),
@@ -163,6 +237,7 @@ def _installed_distribution_lines(python_executable: Path) -> bytes:
             ),
         ],
         text=True,
+        env=_contained_python_env(python_executable, python_home),
     )
     return payload.encode("utf-8")
 
@@ -255,7 +330,9 @@ def build_source_artifact(
     )
 
 
-def _site_packages(python_executable: Path) -> Path:
+def _site_packages(
+    python_executable: Path, *, python_home: Path | None = None
+) -> Path:
     value = subprocess.check_output(
         [
             str(python_executable),
@@ -263,12 +340,15 @@ def _site_packages(python_executable: Path) -> Path:
             "import sysconfig; print(sysconfig.get_paths()['purelib'])",
         ],
         text=True,
+        env=_contained_python_env(python_executable, python_home),
     ).strip()
     return Path(value)
 
 
 def _copy_entries(source: Path, destination: Path) -> None:
     for entry in sorted(source.iterdir(), key=lambda item: item.name):
+        if entry.is_symlink():
+            raise ArtifactBuildError(f"runtime_input_symlink:{entry.name}")
         # The gateway environment is an editable checkout. Carrying its
         # finder or virtualenv .pth files into the artifact would reintroduce
         # absolute source paths and make the purportedly frozen runtime
@@ -287,16 +367,16 @@ def _copy_entries(source: Path, destination: Path) -> None:
             if "__editable__" in pth_text or "_virtualenv" in pth_text:
                 continue
         target = destination / entry.name
-        if entry.is_dir() and not entry.is_symlink():
-            shutil.copytree(entry, target, symlinks=True, dirs_exist_ok=True)
-        elif entry.is_file() or entry.is_symlink():
+        if entry.is_dir():
+            shutil.copytree(entry, target, symlinks=False, dirs_exist_ok=True)
+        elif entry.is_file():
             if target.exists() or target.is_symlink():
                 target.unlink()
-            shutil.copy2(entry, target, follow_symlinks=False)
+            shutil.copy2(entry, target)
 
 
 def _runtime_probe(
-    python_executable: Path, *, cwd: Path
+    python_executable: Path, *, cwd: Path, python_home: Path | None = None
 ) -> tuple[str, str, str, tuple[str, ...]]:
     payload = subprocess.check_output(
         [
@@ -311,6 +391,7 @@ def _runtime_probe(
         ],
         cwd=cwd,
         text=True,
+        env=_contained_python_env(python_executable, python_home),
     )
     observed = json.loads(payload)
     runtime_root = cwd.resolve()
@@ -366,7 +447,28 @@ def build_frozen_runtime(
     target_python = destination / "bin" / "python"
     if target_python.is_symlink() or not target_python.is_file():
         raise ArtifactBuildError("frozen_interpreter_not_materialized")
-    target_site = _site_packages(target_python)
+    # CPython's venv creator emits ``lib64 -> lib`` even with ``--copies``.
+    # The artifact contract rejects symlinks, so remove this redundant alias
+    # before any bytes are hashed.
+    lib64 = destination / "lib64"
+    if lib64.is_symlink():
+        lib64.unlink()
+    shared_library_provenance = _materialize_linked_libraries(
+        builder_python, destination
+    )
+    builder_stdlib = Path(
+        subprocess.check_output(
+            [
+                str(builder_python),
+                "-c",
+                "import sysconfig; print(sysconfig.get_paths()['stdlib'])",
+            ],
+            text=True,
+        ).strip()
+    )
+    contained_stdlib = destination / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    shutil.copytree(builder_stdlib, contained_stdlib, symlinks=False, dirs_exist_ok=True)
+    target_site = _site_packages(target_python, python_home=destination)
     target_site.mkdir(parents=True, exist_ok=True)
     _copy_entries(gateway_site, target_site)
     # Never merge an older editable/source tree with the archived commit:
@@ -383,16 +485,11 @@ def build_frozen_runtime(
         raise ArtifactBuildError("shim_materialization_failed")
 
     version, sqlite_module, sqlite_version, sys_path = _runtime_probe(
-        target_python, cwd=destination
+        target_python, cwd=destination, python_home=destination
     )
     if sqlite_module != "pysqlite3" or tuple(int(part) for part in sqlite_version.split(".")[:2]) < (3, 53):
         raise ArtifactBuildError("runtime_parity_mismatch")
-    stdlib_root = Path(
-        subprocess.check_output(
-            [str(target_python), "-c", "import sysconfig; print(sysconfig.get_paths()['stdlib'])"],
-            text=True,
-        ).strip()
-    )
+    stdlib_root = contained_stdlib
     native_suffixes = frozenset({".so", ".dylib", ".dll"})
     shim_sha256 = _sha256_bytes((target_site / SHIM_NAME).read_bytes())
     artifact_tree_sha256 = _artifact_tree_hash(destination)
@@ -406,7 +503,8 @@ def build_frozen_runtime(
         installed_files_sha256=_tree_hash(target_site),
         sys_path_sha256=_sha256_bytes("\n".join(sys_path).encode("utf-8")),
         native_extensions_sha256=_inventory_hash(target_site, suffixes=native_suffixes),
-        shared_libraries_sha256=_inventory_hash(stdlib_root, suffixes=native_suffixes),
+        shared_libraries_sha256=_tree_hash(destination / "lib"),
+        shared_library_provenance=shared_library_provenance,
     )
     return FrozenRuntime(
         root=destination,
@@ -433,9 +531,9 @@ def build_assembled_artifact(
     """Materialize the exact tree that the Task 9 installer publishes.
 
     The source archive and frozen interpreter are built by the neutral runtime
-    module.  The resulting tree is hashed only after all executable inputs
-    (including ``python-runtime``) have been assembled; the two manifest files
-    are deliberately excluded because they record that external hash.
+    module. The resulting tree is hashed only after all executable inputs and
+    the manifest body have been assembled; only the checksum sidecar is
+    excluded because it records that external hash.
     """
     destination = destination.resolve()
     if destination.exists():
@@ -461,17 +559,18 @@ def build_assembled_artifact(
         )
 
     distributions_path = destination / "python-runtime" / "installed-distributions.txt"
-    distributions_bytes = _installed_distribution_lines(frozen_runtime.python_executable)
+    distributions_bytes = _installed_distribution_lines(
+        frozen_runtime.python_executable, python_home=frozen_runtime.root
+    )
     distributions_path.write_bytes(distributions_bytes)
 
     dependency_lock = runtime_root / "uv.lock"
     if not dependency_lock.is_file() or dependency_lock.is_symlink():
         raise ArtifactBuildError("dependency_lock_missing")
 
-    artifact_tree_sha256 = _artifact_tree_hash(
-        destination,
-        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
-    )
+    # The manifest body is part of the external anchor, except for the one
+    # field that records that anchor.  Its checksum sidecar is excluded.
+    artifact_tree_sha256 = "0" * 64
     runtime_identity = frozen_runtime.runtime_identity.model_copy(
         update={"artifact_tree_sha256": artifact_tree_sha256}
     )
@@ -497,19 +596,27 @@ def build_assembled_artifact(
         "sys_path_sha256": runtime_identity.sys_path_sha256,
         "native_extensions_sha256": runtime_identity.native_extensions_sha256,
         "shared_libraries_sha256": runtime_identity.shared_libraries_sha256,
+        "shared_library_provenance": runtime_identity.shared_library_provenance,
         "editable_installs": [],
     }
     manifest_path = destination / "runtime-manifest.json"
+    _write_json(manifest_path, manifest_payload)
+    artifact_tree_sha256 = _artifact_tree_hash(
+        destination,
+        excluded=frozenset({"runtime-manifest.sha256"}),
+    )
+    manifest_payload["artifact_tree_sha256"] = artifact_tree_sha256
     manifest_sha256 = _write_json(manifest_path, manifest_payload)
     (destination / "runtime-manifest.sha256").write_text(
         manifest_sha256 + "\n", encoding="ascii"
     )
 
-    # The manifest is intentionally not included in the tree hash.  Recompute
-    # it as a guard against accidentally writing any other bytes after binding.
+    # Recompute the canonical view as a guard against accidentally writing any
+    # other bytes after binding.  The manifest field itself is elided by the
+    # hash function, so this is not a self-referential fixed point.
     observed = _artifact_tree_hash(
         destination,
-        excluded=frozenset({"runtime-manifest.json", "runtime-manifest.sha256"}),
+        excluded=frozenset({"runtime-manifest.sha256"}),
     )
     if observed != artifact_tree_sha256:
         raise ArtifactBuildError("assembled_artifact_changed_after_binding")

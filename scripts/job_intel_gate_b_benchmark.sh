@@ -32,6 +32,8 @@ readonly artifact_parent="/var/lib/job-intel-gate-b-artifacts"
 
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
+export PYTHONHOME="$artifact_root/python-runtime/venv"
+export LD_LIBRARY_PATH="$artifact_root/python-runtime/venv/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$runtime_source"
 unset SLACK_BOT_TOKEN SLACK_APP_TOKEN JOB_INTEL_DB_PATH JOB_INTEL_OUTBOX_PATH
 unset BROWSER_PROFILE_DIR PLAYWRIGHT_BROWSERS_PATH XDG_CACHE_HOME

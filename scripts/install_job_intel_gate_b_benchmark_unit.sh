@@ -63,6 +63,7 @@ PY
 verify_runtime_manifest_hash() {
   /usr/bin/python3 - "$1" <<'PY'
 import hashlib
+import json
 from pathlib import Path
 import sys
 
@@ -109,14 +110,23 @@ verify_artifact_hash() {
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
 expected = sys.argv[2]
-excluded = {"runtime-manifest.json", "runtime-manifest.sha256"}
+excluded = {"runtime-manifest.sha256"}
 if not root.is_dir() or root.is_symlink():
     raise SystemExit("artifact root is unavailable")
+manifest = root / "runtime-manifest.json"
+manifest_view = None
+if manifest.is_file() and not manifest.is_symlink():
+    payload = json.loads(manifest.read_bytes())
+    payload.pop("artifact_tree_sha256", None)
+    manifest_view = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
 digest = hashlib.sha256()
 paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
 for path in paths:
@@ -125,14 +135,12 @@ for path in paths:
         continue
     reference_bytes = reference.encode("utf-8")
     if path.is_symlink():
-        digest.update(b"L\0" + reference_bytes + b"\0")
-        digest.update(path.readlink().as_posix().encode("utf-8"))
-        digest.update(b"\0")
+        raise SystemExit(f"artifact contains symlink: {path}")
     elif path.is_dir():
         digest.update(b"D\0" + reference_bytes + b"\0")
     elif path.is_file():
         digest.update(b"F\0" + reference_bytes + b"\0")
-        digest.update(path.read_bytes())
+        digest.update(manifest_view if reference == "runtime-manifest.json" else path.read_bytes())
         digest.update(b"\0")
     else:
         raise SystemExit(f"artifact contains unsupported entry: {path}")
@@ -144,8 +152,21 @@ if observed != expected:
 PY
 }
 
+verify_manifest_anchor_field() {
+  /usr/bin/python3 - "$1" "$2" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+payload = json.loads((Path(sys.argv[1]) / "runtime-manifest.json").read_bytes())
+if payload.get("artifact_tree_sha256") != sys.argv[2]:
+    raise SystemExit("runtime manifest artifact_tree_sha256 mismatch")
+PY
+}
+
 verify_source_artifact_hash "$runtime_source" "$artifact_sha256" || exit 66
 verify_runtime_manifest_hash "$source_root" || exit 66
+verify_manifest_anchor_field "$source_root" "$artifact_tree_sha256" || exit 66
 verify_artifact_hash "$source_root" "$artifact_tree_sha256" || exit 66
 /usr/bin/install -d -o root -g hermes -m 0750 "$artifact_parent"
 
@@ -155,12 +176,14 @@ if [[ -e "$destination" || -L "$destination" ]]; then
     exit 66
   }
   verify_runtime_manifest_hash "$destination" || exit 66
+  verify_manifest_anchor_field "$destination" "$artifact_tree_sha256" || exit 66
   verify_artifact_hash "$destination" "$artifact_tree_sha256" || exit 66
 else
   temporary="$artifact_parent/.${artifact_tree_sha256}.install.$$"
   trap 'rm -rf -- "$temporary"' EXIT
   (umask 077; mkdir -- "$temporary"; cp -a --no-preserve=ownership "$source_root/." "$temporary/")
   verify_runtime_manifest_hash "$temporary" || exit 66
+  verify_manifest_anchor_field "$temporary" "$artifact_tree_sha256" || exit 66
   verify_artifact_hash "$temporary" "$artifact_tree_sha256" || exit 66
   chown -R root:hermes "$temporary"
   find "$temporary" -type d -exec chmod u=rwx,g=rx,o= {} +
