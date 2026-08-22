@@ -28456,6 +28456,55 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         }
 
     @staticmethod
+    def _build_upstream_sync_ack_findings_ack(message, source):
+        """Answer the structural gate by naming the findings the operator accepts.
+
+        The gate refuses a merge whose resolution lost a module-level
+        definition. Some of those refusals are legitimate — an accepted deletion
+        the merge base cannot prove — and the operator confirms those BY NAME so
+        the check stays armed for every finding they did not name. The
+        alternative already in the pipeline disarms it for the whole merge.
+
+        This intercept is the only channel: the finalizer is started by a
+        systemd path unit watching for a request file, so nothing typed anywhere
+        reaches it as an environment variable.
+
+        The parser needs the keyword AND a ``path:symbol`` token, which is what
+        keeps it clear of the three other gates that answer to plain text in the
+        same thread.
+
+        Returns an ack string when the message is an acknowledgement; otherwise
+        ``None`` so the normal path proceeds.
+        """
+        try:
+            from hermes_cli.upstream_sync_reply import (
+                parse_upstream_sync_ack_reply,
+                record_ack_findings,
+                default_upstream_sync_state_dir,
+            )
+
+            entries = parse_upstream_sync_ack_reply(message)
+            if not entries:
+                return None
+            state_dir = default_upstream_sync_state_dir()
+            source_dict = {
+                "platform": str(getattr(source, "platform", "") or "") or None,
+                "chat_id": str(getattr(source, "chat_id", "") or "") or None,
+                "thread_id": str(getattr(source, "thread_id", "") or "") or None,
+                "user_id": str(getattr(source, "user_id", "") or "") or None,
+            }
+            outcome = record_ack_findings(state_dir, entries, source_dict)
+        except Exception:
+            logger.warning("upstream-sync ack intercept failed", exc_info=True)
+            return None
+
+        if outcome.get("requested"):
+            return ("\u2705 Acknowledged: " + ", ".join(entries) + ". Re-running the apply with the "
+                    "structural check still armed for everything you did not name. The result lands "
+                    "in this thread.")
+        return "\u26a0\ufe0f Not re-run: " + (outcome.get("reason") or "nothing to apply") + "."
+
+    @staticmethod
     def _build_upstream_sync_triage_ack(message, source):
         """Answer a gate-triage proposal: ``apply fix`` or ``keep test``.
 
@@ -29678,6 +29727,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # The triage gate answers to a bare word and is matched whole-message;
         # the decision gate's parser is looser. Strict first: it cannot take an
         # answer meant for the other one, but the loose one could.
+        # Strictest parser first. This one needs its keyword AND a path:symbol
+        # token, so it cannot take an answer meant for the triage or decision
+        # gates, while either of those could swallow one meant for it.
+        _ack_findings_ack = self._build_upstream_sync_ack_findings_ack(_operator_text, source)
+        if _ack_findings_ack is not None:
+            logger.info(
+                "upstream-sync ack intercept: handled: session=%s platform=%s",
+                session_id,
+                platform_key,
+            )
+            return {
+                "final_response": _ack_findings_ack,
+                "messages": [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": _ack_findings_ack},
+                ],
+                "api_calls": 0,
+                "tools": [],
+                "history_offset": len(history),
+                "completed": True,
+                "interrupted": False,
+                "compression_exhausted": False,
+            }
+
         _triage_ack = self._build_upstream_sync_triage_ack(_operator_text, source)
         if _triage_ack is not None:
             logger.info(

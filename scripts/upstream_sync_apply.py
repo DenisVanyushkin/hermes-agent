@@ -501,6 +501,15 @@ def _commit_merge(args) -> tuple:
         # single accepted deletion takes every other resolved file out of the
         # check with it.
         entries = parse_ack_spec(os.environ.get("HERMES_SYNC_ACK_FINDINGS", ""))
+        if getattr(args, "amend", False):
+            # An amend folds a triage patch into a merge that was already
+            # authorized, and it runs from a separate systemd invocation with
+            # none of the environment the operator's answer arrived in. The
+            # record is that authorization, and it is scoped to this merge by
+            # construction: --amend below refuses any commit whose parents are
+            # not (local_base, upstream_head). Names only — a finding the
+            # operator never named still blocks.
+            entries = sorted(set(entries) | set(prep.get("invariants_acked") or []))
         blocking, acked, ack_unmatched = split_acked(report.findings, entries)
         report = Report(findings=blocking)
         if not report.ok:

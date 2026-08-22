@@ -13,8 +13,8 @@ import json
 import sys
 
 
-def findings_from_log(text: str) -> list:
-    """Findings of the most recent invariants_failed payload in ``text``."""
+def payload_from_log(text: str) -> dict:
+    """The most recent invariants_failed payload in ``text``, or ``{}``."""
     for line in reversed(text.splitlines()):
         line = line.strip()
         if not line.startswith("{") or "invariants_failed" not in line:
@@ -24,22 +24,41 @@ def findings_from_log(text: str) -> list:
         except ValueError:
             continue
         if payload.get("status") == "invariants_failed":
-            return payload.get("findings", [])
-    return []
+            return payload
+    return {}
 
 
-def render(findings: list) -> str:
+def findings_from_log(text: str) -> list:
+    """Findings of the most recent invariants_failed payload in ``text``."""
+    return payload_from_log(text).get("findings", [])
+
+
+def render(findings: list, unmatched: list = ()) -> str:
+    """One line per finding, plus any acknowledgement that matched none of them.
+
+    Each line carries the exact ``ack path:symbol`` the operator can send back.
+    Rendering the symbol in some other shape means transcribing it by hand, and
+    a slip there produces a byte-identical refusal — indistinguishable from the
+    acknowledgement not working at all.
+    """
+    lines = []
     if not findings:
         # Never render silence: an empty report reads as "nothing was wrong",
         # which is exactly what this path has already disproved.
-        return "(the findings could not be read — see finalize-detail.log)"
-    lines = []
+        lines.append("(the findings could not be read — see finalize-detail.log)")
     for f in findings:
-        where = f.get("symbol") or (f"line {f['line']}" if f.get("line") else "?")
-        lines.append(f"- {f.get('path')}: {f.get('kind')} ({where})")
+        symbol = f.get("symbol")
+        where = symbol or (f"line {f['line']}" if f.get("line") else "?")
+        line = f"- {f.get('path')}: {f.get('kind')} ({where})"
+        if symbol:
+            line += f"   →  ack {f.get('path')}:{symbol}"
+        lines.append(line)
+    for entry in unmatched or ():
+        lines.append(f"- acknowledgement {entry} matched no finding — check the spelling above")
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
     with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
-        print(render(findings_from_log(fh.read())))
+        payload = payload_from_log(fh.read())
+    print(render(payload.get("findings", []), payload.get("invariants_ack_unmatched") or []))

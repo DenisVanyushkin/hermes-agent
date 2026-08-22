@@ -20,8 +20,10 @@ purpose locally, one retired with an implementation upstream had rewritten.
 The checks state what changed and stop; they never restore anything.
 
 Telling those two apart is what the merge base is for. A symbol the base had
-and exactly one side removed was deleted on purpose — the other side never
-touched it — and reporting that is noise. Without the base every accepted
+and exactly one side no longer defines was deleted rather than lost, and
+reporting that is noise. The comparison is by name only, so it does not
+establish that the surviving side left the body alone — see
+``_accepted_deletions`` for what that leaves uncovered. Without the base every accepted
 deletion and every rename in an upstream batch became a finding, which taught
 the operator to answer the gate with the whole-merge bypass; on 2026-08-22 one
 false positive took the structural check off five files nobody had inspected.
@@ -187,7 +189,15 @@ def lost_definitions(*, ours: str, theirs: str, result: str, path: str,
                 )
             ]
     missing = (sides["ours"] | sides["theirs"]) - sides["result"]
-    missing -= _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
+    # A side with no text is a side without the file (the readers return "" for
+    # a path absent at a revision), and "absent" is not "deleted every symbol in
+    # it". Left to the name comparison below, every base name would satisfy
+    # "exactly one side has it" and the whole file would be excused — a
+    # modify/delete resolved by keeping the file, which is the routine shape of
+    # upstream retiring a module the fork still edits, would be checked against
+    # nothing at all.
+    if ours.strip() and theirs.strip():
+        missing -= _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
     return [
         Finding(
             path=path,
@@ -203,15 +213,24 @@ def lost_definitions(*, ours: str, theirs: str, result: str, path: str,
 
 
 def _accepted_deletions(base: str | None, *, ours: set, theirs: set) -> set:
-    """Names the merge base had that exactly one side removed on purpose.
+    """Names the merge base had that exactly one side no longer defines.
 
-    One side deleted it, the other never touched it — so a resolution without
-    it followed the deletion instead of losing anything. A name both sides
-    still define, or one no side had to begin with, is not in here: dropping
-    either of those is a resolver defect.
+    One side dropped the name and the other still carries it, so a resolution
+    without it followed a deletion rather than losing something both parents
+    agreed to keep. A name both sides still define, or one no side had to begin
+    with, is not in here: dropping either of those is a resolver defect.
+
+    This compares NAMES, and that is the limit of what it establishes. Whether
+    the surviving side rewrote the body is never examined, so the suppressed set
+    also covers "the fork reworked this function and upstream deleted it" — the
+    fork's rework then goes with the deletion, unreported. Narrowing that needs
+    a body comparison against the base, which this does not do.
 
     Returns the empty set when the base is unknown or does not parse, so the
-    fallback is noise rather than silence.
+    fallback is noise rather than silence. The caller is responsible for not
+    reaching here when a side lacks the file altogether: this compares name
+    sets, and an absent side presents the same empty set as one that deleted
+    everything.
     """
     if base is None:
         return set()

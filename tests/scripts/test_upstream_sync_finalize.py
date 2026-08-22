@@ -1113,9 +1113,12 @@ class TestApplyDecisions:
     def test_the_structural_refusal_offers_the_per_finding_acknowledgement(self, tmp_path, state):
         """The operator only ever sees this text, so this is where the option lives.
 
-        Naming only the whole-merge bypass here is what makes it the reflex: on
-        2026-08-22 one accepted deletion took the check off five other files
-        because the message offered nothing narrower.
+        It must name the channel they actually have. This script is started by a
+        systemd path unit, so the operator is holding a chat client, not a
+        shell: an instruction to set an environment variable is one they cannot
+        carry out, and the reflex it leaves is the whole-merge bypass — which is
+        how one accepted deletion took the check off five other files on
+        2026-08-22.
         """
         world = self._conflicting_py_repo(tmp_path)
         repo, _local_head, _ = world
@@ -1129,8 +1132,102 @@ class TestApplyDecisions:
             "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
 
         detail = _result(state)["detail"]
-        assert "HERMES_SYNC_ACK_FINDINGS" in detail
         assert "mod.py: lost_definition (B)" in detail
+        # the reply form, not an environment variable the operator cannot set
+        assert "ack path.py:symbol" in detail
+        assert "HERMES_SYNC_ACK_FINDINGS" not in detail
+
+    def test_an_acknowledgement_carried_by_the_request_lets_the_merge_land(self, tmp_path, state):
+        """The operator has no shell here, so the request is the only ack channel.
+
+        This script is started by a systemd path unit watching for the request
+        file (see the header) — no human sets an environment variable on the way
+        in. An acknowledgement the operator cannot deliver is an instruction to
+        use the whole-merge bypass instead.
+        """
+        world = self._conflicting_py_repo(tmp_path)
+        repo, _local_head, _ = world
+        self._pending(state, world, files=("mod.py",))
+        scripts, _calls = _stub_scripts(tmp_path)
+        slack_cmd, _slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\njson.load(sys.stdin)\nsys.stdout.write('A = 100\\n')\n")
+
+        (state / "finalize-request.json").write_text(json.dumps({
+            "action": "apply-decisions", "ack_findings": ["mod.py:B"],
+        }))
+        _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "ok", res.get("detail", "")
+        prep = json.loads((state / "apply-prepare.json").read_text())
+        assert prep["invariants_acked"] == ["mod.py:B"]
+        assert "invariants_skipped" not in prep
+
+    def test_an_ack_naming_something_else_still_stops_the_merge(self, tmp_path, state):
+        """Guard: the channel must carry the acknowledgement, not defeat the gate."""
+        world = self._conflicting_py_repo(tmp_path)
+        repo, local_head, _ = world
+        self._pending(state, world, files=("mod.py",))
+        scripts, _calls = _stub_scripts(tmp_path)
+        slack_cmd, _slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\njson.load(sys.stdin)\nsys.stdout.write('A = 100\\n')\n")
+
+        (state / "finalize-request.json").write_text(json.dumps({
+            "action": "apply-decisions", "ack_findings": ["mod.py:somethingelse"],
+        }))
+        _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "failed"
+        assert res["failed_stage"] == "invariants"
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_the_refusal_prints_the_findings_in_the_form_the_ack_takes(self, tmp_path, state):
+        """Copy-paste has to work: the ack matches `path:symbol` exactly.
+
+        Printing `- mod.py: lost_definition (B)` while asking for `mod.py:B`
+        makes the operator transcribe it by hand, and a transcription slip is
+        indistinguishable from the feature not working.
+        """
+        world = self._conflicting_py_repo(tmp_path)
+        repo, _local_head, _ = world
+        self._pending(state, world, files=("mod.py",))
+        scripts, _calls = _stub_scripts(tmp_path)
+        slack_cmd, _slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\njson.load(sys.stdin)\nsys.stdout.write('A = 100\\n')\n")
+
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        detail = _result(state)["detail"]
+        assert "ack mod.py:B" in detail
+
+    def test_an_ack_that_matched_nothing_is_said_out_loud(self, tmp_path, state):
+        """Otherwise a typo produces a byte-identical refusal.
+
+        The operator's next move after "I acknowledged it and nothing changed"
+        is the whole-merge bypass, which is the escalation the per-finding form
+        exists to avoid.
+        """
+        world = self._conflicting_py_repo(tmp_path)
+        repo, _local_head, _ = world
+        self._pending(state, world, files=("mod.py",))
+        scripts, _calls = _stub_scripts(tmp_path)
+        slack_cmd, _slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\njson.load(sys.stdin)\nsys.stdout.write('A = 100\\n')\n")
+
+        (state / "finalize-request.json").write_text(json.dumps({
+            "action": "apply-decisions", "ack_findings": ["mod.py:Bb"],
+        }))
+        _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        detail = _result(state)["detail"]
+        assert "mod.py:Bb" in detail
+        assert "matched no finding" in detail
 
     def test_unresolvable_hunk_fails_at_resolve_keeps_clone_and_reports(self, tmp_path, state):
         world = self._conflicting_repo(tmp_path)

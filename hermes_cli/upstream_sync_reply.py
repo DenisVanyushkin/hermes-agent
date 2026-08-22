@@ -281,6 +281,74 @@ def parse_upstream_sync_triage_reply(text) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Acknowledging a structural finding
+# ---------------------------------------------------------------------------
+#
+# The structural gate refuses a merge whose resolution lost a definition, and
+# some of those refusals are legitimate — an accepted deletion the base cannot
+# prove. The operator confirms the ones they checked BY NAME so the check stays
+# armed for everything else; the alternative already in the pipeline disarms it
+# for the whole merge.
+#
+# It has to be a reply, because that is the only channel the operator has: the
+# finalizer is started by a systemd path unit watching for a request file, so
+# nothing typed anywhere arrives as an environment variable.
+
+_ACK_ENTRY = re.compile(r"[^\s,:]+:[^\s,:]+")
+_ACK_PREFIX = re.compile(r"^\s*ack\b", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_upstream_sync_ack_reply(text) -> Optional[list]:
+    """Parse ``ack <path>:<symbol> …`` into a list of entries, else ``None``.
+
+    Requires both the keyword and at least one ``path:symbol`` token. Every
+    other gate in this pipeline answers to plain text in the same thread, so a
+    parser that fired on the keyword alone — or on a bare path — would start
+    taking messages meant for them.
+    """
+    if not isinstance(text, str) or not _ACK_PREFIX.search(text):
+        return None
+    entries = []
+    for line in text.splitlines():
+        prefix = _ACK_PREFIX.match(line)
+        if prefix is None:
+            continue
+        # Cut at where the pattern actually matched. Searching the line for the
+        # literal keyword again finds the one inside a path (``pack.py``) as
+        # soon as the operator typed the keyword in another case, and yields a
+        # mangled entry that matches nothing.
+        for entry in _ACK_ENTRY.findall(line[prefix.end():]):
+            if entry not in entries:
+                entries.append(entry)
+    return entries or None
+
+
+def record_ack_findings(state_dir: Path | str, entries, source: dict) -> dict:
+    """Re-request the apply, carrying the operator's acknowledged findings.
+
+    Returns ``{"requested": bool, "reason": str|None}``. The entries ride in the
+    request rather than the environment — see the note above.
+    """
+    state = Path(state_dir)
+    if not (state / "pending.json").exists():
+        # An ack answers a refusal. With no decision armed there is no refusal
+        # in flight and nothing for the entries to be applied to.
+        return {"requested": False, "reason": "no upstream-sync decision is armed to re-apply"}
+    if any((state / n).exists() for n in ("finalize-request.json", "finalize-request.processing.json")):
+        return {"requested": False,
+                "reason": "a finalize is already in flight; answer again once it reports"}
+    _write_json_atomic(state / "finalize-request.json", {
+        "action": "apply-decisions",
+        "requested_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "ack_findings": list(entries),
+        "origin": {"platform": _normalize_platform(source.get("platform")),
+                   "chat_id": source.get("chat_id"), "thread_id": source.get("thread_id"),
+                   "user_id": source.get("user_id")},
+    })
+    return {"requested": True, "reason": None}
+
+
 TRIAGE_FILE = "gate-triage.json"
 
 

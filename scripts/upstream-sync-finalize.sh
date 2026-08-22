@@ -77,6 +77,14 @@ json_field() {
 }
 
 ACTION="$(json_field action)"
+# Acknowledged structural findings travel in the request, not the environment:
+# this script is started by a systemd path unit watching for the request file,
+# so no operator shell is on the way in and an env-only channel is unreachable
+# for the person the refusal message is addressed to.
+ACK_FINDINGS="$(python3 -c "import json,sys
+d = json.load(open(sys.argv[1]))
+v = d.get('ack_findings') or []
+print(' '.join(str(e) for e in v) if isinstance(v, list) else str(v))" "$PROCESSING" 2>/dev/null || true)"
 
 # `sync` — каноническое имя действия; `rebase` принимается от скилла,
 # который ещё не обновился до нового контракта. Оба означают одно:
@@ -577,7 +585,8 @@ apply_decisions() {
     fi
   fi
   set +e
-  "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+  HERMES_SYNC_ACK_FINDINGS="$ACK_FINDINGS" \
+    "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -593,9 +602,9 @@ apply_decisions() {
       write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.
 ${findings:-(see finalize-detail.log)}
 
-Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or a finding is intended — confirm the ones you checked BY NAME and re-run:
-  HERMES_SYNC_ACK_FINDINGS=\"path.py:symbol another.py:symbol\"
-That keeps the gate armed for every finding you did not name. HERMES_SYNC_SKIP_INVARIANTS=1 disarms the structural check for the whole merge and is the last resort, not the first."
+Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or a finding is intended — confirm the ones you checked BY NAME by replying in this thread:
+  ack path.py:symbol another.py:symbol
+Each line above already ends with the exact form to send back. The apply re-runs with the structural check still armed for every finding you did not name, so there is no reply that waves the whole merge through."
       exit 0
     fi
     write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"

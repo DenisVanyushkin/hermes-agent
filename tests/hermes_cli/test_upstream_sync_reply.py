@@ -390,3 +390,87 @@ class TestRecordTriageDecision:
         out = record_triage_decision(tmp_path, "apply_fix", {})
         assert out["requested"] is False
         assert "in flight" in (out["reason"] or "")
+
+
+from hermes_cli.upstream_sync_reply import (  # noqa: E402
+    parse_upstream_sync_ack_reply,
+    record_ack_findings,
+)
+
+
+class TestParseAckReply:
+    """The operator's only channel for acknowledging a structural finding.
+
+    The finalizer is started by a systemd path unit, so nothing an operator
+    types reaches it as an environment variable — the acknowledgement has to
+    travel as a reply, the way every other answer in this pipeline does.
+    """
+
+    def test_a_single_entry(self):
+        assert parse_upstream_sync_ack_reply("ack mod.py:local_only") == ["mod.py:local_only"]
+
+    def test_several_entries_on_one_line_or_several(self):
+        assert parse_upstream_sync_ack_reply("ack a.py:foo b.py:bar") == ["a.py:foo", "b.py:bar"]
+        assert parse_upstream_sync_ack_reply("ack a.py:foo\nack b.py:bar") == ["a.py:foo", "b.py:bar"]
+
+    def test_commas_separate_too(self):
+        assert parse_upstream_sync_ack_reply("ack a.py:foo, b.py:bar") == ["a.py:foo", "b.py:bar"]
+
+    def test_conversation_is_not_an_acknowledgement(self):
+        assert parse_upstream_sync_ack_reply("ack") is None
+        assert parse_upstream_sync_ack_reply("looks fine to me") is None
+        assert parse_upstream_sync_ack_reply("") is None
+        assert parse_upstream_sync_ack_reply(None) is None
+
+    def test_an_entry_without_a_symbol_is_not_an_entry(self):
+        """`path:` names no symbol, and only a symbol-bearing finding is ackable."""
+        assert parse_upstream_sync_ack_reply("ack mod.py") is None
+        assert parse_upstream_sync_ack_reply("ack mod.py:") is None
+
+    def test_a_path_that_contains_the_keyword_is_not_cut_in_half(self):
+        """The prefix is where the pattern matched, not the next literal "ack".
+
+        Splitting the line on the substring finds the one inside the path when
+        the keyword itself was typed in another case, and hands back a mangled
+        entry that matches no finding — which reads to the operator exactly like
+        the acknowledgement being ignored.
+        """
+        assert parse_upstream_sync_ack_reply("ACK pack.py:foo") == ["pack.py:foo"]
+        assert parse_upstream_sync_ack_reply("ack backup.py:foo") == ["backup.py:foo"]
+
+    def test_it_cannot_swallow_the_other_gates_answers(self):
+        """Every gate in this pipeline answers to plain text in the same thread."""
+        assert parse_upstream_sync_ack_reply("F2: merge-both") is None
+        assert parse_upstream_sync_ack_reply("apply fix") is None
+        assert parse_upstream_sync_ack_reply("keep test") is None
+        assert parse_upstream_sync_ack_reply("выполни") is None
+        assert parse_upstream_sync_ack_reply("подтверждаю git_push") is None
+
+
+class TestRecordAckFindings:
+    def test_it_requests_the_apply_carrying_the_entries(self, tmp_path):
+        _pending_with(tmp_path, [_feat("F1", "a.py", "merge-both")], status="auto_apply")
+
+        outcome = record_ack_findings(tmp_path, ["mod.py:local_only"], {"platform": "slack"})
+
+        assert outcome["requested"] is True
+        req = json.loads((tmp_path / "finalize-request.json").read_text())
+        assert req["action"] == "apply-decisions"
+        assert req["ack_findings"] == ["mod.py:local_only"]
+
+    def test_it_refuses_while_a_finalize_is_in_flight(self, tmp_path):
+        """Re-arming over a running apply would answer a gate nobody is holding."""
+        _pending_with(tmp_path, [_feat("F1", "a.py", "merge-both")], status="auto_apply")
+        (tmp_path / "finalize-request.processing.json").write_text("{}")
+
+        outcome = record_ack_findings(tmp_path, ["mod.py:local_only"], {"platform": "slack"})
+
+        assert outcome["requested"] is False
+        assert outcome["reason"]
+
+    def test_it_refuses_when_no_decision_is_armed(self, tmp_path):
+        """Nothing to re-apply: an ack is an answer to a refusal, not a command."""
+        outcome = record_ack_findings(tmp_path, ["mod.py:local_only"], {"platform": "slack"})
+
+        assert outcome["requested"] is False
+        assert not (tmp_path / "finalize-request.json").exists()

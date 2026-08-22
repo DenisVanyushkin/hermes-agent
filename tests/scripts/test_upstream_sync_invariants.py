@@ -221,6 +221,42 @@ class TestBaseAwareSuppression:
 
         assert [f.symbol for f in findings] == ["foo"]
 
+    def test_a_side_missing_the_file_entirely_suppresses_nothing(self):
+        """modify/delete is not "the other side deleted every symbol".
+
+        The readers return "" both for a path absent at a revision and for an
+        empty file, so a side without the file has an empty name set — and then
+        every single base name satisfies "exactly one side has it" and the whole
+        file is excused. That is the routine shape of upstream retiring a module
+        the fork still edits, resolved by keeping the file, and it would leave
+        the resolution checked against nothing at all.
+        """
+        from upstream_sync_invariants import lost_definitions
+
+        base = self.FOO + self.BAR
+        ours = base + "def extra():\n    pass\n"
+        result = self.FOO
+
+        findings = lost_definitions(
+            base=base, ours=ours, theirs="", result=result, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["bar", "extra"]
+
+    def test_the_mirror_case_suppresses_nothing_either(self):
+        """Same shape with the sides swapped: the fork deleted the file."""
+        from upstream_sync_invariants import lost_definitions
+
+        base = self.FOO + self.BAR
+        theirs = base + "def extra():\n    pass\n"
+        result = self.FOO
+
+        findings = lost_definitions(
+            base=base, ours="", theirs=theirs, result=result, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["bar", "extra"]
+
     def test_check_merge_threads_the_base_reader_through(self):
         from upstream_sync_invariants import check_merge
 

@@ -310,8 +310,13 @@ class TestPerFindingAcknowledgement:
         assert out["status"] == "invariants_failed"
         assert [f["kind"] for f in out["findings"]] == ["unparseable"]
 
-    def test_the_refusal_tells_the_operator_the_per_finding_form(self, pyworld):
-        """Discoverability is the point: an unknown option gets bypassed instead."""
+    def test_the_refusal_names_the_per_finding_form_to_its_caller(self, pyworld):
+        """This payload is the script's contract with whoever invoked it.
+
+        The operator never reads it — they get the finalizer's message, which
+        names the reply form because a chat client cannot set an environment
+        variable. Here the caller IS a process, so the variable is the form.
+        """
         scratch = _prepared(pyworld)
         (scratch / "mod.py").write_text("def kept():\n    return 100\n")
         _git(scratch, "add", "mod.py")
@@ -319,6 +324,51 @@ class TestPerFindingAcknowledgement:
         out = _out(_run("commit", pyworld["state"], pyworld["live"]))
 
         assert "HERMES_SYNC_ACK_FINDINGS" in out["hint"]
+
+
+class TestAnAcknowledgementSurvivesTheAmend:
+    """The pipeline amends its own merge, from a process the operator never sees.
+
+    `apply-triage-fixes` patches test files in the preserved clone and folds
+    them into the merge with `commit --amend` — a separate systemd-launched run
+    with no environment carried over. The gate re-runs there (TestAmendIsChecked
+    Too pins that), so an acknowledgement that lives only in the environment is
+    gone by then and the already-authorized merge is refused a second time, with
+    a message blaming the patch rather than the gate.
+    """
+
+    def test_the_record_re_authorizes_the_amend(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        first = _out(_run("commit", pyworld["state"], pyworld["live"],
+                          env={"HERMES_SYNC_ACK_FINDINGS": "mod.py:local_only"}))
+        assert first["status"] == "committed", first
+
+        # the triage patch lands, and the amend runs with no environment at all
+        (scratch / "extra_test.py").write_text("def test_x():\n    assert 1\n")
+        _git(scratch, "add", "extra_test.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"], "--amend"))
+
+        assert out["status"] == "committed", out
+        assert out["invariants_acked"] == ["mod.py:local_only"]
+        assert "invariants_skipped" not in out
+
+    def test_the_record_does_not_authorize_a_finding_it_never_named(self, pyworld):
+        """Guard: replaying the record must not become a blanket pass."""
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        assert _out(_run("commit", pyworld["state"], pyworld["live"],
+                         env={"HERMES_SYNC_ACK_FINDINGS": "mod.py:local_only"}))["status"] == "committed"
+
+        # the amend drops a second definition, which nobody acknowledged
+        (scratch / "mod.py").write_text("def gone():\n    return 0\n")
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"], "--amend"))
+
+        assert out["status"] == "invariants_failed"
+        assert [f["symbol"] for f in out["findings"]] == ["kept"]
 
 
 class TestMechanicalResolutionValidatesItsOutput:
@@ -456,19 +506,67 @@ class TestFindingsRenderer:
 
         assert m.findings_from_log("just git output\n") == []
 
-    def test_renders_a_symbol_finding_by_name(self):
+    def test_renders_a_symbol_finding_by_name_and_by_acknowledgement(self):
+        """The line now ends with the exact form the operator can send back.
+
+        Changed 2026-08-22: naming the symbol alone left them transcribing it
+        into `ack path:symbol` by hand, and a slip there produces a refusal
+        identical to the one before it — indistinguishable from the
+        acknowledgement not working.
+        """
         m = self._mod()
 
         out = m.render([{"path": "gateway/run.py", "kind": "lost_definition", "symbol": "_stale_guard_tick"}])
 
-        assert out == "- gateway/run.py: lost_definition (_stale_guard_tick)"
+        assert out.startswith("- gateway/run.py: lost_definition (_stale_guard_tick)")
+        assert out.endswith("ack gateway/run.py:_stale_guard_tick")
 
-    def test_renders_a_parse_finding_by_line(self):
+    def test_renders_a_parse_finding_by_line_and_offers_no_acknowledgement(self):
+        """`split_acked` can never match a finding with no symbol.
+
+        Offering the form here would send the operator after an answer the gate
+        refuses by construction: broken syntax is not a judgement call about
+        intent, so there is nothing to confirm.
+        """
         m = self._mod()
 
         out = m.render([{"path": "cfg.py", "kind": "unparseable", "line": 7}])
 
         assert out == "- cfg.py: unparseable (line 7)"
+
+    def test_names_an_acknowledgement_that_matched_no_finding(self):
+        m = self._mod()
+
+        out = m.render([{"path": "mod.py", "kind": "lost_definition", "symbol": "B"}], ["mod.py:Bb"])
+
+        assert "mod.py:Bb matched no finding" in out
+
+    def test_an_unmatched_acknowledgement_survives_an_unreadable_finding_list(self):
+        """Independent failures: a typo must not be swallowed by the other one."""
+        m = self._mod()
+
+        out = m.render([], ["mod.py:Bb"])
+
+        assert "finalize-detail.log" in out
+        assert "mod.py:Bb matched no finding" in out
+
+    def test_the_payload_reader_carries_the_unmatched_acknowledgements(self):
+        m = self._mod()
+        log = (
+            '{"status": "invariants_failed", "findings": [{"path": "old.py", "symbol": "x"}]}\n'
+            '{"status": "invariants_failed", "findings": [{"path": "new.py", "symbol": "y"}],'
+            ' "invariants_ack_unmatched": ["new.py:z"]}\n'
+        )
+
+        payload = m.payload_from_log(log)
+
+        assert [f["path"] for f in payload["findings"]] == ["new.py"]
+        assert payload["invariants_ack_unmatched"] == ["new.py:z"]
+
+    def test_the_payload_reader_survives_a_log_with_no_payload(self):
+        m = self._mod()
+
+        assert m.payload_from_log("just git output\n{}\n") == {}
 
     def test_says_so_when_there_is_nothing_to_render(self):
         """Silence here would read as "no problem found", which is never true."""

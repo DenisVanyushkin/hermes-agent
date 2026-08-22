@@ -167,3 +167,62 @@ def test_a_diagnosis_without_a_patch_says_so_instead_of_arming(tmp_path, monkeyp
 
     assert ack is not None and "no patch" in ack.lower()
     assert not (tmp_path / "finalize-request.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Acknowledging a structural finding
+# ---------------------------------------------------------------------------
+#
+# The gate that refuses a merge for a lost definition is answered here or not at
+# all: the finalizer is started by a systemd path unit, so nothing the operator
+# types arrives as an environment variable.
+
+
+def _write_auto_apply_pending(tmp_path):
+    (tmp_path / "pending.json").write_text(json.dumps({
+        "schema": "upstream-sync-pending/v1", "status": "auto_apply", "upstream_head": "bbbb2222",
+        "features": [{"id": "F1", "files": ["a.py"], "local_subjects": ["x"],
+                      "status": "decided", "decision": "merge-both"}],
+    }))
+
+
+def test_an_ack_reply_rearms_the_apply_carrying_the_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_auto_apply_pending(tmp_path)
+
+    ack = GatewayRunner._build_upstream_sync_ack_findings_ack(
+        "ack mod.py:local_only", _source())
+
+    assert ack is not None
+    req = json.loads((tmp_path / "finalize-request.json").read_text())
+    assert req["action"] == "apply-decisions"
+    assert req["ack_findings"] == ["mod.py:local_only"]
+    assert req["origin"]["thread_id"] == "1783420000.000"
+
+
+def test_a_plain_message_is_not_an_acknowledgement(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_auto_apply_pending(tmp_path)
+
+    assert GatewayRunner._build_upstream_sync_ack_findings_ack("looks fine", _source()) is None
+    assert not (tmp_path / "finalize-request.json").exists()
+
+
+def test_the_other_gates_answers_are_left_alone(tmp_path, monkeypatch):
+    """Four gates in this pipeline answer to plain text in the same thread."""
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_auto_apply_pending(tmp_path)
+
+    for other in ("F1: merge-both", "apply fix", "keep test", "выполни"):
+        assert GatewayRunner._build_upstream_sync_ack_findings_ack(other, _source()) is None
+
+
+def test_an_ack_without_an_armed_decision_says_so_instead_of_arming(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+
+    ack = GatewayRunner._build_upstream_sync_ack_findings_ack(
+        "ack mod.py:local_only", _source())
+
+    assert ack is not None
+    assert "\u26a0" in ack or "not" in ack.lower() or "нет" in ack.lower()
+    assert not (tmp_path / "finalize-request.json").exists()
