@@ -12,6 +12,7 @@ import job_intel.product_search.gate_b_evidence_runner_v1 as runner
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
     CollectionReport,
     DispatchReceipt,
+    DecisionEvidenceRef,
     DecisionEvidenceStore,
     EvidenceManifestRow,
     ManifestRef,
@@ -346,6 +347,8 @@ def test_reservation_callbacks_bind_duplicate_inputs_to_their_ordinal() -> None:
         refs[0],
         refs[1],
     ]
+    with pytest.raises(ValueError, match="reservation_manifest_ref_missing"):
+        capability.reserve("f" * 64)
 
 
 def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
@@ -448,7 +451,14 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         recording_sha256=("5" if recording.manifest_ref.ordinal == 0 else "6") * 64,
     )
     recordings.bytes_for.side_effect = lambda recording_ref: b"recording"
-    decision_store = DecisionEvidenceStore(tmp_path / "decisions")
+    decision_store = Mock()
+    decision_store.save_exclusive.side_effect = (
+        lambda ref, decision_bytes: DecisionEvidenceRef(
+            manifest_ref=ref,
+            decision_sha256=("7" if ref.ordinal == 0 else "8") * 64,
+        )
+    )
+    decision_store.bytes_for.side_effect = lambda ref: b"decision"
     projection = Mock()
     projection.model_dump.return_value = {}
     projection.provider_payload.return_value = {}
