@@ -1,4 +1,10 @@
-"""Gate B evidence collection over the governed structured-call boundary."""
+"""Gate B evidence pipeline over the governed structured-call boundary.
+
+This module owns the manifest, append-only journal, sealed recording and
+decision/adjudication evidence stores, the collection runner, and the
+post-collection gate evaluator. Collection publishes per-row Decision v2
+evidence; the separate evaluator produces the run-level gate decision.
+"""
 from __future__ import annotations
 
 import base64
@@ -545,8 +551,6 @@ class RecordingStore:
             with path.open("xb") as stream:
                 stream.write(encoded)
                 stream.flush()
-                import os
-
                 os.fsync(stream.fileno())
         except FileExistsError:
             if path.read_bytes() != encoded:
@@ -1032,7 +1036,7 @@ class CorpusRow(_StrictFrozenModel):
 
 
 class CollectionRowResult(_StrictFrozenModel):
-    """Durable collection evidence; deliberately contains no decision."""
+    """Durable collection evidence: per-row Decision v2 output, but no gate decision."""
 
     manifest_ref: ManifestRef
     validation_status: EvidenceSynthesisStatus | None

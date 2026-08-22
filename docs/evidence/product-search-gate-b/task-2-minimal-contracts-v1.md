@@ -176,7 +176,7 @@ event without the manifest run/hash/ordinal/input/projection tuple is invalid.
 
 ```text
 RecordingStore.save_exclusive(record: SealedRecording) -> RecordingRef
-RecordingStore.load(ref: RecordingRef) -> SealedRecording
+RecordingStore.bytes_for(ref: RecordingRef) -> bytes
 RecordingStore.verify(
     ref: RecordingRef,
     manifest: EvidenceManifest,
@@ -189,23 +189,25 @@ RecordingStore.replay(
 ) -> ReplayObservation
 ```
 
-`SealedRecording` contains the shared `ManifestRef`, `recording_sha256`, the
-canonical request bytes, response bytes (or an explicit empty response for a
-terminal unknown), response/schema/model/prompt hashes, normalized usage and
-cost, latency, terminal outcome, and sanitized failure diagnostics. Its hash is
-over the canonical sealed bytes. The journal's terminal entry is the external
-anchor for the canonical provider-runtime record; the derived recording must
-carry the same provider-record hash in metadata. Verification rejects a
-missing/non-terminal entry, a mismatched reference, or a provider-record hash
-that is not the journal anchor. `save_exclusive` is create-once: an existing
-hash with different bytes is an error, never an overwrite or delete/recreate.
+`SealedRecording` contains exactly the shared `ManifestRef`, canonical request
+and response bytes, the terminal outcome, and string metadata. The recording
+hash is the canonical sealed-payload hash carried by `RecordingRef` and the
+store filename; it is not a field on `SealedRecording`. The journal's terminal
+entry is the external anchor for the canonical provider-runtime record; the
+derived recording must carry the same provider-record hash in metadata. These
+are two distinct anchors, and neither is read from the object it anchors.
+`save_exclusive` is create-once: an existing hash with different bytes is an
+error, never an overwrite or delete/recreate.
 
-`verify` checks all manifest and row hashes, schema/model/prompt identity,
-usage/cost consistency, and that the recording is a regular immutable artifact
-inside the run store. `replay` reads bytes only: it opens no provider, socket,
-database, subprocess, clock, or credential source and returns a byte-identical
-observation. It must work for successful, terminal-failure, and
-terminal-unknown records.
+`verify` checks canonical payload/schema, the manifest row reference, request
+and input hashes, projection and response hashes from metadata, the terminal
+journal state and provider-record anchor, and the empty-response plus
+conservative-cost rules for terminal-unknown records. It does not claim to
+verify schema/model/prompt identity, usage or latency consistency, or
+regular-file/symlink properties. `replay` first performs `verify`, then reads
+bytes only: it opens no provider, socket, database, subprocess, clock, or
+credential source and returns a byte-identical observation. It works for
+successful, terminal-failure, and terminal-unknown records.
 
 ## 5. Deterministic gate evaluator interface
 
