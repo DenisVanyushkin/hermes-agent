@@ -148,6 +148,8 @@ class FakeProvider:
     def __init__(self) -> None:
         self.store = SimpleNamespace(records={})
         self.dispatch_count = 0
+        self.dispatch_inputs: list[str] = []
+        self.dispatch_log_path = os.environ.get("GATE_B_SMOKE_DISPATCH_LOG")
         self.pricing = SimpleNamespace(
             identity_sha256=_sha(b"pricing:smoke"),
             reservation_cost_usd=Decimal("0.01"),
@@ -176,6 +178,7 @@ class FakeProvider:
         capability.mark_dispatching(reservation)
         ordinal = self.dispatch_count
         self.dispatch_count += 1
+        self.dispatch_inputs.append(input_hash)
         if ordinal % 10 == 0:
             outcome = "terminal_unknown"
             raw_response_text = ""
@@ -205,6 +208,28 @@ class FakeProvider:
         }
         self.store.records[input_hash] = record
         capability.reconcile(reservation, Decimal("0"), outcome)
+        extra_dispatch_refused = None
+        if (
+            os.environ.get("GATE_B_SMOKE_PROBE_CAP") == "1"
+            and ordinal == 47
+        ):
+            try:
+                extra_reservation = capability.reserve(input_hash)
+                capability.mark_dispatching(extra_reservation)
+            except ValueError as exc:
+                extra_dispatch_refused = str(exc)
+            else:
+                extra_dispatch_refused = "not_refused"
+        if self.dispatch_log_path:
+            Path(self.dispatch_log_path).write_bytes(
+                _canonical(
+                    {
+                        "dispatch_count": self.dispatch_count,
+                        "dispatch_inputs": self.dispatch_inputs,
+                        "extra_dispatch_refused": extra_dispatch_refused,
+                    }
+                )
+            )
         return SimpleNamespace(record=record)
 
 

@@ -159,6 +159,7 @@ def main() -> int:
         supervised_wrapper_copy.chmod(0o755)
         state = root / "state"
         state.mkdir()
+        dispatch_probe_path = state / "dispatch-probe.json"
         target_args = [
             "--manifest",
             str(manifest_path),
@@ -178,6 +179,8 @@ def main() -> int:
         target_env = {
             **os.environ,
             "GATE_B_SMOKE_ISOLATION_PROBE": str(probe_path),
+            "GATE_B_SMOKE_DISPATCH_LOG": str(dispatch_probe_path),
+            "GATE_B_SMOKE_PROBE_CAP": "1",
         }
         target_started = time.perf_counter()
         target_attempt = subprocess.run(
@@ -209,6 +212,16 @@ def main() -> int:
             if target_attempt is not None:
                 detail = target_attempt.stderr.strip()
             raise RuntimeError(f"supervised collection failed: {detail}")
+        if not dispatch_probe_path.is_file():
+            raise RuntimeError("provider did not publish dispatch probe")
+        dispatch_probe = json.loads(dispatch_probe_path.read_bytes())
+        manifest_row_count = 48
+        if dispatch_probe.get("dispatch_count") != manifest_row_count:
+            raise RuntimeError("composition dispatch count exceeded the 48-row cap")
+        if len(set(dispatch_probe.get("dispatch_inputs", []))) != manifest_row_count:
+            raise RuntimeError("composition dispatched a row more than once")
+        if dispatch_probe.get("extra_dispatch_refused") != "call_cap_exhausted":
+            raise RuntimeError("composition did not refuse the 49th dispatch")
         from job_intel.product_search.gate_b_evidence_runner_v1 import (
             AdjudicationSet,
             AdjudicationVerdict,
@@ -336,6 +349,7 @@ def main() -> int:
             ),
             "isolation_probe": isolation_probe,
             "isolation_probe_error": isolation_probe_error,
+            "dispatch_probe": dispatch_probe,
             "first_stop": first_stop,
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")

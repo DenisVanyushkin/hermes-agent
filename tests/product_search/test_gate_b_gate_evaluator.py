@@ -129,6 +129,27 @@ def test_evaluator_rejects_verdict_with_foreign_manifest_ref() -> None:
     assert decision.violated_rules == ("adjudication_incomplete",)
 
 
+def test_evaluator_rejects_direct_call_with_mismatched_adjudication_totals() -> None:
+    manifest = _manifest(
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    decision = GateEvaluator.evaluate(
+        manifest,
+        _metrics(
+            adjudicated_count=47,
+            adjudication_denominator=47,
+            adjudicated_correct=47,
+        ),
+        _complete_adjudication(manifest),
+        policy=_policy(),
+    )
+
+    assert decision.decision is GateDecisionKind.REVISE
+    assert decision.violated_rules == ("adjudication_incomplete",)
+
+
 def test_evaluator_always_returns_metrics_and_refuses_only_gate_decision() -> None:
     manifest = _manifest(
         input_sha256="1" * 64,
@@ -247,7 +268,7 @@ def test_adjudication_set_is_create_once_and_manifest_bound(tmp_path: Path) -> N
     assert store.save_exclusive(adjudication, manifest, _decision_hashes()) == ref
 
 
-def test_adjudication_totals_are_derived_and_mismatch_is_incomplete() -> None:
+def test_adjudication_totals_are_derived_from_verdicts() -> None:
     manifest = _manifest(
         input_sha256="1" * 64,
         projection_sha256="2" * 64,
@@ -260,5 +281,8 @@ def test_adjudication_totals_are_derived_and_mismatch_is_incomplete() -> None:
         policy=_policy(),
     )
 
-    assert report.gate_decision.decision is GateDecisionKind.REVISE
-    assert report.gate_decision.violated_rules == ("adjudication_incomplete",)
+    assert report.metrics.adjudicated_count == 48
+    assert report.metrics.adjudication_denominator == 48
+    assert report.metrics.adjudicated_correct == 48
+    assert report.gate_decision.decision is GateDecisionKind.PROCEED_TO_SHADOW
+    assert report.gate_decision.violated_rules == ()

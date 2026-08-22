@@ -49,5 +49,7 @@ exec sudo -n systemd-run --wait --pipe --uid=hermes \
   --setenv=LD_LIBRARY_PATH="$artifact_root/python-runtime/venv/lib" \
   --setenv=PYTHONPATH="$runtime_source" \
   --setenv=GATE_B_SMOKE_ISOLATION_PROBE="${GATE_B_SMOKE_ISOLATION_PROBE:-}" \
+  --setenv=GATE_B_SMOKE_DISPATCH_LOG="${GATE_B_SMOKE_DISPATCH_LOG:-}" \
+  --setenv=GATE_B_SMOKE_PROBE_CAP="${GATE_B_SMOKE_PROBE_CAP:-}" \
   "${namespace_properties[@]}" \
   -- "$runtime_python" -m "$module" "$@"
