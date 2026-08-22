@@ -534,6 +534,7 @@ def _invariant_report(scratch: Path, prep: dict):
     )
     paths = sorted(touched | both_sides)
     index = stage_zero_entries(scratch)
+    paths_in_result = set(index)
     base_entries = tree_entries(scratch, base)
     ours_entries = tree_entries(scratch, local_base)
     theirs_entries = tree_entries(scratch, upstream_head)
@@ -547,9 +548,13 @@ def _invariant_report(scratch: Path, prep: dict):
     def read_result(path):
         return read_stage_zero_blob(scratch, index, path)
 
-    full = sorted(both_sides)
-    parse_only = [path for path in paths if path not in both_sides]
+    full = sorted(path for path in both_sides if path in paths_in_result)
+    parse_only = [
+        path for path in paths
+        if path not in both_sides and path in paths_in_result
+    ]
     policy = prep.get("resolution_policy_by_path") or {}
+    deleted = sorted(path for path in paths if path not in paths_in_result)
     report = check_merge(
         full,
         lambda path: read_from(ours_entries, path),
@@ -566,6 +571,17 @@ def _invariant_report(scratch: Path, prep: dict):
         policy_by_path=policy,
     )
     report.findings.extend(f for f in parse_report.findings if f.kind == "unparseable")
+    from upstream_sync_invariants import Finding
+    for path in deleted:
+        report.findings.append(Finding(
+            path=path,
+            kind="deleted_in_result",
+            policy=policy.get(path),
+            message=(
+                "the resolved merge deletes this path from the stage-0 result; "
+                "confirm the delete/modify resolution was intended"
+            ),
+        ))
     _decorate_findings(scratch, prep, report)
     return report
 
@@ -573,7 +589,7 @@ def _invariant_report(scratch: Path, prep: dict):
 _HARD_INVARIANT_KINDS = {"unparseable", "unreadable_parent"}
 
 
-def _arm_invariant_state(state: Path, prep: dict, findings: list[dict]) -> None:
+def _arm_invariant_state(state: Path, prep: dict, findings: list[dict], *, expected=None, mode="block") -> None:
     """Persist the merge-scoped receipt state without rereading pending later."""
     path = state / "invariants-pending.json"
     old: dict = {}
@@ -596,10 +612,31 @@ def _arm_invariant_state(state: Path, prep: dict, findings: list[dict]) -> None:
         "thread_id": pending.get("slack_thread_ts"),
         "user_id": pending.get("slack_user_id"),
     }
+    blocking = [
+        finding for finding in findings
+        if not (mode == "report" and finding.get("kind") == "discarded_contribution")
+    ]
+    if mode == "report" and not blocking:
+        status = "reported"
+    else:
+        status = "blocked" if any(
+            f.get("kind") in _HARD_INVARIANT_KINDS for f in blocking
+        ) else "awaiting_ack"
+    journal = list(old.get("journal") or [])
+    for event in expected or []:
+        if not any(
+            existing.get("event") == "expected_policy_loss"
+            and existing.get("path") == event.get("path")
+            and existing.get("symbol") == event.get("symbol")
+            and existing.get("discarded_side") == event.get("discarded_side")
+            for existing in journal
+        ):
+            journal.append(event)
     payload = {
         "schema": "upstream-sync-invariants-pending/v1",
         "version": 1,
-        "status": "blocked" if any(f.get("kind") in _HARD_INVARIANT_KINDS for f in findings) else "awaiting_ack",
+        "status": status,
+        "mode": mode,
         "created_at": old.get("created_at") or _now(),
         "updated_at": _now(),
         "merge_scope": scope,
@@ -607,7 +644,8 @@ def _arm_invariant_state(state: Path, prep: dict, findings: list[dict]) -> None:
         "origin": old.get("origin") or origin,
         "findings": findings,
         "receipts": old.get("receipts") or [],
-        "journal": old.get("journal") or [],
+        "journal": journal,
+        "expected_policy_losses": list(expected or []),
     }
     _write_json(path, payload)
 
@@ -623,6 +661,15 @@ def _unacknowledged_findings(state: Path, findings: list[dict]) -> list[dict]:
         if finding.get("kind") in _HARD_INVARIANT_KINDS
         or not any(receipt_matches(receipt, finding) for receipt in receipts)
     ]
+
+def _invariant_mode(args) -> str:
+    value = getattr(args, "invariant_mode", None) or os.getenv(
+        "HERMES_SYNC_INVARIANT_MODE", "block"
+    )
+    value = str(value).strip().lower()
+    if value not in {"block", "report"}:
+        raise ValueError("invariant mode must be 'block' or 'report'")
+    return value
 
 
 def _commit_merge(args) -> tuple:
@@ -665,20 +712,67 @@ def _commit_merge(args) -> tuple:
     # is not a merge anyone should be able to hand off. The preserved clone is
     # the repair surface; the commit object is not rewritten on refusal.
     break_glass = bool(getattr(args, "break_glass", False))
+    invariant_mode = _invariant_mode(args)
     if break_glass:
         prep["invariants_break_glass"] = {"used_at": _now(), "mode": "manual-only"}
+        prep["invariant_report"] = {
+            "mode": "break-glass",
+            "status": "not-run",
+            "findings": [],
+            "expected_policy_losses": [],
+        }
     else:
         report = _invariant_report(scratch, prep)
-        if not report.ok:
-            records = report.as_dict()["findings"]
-            _arm_invariant_state(state, prep, records)
-            active = _unacknowledged_findings(state, records)
+        report_payload = report.as_dict()
+        records = report_payload["findings"]
+        expected = report_payload.get("expected_policy_losses", [])
+        prep["invariant_report"] = {
+            "mode": invariant_mode,
+            "status": "reported" if invariant_mode == "report" else "blocking",
+            "findings": records,
+            "expected_policy_losses": expected,
+        }
+        if records or expected:
+            _arm_invariant_state(
+                state, prep, records, expected=expected, mode=invariant_mode,
+            )
+        blocking = [
+            finding for finding in records
+            if not (
+                invariant_mode == "report"
+                and finding.get("kind") == "discarded_contribution"
+            )
+        ]
+        if blocking:
+            active = _unacknowledged_findings(state, blocking)
             if active:
-                payload = {"status": "invariants_failed", "ok": False, "findings": active}
-                payload["acknowledgements_required"] = [f.get("finding_id") for f in active if f.get("kind") not in _HARD_INVARIANT_KINDS]
-                payload["hint"] = ("nothing was committed and the clone is preserved; hard findings "
-                                   "must be repaired, while soft findings require one matching "
-                                   "fingerprint receipt each")
+                payload = {
+                    "status": "invariants_failed",
+                    "ok": False,
+                    "findings": active,
+                    "invariant_report": prep["invariant_report"],
+                }
+                payload["acknowledgements_required"] = [
+                    f.get("finding_id") for f in active
+                    if f.get("kind") not in _HARD_INVARIANT_KINDS
+                ]
+                blocked_note = ""
+                try:
+                    current_status = json.loads(
+                        (state / "invariants-pending.json").read_text(encoding="utf-8")
+                    ).get("status")
+                    if current_status == "blocked":
+                        blocked_note = (
+                            " The invariant state is blocked; receipt interception is "
+                            "disabled until every hard finding is repaired."
+                        )
+                except (OSError, ValueError):
+                    blocked_note = ""
+                payload["hint"] = (
+                    "nothing was committed and the clone is preserved; hard findings "
+                    "must be repaired, while soft findings require one matching "
+                    "fingerprint receipt each." + blocked_note
+                )
                 return EXIT_UNRESOLVED, payload
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
@@ -716,6 +810,8 @@ def _commit_merge(args) -> tuple:
     prep["merge_sha"] = merge_sha
     _write_json(prep_path, prep)
     payload = {"status": "committed", "merge_sha": merge_sha, "prep": prep}
+    if prep.get("invariant_report"):
+        payload["invariant_report"] = prep["invariant_report"]
     if break_glass:
         payload["invariants_break_glass"] = prep["invariants_break_glass"]
     return EXIT_OK, payload
@@ -875,6 +971,8 @@ def main(argv=None) -> int:
     p_commit = sub.add_parser("commit", parents=[common])
     p_commit.add_argument("--break-glass", action="store_true",
                           help="manual audited emergency bypass; never supplied by systemd")
+    p_commit.add_argument("--invariant-mode", choices=("block", "report"),
+                          help="block findings (default) or report discarded contributions without blocking")
     p_commit.add_argument("--amend", action="store_true",
                           help="fold staged changes into the existing merge commit (gate-triage fixes), "
                                "preserving its parents")
@@ -882,6 +980,8 @@ def main(argv=None) -> int:
     p_handoff = sub.add_parser("handoff", parents=[common])
     p_handoff.add_argument("--break-glass", action="store_true",
                            help="manual audited emergency bypass; never supplied by systemd")
+    p_handoff.add_argument("--invariant-mode", choices=("block", "report"),
+                           help="block findings (default) or report discarded contributions without blocking")
     p_handoff.set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
     p_wait.add_argument("--after", default="",

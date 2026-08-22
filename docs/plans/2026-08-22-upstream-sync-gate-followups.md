@@ -54,3 +54,26 @@ worktree `/tmp/upstream-sync-gate-remediation-20260822`.
 `/home/hermes/.hermes/scripts/` и gateway на VPS намеренно не перезапускались:
 для этого нужен отдельный operator-approved rollout с проверкой фактического
 `ExecStart`, canary обычного чата, triage/decision/ack и post-restart smoke.
+
+
+## Review fixes (2026-08-22)
+
+The review of commit 159c71d0cf was applied in the isolated remediation
+worktree. Valid findings F1-F14 are covered: policy-aware replay fixtures and
+exact expected-loss journaling; distinct discarded-contribution findings;
+one finding per missing fact; file-level stage-0 deletion reporting; fail-closed
+origin binding; gateway end-to-end armed/unarmed routing tests and concurrent
+ack protection; durable neutral policy-loss reporting; copyable standalone
+ack INV-... lines; explicit break-glass and blocked-state operator messages;
+a separate report-only invariant mode; decorator-aware definition segments; and
+the documented gate-order rationale.
+
+Report-only mode is explicit (--invariant-mode report or
+HERMES_SYNC_INVARIANT_MODE=report) and is not enabled in the live scheduler.
+The old global invariant skip remains rejected. The standalone ack line is
+intentional: it keeps the receipt command copyable and is the parser's
+whole-message contract.
+
+No live deployment, restart, or push is part of this remediation. T12 remains
+an operational follow-up: exercise the published wrapper/ExecStart path
+end-to-end after these source and test changes are published.

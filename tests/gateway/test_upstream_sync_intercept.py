@@ -6,13 +6,33 @@ import types
 import pytest
 
 from gateway.run import GatewayRunner
+from gateway.config import Platform
 
 
-def _source():
+def _source(platform="slack"):
     return types.SimpleNamespace(
-        platform="slack", chat_id="C0B3X1E5SJZ",
+        platform=platform, chat_id="C0B3X1E5SJZ",
         thread_id="1783420000.000", user_id="U123",
     )
+
+
+def _write_invariant_pending(tmp_path):
+    (tmp_path / "invariants-pending.json").write_text(json.dumps({
+        "schema": "upstream-sync-invariants-pending/v1",
+        "status": "awaiting_ack",
+        "origin": {
+            "platform": "slack", "chat_id": "C0B3X1E5SJZ",
+            "thread_id": "1783420000.000", "user_id": "U123",
+        },
+        "findings": [{
+            "finding_id": "INV-abc123456789",
+            "kind": "lost_definition",
+            "path": "mod.py",
+            "symbol": "gone",
+            "fingerprint": {"sha256": "f" * 64},
+        }],
+        "receipts": [],
+    }))
 
 
 def _write_pending(tmp_path, status="awaiting_decision"):
@@ -71,6 +91,91 @@ def test_partial_decision_reply_acks_what_is_still_missing(tmp_path, monkeypatch
     assert ack is not None
     assert "F2" in ack and "F3" in ack
     assert not (tmp_path / "finalize-request.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_real_handler_passes_an_unarmed_plain_message_to_the_normal_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._get_proxy_url = lambda: "http://ordinary-pipeline"
+    called = {"n": 0}
+
+    async def ordinary(**_kwargs):
+        called["n"] += 1
+        return {"final_response": "ordinary pipeline"}
+
+    runner._run_agent_via_proxy = ordinary
+    for name in (
+        "_pipeline_controlled_final_response",
+        "_pipeline_engineering_plan_only_response",
+        "_pipeline_autonomous_terminal_response",
+        "_pipeline_clarification_response",
+        "_pipeline_engineering_agent_resolution_prompt",
+        "_pipeline_autonomous_preflight_block_response",
+        "_pipeline_router_infra_degraded_notice",
+        "_pipeline_autonomous_fail_closed_response",
+        "_pipeline_controlled_block_response",
+    ):
+        setattr(runner, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+    monkeypatch.setattr("gateway.run._pipeline_platform_allowed", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "gateway.run._resolve_gateway_engineering_task_context",
+        lambda **_kwargs: None,
+    )
+
+    out = await runner._run_agent_inner(
+        "hello", "", [], _source(Platform.SLACK), "session-1", raw_message="hello",
+    )
+    assert out["final_response"] == "ordinary pipeline"
+    assert called["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_real_handler_consumes_an_armed_invariant_ack_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_SYNC_STATE_DIR", str(tmp_path))
+    _write_invariant_pending(tmp_path)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._get_proxy_url = lambda: "http://ordinary-pipeline"
+    called = {"n": 0}
+
+    async def ordinary(**_kwargs):
+        called["n"] += 1
+        return {"final_response": "ordinary pipeline"}
+
+    runner._run_agent_via_proxy = ordinary
+    for name in (
+        "_pipeline_controlled_final_response",
+        "_pipeline_engineering_plan_only_response",
+        "_pipeline_autonomous_terminal_response",
+        "_pipeline_clarification_response",
+        "_pipeline_engineering_agent_resolution_prompt",
+        "_pipeline_autonomous_preflight_block_response",
+        "_pipeline_router_infra_degraded_notice",
+        "_pipeline_autonomous_fail_closed_response",
+        "_pipeline_controlled_block_response",
+    ):
+        setattr(runner, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+    monkeypatch.setattr("gateway.run._pipeline_platform_allowed", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        "gateway.run._resolve_gateway_engineering_task_context",
+        lambda **_kwargs: None,
+    )
+
+    out = await runner._run_agent_inner(
+        "ack INV-abc123456789", "", [], _source(Platform.SLACK), "session-1",
+        raw_message="ack INV-abc123456789",
+    )
+    assert "Receipt recorded" in out["final_response"]
+    assert called["n"] == 0
+
+
+def test_gate_order_comment_preserves_the_ops_first_rationale():
+    import inspect
+    source = inspect.getsource(GatewayRunner._run_agent_inner)
+    assert "право первого отказа" in source
+    assert "пересечение" in source
 
 
 def test_plain_message_returns_none_and_no_job(tmp_path, monkeypatch):

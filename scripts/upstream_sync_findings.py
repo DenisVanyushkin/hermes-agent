@@ -41,8 +41,9 @@ def render(findings: list) -> str:
         # through. Keep the command at column zero so copying a report bullet
         # cannot accidentally execute it.
         finding_id = f.get("finding_id")
-        if finding_id and f.get("symbol"):
-            lines.append(f"ack {finding_id} — {f.get('path')}: {f.get('kind')} ({where})")
+        if finding_id and (f.get("symbol") or f.get("kind") == "deleted_in_result"):
+            lines.append(f"- {f.get('path')}: {f.get('kind')} ({where})")
+            lines.append(f"ack {finding_id}")
         else:
             lines.append(f"- {f.get('path')}: {f.get('kind')} ({where})")
     return "\n".join(lines)

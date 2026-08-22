@@ -53,7 +53,7 @@ from typing import Mapping
 @dataclass(frozen=True)
 class Finding:
     path: str
-    kind: str                 # "unparseable" | "lost_definition"
+    kind: str                 # "unparseable" | "unreadable_parent" | "lost_definition" | "discarded_contribution"
     message: str
     symbol: str | None = None
     line: int | None = None
@@ -65,18 +65,22 @@ class Finding:
 @dataclass
 class Report:
     findings: list = field(default_factory=list)
+    expected_policy_losses: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not self.findings
 
     def as_dict(self) -> dict:
-        return {
+        payload = {
             "ok": self.ok,
             "findings": [
                 {k: v for k, v in vars(f).items() if v is not None} for f in self.findings
             ],
         }
+        if self.expected_policy_losses:
+            payload["expected_policy_losses"] = list(self.expected_policy_losses)
+        return payload
 
 
 def _is_python(path: str) -> bool:
@@ -87,6 +91,7 @@ def _definition_segments(src: str) -> dict[str, tuple[str, ...]]:
     """Return exact top-level source segments, retaining duplicate occurrences."""
     tree = ast.parse(src)
     states: dict[str, list[str]] = {}
+    source_lines = src.splitlines(keepends=True)
     for node in tree.body:
         names: list[str] = []
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -95,7 +100,12 @@ def _definition_segments(src: str) -> dict[str, tuple[str, ...]]:
             names = [target.id for target in node.targets if isinstance(target, ast.Name)]
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names = [node.target.id]
-        segment = ast.get_source_segment(src, node) or ""
+        if getattr(node, "decorator_list", None):
+            start = min(decorator.lineno for decorator in node.decorator_list) - 1
+            end = node.end_lineno
+            segment = "".join(source_lines[start:end])
+        else:
+            segment = ast.get_source_segment(src, node) or ""
         for name in names:
             states.setdefault(name, []).append(segment)
     return {name: tuple(segments) for name, segments in states.items()}
@@ -149,19 +159,7 @@ def parse_failures(files: dict) -> list:
 
 def lost_definitions(*, ours, theirs, result, path: str, base=None,
                      policy: str | None = None) -> list:
-    """Report definitions present on either parent but absent from the result.
-
-    Both parents count: dropping upstream's new function is as much a loss as
-    dropping ours.
-
-    *ours* and *theirs* are ``None`` when that side has no such file, which is
-    not the same as an empty one: a side that HAS the file and defines nothing
-    in it removed those definitions on purpose, while a side without the file
-    says nothing at all. *base* is the same file at the merge base, and is what
-    separates an accepted deletion from a dropped one. Anything unknown —
-    absent base, unparseable base, a side with no file — reports rather than
-    suppresses. See the module docstring for the rule in full.
-    """
+    """Report lost names and discarded body/decorator contributions."""
     if not _is_python(path):
         return []
     sides = {}
@@ -181,8 +179,10 @@ def lost_definitions(*, ours, theirs, result, path: str, base=None,
                         f"line {exc.lineno}) - the definition check cannot run and "
                         f"its silence must not be read as 'nothing was lost'"
                     ),
+                    policy=policy,
                 )
             ]
+
     missing = (sides["ours"] | sides["theirs"]) - sides["result"]
     if policy in {"keep-local", "take-upstream"}:
         base_names = set()
@@ -192,49 +192,39 @@ def lost_definitions(*, ours, theirs, result, path: str, base=None,
             except SyntaxError:
                 base_names = set()
         if policy == "keep-local":
-            missing -= {n for n in missing if n in sides["theirs"]
-                        and n not in sides["ours"] and n not in base_names}
+            missing -= {
+                name for name in missing
+                if name in sides["theirs"]
+                and name not in sides["ours"]
+                and name not in base_names
+            }
         else:
-            missing -= {n for n in missing if n in sides["ours"]
-                        and n not in sides["theirs"] and n not in base_names}
+            missing -= {
+                name for name in missing
+                if name in sides["ours"]
+                and name not in sides["theirs"]
+                and name not in base_names
+            }
+
     accepted = set()
     if ours is not None and theirs is not None:
         accepted = _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
         missing -= accepted
 
-    # Under merge-both, presence by name is not enough: a resolver can keep the
-    # local definition while silently dropping an upstream body edit. Compare
-    # exact top-level source segments and apply the file policy to the side that
-    # was discarded. keep-local/take-upstream intentionally suppress only their
-    # corresponding one-sided loss; merge-both reports it.
-    contribution_loss = set()
+    lost = set(missing)
     if policy == "merge-both":
-        base_segments = {}
-        if base is not None:
-            try:
-                base_segments = _definition_segments(base)
-            except SyntaxError:
-                base_segments = {}
         for name in set(segments["ours"]) | set(segments["theirs"]):
             if name in accepted:
                 continue
             ours_state = segments["ours"].get(name, ())
             theirs_state = segments["theirs"].get(name, ())
             result_state = segments["result"].get(name, ())
-            base_state = base_segments.get(name, ())
-            if result_state == ours_state and theirs_state != base_state and theirs_state != ours_state:
-                contribution_loss.add(name)
-            elif result_state == theirs_state and ours_state != base_state and ours_state != theirs_state:
-                contribution_loss.add(name)
-            # A module-level set loses the second definition. Keep the raw
-            # compromise for old callers, but make the blocking policy report
-            # the missing occurrence explicitly instead of silently collapsing it.
             max_count = max(len(ours_state), len(theirs_state))
-            if len(result_state) < max_count:
+            if len(result_state) > 0 and len(result_state) < max_count:
                 for occurrence in range(len(result_state), max_count):
-                    contribution_loss.add(f"{name}#{occurrence + 1}")
-    missing |= contribution_loss
-    return [
+                    lost.add(f"{name}#{occurrence + 1}")
+
+    findings = [
         Finding(
             path=path,
             kind="lost_definition",
@@ -245,8 +235,132 @@ def lost_definitions(*, ours, theirs, result, path: str, base=None,
             ),
             policy=policy,
         )
-        for name in sorted(missing)
+        for name in sorted(lost)
     ]
+
+    if policy == "merge-both":
+        base_segments = {}
+        if base is not None:
+            try:
+                base_segments = _definition_segments(base)
+            except SyntaxError:
+                base_segments = {}
+        for name in sorted(set(segments["ours"]) | set(segments["theirs"])):
+            if name in accepted:
+                continue
+            ours_state = segments["ours"].get(name, ())
+            theirs_state = segments["theirs"].get(name, ())
+            result_state = segments["result"].get(name, ())
+            base_state = base_segments.get(name, ())
+            if (
+                result_state == ours_state
+                and theirs_state != base_state
+                and theirs_state != ours_state
+            ):
+                findings.append(Finding(
+                    path=path, kind="discarded_contribution", symbol=name, policy=policy,
+                    message=(
+                        f"the upstream contribution to {name!r} between the merge base "
+                        f"and theirs was discarded; the local body/decorators remain in "
+                        f"the resolution"
+                    ),
+                ))
+            elif (
+                result_state == theirs_state
+                and ours_state != base_state
+                and ours_state != theirs_state
+            ):
+                findings.append(Finding(
+                    path=path, kind="discarded_contribution", symbol=name, policy=policy,
+                    message=(
+                        f"the local contribution to {name!r} between the merge base "
+                        f"and ours was discarded; the upstream body/decorators remain in "
+                        f"the resolution"
+                    ),
+                ))
+
+    return findings
+
+def expected_policy_losses(*, ours, theirs, result, path: str, base=None,
+                           policy: str | None = None) -> list[dict]:
+    """Describe non-blocking losses selected explicitly by file policy."""
+    if policy not in {"keep-local", "take-upstream"} or not _is_python(path):
+        return []
+    try:
+        sides = {
+            label: _definitions(src or "")
+            for label, src in (("ours", ours), ("theirs", theirs), ("result", result))
+        }
+        segments = {
+            label: _definition_segments(src or "")
+            for label, src in (("ours", ours), ("theirs", theirs), ("result", result))
+        }
+        base_names = _definitions(base) if base is not None else set()
+        base_segments = _definition_segments(base) if base is not None else {}
+    except SyntaxError:
+        return []
+
+    accepted = _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
+    events: list[dict] = []
+    missing = (sides["ours"] | sides["theirs"]) - sides["result"]
+    if policy == "keep-local":
+        one_sided = {
+            name for name in missing
+            if name in sides["theirs"]
+            and name not in sides["ours"]
+            and name not in base_names
+        }
+        discarded_side = "upstream"
+    else:
+        one_sided = {
+            name for name in missing
+            if name in sides["ours"]
+            and name not in sides["theirs"]
+            and name not in base_names
+        }
+        discarded_side = "local"
+    for name in sorted(one_sided):
+        events.append({
+            "event": "expected_policy_loss",
+            "path": path,
+            "kind": "lost_definition",
+            "symbol": name,
+            "discarded_side": discarded_side,
+            "policy": policy,
+            "message": f"{discarded_side} definition {name!r} was omitted by {policy}",
+        })
+
+    for name in sorted(set(segments["ours"]) | set(segments["theirs"])):
+        if name in accepted:
+            continue
+        ours_state = segments["ours"].get(name, ())
+        theirs_state = segments["theirs"].get(name, ())
+        result_state = segments["result"].get(name, ())
+        base_state = base_segments.get(name, ())
+        if policy == "keep-local":
+            selected, discarded = ours_state, theirs_state
+            discarded_side = "upstream"
+        else:
+            selected, discarded = theirs_state, ours_state
+            discarded_side = "local"
+        if (
+            result_state == selected
+            and discarded != base_state
+            and discarded != selected
+        ):
+            events.append({
+                "event": "expected_policy_loss",
+                "path": path,
+                "kind": "discarded_contribution",
+                "symbol": name,
+                "discarded_side": discarded_side,
+                "policy": policy,
+                "message": (
+                    f"{discarded_side} contribution to {name!r} was omitted by "
+                    f"{policy}; the selected side remains in the resolution"
+                ),
+            })
+    return events
 
 
 def _accepted_deletions(base, *, ours: set, theirs: set) -> set:
@@ -291,11 +405,20 @@ def check_merge(paths, read_ours, read_theirs, read_result, read_base=None,
             # all of them as lost would bury the finding that matters.
             report.findings.extend(broken)
             continue
+        policy = (policy_by_path or {}).get(path)
+        ours = read_ours(path)
+        theirs = read_theirs(path)
+        base = read_base(path) if read_base is not None else None
+        report.expected_policy_losses.extend(
+            expected_policy_losses(
+                ours=ours, theirs=theirs, result=result, path=path,
+                base=base, policy=policy,
+            )
+        )
         report.findings.extend(
             lost_definitions(
-                ours=read_ours(path), theirs=read_theirs(path), result=result, path=path,
-                base=read_base(path) if read_base is not None else None,
-                policy=(policy_by_path or {}).get(path),
+                ours=ours, theirs=theirs, result=result, path=path,
+                base=base, policy=policy,
             )
         )
     return report

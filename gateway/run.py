@@ -29720,7 +29720,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # cron job that applies Mode B, and ack immediately.
         # The triage gate answers to a bare word and is matched whole-message;
         # the decision gate's parser is looser. Strict first: it cannot take an
-        # answer meant for the other one, but the loose one could.
+        # answer meant for the other one, but the loose one could. The cancellation
+        # words overlap, so the strict parser gets the first refusal: право первого отказа
+        # принадлежит тому, кто ошибается реже; this preserves the
+        # пересечение semantics that prevented one gate from stealing another reply.
         _ops_ack = self._build_ops_approval_ack(_operator_text, source)
         if _ops_ack is not None:
             logger.info("ops-approval intercept: handled reply: session=%s platform=%s", session_id, platform_key)

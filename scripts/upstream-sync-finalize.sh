@@ -93,6 +93,7 @@ BACKUP_REF="$(json_field backup_ref)"
 # reported to the operator as a failed smoketest (2026-07-27) — the log tail
 # they were shown started well after the real cause.
 FAILED_STAGE=""
+BREAK_GLASS_NOTICE=""
 
 write_result() {
   # Statuses: ok | failed | awaiting_decision (apply-decisions stopped to ask
@@ -439,6 +440,9 @@ run_post_update_pipeline() {
 # UPSTREAM_SHA, SCRATCH, SCRATCH_NAME, BACKUP_REF from the caller. Every early
 # return follows a write_result, so exiting there is terminal by design.
 land_merge() {
+    if [ -z "$BREAK_GLASS_NOTICE" ] &&        grep -q '"invariants_break_glass"' "$STATE_DIR/apply-prepare.json" 2>/dev/null; then
+      BREAK_GLASS_NOTICE="BREAK_GLASS: structural gate was not executed; merge continued only via explicit manual emergency bypass."
+    fi
     # A merge that is already the branch tip is a duplicate hand-off, not a
     # mismatch: reporting it as a parent mismatch overwrote the real outcome of
     # the run that had just landed it, telling the operator the apply had failed
@@ -506,6 +510,9 @@ land_merge() {
       FAILED_STAGE=fast-forward
       write_result failed "fast-forward to the agent merge failed — repo untouched, no rollback. $(cat "$DETAIL_LOG")"
       exit 0
+    fi
+    if [ -n "$BREAK_GLASS_NOTICE" ]; then
+      echo "$BREAK_GLASS_NOTICE" >>"$DETAIL_LOG"
     fi
     run_post_update_pipeline "$HEAD_SHA"
     # The clone is a full working copy; keep it only when it may still be
@@ -593,13 +600,16 @@ apply_decisions() {
       write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.
 ${findings:-(see finalize-detail.log)}
 
-Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case repair the resolution, or answer each listed soft finding with its exact `ack INV-...` receipt; hard findings cannot be acknowledged."
+Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case repair the resolution, or answer each listed soft finding with its exact `ack INV-...` receipt; hard findings cannot be acknowledged. When the invariant state is blocked, receipt interception stays disabled until every hard finding is repaired."
       exit 0
     fi
     write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"
     exit 0
   fi
   MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"merge_sha\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if grep -q '"invariants_break_glass"' "$STATE_DIR/apply-prepare.json" 2>/dev/null; then
+    BREAK_GLASS_NOTICE="BREAK_GLASS: structural gate was not executed; merge continued only via explicit manual emergency bypass."
+  fi
   if [ -z "$MERGE_SHA" ]; then
     write_result failed "apply-decisions: commit reported no merge_sha; clone preserved."
     exit 0

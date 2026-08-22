@@ -6,6 +6,10 @@
   "path": "tools/approval.py",
   "orientation": "ours=first-parent(local/customizations), theirs=second-parent(upstream)",
   "expected_raw_findings": [],
+  "expected_policy_findings": [
+    {"kind": "discarded_contribution", "symbol": "check_all_command_guards"},
+    {"kind": "discarded_contribution", "symbol": "check_execute_code_guard"}
+  ],
   "manual_classifications": [
     {"case": "gateway/run.py:_stale_guard_*", "classification": "real loss; restore"},
     {"case": "tools/approval.py:submit_pending", "classification": "expected keep-local deletion"},

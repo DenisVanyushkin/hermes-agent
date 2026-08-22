@@ -56,6 +56,56 @@ def test_receipt_is_fingerprint_bound_and_requests_one_host_action(tmp_path):
     assert duplicate["duplicate"] is True
 
 
+def test_ack_rejects_a_different_thread(tmp_path):
+    state = _armed(tmp_path)
+    out = record_invariant_ack(
+        state, "INV-abc123456789",
+        {"platform": "slack", "chat_id": "C1", "thread_id": "T2", "user_id": "U1"},
+    )
+    assert out["requested"] is False
+    assert "thread_id" in out["reason"]
+
+
+def test_ack_rejects_a_missing_operator_identity(tmp_path):
+    state = _armed(tmp_path)
+    out = record_invariant_ack(
+        state, "INV-abc123456789",
+        {"platform": "slack", "chat_id": "C1", "thread_id": "T1", "user_id": None},
+    )
+    assert out["requested"] is False
+    assert "user_id" in out["reason"]
+
+
+def test_ack_rejects_an_armed_state_without_thread(tmp_path):
+    state = _armed(tmp_path)
+    data = json.loads((tmp_path / "invariants-pending.json").read_text())
+    data["origin"]["thread_id"] = None
+    (tmp_path / "invariants-pending.json").write_text(json.dumps(data))
+    out = record_invariant_ack(
+        state, "INV-abc123456789",
+        {"platform": "slack", "chat_id": "C1", "thread_id": "T1", "user_id": "U1"},
+    )
+    assert out["requested"] is False
+    assert "thread_id" in out["reason"]
+
+
+def test_two_concurrent_acks_record_one_receipt_and_one_request(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    state = _armed(tmp_path)
+    source = {"platform": "slack", "chat_id": "C1", "thread_id": "T1", "user_id": "U1"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(
+            lambda _n: record_invariant_ack(state, "INV-abc123456789", source),
+            range(2),
+        ))
+    assert sum(bool(out.get("requested")) for out in outcomes) == 1
+    data = json.loads((tmp_path / "invariants-pending.json").read_text())
+    assert len(data["receipts"]) == 1
+    assert len(data["journal"]) == 1
+    assert json.loads((tmp_path / "finalize-request.json").read_text())["action"] == "ack-invariant"
+
+
 def test_hard_findings_cannot_be_acknowledged(tmp_path):
     state = _armed(tmp_path)
     data = json.loads((state / "invariants-pending.json").read_text())

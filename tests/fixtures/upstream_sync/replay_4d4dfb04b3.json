@@ -1,0 +1,10 @@
+{
+  "merge": "4d4dfb04b3",
+  "base": "a3bcb2c23265dd6bc571fd7522ca4f6475c1b9a6",
+  "ours_commit": "da866b974a0e4e64bc2d6d9f7927507299d5ec8a",
+  "theirs_commit": "7a16840addc345666abc510dbfc2ffbe6631f948",
+  "path": "tools/approval.py",
+  "orientation": "ours=first-parent(local/customizations), theirs=second-parent(upstream)",
+  "expected_raw_findings": [],
+  "expected_policy_findings": []
+}

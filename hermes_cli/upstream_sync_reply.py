@@ -72,10 +72,16 @@ def record_invariant_ack(state_dir: Path | str, finding_id: str, source: dict) -
         if data.get("schema") != "upstream-sync-invariants-pending/v1" or data.get("status") != "awaiting_ack":
             return {"requested": False, "reason": "the invariant gate is not armed"}
         expected_origin = data.get("origin") or {}
+        actual_origin = dict(source or {})
+        actual_origin["platform"] = _normalize_platform(actual_origin.get("platform"))
         for key in ("platform", "chat_id", "thread_id", "user_id"):
             expected = expected_origin.get(key)
-            actual = source.get(key)
-            if expected and actual and str(expected) != str(actual):
+            actual = actual_origin.get(key)
+            if not expected:
+                return {"requested": False, "reason": f"armed invariant state has no {key}"}
+            if not actual:
+                return {"requested": False, "reason": f"receipt source has no {key}"}
+            if str(expected) != str(actual):
                 return {"requested": False, "reason": f"receipt source does not match the armed {key}"}
         finding = next((f for f in data.get("findings", []) if f.get("finding_id") == finding_id), None)
         if finding is None:
@@ -89,7 +95,7 @@ def record_invariant_ack(state_dir: Path | str, finding_id: str, source: dict) -
             "finding_id": finding_id,
             "fingerprint_sha256": (finding.get("fingerprint") or {}).get("sha256"),
             "acknowledged_at": now,
-            "source": {"platform": source.get("platform"), "chat_id": source.get("chat_id"), "thread_id": source.get("thread_id"), "user_id": source.get("user_id")},
+            "source": actual_origin,
         }
         receipts.append(receipt)
         data.setdefault("journal", []).append({"event": "ack", **receipt})
@@ -104,7 +110,7 @@ def record_invariant_ack(state_dir: Path | str, finding_id: str, source: dict) -
             "finding_id": finding_id,
             "receipt": receipt,
             "requested_at": now,
-            "origin": {"platform": _normalize_platform(source.get("platform")), "chat_id": source.get("chat_id"), "thread_id": source.get("thread_id"), "user_id": source.get("user_id")},
+            "origin": actual_origin,
         })
         return {"requested": True, "receipt": receipt}
 
@@ -220,10 +226,10 @@ def record_operator_decisions(state_dir: Path | str, decisions: dict, source: di
         feat["source"] = "operator"
         applied.append(feat["id"])
     still = [f["id"] for f in features if not f.get("decision")]
-    if source.get("chat_id"):
-        pending["slack_channel"] = source.get("chat_id")
-    if source.get("thread_id"):
-        pending["slack_thread_ts"] = source.get("thread_id")
+    pending["slack_platform"] = _normalize_platform(source.get("platform"))
+    pending["slack_channel"] = source.get("chat_id")
+    pending["slack_thread_ts"] = source.get("thread_id")
+    pending["slack_user_id"] = source.get("user_id")
     pending["status"] = "awaiting_decision" if still else "auto_apply"
     pending["decided_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     _write_json_atomic(pending_path, pending)

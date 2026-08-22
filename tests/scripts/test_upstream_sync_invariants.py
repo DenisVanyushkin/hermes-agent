@@ -351,3 +351,45 @@ def test_merge_both_reports_a_dropped_duplicate_definition_occurrence():
     result = "def foo():\n    return 1\n"
     findings = lost_definitions(ours=ours, theirs=theirs, result=result, path="x.py", policy="merge-both")
     assert any(f.symbol == "foo#2" for f in findings)
+
+
+def test_merge_both_reports_one_finding_when_the_whole_name_is_absent():
+    from upstream_sync_invariants import lost_definitions
+
+    src = "def foo():\n    return 1\n"
+    findings = lost_definitions(
+        ours=src, theirs=src, result="", path="x.py", policy="merge-both",
+    )
+    assert [(f.kind, f.symbol) for f in findings] == [("lost_definition", "foo")]
+
+
+def test_body_contribution_has_a_distinct_kind_and_message():
+    from upstream_sync_invariants import lost_definitions
+
+    base = "def guarded():\n    return 1\n"
+    ours = "def guarded():\n    return 2\n"
+    theirs = "def guarded():\n    return 3\n"
+    findings = lost_definitions(
+        ours=ours, theirs=theirs, result=ours, base=base,
+        path="x.py", policy="merge-both",
+    )
+    finding = next(f for f in findings if f.symbol == "guarded")
+    assert finding.kind == "discarded_contribution"
+    assert "absent from the resolution" not in finding.message
+    assert "upstream" in finding.message.lower()
+
+
+def test_decorator_only_change_is_a_discarded_contribution():
+    from upstream_sync_invariants import lost_definitions
+
+    base = "def guarded():\n    pass\n"
+    ours = "@local\n\ndef guarded():\n    pass\n"
+    theirs = "@upstream\n\ndef guarded():\n    pass\n"
+    findings = lost_definitions(
+        ours=ours, theirs=theirs, result=ours, base=base,
+        path="x.py", policy="merge-both",
+    )
+    assert any(
+        f.kind == "discarded_contribution" and f.symbol == "guarded"
+        for f in findings
+    )

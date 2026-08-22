@@ -479,6 +479,12 @@ class TestFinalizeReportsWhichStageFailed:
         assert res["failed_stage"] == "smoketest"
 
 
+def test_finalize_reports_manual_break_glass_in_detail():
+    text = FINALIZE.read_text(encoding="utf-8")
+    assert "BREAK_GLASS" in text
+    assert "structural gate was not executed" in text
+
+
 class TestRepoLock:
     def test_rebase_script_refuses_to_run_while_repo_lock_is_held(self, tmp_path):
         # Minimal layout so the script resolves REPO to cwd.

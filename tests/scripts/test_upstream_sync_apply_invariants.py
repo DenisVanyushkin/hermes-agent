@@ -81,6 +81,10 @@ def pyworld(tmp_path: Path):
         "status": "awaiting_decision",
         "local_head": local_head,
         "upstream_head": upstream_head,
+        "slack_platform": "slack",
+        "slack_channel": "C0B3X1E5SJZ",
+        "slack_thread_ts": "1783420000.000",
+        "slack_user_id": "U123",
         "features": [{"id": "F1", "decision": "keep-local", "files": ["mod.py"],
                       "local_subjects": ["local change"]}],
     }))
@@ -442,6 +446,21 @@ class TestStageZeroCommitContract:
         assert out["invariants_break_glass"]["mode"] == "manual-only"
 
 
+    def test_deleted_stage_zero_path_is_one_ackable_file_finding(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").unlink()
+        _git(scratch, "add", "-u", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert len(out["findings"]) == 1
+        finding = out["findings"][0]
+        assert finding["kind"] == "deleted_in_result"
+        assert finding["path"] == "mod.py"
+        assert finding.get("finding_id")
+
+
 class TestResolutionPolicySnapshot:
     def test_conflicting_policies_for_one_path_are_a_hard_refusal(self, pyworld):
         pending_path = pyworld["state"] / "pending.json"
@@ -451,6 +470,51 @@ class TestResolutionPolicySnapshot:
         out = _out(_run("prepare", pyworld["state"], pyworld["live"]))
         assert out["status"] == "policy_error"
         assert "ambiguous" in out["reason"]
+
+    def test_keep_local_journals_expected_upstream_contribution_loss(self, pyworld):
+        scratch = _prepared(pyworld)
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "committed"
+        prep = json.loads((pyworld["state"] / "apply-prepare.json").read_text())
+        expected = prep["invariant_report"]["expected_policy_losses"]
+        assert any(item["symbol"] == "kept" for item in expected)
+        pending = json.loads((pyworld["state"] / "invariants-pending.json").read_text())
+        assert any(item["event"] == "expected_policy_loss" for item in pending["journal"])
+
+
+    def test_report_only_mode_records_contribution_without_blocking(self, pyworld):
+        pending_path = pyworld["state"] / "pending.json"
+        pending = json.loads(pending_path.read_text())
+        pending["features"][0]["decision"] = "merge-both"
+        pending_path.write_text(json.dumps(pending))
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text(
+            "def kept():\n    return 100\n\n\ndef local_only():\n    return 2\n"
+        )
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run(
+            "commit", pyworld["state"], pyworld["live"], "--invariant-mode", "report",
+        ))
+
+        assert out["status"] == "committed"
+        report = out["invariant_report"]
+        assert report["mode"] == "report"
+        assert any(f["kind"] == "discarded_contribution" for f in report["findings"])
+
+
+    def test_blocked_hard_finding_explains_that_receipts_are_disabled(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert "blocked" in out["hint"].lower()
+        assert "receipt" in out["hint"].lower()
+
 
     def test_merge_both_catches_a_dropped_body_contribution(self, pyworld):
         pending_path = pyworld["state"] / "pending.json"
@@ -474,7 +538,11 @@ class TestReceiptAndAmendLifecycle:
         assert failed["status"] == "invariants_failed"
         finding_id = failed["acknowledgements_required"][0]
         from hermes_cli.upstream_sync_reply import record_invariant_ack
-        ack = record_invariant_ack(pyworld["state"], finding_id, {})
+        ack = record_invariant_ack(
+            pyworld["state"], finding_id,
+            {"platform": "slack", "chat_id": "C0B3X1E5SJZ",
+             "thread_id": "1783420000.000", "user_id": "U123"},
+        )
         assert ack["requested"] is True
         committed = _out(_run("commit", pyworld["state"], pyworld["live"]))
         assert committed["status"] == "committed"
