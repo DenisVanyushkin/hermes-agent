@@ -50,6 +50,9 @@ from job_intel.product_search.gate_b_evidence_v3 import (
     project_vacancy_evidence_v3,
     validate_provider_payload_v3,
 )
+from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    LLMProviderError,
+)
 
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -708,6 +711,8 @@ class AdjudicationSetStore:
 
 
 class MeasurementReport(_StrictFrozenModel):
+    run_id: str = Field(pattern=r"^gate-b-evidence-v1-[0-9a-f]{16}$")
+    manifest_sha256: str = Field(pattern=SHA256_PATTERN)
     expected_row_count: int = Field(ge=1, le=48)
     observed_row_count: int = Field(ge=0, le=48)
     deliverable_count: int = Field(ge=0, le=48)
@@ -801,6 +806,18 @@ class GateEvaluator:
         policy: GateBBenchmarkPolicyV3,
     ) -> GateDecision:
         evaluator_contract_sha256 = _evaluator_contract_sha256(policy)
+        if (
+            measurements.run_id != manifest.run_id
+            or measurements.manifest_sha256 != manifest.manifest_sha256
+        ):
+            return GateDecision(
+                run_id=manifest.run_id,
+                manifest_sha256=manifest.manifest_sha256,
+                evaluator_contract_sha256=evaluator_contract_sha256,
+                measurement_status="incomplete",
+                decision=GateDecisionKind.REVISE,
+                violated_rules=("measurement_report_manifest_binding_mismatch",),
+            )
         if measurements.expected_row_count != manifest.row_count:
             return GateDecision(
                 run_id=manifest.run_id,
@@ -1085,29 +1102,26 @@ def _artifact_binding_context(
         raise ValueError("artifact interpreter hash mismatch")
     if _sha256(shim.read_bytes()) != manifest.runtime.shim_sha256:
         raise ValueError("artifact shim hash mismatch")
+    runtime_fields = {
+        "artifact_sha256": "artifact_sha256",
+        "artifact_tree_sha256": "artifact_tree_sha256",
+        "shim_sha256": "shim_sha256",
+        "interpreter_sha256": "python_executable_sha256",
+        "stdlib_inventory_sha256": "stdlib_tree_sha256",
+        "installed_distributions_sha256": "installed_distributions_sha256",
+        "installed_files_sha256": "installed_files_sha256",
+        "sys_path_sha256": "sys_path_sha256",
+        "native_extensions_sha256": "native_extensions_sha256",
+        "shared_libraries_sha256": "shared_libraries_sha256",
+        "shared_library_provenance": "shared_library_provenance",
+    }
+    missing = [key for key in runtime_fields.values() if key not in payload]
+    if missing:
+        raise ValueError(f"runtime identity fields missing: {','.join(missing)}")
+    if payload["artifact_tree_sha256"] != artifact_root.name:
+        raise ValueError("artifact tree anchor mismatch")
     known_manifest_fields = {
-        "artifact_sha256": payload.get("artifact_sha256"),
-        "artifact_tree_sha256": payload.get("artifact_tree_sha256"),
-        "shim_sha256": payload.get("shim_sha256", manifest.runtime.shim_sha256),
-        "interpreter_sha256": payload.get(
-            "python_executable_sha256", manifest.runtime.interpreter_sha256
-        ),
-        "stdlib_inventory_sha256": payload.get(
-            "stdlib_tree_sha256", manifest.runtime.stdlib_inventory_sha256
-        ),
-        "installed_distributions_sha256": payload.get(
-            "installed_distributions_sha256", manifest.runtime.installed_distributions_sha256
-        ),
-        "installed_files_sha256": payload.get(
-            "installed_files_sha256", manifest.runtime.installed_files_sha256
-        ),
-        "sys_path_sha256": payload.get("sys_path_sha256", manifest.runtime.sys_path_sha256),
-        "native_extensions_sha256": payload.get(
-            "native_extensions_sha256", manifest.runtime.native_extensions_sha256
-        ),
-        "shared_libraries_sha256": payload.get(
-            "shared_libraries_sha256", manifest.runtime.shared_libraries_sha256
-        ),
+        key: payload[source_key] for key, source_key in runtime_fields.items()
     }
     if manifest.runtime.model_dump(mode="json") != manifest.runtime.model_validate(
         known_manifest_fields
@@ -1122,7 +1136,7 @@ def _artifact_binding_context(
         # Pydantic class identity into FrozenRuntime validation.
         runtime_identity=manifest.runtime.model_dump(mode="json"),
         parity=RuntimeParity(
-            python_version=str(payload.get("python_version", "unknown")),
+            python_version=str(payload["python_version"]),
             sqlite_module="pysqlite3",
             sqlite_version="unknown",
         ),
@@ -1130,7 +1144,7 @@ def _artifact_binding_context(
         reproducibility="frozen_non_editable",
     )
     source_artifact = SourceArtifact(
-        commit=str(payload.get("candidate_commit", "0" * 40)),
+        commit=str(payload["candidate_commit"]),
         source_root=artifact_root / "runtime",
         archive_sha256="0" * 64,
         artifact_sha256=manifest.runtime.artifact_sha256,
@@ -1166,6 +1180,8 @@ def _write_measurement_report(
     state_directory: Path,
 ) -> Path:
     measurement = MeasurementReport(
+        run_id=report.run_id,
+        manifest_sha256=report.manifest_sha256,
         expected_row_count=report.metrics.expected_row_count,
         observed_row_count=report.metrics.observed_row_count,
         deliverable_count=report.metrics.deliverable_count,
@@ -1183,13 +1199,27 @@ def _write_measurement_report(
     return destination
 
 
-def _load_measurement_report(path: Path) -> MeasurementReport:
+def _load_measurement_report(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_run_id: str,
+    expected_manifest_sha256: str,
+) -> MeasurementReport:
     try:
         encoded = path.read_bytes()
+        if _sha256(encoded) != expected_sha256:
+            raise ValueError("measurement report hash mismatch")
         payload = json.loads(encoded)
         if _canonical_bytes(payload) != encoded:
             raise ValueError("measurement report is not canonical")
-        return MeasurementReport.model_validate(payload)
+        report = MeasurementReport.model_validate(payload)
+        if (
+            report.run_id != expected_run_id
+            or report.manifest_sha256 != expected_manifest_sha256
+        ):
+            raise ValueError("measurement report manifest binding mismatch")
+        return report
     except ValueError:
         raise
     except Exception as exc:
@@ -1306,7 +1336,12 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
 def _run_evaluate_run(args: argparse.Namespace) -> int:
     """Evaluate finalized collection evidence in a separate foreground step."""
     manifest = _load_manifest(args.manifest, args.manifest_sha256)
-    measurements = _load_measurement_report(args.measurement_report)
+    measurements = _load_measurement_report(
+        args.measurement_report,
+        expected_sha256=args.measurement_report_sha256,
+        expected_run_id=manifest.run_id,
+        expected_manifest_sha256=manifest.manifest_sha256,
+    )
     adjudication = _load_adjudication_file(
         args.adjudication,
         args.adjudication_sha256,
@@ -1355,6 +1390,7 @@ def _main(arguments: list[str]) -> int:
     evaluate.add_argument("--manifest", type=Path, required=True)
     evaluate.add_argument("--manifest-sha256", required=True)
     evaluate.add_argument("--measurement-report", type=Path, required=True)
+    evaluate.add_argument("--measurement-report-sha256", required=True)
     evaluate.add_argument("--adjudication", type=Path, required=True)
     evaluate.add_argument("--adjudication-sha256", required=True)
     evaluate.add_argument("--gate-policy", type=Path, required=True)
@@ -1849,11 +1885,21 @@ def run_collection(
             raise ValueError("provider input hash does not match manifest row")
         ref = manifest.row_ref(corpus_row.ordinal)
         dispatch_input_hash = _reservation_input_hash(ref)
-        dispatch_result = provider.dispatch(
-            request_payload,
-            input_hash=dispatch_input_hash,
-            capability=capability,
-        )
+        try:
+            dispatch_result = provider.dispatch(
+                request_payload,
+                input_hash=dispatch_input_hash,
+                capability=capability,
+            )
+        except LLMProviderError:
+            # The governed provider persists its canonical terminal-failure
+            # record before raising.  Consume that record as the row result;
+            # an absent record is a fail-closed provider contract violation.
+            try:
+                _provider_record(provider, dispatch_input_hash)
+            except Exception as exc:
+                raise ValueError("provider_failure_record_missing") from exc
+            dispatch_result = None
         (
             provider_record,
             provider_record_sha256,

@@ -350,6 +350,8 @@ def test_gate_evaluator_distinguishes_complete_negative_from_incomplete() -> Non
         raw_sha256="3" * 64,
     )
     complete = MeasurementReport(
+        run_id=manifest.run_id,
+        manifest_sha256=manifest.manifest_sha256,
         expected_row_count=48,
         observed_row_count=48,
         deliverable_count=42,

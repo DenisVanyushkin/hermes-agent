@@ -125,3 +125,50 @@ def test_supervised_wrapper_fails_closed_before_sudo_if_property_composition_bre
     )
     assert result.returncode != 0
     assert not marker.exists()
+
+
+def test_supervised_wrapper_passes_every_namespace_property_to_systemd_run(
+    tmp_path: Path,
+) -> None:
+    artifact_parent = tmp_path / "artifacts"
+    artifact_root = artifact_parent / ("a" * 64)
+    runtime_source = artifact_root / "runtime/scripts"
+    runtime_source.mkdir(parents=True)
+    fake_python = artifact_root / "python-runtime/venv/bin/python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    args_file = tmp_path / "systemd-run-args"
+    fake_sudo = tmp_path / "bin/sudo"
+    fake_sudo.parent.mkdir(parents=True)
+    fake_sudo.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {args_file!s}\nexit 0\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    source = SUPERVISED_RUNNER.read_text(encoding="utf-8").replace(
+        "/var/lib/job-intel-gate-b-artifacts", str(artifact_parent)
+    )
+    wrapper = runtime_source / "runner.sh"
+    wrapper.write_text(source, encoding="utf-8")
+    wrapper.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(wrapper), "run-supervised"],
+        env={**os.environ, "PATH": f"{fake_sudo.parent}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    args = args_file.read_text(encoding="utf-8").splitlines()
+    properties = [
+        value.split("=", 2)[-1]
+        for value in args
+        if value.startswith("--property=InaccessiblePaths=")
+    ]
+    assert properties == [
+        "/home/hermes/.hermes/state.db",
+        "/var/lib/job-intel/state",
+        "/home/hermes/.cache",
+        "/var/lib/browser-desktop/profiles",
+        "/home/hermes/.hermes/sessions",
+    ]

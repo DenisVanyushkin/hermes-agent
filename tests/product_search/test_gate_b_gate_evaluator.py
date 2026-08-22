@@ -18,12 +18,21 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 )
 
 
+_TEST_MANIFEST = _manifest(
+    input_sha256="1" * 64,
+    projection_sha256="2" * 64,
+    raw_sha256="3" * 64,
+)
+
+
 def _decision_hashes() -> tuple[str, ...]:
     return tuple(f"{index + 100:064x}" for index in range(48))
 
 
 def _metrics(**overrides: object) -> MeasurementReport:
     values: dict[str, object] = {
+        "run_id": _TEST_MANIFEST.run_id,
+        "manifest_sha256": _TEST_MANIFEST.manifest_sha256,
         "expected_row_count": 48,
         "observed_row_count": 48,
         "deliverable_count": 48,
@@ -127,6 +136,25 @@ def test_evaluator_rejects_verdict_with_foreign_manifest_ref() -> None:
 
     assert decision.decision is GateDecisionKind.REVISE
     assert decision.violated_rules == ("adjudication_incomplete",)
+
+
+def test_evaluator_rejects_measurement_report_from_foreign_manifest() -> None:
+    manifest = _manifest(
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    decision = GateEvaluator.evaluate(
+        manifest,
+        _metrics(manifest_sha256="e" * 64),
+        _complete_adjudication(manifest),
+        policy=_policy(),
+    )
+
+    assert decision.decision is GateDecisionKind.REVISE
+    assert decision.violated_rules == (
+        "measurement_report_manifest_binding_mismatch",
+    )
 
 
 def test_evaluator_rejects_direct_call_with_mismatched_adjudication_totals() -> None:

@@ -28,6 +28,7 @@ from job_intel.product_search.gate_b_runtime_v1 import (
     _authority_identity,
     assert_artifact_destination_safe,
 )
+from job_intel.vacancy_understanding.semantic.runtime.llm_provider import LLMProviderError
 
 
 CORPUS_SHA256 = "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
@@ -230,6 +231,8 @@ class FakeProvider:
                     }
                 )
             )
+        if outcome == "terminal_failure":
+            raise LLMProviderError("schema_invalid", "composition smoke fixture")
         return SimpleNamespace(record=record)
 
 
@@ -413,6 +416,7 @@ exec {sys.executable!s} "$@"
         "sys_path_sha256": runtime_identity.sys_path_sha256,
         "native_extensions_sha256": runtime_identity.native_extensions_sha256,
         "shared_libraries_sha256": runtime_identity.shared_libraries_sha256,
+        "shared_library_provenance": runtime_identity.shared_library_provenance,
     }
     (artifact_root / "runtime-manifest.json").write_bytes(_canonical(runtime_manifest))
     (artifact_root / "runtime-manifest.sha256").write_text(

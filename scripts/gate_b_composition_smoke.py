@@ -93,7 +93,7 @@ def bind_manifest_runtime(manifest_path: Path, runtime_manifest_path: Path) -> s
         "sys_path_sha256": runtime["sys_path_sha256"],
         "native_extensions_sha256": runtime["native_extensions_sha256"],
         "shared_libraries_sha256": runtime["shared_libraries_sha256"],
-        "shared_library_provenance": {},
+        "shared_library_provenance": runtime["shared_library_provenance"],
     }
     identity = dict(manifest)
     identity.pop("manifest_sha256")
@@ -255,6 +255,8 @@ def main() -> int:
                 manifest_sha,
                 "--measurement-report",
                 str(state / "measurement-report.json"),
+                "--measurement-report-sha256",
+                sha256((state / "measurement-report.json").read_bytes()),
                 "--adjudication",
                 str(adjudication_path),
                 "--adjudication-sha256",

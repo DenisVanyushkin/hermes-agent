@@ -636,7 +636,11 @@ def build_assembled_artifact(
     if observed != artifact_tree_sha256:
         raise ArtifactBuildError("assembled_artifact_changed_after_binding")
     runtime = frozen_runtime.model_copy(
-        update={"runtime_identity": runtime_identity}
+        update={
+            "runtime_identity": runtime_identity.model_copy(
+                update={"artifact_tree_sha256": artifact_tree_sha256}
+            )
+        }
     )
     for path in (destination / "runtime", destination / "python-runtime"):
         for entry in path.rglob("*"):

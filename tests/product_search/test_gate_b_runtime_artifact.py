@@ -193,6 +193,8 @@ def test_assembled_artifact_hash_covers_runtime_and_manifest_body(
     payload = json.loads((assembled.root / "runtime-manifest.json").read_bytes())
     assert payload["runtime_kind"] == "gate_b_description_evidence"
     assert payload["artifact_tree_sha256"] == assembled.artifact_tree_sha256
+    assert assembled.runtime.runtime_identity.artifact_tree_sha256 == assembled.artifact_tree_sha256
+    assert assembled.runtime.runtime_identity.artifact_tree_sha256 != "0" * 64
     assert runtime_v1._artifact_tree_hash(
         assembled.root,
         excluded=frozenset({"runtime-manifest.sha256"}),

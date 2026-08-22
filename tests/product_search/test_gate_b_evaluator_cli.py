@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from job_intel.product_search import gate_b_evidence_runner_v1 as runner
 from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     load_gate_b_benchmark_policy_v3,
@@ -25,7 +27,7 @@ def _write_canonical(path: Path, payload: object) -> str:
     return runner._sha256(encoded)
 
 
-def _write_run_inputs(tmp_path: Path, adjudication: object) -> tuple[Path, str, Path, str, Path]:
+def _write_run_inputs(tmp_path: Path, adjudication: object) -> tuple[Path, str, Path, str, str, Path]:
     manifest = _manifest(
         input_sha256="1" * 64,
         projection_sha256="2" * 64,
@@ -37,7 +39,7 @@ def _write_run_inputs(tmp_path: Path, adjudication: object) -> tuple[Path, str, 
         manifest.model_dump(mode="json"),
     )
     measurement_path = tmp_path / "measurement-report.json"
-    _write_canonical(
+    measurement_sha256 = _write_canonical(
         measurement_path,
         _metrics(
             adjudicated_count=0,
@@ -59,6 +61,7 @@ def _write_run_inputs(tmp_path: Path, adjudication: object) -> tuple[Path, str, 
         manifest_path,
         manifest_sha256,
         measurement_path,
+        measurement_sha256,
         adjudication_sha256,
         policy_path,
     )
@@ -69,7 +72,14 @@ def _evaluate_args(
     adjudication_path: Path,
     output: Path,
 ) -> list[str]:
-    manifest_path, manifest_sha256, measurement_path, adjudication_sha256, policy_path = inputs
+    (
+        manifest_path,
+        manifest_sha256,
+        measurement_path,
+        measurement_sha256,
+        adjudication_sha256,
+        policy_path,
+    ) = inputs
     return [
         "evaluate-run",
         "--manifest",
@@ -78,6 +88,8 @@ def _evaluate_args(
         manifest_sha256,
         "--measurement-report",
         str(measurement_path),
+        "--measurement-report-sha256",
+        measurement_sha256,
         "--adjudication",
         str(adjudication_path),
         "--adjudication-sha256",
@@ -175,3 +187,20 @@ def test_evaluate_refuses_measurement_cardinality_not_matching_manifest() -> Non
     assert decision.measurement_status == "incomplete"
     assert decision.decision.value == "revise"
     assert decision.violated_rules == ("measurement_cardinality_mismatch",)
+
+
+def test_evaluate_run_rejects_measurement_report_with_wrong_external_hash(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    inputs = _write_run_inputs(tmp_path, _complete_adjudication(manifest))
+    adjudication_path = tmp_path / "adjudication.json"
+    args = _evaluate_args(inputs, adjudication_path, tmp_path / "out")
+    index = args.index("--measurement-report-sha256") + 1
+    args[index] = "0" * 64
+    with pytest.raises(ValueError, match="measurement report hash mismatch"):
+        runner._main(args)
