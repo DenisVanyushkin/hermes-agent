@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -342,6 +343,24 @@ def test_observe_failure_is_logged_and_swallowed(monkeypatch, caplog):
     assert '"exception": "PipelineSpecValidationError"' in log_message
 
 
+def _drained_gateway_log(hermes_home: Path, timeout_seconds: float = 5.0) -> str:
+    """Read ``logs/gateway.log`` once the async log listener has drained it.
+
+    setup_logging() routes every record through a QueueHandler, so the file is
+    written on the QueueListener thread. Reading it in the same breath as the
+    ``logger.info()`` call reads a file that exists but is still empty. The
+    assertion below is about the sink receiving the record, not about the sink
+    being synchronous, so wait for the drain instead of racing it.
+    """
+    path = hermes_home / "logs" / "gateway.log"
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if text or time.monotonic() >= deadline:
+            return text
+        time.sleep(0.01)
+
+
 def test_observe_helper_logs_to_gateway_sink_with_injected_gateway_logger(monkeypatch):
     from hermes_cli import pipeline_observe
 
@@ -383,7 +402,7 @@ def test_observe_helper_logs_to_gateway_sink_with_injected_gateway_logger(monkey
         )
 
         assert result == decision
-        gateway_log = (hermes_home / "logs" / "gateway.log").read_text(encoding="utf-8")
+        gateway_log = _drained_gateway_log(hermes_home)
         assert "pipeline_router_observe_decision" in gateway_log
         assert '"status": "selected"' in gateway_log
         assert "gateway.run" in gateway_log
