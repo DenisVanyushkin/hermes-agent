@@ -24,6 +24,7 @@ from job_intel.product_search.gate_b_runtime_v1 import (
     build_frozen_runtime,
     build_source_artifact,
     verify_manifest_binding,
+    _authority_identity,
 )
 
 
@@ -49,8 +50,17 @@ def _authority_inputs() -> AuthorityInputs:
         profile_bytes=b"profile:v1",
         policy_bytes=b"policy:v1",
         decision_v2_bytes=b"decision:v2",
+        pricing_bytes=b"pricing:v1",
         source_authority_bytes={"gate_a": b"gate-a:v1"},
     )
+
+
+def test_pricing_authority_bytes_change_identity() -> None:
+    first = _authority_identity(_authority_inputs())
+    second = _authority_identity(
+        _authority_inputs().model_copy(update={"pricing_bytes": b"pricing:v2"})
+    )
+    assert first.pricing_sha256 != second.pricing_sha256
 
 
 def _rows() -> tuple[EvidenceManifestRow, ...]:

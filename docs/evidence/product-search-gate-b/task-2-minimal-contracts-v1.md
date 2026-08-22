@@ -58,10 +58,21 @@ shared_libraries_sha256
 shared_library_provenance   # soname -> resolved source filename, covered by the artifact anchor
 ```
 
+The dispatch journal's `recording_sha256` anchors the canonical provider-runtime
+record for that input. The Gate B sealed recording is derived evidence: it is
+separately content-hashed and manifest-bound, but it is not the journal's
+canonical provider record. Recovery reads and verifies the provider-runtime
+record before reconciling a dispatched row; it never treats a derived Gate B
+record as proof of provider outcome or cost. These are two independent anchors,
+each external to the object it attests.
+
 `AuthorityIdentity` records the exact model, prompt, response schema, profile,
 policy, Decision v2, pricing schedule, and source-authority hashes. Each value
 is a lowercase SHA-256; versions are separate strings where a version is part
-of the public contract. The manifest contains no owner signature, launch
+of the public contract. `pricing_sha256` is the hash of the canonical
+`GovernedPricingSchedule` record, never a label or caller-supplied constant;
+the issued capability must carry the same identity and reservation cost before
+transport. The manifest contains no owner signature, launch
 receipt, PID, process-start identity, approval window, or launch-attempt ID.
 
 ### Manifest invariants

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 from job_intel.product_search import gate_b_evidence_v3 as evidence
@@ -111,10 +113,52 @@ _SEED_PROVIDER_PAYLOAD = _provider_payload(_SEED_INPUT)
 
 
 class FakeProvider:
-    def dispatch(self, payload: dict[str, object]) -> dict[str, object]:
-        # Empty output is deliberate: the real validator records a terminal
+    def __init__(self) -> None:
+        self.store = SimpleNamespace(records={})
+        self.pricing = SimpleNamespace(
+            identity_sha256=_sha(b"pricing:smoke"),
+            reservation_cost_usd=Decimal("0.01"),
+        )
+        self.authority_identity = {
+            "provider_sha256": _sha(b"provider:smoke"),
+            "model_sha256": _sha(b"model:smoke"),
+            "prompt_sha256": _sha(b"prompt:smoke"),
+            "response_schema_sha256": _sha(b"schema:smoke"),
+            "pricing_sha256": _sha(b"pricing:smoke"),
+        }
+
+        def load(input_hash: str) -> dict[str, object]:
+            return self.store.records[input_hash]
+
+        self.store.load = load
+
+    def dispatch(
+        self,
+        payload: dict[str, object],
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object:
+        reservation = capability.reserve(input_hash)
+        capability.mark_dispatching(reservation)
+        # Empty output is deliberate: the validator records a terminal
         # failure while the real Decision v2 request remains deterministic.
-        return {}
+        record = {
+            "provider_id": "fake-provider",
+            "model_id": "fake-model",
+            "provider_sha256": _sha(b"provider:smoke"),
+            "model_sha256": _sha(b"model:smoke"),
+            "prompt_sha256": _sha(b"prompt:smoke"),
+            "response_schema_sha256": _sha(b"schema:smoke"),
+            "raw_response_text": "{}",
+            "post_dispatch_outcome_v3": "terminal_failure",
+            "measured_cost_usd": "0",
+            "conservative_cost_usd": "0.01",
+            "pricing_sha256": _sha(b"pricing:smoke"),
+        }
+        self.store.records[input_hash] = record
+        capability.reconcile(reservation, Decimal("0"), "terminal_failure")
+        return SimpleNamespace(record=record)
 
 
 def provider_factory() -> FakeProvider:
@@ -142,7 +186,9 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
         "profile_bytes": b"profile:smoke",
         "policy_bytes": policy_path.read_bytes(),
         "decision_v2_bytes": b"decision-v2:smoke",
+        "pricing_bytes": b"pricing:smoke",
         "source:gate_a": b"gate-a:smoke",
+        "source:provider": b"provider:smoke",
     }
     authority_paths: dict[str, Path] = {}
     for name, value in authority_values.items():
@@ -157,7 +203,11 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
         profile_bytes=authority_values["profile_bytes"],
         policy_bytes=authority_values["policy_bytes"],
         decision_v2_bytes=authority_values["decision_v2_bytes"],
-        source_authority_bytes={"gate_a": authority_values["source:gate_a"]},
+        pricing_bytes=authority_values["pricing_bytes"],
+        source_authority_bytes={
+            "gate_a": authority_values["source:gate_a"],
+            "provider": authority_values["source:provider"],
+        },
     )
     shim = artifact_root / "python-runtime/venv/lib/python3.12/site-packages/00-pysqlite3-shim.pth"
     shim.parent.mkdir(parents=True, exist_ok=True)

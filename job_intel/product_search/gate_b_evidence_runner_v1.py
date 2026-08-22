@@ -1,10 +1,4 @@
-"""Offline one-row Gate B evidence walking skeleton.
-
-This module is deliberately boring: it owns the smallest concrete pieces of
-the Task 2 contracts and has no database, socket, credential, subprocess, or
-provider-runtime dependency.  The live runner and 48-row binding arrive in
-later tasks.
-"""
+"""Gate B evidence collection over the governed structured-call boundary."""
 from __future__ import annotations
 
 import base64
@@ -848,7 +842,53 @@ class GateEvaluator:
 
 
 class GovernedProvider(Protocol):
-    def dispatch(self, payload: dict[str, object]) -> Mapping[str, object]: ...
+    """One production-shaped dispatch seam shared by real and fake providers."""
+
+    store: object
+    pricing: object
+
+    def dispatch(
+        self,
+        payload: dict[str, object],
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object: ...
+
+
+class GovernedStructuredProviderAdapter:
+    """Production-shaped adapter over the semantic governed-call runtime."""
+
+    def __init__(
+        self,
+        *,
+        provider: object,
+        request_factory: Callable[[dict[str, object], str], object],
+        pricing: object,
+        authority_identity: Mapping[str, str],
+    ) -> None:
+        governed_call = getattr(provider, "governed_structured_call", None)
+        store = getattr(provider, "store", None)
+        if not callable(governed_call) or store is None:
+            raise ValueError("governed_structured_provider_required")
+        self._provider = provider
+        self._request_factory = request_factory
+        self.store = store
+        self.pricing = pricing
+        self.authority_identity = dict(authority_identity)
+
+    def dispatch(
+        self,
+        payload: dict[str, object],
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object:
+        request = self._request_factory(payload, input_hash)
+        return self._provider.governed_structured_call(
+            request=request,
+            capability=capability,
+        )
 
 
 class OneRowResult(_StrictFrozenModel):
@@ -1078,6 +1118,7 @@ def _artifact_binding_context(
         "profile_bytes",
         "policy_bytes",
         "decision_v2_bytes",
+        "pricing_bytes",
     )
     missing = [name for name in names if name not in authority_paths]
     if missing:
@@ -1297,6 +1338,207 @@ def _default_binding_verifier(
     )
 
 
+def _provider_record(provider: GovernedProvider, input_hash: str) -> dict[str, object]:
+    store = getattr(provider, "store", None)
+    loader = getattr(store, "load", None)
+    if not callable(loader):
+        raise ValueError("provider_record_store_required")
+    record = loader(input_hash)
+    if not isinstance(record, dict):
+        raise ValueError("provider_record_invalid")
+    return record
+
+
+def _reservation_input_hash(ref: ManifestRef) -> str:
+    """Namespace provider-runtime records by the complete row identity."""
+    return _sha256(_canonical_bytes(ref.model_dump(mode="json")))
+
+
+def _provider_authority_identity(provider: GovernedProvider) -> Mapping[str, str]:
+    supplied = getattr(provider, "authority_identity", None)
+    identity = supplied() if callable(supplied) else supplied
+    if not isinstance(identity, Mapping):
+        raise ValueError("provider_authority_identity_required")
+    names = ("provider_sha256", "model_sha256", "prompt_sha256", "response_schema_sha256", "pricing_sha256")
+    if any(not isinstance(identity.get(name), str) for name in names):
+        raise ValueError("provider_authority_identity_incomplete")
+    return {name: str(identity[name]) for name in names}
+
+
+def _assert_provider_authority(
+    manifest: EvidenceManifest, provider: GovernedProvider
+) -> None:
+    observed = _provider_authority_identity(provider)
+    expected = {
+        "provider_sha256": manifest.authorities.source_authority_sha256s.get(
+            "provider"
+        ),
+        "model_sha256": manifest.authorities.model_sha256,
+        "prompt_sha256": manifest.authorities.prompt_sha256,
+        "response_schema_sha256": manifest.authorities.response_schema_sha256,
+        "pricing_sha256": manifest.authorities.pricing_sha256,
+    }
+    if any(observed.get(name) != expected.get(name) for name in expected):
+        raise ValueError("provider_authority_mismatch")
+
+
+def _assert_provider_record_authority(
+    manifest: EvidenceManifest, record: Mapping[str, object]
+) -> None:
+    provider_id = record.get("provider_id")
+    model_id = record.get("model_id")
+    observed = {
+        "provider_sha256": record.get(
+            "provider_sha256",
+            _sha256(str(provider_id).encode("utf-8")) if provider_id else None,
+        ),
+        "model_sha256": record.get(
+            "model_sha256",
+            _sha256(str(model_id).encode("utf-8")) if model_id else None,
+        ),
+        "prompt_sha256": record.get(
+            "prompt_sha256", record.get("semantic_prompt_sha256")
+        ),
+        "response_schema_sha256": record.get("response_schema_sha256"),
+        "pricing_sha256": record.get("pricing_sha256"),
+    }
+    expected = {
+        "provider_sha256": manifest.authorities.source_authority_sha256s.get(
+            "provider"
+        ),
+        "model_sha256": manifest.authorities.model_sha256,
+        "prompt_sha256": manifest.authorities.prompt_sha256,
+        "response_schema_sha256": manifest.authorities.response_schema_sha256,
+        "pricing_sha256": manifest.authorities.pricing_sha256,
+    }
+    if any(observed.get(name) != expected.get(name) for name in expected):
+        raise ValueError("provider_record_authority_mismatch")
+
+
+def _provider_dispatch_result(
+    provider: GovernedProvider, input_hash: str, result: object
+) -> tuple[dict[str, object], str, str, bytes, Decimal | None, Decimal]:
+    record = _provider_record(provider, input_hash)
+    outcome = str(record.get("post_dispatch_outcome_v3", ""))
+    try:
+        terminal = TerminalOutcome(outcome)
+    except ValueError as exc:
+        raise ValueError("provider_record_outcome_invalid") from exc
+    provider_record_sha256 = _sha256(_canonical_bytes(record))
+    raw_response = record.get("raw_response_text", "")
+    if not isinstance(raw_response, str):
+        raise ValueError("provider_record_response_invalid")
+    try:
+        measured = (
+            None
+            if record.get("measured_cost_usd") is None
+            else Decimal(str(record["measured_cost_usd"]))
+        )
+        conservative = Decimal(str(record["conservative_cost_usd"]))
+    except Exception as exc:
+        raise ValueError("provider_record_cost_invalid") from exc
+    if not conservative.is_finite() or conservative < 0:
+        raise ValueError("provider_record_cost_invalid")
+    if terminal is TerminalOutcome.TERMINAL_UNKNOWN and raw_response:
+        raise ValueError("provider_record_unknown_response_not_empty")
+    if terminal is TerminalOutcome.TERMINAL_UNKNOWN:
+        payload: dict[str, object] = {}
+    else:
+        try:
+            parsed = json.loads(raw_response) if raw_response else {}
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("provider_record_response_invalid") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("provider_record_response_invalid")
+        payload = parsed
+    return record, provider_record_sha256, outcome, raw_response.encode("utf-8"), measured, conservative
+
+
+def _issue_collection_capability(
+    *,
+    manifest: EvidenceManifest,
+    provider: GovernedProvider,
+    journal: AppendOnlyJournal,
+) -> object:
+    try:
+        from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+            _issue_structured_call_capability,
+        )
+    except ImportError as exc:
+        raise ValueError("governed_provider_runtime_unavailable") from exc
+    pricing = getattr(provider, "pricing", None)
+    pricing_identity = getattr(pricing, "identity_sha256", None)
+    if not isinstance(pricing_identity, str):
+        raise ValueError("provider_pricing_identity_required")
+    if pricing_identity != manifest.authorities.pricing_sha256:
+        raise ValueError("pricing_identity_mismatch")
+    if getattr(pricing, "reservation_cost_usd", None) != manifest.limits.per_call_maximum_usd:
+        raise ValueError("pricing_reservation_mismatch")
+    reservations: dict[str, str] = {}
+    reservation_refs: dict[str, ManifestRef] = {}
+    for row in manifest.rows:
+        ref = manifest.row_ref(row.ordinal)
+        dispatch_key = _reservation_input_hash(ref)
+        if dispatch_key in reservation_refs:
+            raise ValueError("reservation_identity_collision")
+        reservation_refs[dispatch_key] = ref
+    receipts: dict[str, DispatchReceipt] = {}
+
+    def reserve(dispatch_key: str, _amount: Decimal) -> str:
+        if dispatch_key not in reservation_refs:
+            raise ValueError("reservation_manifest_ref_missing")
+        reservation_id = f"gate-b:{dispatch_key}"
+        reservations[reservation_id] = dispatch_key
+        return reservation_id
+
+    def mark_dispatching(reservation_id: str) -> None:
+        dispatch_key = reservations.get(reservation_id)
+        if dispatch_key is None:
+            raise ValueError("reservation_unknown")
+        ref = reservation_refs.get(dispatch_key)
+        if ref is None:
+            raise ValueError("reservation_manifest_ref_missing")
+        receipts[reservation_id] = journal.append_pre_dispatch(ref)
+
+    def reconcile(
+        reservation_id: str, actual_cost: Decimal, outcome: str
+    ) -> None:
+        dispatch_key = reservations.get(reservation_id)
+        receipt = receipts.get(reservation_id)
+        if dispatch_key is None or receipt is None:
+            raise ValueError("reservation_unknown")
+        record = _provider_record(provider, dispatch_key)
+        _assert_provider_record_authority(manifest, record)
+        provider_record_sha256 = _sha256(_canonical_bytes(record))
+        measured = (
+            None
+            if record.get("measured_cost_usd") is None
+            else Decimal(str(record["measured_cost_usd"]))
+        )
+        conservative = Decimal(str(record.get("conservative_cost_usd")))
+        journal.commit_terminal(
+            receipt,
+            TerminalOutcome(outcome),
+            provider_record_sha256,
+            measured,
+            conservative,
+        )
+
+    metadata_seal_key = hashlib.sha256(
+        ("gate-b-provider-record:" + manifest.manifest_sha256).encode("ascii")
+    ).digest()
+    return _issue_structured_call_capability(
+        run_identity_sha256=manifest.manifest_sha256,
+        pricing=pricing,
+        exact_call_cap=manifest.limits.ordered_call_cap,
+        exact_spend_cap_usd=manifest.limits.aggregate_maximum_usd,
+        metadata_seal_key=metadata_seal_key,
+        reserve=reserve,
+        mark_dispatching=mark_dispatching,
+        reconcile=reconcile,
+    )
+
+
 def run_collection(
     *,
     manifest: EvidenceManifest,
@@ -1342,6 +1584,10 @@ def run_collection(
         authorities=authorities,
     )
     provider = provider_factory()
+    _assert_provider_authority(manifest, provider)
+    capability = _issue_collection_capability(
+        manifest=manifest, provider=provider, journal=journal
+    )
     results: list[CollectionRowResult] = []
     for corpus_row in rows:
         row = manifest.row(corpus_row.ordinal)
@@ -1360,19 +1606,31 @@ def run_collection(
         if _sha256(request_bytes) != row.input_sha256:
             raise ValueError("provider input hash does not match manifest row")
         ref = manifest.row_ref(corpus_row.ordinal)
-        receipt = journal.append_pre_dispatch(ref)
-        response_payload = dict(provider.dispatch(request_payload))
+        dispatch_input_hash = _reservation_input_hash(ref)
+        dispatch_result = provider.dispatch(
+            request_payload,
+            input_hash=dispatch_input_hash,
+            capability=capability,
+        )
+        (
+            provider_record,
+            provider_record_sha256,
+            provider_outcome,
+            response_bytes,
+            measured_cost,
+            conservative_cost,
+        ) = _provider_dispatch_result(provider, dispatch_input_hash, dispatch_result)
+        _assert_provider_record_authority(manifest, provider_record)
+        response_payload = (
+            json.loads(response_bytes) if response_bytes else {}
+        )
         response_bytes = _canonical_bytes(response_payload)
         validation_status = validate_provider_payload_v3(
             response_payload,
             synthesis_input=projected,
             reviewed_allowlist=reviewed_allowlist,
         )
-        outcome = (
-            TerminalOutcome.TERMINAL_FAILURE
-            if validation_status is not None
-            else TerminalOutcome.SUCCESS
-        )
+        outcome = TerminalOutcome(provider_outcome)
         decision_request = decision_request_factory(response_payload, ref)
         decision = run_decision_v2(decision_request, policy=decision_policy)
         decision_bytes = canonical_decision_bytes(decision)
@@ -1387,16 +1645,25 @@ def run_collection(
                     "input_sha256": row.input_sha256,
                     "projection_sha256": row.projection_sha256,
                     "response_sha256": _sha256(response_bytes),
+                    "provider_record_sha256": provider_record_sha256,
+                    "provider_id": str(provider_record.get("provider_id", "")),
+                    "model_id": str(provider_record.get("model_id", "")),
+                    "provider_sha256": str(provider_record.get("provider_sha256", "")),
+                    "model_sha256": str(provider_record.get("model_sha256", "")),
+                    "prompt_sha256": str(
+                        provider_record.get(
+                            "prompt_sha256",
+                            provider_record.get("semantic_prompt_sha256", ""),
+                        )
+                    ),
+                    "response_schema_sha256": str(
+                        provider_record.get("response_schema_sha256", "")
+                    ),
+                    "pricing_sha256": str(provider_record.get("pricing_sha256", "")),
+                    "conservative_cost_usd": str(conservative_cost),
                     "validator": "gate_b_evidence_v3",
                 },
             )
-        )
-        journal.commit_terminal(
-            receipt,
-            outcome,
-            recording_ref.recording_sha256,
-            Decimal("0"),
-            manifest.limits.per_call_maximum_usd,
         )
         results.append(
             CollectionRowResult(

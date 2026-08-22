@@ -53,6 +53,7 @@ class AuthorityInputs(_StrictFrozenModel):
     profile_bytes: bytes
     policy_bytes: bytes
     decision_v2_bytes: bytes
+    pricing_bytes: bytes
     source_authority_bytes: dict[str, bytes]
 
 
@@ -642,6 +643,8 @@ def build_assembled_artifact(
 
 
 def _authority_identity(authorities: AuthorityInputs) -> AuthorityIdentity:
+    if not authorities.pricing_bytes:
+        raise ArtifactBuildError("pricing_authority_missing")
     return AuthorityIdentity(
         model_sha256=_sha256_bytes(authorities.model_bytes),
         prompt_sha256=_sha256_bytes(authorities.prompt_bytes),
@@ -649,7 +652,7 @@ def _authority_identity(authorities: AuthorityInputs) -> AuthorityIdentity:
         profile_sha256=_sha256_bytes(authorities.profile_bytes),
         policy_sha256=_sha256_bytes(authorities.policy_bytes),
         decision_v2_sha256=_sha256_bytes(authorities.decision_v2_bytes),
-        pricing_sha256=_sha256_bytes(b"pricing:v1"),
+        pricing_sha256=_sha256_bytes(authorities.pricing_bytes),
         source_authority_sha256s={
             key: _sha256_bytes(value)
             for key, value in sorted(authorities.source_authority_bytes.items())
