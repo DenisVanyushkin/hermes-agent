@@ -1065,6 +1065,57 @@ class TestApplyDecisions:
         assert threaded[-1]["thread_ts"] == "1786.001"
         assert "applied" in threaded[-1]["text"].lower()
 
+    def _conflicting_py_repo(self, tmp_path):
+        """Every line differs on both sides, so the whole module is one block.
+
+        A resolution that answers the block with a single line therefore drops a
+        module-level definition — the shape the structural gate exists to catch.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "local/customizations")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "mod.py").write_text("A = 1\nB = 2\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base")
+        (repo / "mod.py").write_text("A = 100\nB = 200\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "tip")
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "mod.py").write_text("A = 999\nB = 299\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream edit")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        return repo, local_head, upstream_head
+
+    def test_a_resolution_that_drops_a_definition_stops_at_the_structural_gate(self, tmp_path, state):
+        """Both sides still define B, so dropping it is a resolver defect.
+
+        The whole point of the base going into the gate is that this case must
+        keep failing while an accepted deletion stops failing.
+        """
+        world = self._conflicting_py_repo(tmp_path)
+        repo, local_head, _ = world
+        self._pending(state, world, files=("mod.py",))
+        scripts, _calls = _stub_scripts(tmp_path)
+        slack_cmd, _slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(tmp_path, "import json,sys\njson.load(sys.stdin)\nsys.stdout.write('A = 100\\n')\n")
+
+        _decisions_request(state)
+        _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "failed"
+        assert res["failed_stage"] == "invariants"
+        assert "mod.py: lost_definition (B)" in res["detail"]
+        assert _git(repo, "rev-parse", "HEAD") == local_head       # repo untouched
+        assert (state / "scratch").exists()                        # clone preserved for repair
+        assert (state / "pending.json").exists()                   # decision still armed
+
     def test_unresolvable_hunk_fails_at_resolve_keeps_clone_and_reports(self, tmp_path, state):
         world = self._conflicting_repo(tmp_path)
         repo, local_head, upstream_head = world

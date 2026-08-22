@@ -17,8 +17,29 @@ parsing the result and diffing its definitions against both parents.
 Deliberately reports rather than repairs. During the incident audit three
 symbols came up missing and two were *supposed* to be gone: one deleted on
 purpose locally, one retired with an implementation upstream had rewritten.
-Only a human can tell those from a resolver dropping code, so the checks state
-what changed and stop.
+The checks state what changed and stop; they never restore anything.
+
+Telling an accepted deletion from a dropped one is what the merge base is for.
+Without it, every deliberate removal and every rename an upstream batch brings
+became a finding — and since the only answer to a finding disarmed the gate for
+the whole merge, the noise was training the operator to bypass it. The rule, in
+full:
+
+    silent  iff  the base is known and parses
+                 AND both sides have the file
+                 AND exactly one side still defines the name;
+    report  otherwise — including a base that is absent or unparseable, and
+            including a side that has no file at all, because neither says
+            anything about intent.
+
+Both preconditions are load-bearing. A side that lacks the file presents the
+same empty name set as one that deleted everything in it, so read without the
+presence check every base-era name looks one-sidedly removed and the file is
+excused entirely — the exact defect this module exists to catch.
+
+The comparison is by NAME. It does not establish that the surviving side left
+the body alone, so "the fork reworked this function and upstream deleted it" is
+suppressed too; narrowing that needs a body comparison the module does not do.
 """
 
 from __future__ import annotations
@@ -101,18 +122,26 @@ def parse_failures(files: dict) -> list:
     return findings
 
 
-def lost_definitions(*, ours: str, theirs: str, result: str, path: str) -> list:
+def lost_definitions(*, ours, theirs, result, path: str, base=None) -> list:
     """Report definitions present on either parent but absent from the result.
 
     Both parents count: dropping upstream's new function is as much a loss as
     dropping ours.
+
+    *ours* and *theirs* are ``None`` when that side has no such file, which is
+    not the same as an empty one: a side that HAS the file and defines nothing
+    in it removed those definitions on purpose, while a side without the file
+    says nothing at all. *base* is the same file at the merge base, and is what
+    separates an accepted deletion from a dropped one. Anything unknown —
+    absent base, unparseable base, a side with no file — reports rather than
+    suppresses. See the module docstring for the rule in full.
     """
     if not _is_python(path):
         return []
     sides = {}
     for label, src in (("result", result), ("ours", ours), ("theirs", theirs)):
         try:
-            sides[label] = _definitions(src)
+            sides[label] = _definitions(src or "")
         except SyntaxError as exc:
             return [
                 Finding(
@@ -127,6 +156,8 @@ def lost_definitions(*, ours: str, theirs: str, result: str, path: str) -> list:
                 )
             ]
     missing = (sides["ours"] | sides["theirs"]) - sides["result"]
+    if ours is not None and theirs is not None:
+        missing -= _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
     return [
         Finding(
             path=path,
@@ -141,8 +172,38 @@ def lost_definitions(*, ours: str, theirs: str, result: str, path: str) -> list:
     ]
 
 
-def check_merge(paths, read_ours, read_theirs, read_result) -> Report:
-    """Run every check over ``paths``; readers return file text for one side."""
+def _accepted_deletions(base, *, ours: set, theirs: set) -> set:
+    """Names the merge base had that exactly one side no longer defines.
+
+    One side dropped the name and the other still carries it, so a resolution
+    without it followed a deletion rather than losing something both parents
+    agreed to keep. A name both sides still define, or one no side had to begin
+    with, is not in here: dropping either of those is a resolver defect.
+
+    Returns the empty set when the base is unknown or does not parse, so the
+    fallback is noise rather than silence. The caller is responsible for the
+    other precondition — not reaching here when a side has no file at all —
+    because that side's empty name set is indistinguishable here from one that
+    deleted everything.
+    """
+    if base is None:
+        return set()
+    try:
+        base_names = _definitions(base)
+    except SyntaxError:
+        # The base is not a parent of this merge and its syntax is not this
+        # merge's problem; it simply stops being usable evidence.
+        return set()
+    return {n for n in base_names if (n in ours) != (n in theirs)}
+
+
+def check_merge(paths, read_ours, read_theirs, read_result, read_base=None) -> Report:
+    """Run every check over ``paths``; readers return file text for one side.
+
+    A reader returns ``None`` for a side that has no such file. ``read_base`` is
+    optional so a caller with no merge base (the parse-only sweep) keeps
+    working; supplying it is what silences accepted deletions.
+    """
     report = Report()
     for path in paths:
         result = read_result(path)
@@ -154,7 +215,8 @@ def check_merge(paths, read_ours, read_theirs, read_result) -> Report:
             continue
         report.findings.extend(
             lost_definitions(
-                ours=read_ours(path), theirs=read_theirs(path), result=result, path=path
+                ours=read_ours(path), theirs=read_theirs(path), result=result, path=path,
+                base=read_base(path) if read_base is not None else None,
             )
         )
     return report

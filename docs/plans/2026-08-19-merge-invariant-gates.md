@@ -32,6 +32,21 @@ Nothing between the resolver and the 20-minute test gate looked at the result.
 
 ## Design notes
 
+> **Superseded in part, 2026-08-22.** The definition check now takes the merge
+> base as a fourth input. A name the base had that exactly one side no longer
+> defines — with both sides actually having the file — is treated as an accepted
+> deletion and is not reported, so the `submit_pending` case named in Task 2's
+> test list is deliberately silent now, and the contract below is
+> `(ours ∪ theirs) − result` minus those. The reason is in
+> `scripts/upstream_sync_invariants.py`: without the base, every deletion and
+> every rename an upstream batch brings became a finding, and the only answer to
+> a finding disarmed the gate for the whole merge — so the noise was training the
+> operator to bypass it. "A human decides" still holds for everything the base
+> cannot settle. The signatures published below have gained `base` / `read_base`
+> parameters, and their readers now return `None` for a side that has no such
+> file.
+
+
 **What "definition set" means.** For each changed `.py` file, parse `ours`, `theirs`
 and the result, and compare the sets of module-level `def`/`async def`/`class` names
 and simple assignment targets. Report `(ours ∪ theirs) − result`.

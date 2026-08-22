@@ -430,8 +430,11 @@ def _invariant_report(scratch: Path, prep: dict):
     both_sides = _names(base, local_base) & _names(base, upstream_head)
 
     def _blob(rev, path):
+        # None, not "": a revision without the file says nothing about intent,
+        # while an empty file is a side that removed its definitions on purpose.
+        # Collapsing the two excuses every base-era name in a modify/delete.
         proc = git(scratch, "show", f"{rev}:{path}", check=False)
-        return proc.stdout if proc.returncode == 0 else ""
+        return proc.stdout if proc.returncode == 0 else None
 
     def read_result(path):
         f = scratch / path
@@ -443,7 +446,10 @@ def _invariant_report(scratch: Path, prep: dict):
     parse_only = [p for p in paths if p not in both_sides]
     full = [p for p in paths if p in both_sides]
 
-    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p), read_result)
+    # The merge base is already computed above for both_sides; withholding it
+    # from the check is what made every finding of 2026-08-21/22 a false alarm.
+    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p),
+                         read_result, lambda p: _blob(base, p))
     report.findings.extend(
         f for f in check_merge(parse_only, lambda p: "", lambda p: "", read_result).findings
         if f.kind == "unparseable"

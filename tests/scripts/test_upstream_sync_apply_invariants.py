@@ -146,6 +146,83 @@ class TestCommitRefusesBrokenResolutions:
         assert (scratch / "mod.py").exists()
 
 
+@pytest.fixture()
+def pyworld_upstream_deletes(tmp_path: Path):
+    """Same shape as ``pyworld``, except upstream removes ``local_only``.
+
+    The fork only edits ``kept`` here — it never removes the deleted function,
+    which is the ordinary shape of an upstream refactor landing next to local
+    work (2026-08-22: c1693d7dcc removed 27 duplicate helpers).
+    """
+    live = tmp_path / "live"
+    live.mkdir()
+    _git(live, "init", "-q", "-b", "local/customizations")
+    _git(live, "config", "user.email", "t@t")
+    _git(live, "config", "user.name", "t")
+    (live / "mod.py").write_text(MODULE_BASE)
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "base")
+    base = _git(live, "rev-parse", "HEAD")
+
+    (live / "mod.py").write_text(MODULE_BASE.replace("return 1", "return 100"))
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "local change")
+    local_head = _git(live, "rev-parse", "HEAD")
+
+    _git(live, "checkout", "-qb", "up", base)
+    (live / "mod.py").write_text("def kept():\n    return 999\n")
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "upstream drops local_only")
+    upstream_head = _git(live, "rev-parse", "HEAD")
+    _git(live, "checkout", "-q", "local/customizations")
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "pending.json").write_text(json.dumps({
+        "schema": "upstream-sync-pending/v1",
+        "status": "awaiting_decision",
+        "local_head": local_head,
+        "upstream_head": upstream_head,
+        "features": [{"id": "F1", "decision": "merge-both", "files": ["mod.py"],
+                      "local_subjects": ["local change"]}],
+    }))
+    return {"live": live, "state": state, "local_head": local_head,
+            "upstream_head": upstream_head}
+
+
+class TestAcceptedDeletionsDoNotBlock:
+    """The same resolution, judged against two different bases.
+
+    ``test_a_dropped_definition_blocks_the_commit`` writes this exact file and
+    is refused, because there both parents still defined ``local_only``. Here
+    upstream deleted it, so following the deletion is the merge working — and
+    the gate must be able to tell the two apart, or its findings are noise and
+    the operator learns to bypass it wholesale.
+    """
+
+    def test_following_an_upstream_deletion_commits(self, pyworld_upstream_deletes):
+        scratch = _prepared(pyworld_upstream_deletes)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld_upstream_deletes["state"],
+                        pyworld_upstream_deletes["live"]))
+
+        assert out["status"] == "committed", out
+        assert "invariants_skipped" not in out
+
+    def test_dropping_a_definition_both_parents_kept_still_blocks(self, pyworld):
+        """Guards against over-suppression: the original alarm must still fire."""
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert [f["symbol"] for f in out["findings"]] == ["local_only"]
+
+
 class TestAmendIsCheckedToo:
     def test_amend_cannot_smuggle_a_broken_file_into_the_merge(self, pyworld):
         scratch = _prepared(pyworld)
