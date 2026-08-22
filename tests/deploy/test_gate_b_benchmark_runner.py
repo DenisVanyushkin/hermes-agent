@@ -11,6 +11,7 @@ import sysconfig
 ROOT = Path(__file__).resolve().parents[2]
 EXPORTER = ROOT / "scripts/export_job_intel_gate_b_benchmark.sh"
 RUNNER = ROOT / "scripts/job_intel_gate_b_benchmark.sh"
+SUPERVISED_RUNNER = ROOT / "scripts/job_intel_gate_b_supervised.sh"
 INSTALLER = ROOT / "scripts/install_job_intel_gate_b_benchmark_unit.sh"
 SERVICE = ROOT / "deploy/systemd/experiments/job-intel-gate-b-benchmark@.service"
 
@@ -365,3 +366,98 @@ def test_published_wrapper_runs_positive_collection_with_anchored_fake_provider(
     assert (state / "journal.jsonl").is_file()
     assert len(list((state / "recordings").glob("*.json"))) == 48
     assert len(list((state / "decisions").glob("*.json"))) == 48
+
+
+def test_supervised_wrapper_is_the_single_systemd_enforcement_root() -> None:
+    assert SUPERVISED_RUNNER.exists()
+    script = SUPERVISED_RUNNER.read_text(encoding="utf-8")
+    assert "sudo -n systemd-run --wait --pipe --uid=hermes" in script
+    assert 'protected_paths=(' in script
+    assert '"${#protected_paths[@]}" -eq 6' in script
+    assert 'namespace_properties+=(--property="InaccessiblePaths=-${protected_path}")' in script
+    assert ":/home/hermes/.hermes" not in script
+    assert "state.db" in script
+    assert "job_intel.sqlite3" in script
+    assert "job_intel.sqlite3-wal" in script
+    assert "job_intel.sqlite3-shm" in script
+    assert "/home/hermes/.cache" in script
+    assert "/var/lib/browser-desktop/profiles" in script
+    assert "chown -R root:hermes" in INSTALLER.read_text(encoding="utf-8")
+    syntax = subprocess.run(
+        ["bash", "-n", str(SUPERVISED_RUNNER)],
+        text=True,
+        capture_output=True,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+
+def test_supervised_wrapper_fails_if_one_protected_path_is_removed(tmp_path: Path) -> None:
+    artifact_parent = tmp_path / "artifacts"
+    artifact_root = artifact_parent / ("a" * 64)
+    runtime_source = artifact_root / "runtime"
+    runtime_source.mkdir(parents=True)
+    fake_python = artifact_root / "python-runtime/venv/bin/python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    source = SUPERVISED_RUNNER.read_text(encoding="utf-8")
+    source = source.replace(
+        "/var/lib/job-intel-gate-b-artifacts", str(artifact_parent)
+    )
+    source = source.replace(
+        '  "/home/hermes/.cache"\n',
+        "",
+        1,
+    )
+    wrapper = runtime_source / "scripts/runner.sh"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(source, encoding="utf-8")
+    wrapper.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(wrapper), "init-run"],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 66
+    assert "protected path set is incomplete" in result.stderr
+
+
+def test_supervised_wrapper_fails_closed_before_sudo_if_property_composition_breaks(
+    tmp_path: Path,
+) -> None:
+    artifact_parent = tmp_path / "artifacts"
+    artifact_root = artifact_parent / ("a" * 64)
+    runtime_source = artifact_root / "runtime/scripts"
+    runtime_source.mkdir(parents=True)
+    fake_python = artifact_root / "python-runtime/venv/bin/python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    fake_sudo = tmp_path / "bin/sudo"
+    fake_sudo.parent.mkdir()
+    marker = tmp_path / "sudo-invoked"
+    fake_sudo.write_text(
+        f"#!/usr/bin/env bash\ntouch {marker!s}\nexit 99\n",
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+    source = SUPERVISED_RUNNER.read_text(encoding="utf-8")
+    source = source.replace(
+        "/var/lib/job-intel-gate-b-artifacts", str(artifact_parent)
+    )
+    source = source.replace(
+        "namespace_properties=()",
+        "readonly -a namespace_properties=()",
+        1,
+    )
+    wrapper = runtime_source / "runner.sh"
+    wrapper.write_text(source, encoding="utf-8")
+    wrapper.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(wrapper), "init-run"],
+        env={**os.environ, "PATH": f"{fake_sudo.parent}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert not marker.exists()

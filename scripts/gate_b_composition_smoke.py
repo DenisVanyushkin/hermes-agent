@@ -67,6 +67,10 @@ def make_source_commit(root: Path) -> str:
         REPO / "tests/product_search/gate_b_cli_smoke_fixture.py",
         root / "gate_b_cli_smoke_fixture.py",
     )
+    wrapper_source = REPO / "scripts/job_intel_gate_b_supervised.sh"
+    wrapper_target = root / "scripts/job_intel_gate_b_supervised.sh"
+    wrapper_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(wrapper_source, wrapper_target)
     run(["git", "init", "-q"], cwd=root)
     run(["git", "config", "user.email", "gate-b-smoke@example.invalid"], cwd=root)
     run(["git", "config", "user.name", "Gate B smoke harness"], cwd=root)
@@ -143,55 +147,81 @@ def main() -> int:
         manifest_sha = bind_manifest_runtime(
             manifest_path, install_root / "runtime-manifest.json"
         )
-        wrapper = install_root / "runtime/scripts/job_intel_gate_b_benchmark.sh"
-        wrapper_copy = install_root / "runtime/scripts/.composition-smoke.sh"
-        wrapper_copy.write_text(
-            wrapper.read_text(encoding="utf-8").replace(
+        old_wrapper = install_root / "runtime/scripts/job_intel_gate_b_benchmark.sh"
+        old_wrapper_copy = install_root / "runtime/scripts/.composition-smoke-old.sh"
+        old_wrapper_copy.write_text(
+            old_wrapper.read_text(encoding="utf-8").replace(
                 "/var/lib/job-intel-gate-b-artifacts", str(install_parent)
             ),
             encoding="utf-8",
         )
-        wrapper_copy.chmod(0o755)
+        old_wrapper_copy.chmod(0o755)
+        supervised_wrapper = install_root / "runtime/scripts/job_intel_gate_b_supervised.sh"
+        supervised_wrapper_copy = install_root / "runtime/scripts/.composition-smoke-supervised.sh"
+        supervised_wrapper_copy.write_text(
+            supervised_wrapper.read_text(encoding="utf-8").replace(
+                "/var/lib/job-intel-gate-b-artifacts", str(install_parent)
+            ),
+            encoding="utf-8",
+        )
+        supervised_wrapper_copy.chmod(0o755)
         state = root / "state"
         state.mkdir()
-        artifact_python = install_root / "python-runtime/venv/bin/python"
-        target_env = os.environ.copy()
-        target_env["PYTHONHOME"] = str(install_root / "python-runtime/venv")
-        target_env["LD_LIBRARY_PATH"] = str(install_root / "python-runtime/venv/lib")
-        target_env["PYTHONNOUSERSITE"] = "1"
-        target_env["PYTHONPATH"] = str(install_root / "runtime")
-        target_started = time.perf_counter()
-        target_attempt = subprocess.run(
+        init_args = [
+            "--manifest",
+            str(manifest_path),
+            "--manifest-sha256",
+            manifest_sha,
+            "--state-directory",
+            str(state),
+        ]
+        target_args = [
+            "--manifest",
+            str(manifest_path),
+            "--manifest-sha256",
+            manifest_sha,
+            "--output",
+            str(state),
+        ]
+        init_started = time.perf_counter()
+        init_attempt = subprocess.run(
             [
-                str(artifact_python),
-                "-m",
-                "job_intel.product_search.gate_b_evidence_runner_v1",
-                "run-supervised",
-                "--corpus",
-                str(fixture_root / "corpus-rows.json"),
-                "--manifest",
-                str(manifest_path),
-                "--manifest-sha256",
-                manifest_sha,
-                "--output",
-                str(state),
-                "--provider-factory",
-                "gate_b_cli_smoke_fixture:provider_factory",
-                "--decision-request-factory",
-                "gate_b_cli_smoke_fixture:decision_request_factory",
+                str(supervised_wrapper_copy),
+                "init-run",
+                *init_args,
             ],
             cwd=install_root / "runtime",
-            env=target_env,
             text=True,
             capture_output=True,
         )
-        target_seconds = time.perf_counter() - target_started
-        target_expected = "invariant supervised_collection_spine_v1 is unsatisfied"
-        if target_attempt.returncode == 0 or target_expected not in target_attempt.stderr:
-            raise RuntimeError(
-                "target supervised entrypoint did not fail closed on the named spine invariant"
+        init_seconds = time.perf_counter() - init_started
+        target_attempt = None
+        target_seconds = 0.0
+        if init_attempt.returncode == 0:
+            target_started = time.perf_counter()
+            target_attempt = subprocess.run(
+                [
+                    str(supervised_wrapper_copy),
+                    "run-supervised",
+                    "--corpus",
+                    str(fixture_root / "corpus-rows.json"),
+                    *target_args,
+                    "--reviewed-allowlist",
+                    str(fixture_root / "reviewed-allowlist.json"),
+                    "--decision-policy",
+                    str(fixture_artifact / "authority/decision_contract.v2.yaml"),
+                    "--authority-root",
+                    str(fixture_artifact / "authority"),
+                    "--provider-factory",
+                    "gate_b_cli_smoke_fixture:provider_factory",
+                    "--decision-request-factory",
+                    "gate_b_cli_smoke_fixture:decision_request_factory",
+                ],
+                cwd=install_root / "runtime",
+                text=True,
+                capture_output=True,
             )
-
+            target_seconds = time.perf_counter() - target_started
         old_env = os.environ.copy()
         old_env.pop("GATE_B_COLLECTION_CONFIG", None)
         old_env.pop("GATE_B_EVIDENCE_MANIFEST", None)
@@ -199,7 +229,7 @@ def main() -> int:
         old_env["STATE_DIRECTORY"] = str(state)
         old_started = time.perf_counter()
         old_attempt = subprocess.run(
-            [str(wrapper_copy), "run-description-evidence"],
+            [str(old_wrapper_copy), "run-description-evidence"],
             cwd=install_root / "runtime",
             env=old_env,
             text=True,
@@ -211,23 +241,33 @@ def main() -> int:
             raise RuntimeError(
                 "old unit wrapper was not inert: expected exit 2 input validation"
             )
+        first_attempt = target_attempt or init_attempt
+        first_stop = (
+            "target supervised collection"
+            if target_attempt is not None
+            else "supervised init-run"
+        )
         report = {
             "head": run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip(),
             "artifact_build_seconds": round(build_seconds, 3),
             "artifact_install_seconds": round(install_seconds, 3),
+            "init_attempt_seconds": round(init_seconds, 3),
             "target_attempt_seconds": round(target_seconds, 3),
             "old_unit_attempt_seconds": round(old_seconds, 3),
             "harness_lines": len(Path(__file__).read_text(encoding="utf-8").splitlines()),
             "artifact_tree_sha256": artifact_hash,
             "manifest_sha256": manifest_sha,
             "provider_fixture": str(config_path),
-            "target_returncode": target_attempt.returncode,
-            "target_stdout": target_attempt.stdout,
-            "target_stderr": target_attempt.stderr,
+            "init_returncode": init_attempt.returncode,
+            "init_stdout": init_attempt.stdout,
+            "init_stderr": init_attempt.stderr,
+            "target_returncode": None if target_attempt is None else target_attempt.returncode,
+            "target_stdout": "" if target_attempt is None else target_attempt.stdout,
+            "target_stderr": "" if target_attempt is None else target_attempt.stderr,
             "old_unit_returncode": old_attempt.returncode,
             "old_unit_stdout": old_attempt.stdout,
             "old_unit_stderr": old_attempt.stderr,
-            "first_stop": "target supervised entrypoint named-invariant guard",
+            "first_stop": first_stop,
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")
             ),

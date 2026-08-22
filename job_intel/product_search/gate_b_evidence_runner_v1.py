@@ -1304,6 +1304,63 @@ def _load_corpus_rows_file(path: Path, manifest: EvidenceManifest) -> tuple[Corp
     return rows
 
 
+
+def _run_supervised_collection(args: argparse.Namespace) -> int:
+    """Run one foreground collection under the canonical supervised wrapper."""
+    manifest = _load_manifest(args.manifest, args.manifest_sha256)
+    artifact_root = Path(__file__).resolve().parents[3]
+    provider_factory = _load_artifact_callable(args.provider_factory, artifact_root)
+    decision_request_factory = _load_artifact_callable(
+        args.decision_request_factory, artifact_root
+    )
+    reviewed_allowlist = load_reviewed_fragment_allowlist_v3(
+        args.reviewed_allowlist
+    )
+    decision_policy = load_decision_policy(args.decision_policy)
+    authority_root = args.authority_root.resolve()
+    authority_keys = (
+        "model_bytes",
+        "prompt_bytes",
+        "response_schema_bytes",
+        "profile_bytes",
+        "policy_bytes",
+        "decision_v2_bytes",
+        "pricing_bytes",
+        "source:gate_a",
+        "source:provider",
+    )
+    authority_paths = {
+        key: authority_root / (key.replace(":", "-") + ".bin")
+        for key in authority_keys
+    }
+    source_artifact, runtime, authorities = _artifact_binding_context(
+        manifest, artifact_root, authority_paths
+    )
+    state_directory = args.output.resolve()
+    state_directory.mkdir(parents=True, exist_ok=True)
+    journal = AppendOnlyJournal.open(manifest, state_directory / "journal.jsonl")
+    recordings = RecordingStore(state_directory / "recordings")
+    decision_evidence = DecisionEvidenceStore(state_directory / "decisions")
+    corpus_rows = _load_corpus_rows_file(args.corpus, manifest)
+    report = run_collection(
+        manifest=manifest,
+        corpus_rows=corpus_rows,
+        reviewed_allowlist=reviewed_allowlist,
+        provider_factory=provider_factory,
+        journal=journal,
+        recordings=recordings,
+        decision_evidence=decision_evidence,
+        decision_policy=decision_policy,
+        decision_request_factory=decision_request_factory,
+        source_artifact=source_artifact,
+        runtime=runtime,
+        authorities=authorities,
+    )
+    report_path = _write_measurement_report(report, state_directory)
+    if not report_path.is_file() or not journal.path.is_file():
+        raise RuntimeError("collection evidence publication incomplete")
+    return 0
+
 def _main(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gate_b_evidence_runner_v1")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1329,6 +1386,9 @@ def _main(arguments: list[str]) -> int:
     supervised.add_argument("--manifest", type=Path, required=True)
     supervised.add_argument("--manifest-sha256", required=True)
     supervised.add_argument("--output", type=Path, required=True)
+    supervised.add_argument("--reviewed-allowlist", type=Path, required=True)
+    supervised.add_argument("--decision-policy", type=Path, required=True)
+    supervised.add_argument("--authority-root", type=Path, required=True)
     supervised.add_argument("--provider-factory", required=True)
     supervised.add_argument("--decision-request-factory", required=True)
 
@@ -1777,6 +1837,9 @@ def _issue_collection_capability(
         raise ValueError("pricing_identity_mismatch")
     if getattr(pricing, "reservation_cost_usd", None) != manifest.limits.per_call_maximum_usd:
         raise ValueError("pricing_reservation_mismatch")
+    # Step 1 scope: this capability and its counters live for one foreground
+    # process only. A restart is not promised to preserve the cap; reopening a
+    # run is an explicit later recovery concern, not an implicit retry path.
     reservations: dict[str, str] = {}
     reservation_refs: dict[str, ManifestRef] = {}
     for row in manifest.rows:
