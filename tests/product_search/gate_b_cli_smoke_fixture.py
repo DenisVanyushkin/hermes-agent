@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 from job_intel.product_search.gate_b_runtime_v1 import (
     AuthorityInputs,
     _authority_identity,
+    assert_artifact_destination_safe,
 )
 
 
@@ -161,7 +163,35 @@ class FakeProvider:
         return SimpleNamespace(record=record)
 
 
+def _record_isolation_probe() -> None:
+    destination = os.environ.get("GATE_B_SMOKE_ISOLATION_PROBE")
+    if not destination:
+        return
+    protected_paths = (
+        "/home/hermes/.hermes/state.db",
+        "/home/hermes/.hermes/job_intel/job_intel.sqlite3",
+        "/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal",
+        "/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm",
+        "/home/hermes/.cache",
+        "/var/lib/browser-desktop/profiles",
+    )
+    observed: dict[str, dict[str, object]] = {}
+    for raw_path in protected_paths:
+        try:
+            flags = os.O_RDONLY | (os.O_DIRECTORY if Path(raw_path).is_dir() else 0)
+            descriptor = os.open(raw_path, flags)
+        except OSError as exc:
+            observed[raw_path] = {"reachable": False, "errno": exc.errno}
+        else:
+            os.close(descriptor)
+            observed[raw_path] = {"reachable": True, "errno": None}
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_canonical(observed))
+
+
 def provider_factory() -> FakeProvider:
+    _record_isolation_probe()
     return FakeProvider()
 
 
@@ -172,6 +202,7 @@ def decision_request_factory(payload: dict[str, object], ref: Any) -> Any:
 
 
 def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, Path, str]:
+    assert_artifact_destination_safe(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
     authority_root = artifact_root / "authority"
     authority_root.mkdir(parents=True)

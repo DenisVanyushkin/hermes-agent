@@ -76,6 +76,41 @@ def _rows() -> tuple[EvidenceManifestRow, ...]:
     )
 
 
+def test_materialization_rejects_live_hermes_agent_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    commit = _git_fixture(repo)
+    live_destination = runtime_v1.HERMES_AGENT_ROOT / "venv" / "gate-b-test-artifact"
+
+    with pytest.raises(ArtifactBuildError, match="artifact_destination_inside_hermes_agent"):
+        build_source_artifact(
+            repo_root=repo,
+            commit=commit,
+            destination=live_destination,
+        )
+    with pytest.raises(ArtifactBuildError, match="artifact_destination_inside_hermes_agent"):
+        build_frozen_runtime(
+            artifact=None,  # type: ignore[arg-type]
+            gateway_venv=tmp_path / "gateway",
+            destination=live_destination,
+        )
+    with pytest.raises(ArtifactBuildError, match="artifact_destination_inside_hermes_agent"):
+        build_assembled_artifact(
+            repo_root=repo,
+            commit=commit,
+            gateway_venv=tmp_path / "gateway",
+            destination=live_destination,
+        )
+
+    from tests.product_search import gate_b_cli_smoke_fixture as fixture
+
+    with pytest.raises(ArtifactBuildError, match="artifact_destination_inside_hermes_agent"):
+        fixture.prepare(
+            root=tmp_path / "fixture",
+            artifact_root=live_destination,
+            repo_root=repo,
+        )
+
+
 def test_source_artifact_rejects_dirty_worktree_before_archiving(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     commit = _git_fixture(repo)

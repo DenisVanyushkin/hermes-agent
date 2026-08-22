@@ -1169,6 +1169,7 @@ def _artifact_binding_context(
         FrozenRuntime,
         RuntimeParity,
         SourceArtifact,
+        _site_packages,
     )
 
     runtime_manifest_path = artifact_root / "runtime-manifest.json"
@@ -1178,9 +1179,10 @@ def _artifact_binding_context(
     python_executable = artifact_root / "python-runtime/venv/bin/python"
     if python_executable.is_symlink() or not python_executable.is_file():
         raise ValueError("artifact interpreter is not a regular file")
-    shim = artifact_root / "python-runtime/venv/lib" / (
-        f"python{sys.version_info.major}.{sys.version_info.minor}"
-    ) / "site-packages/00-pysqlite3-shim.pth"
+    shim = _site_packages(
+        python_executable,
+        python_home=artifact_root / "python-runtime/venv",
+    ) / "00-pysqlite3-shim.pth"
     if not shim.is_file() or shim.is_symlink():
         raise ValueError("artifact sqlite shim is unavailable")
     if _sha256(python_executable.read_bytes()) != manifest.runtime.interpreter_sha256:
@@ -1414,10 +1416,7 @@ def _main(arguments: list[str]) -> int:
     )
     args = parser.parse_args(arguments)
     if args.command == "run-supervised":
-        parser.error(
-            "supervised collection refused: invariant "
-            f"{SUPERVISED_COLLECTION_SPINE_INVARIANT} is unsatisfied"
-        )
+        return _run_supervised_collection(args)
     if args.command == "init-run":
         if args.manifest is None or args.state_directory is None:
             parser.error("init-run requires manifest and STATE_DIRECTORY")

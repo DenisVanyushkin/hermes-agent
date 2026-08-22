@@ -311,6 +311,19 @@ def test_published_wrapper_runs_positive_collection_with_anchored_fake_provider(
         symlinks=False,
         dirs_exist_ok=True,
     )
+    # The configured purelib may be under local/.../dist-packages
+    # rather than the conventional lib/.../site-packages. Resolve the
+    # path through the same runtime helper production uses, then place the
+    # fixture shim there while preserving its manifest-bound bytes.
+    from job_intel.product_search.gate_b_runtime_v1 import _site_packages
+
+    fixture_shim = artifact_root / "python-runtime/venv/lib/python3.12/site-packages/00-pysqlite3-shim.pth"
+    resolved_shim = _site_packages(
+        fake_python,
+        python_home=artifact_root / "python-runtime/venv",
+    ) / "00-pysqlite3-shim.pth"
+    resolved_shim.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(fixture_shim, resolved_shim)
     wrapper = runtime_source / "scripts/runner.sh"
     wrapper.write_text(
         wrapper.read_text(encoding="utf-8").replace(

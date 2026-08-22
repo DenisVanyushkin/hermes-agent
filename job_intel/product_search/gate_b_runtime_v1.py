@@ -36,6 +36,17 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 COMMIT_PATTERN = r"^[0-9a-f]{40}$"
 SHIM_NAME = "00-pysqlite3-shim.pth"
+HERMES_AGENT_ROOT = Path("/home/hermes/.hermes/hermes-agent")
+
+def assert_artifact_destination_safe(destination: Path) -> None:
+    """Refuse materialization inside the live Hermes checkout or its venv."""
+    resolved = destination.expanduser().resolve()
+    protected = HERMES_AGENT_ROOT.resolve()
+    try:
+        resolved.relative_to(protected)
+    except ValueError:
+        return
+    raise ArtifactBuildError("artifact_destination_inside_hermes_agent")
 
 
 class _StrictFrozenModel(BaseModel):
@@ -293,6 +304,7 @@ def build_source_artifact(
     destination: Path,
 ) -> SourceArtifact:
     """Archive one exact clean commit into a temporary source artifact."""
+    assert_artifact_destination_safe(destination)
     status = _run(
         "git",
         "status",
@@ -424,6 +436,7 @@ def build_frozen_runtime(
     python_executable: Path | None = None,
 ) -> FrozenRuntime:
     """Create a non-editable venv and copy the declared runtime inputs into it."""
+    assert_artifact_destination_safe(destination)
     if not artifact.source_root.is_dir():
         raise ArtifactBuildError("source_artifact_missing")
     gateway_python = gateway_venv / "bin" / "python"
@@ -537,6 +550,7 @@ def build_assembled_artifact(
     excluded because it records that external hash.
     """
     destination = destination.resolve()
+    assert_artifact_destination_safe(destination)
     if destination.exists():
         raise ArtifactBuildError("assembled_artifact_destination_exists")
     destination.parent.mkdir(parents=True, exist_ok=True)

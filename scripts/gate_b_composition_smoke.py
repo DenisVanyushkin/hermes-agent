@@ -99,8 +99,9 @@ def bind_manifest_runtime(manifest_path: Path, runtime_manifest_path: Path) -> s
     identity.pop("manifest_sha256")
     identity.pop("created_at")
     manifest["manifest_sha256"] = sha256(canonical(identity))
-    manifest_path.write_bytes(canonical(manifest))
-    return manifest["manifest_sha256"]
+    encoded = canonical(manifest)
+    manifest_path.write_bytes(encoded)
+    return sha256(encoded)
 
 
 def main() -> int:
@@ -197,6 +198,11 @@ def main() -> int:
         init_seconds = time.perf_counter() - init_started
         target_attempt = None
         target_seconds = 0.0
+        probe_path = state / "isolation-probe.json"
+        target_env = {
+            **os.environ,
+            "GATE_B_SMOKE_ISOLATION_PROBE": str(probe_path),
+        }
         if init_attempt.returncode == 0:
             target_started = time.perf_counter()
             target_attempt = subprocess.run(
@@ -218,10 +224,23 @@ def main() -> int:
                     "gate_b_cli_smoke_fixture:decision_request_factory",
                 ],
                 cwd=install_root / "runtime",
+                env=target_env,
                 text=True,
                 capture_output=True,
             )
             target_seconds = time.perf_counter() - target_started
+        isolation_probe_error = None
+        if target_attempt is not None:
+            if not probe_path.is_file():
+                isolation_probe = {}
+                isolation_probe_error = "provider did not publish isolation probe"
+                raise RuntimeError(isolation_probe_error)
+            isolation_probe = json.loads(probe_path.read_bytes())
+            if any(item.get("reachable") for item in isolation_probe.values()):
+                isolation_probe_error = "probe observed a reachable protected path"
+                raise RuntimeError(isolation_probe_error)
+        else:
+            isolation_probe = {}
         old_env = os.environ.copy()
         old_env.pop("GATE_B_COLLECTION_CONFIG", None)
         old_env.pop("GATE_B_EVIDENCE_MANIFEST", None)
@@ -264,6 +283,11 @@ def main() -> int:
             "target_returncode": None if target_attempt is None else target_attempt.returncode,
             "target_stdout": "" if target_attempt is None else target_attempt.stdout,
             "target_stderr": "" if target_attempt is None else target_attempt.stderr,
+            "isolation_observed": bool(isolation_probe) and not any(
+                item.get("reachable") for item in isolation_probe.values()
+            ),
+            "isolation_probe": isolation_probe,
+            "isolation_probe_error": isolation_probe_error,
             "old_unit_returncode": old_attempt.returncode,
             "old_unit_stdout": old_attempt.stdout,
             "old_unit_stderr": old_attempt.stderr,
