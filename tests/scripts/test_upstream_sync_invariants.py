@@ -129,6 +129,115 @@ class TestLostDefinitions:
         assert [f.symbol for f in findings] == ["submit_pending"]
 
 
+class TestBaseAwareSuppression:
+    """With the merge base in hand, an accepted deletion stops looking like a loss.
+
+    Without it the check can only ask "was this symbol on a parent?", which
+    conflates two different events: a resolver dropping code (the thing the gate
+    exists for) and one side deliberately deleting code the other side never
+    touched (routine, and the majority of what a 164-commit upstream batch
+    brings). Every finding of 2026-08-21 and 2026-08-22 was the second kind.
+    """
+
+    FOO = "def foo():\n    pass\n"
+    BAR = "def bar():\n    pass\n"
+
+    def test_upstream_deleting_a_symbol_we_never_touched_is_not_a_loss(self):
+        from upstream_sync_invariants import lost_definitions
+
+        # 2026-08-22: upstream removed 27 duplicate _ensure_telegram_mock copies
+        # in c1693d7dcc; the fork had only edited neighbouring lines.
+        assert lost_definitions(
+            base=self.FOO + self.BAR, ours=self.FOO + self.BAR,
+            theirs=self.BAR, result=self.BAR, path="x.py",
+        ) == []
+
+    def test_our_deletion_of_a_symbol_upstream_never_touched_is_not_a_loss(self):
+        from upstream_sync_invariants import lost_definitions
+
+        # The mirror image: 2026-08-21, submit_pending deleted on the fork.
+        assert lost_definitions(
+            base=self.FOO + self.BAR, ours=self.BAR,
+            theirs=self.FOO + self.BAR, result=self.BAR, path="x.py",
+        ) == []
+
+    def test_a_symbol_both_parents_still_define_is_lost_when_dropped(self):
+        """Neither side deleted it, so the resolution had no licence to."""
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base=self.FOO + self.BAR, ours=self.FOO + self.BAR,
+            theirs=self.FOO + self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+        assert findings[0].kind == "lost_definition"
+
+    def test_a_symbol_added_by_one_side_and_then_dropped_is_lost(self):
+        """Absent from the base means nobody deleted it — it was added and lost."""
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base=self.BAR, ours=self.FOO + self.BAR,
+            theirs=self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+
+    def test_a_rename_on_one_side_is_not_reported_as_a_loss(self):
+        """foo -> renamed upstream: the old name is deleted by exactly one side."""
+        from upstream_sync_invariants import lost_definitions
+
+        renamed = "def foo_v2():\n    pass\n"
+
+        assert lost_definitions(
+            base=self.FOO, ours=self.FOO, theirs=renamed, result=renamed, path="x.py",
+        ) == []
+
+    def test_an_unparseable_base_suppresses_nothing(self):
+        """An unreadable base is unknown intent, and unknown intent gets reported.
+
+        Not an ``unreadable_parent`` finding either: the base is not a parent of
+        this merge and its syntax is not this merge's problem. It just stops
+        being evidence, so the check falls back to reporting.
+        """
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base="def broken(:\n", ours=self.FOO + self.BAR,
+            theirs=self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+        assert {f.kind for f in findings} == {"lost_definition"}
+
+    def test_without_a_base_every_absence_is_still_reported(self):
+        """The pre-base contract stays intact for callers that supply nothing."""
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            ours=self.FOO + self.BAR, theirs=self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+
+    def test_check_merge_threads_the_base_reader_through(self):
+        from upstream_sync_invariants import check_merge
+
+        base = {"x.py": self.FOO + self.BAR}
+        ours = {"x.py": self.FOO + self.BAR}
+        theirs = {"x.py": self.BAR}
+        result = {"x.py": self.BAR}
+
+        report = check_merge(
+            ["x.py"],
+            lambda q: ours.get(q, ""), lambda q: theirs.get(q, ""), lambda q: result.get(q, ""),
+            lambda q: base.get(q, ""),
+        )
+
+        assert report.ok is True, [f.symbol for f in report.findings]
+
+
 class TestCheckMerge:
     def _readers(self, ours: dict, theirs: dict, result: dict):
         return (lambda p: ours.get(p, ""), lambda p: theirs.get(p, ""), lambda p: result.get(p, ""))
@@ -176,6 +285,76 @@ class TestCheckMerge:
         report = check_merge(["cfg.py"], ro, rt, rr)
 
         assert [f.kind for f in report.findings] == ["unparseable"]
+
+
+class TestAcknowledgement:
+    """One legitimate finding must not cost the gate on every other file.
+
+    The only escape hatch used to be HERMES_SYNC_SKIP_INVARIANTS=1, which
+    disarms the whole merge. On 2026-08-22 a single false positive was enough
+    to turn the entire structural check off — including the five files nobody
+    had looked at. Acknowledging a named finding keeps the rest armed.
+    """
+
+    def _finding(self, path, symbol, kind="lost_definition"):
+        from upstream_sync_invariants import Finding
+
+        return Finding(path=path, kind=kind, symbol=symbol, message="m")
+
+    def test_parses_entries_separated_by_commas_or_whitespace(self):
+        from upstream_sync_invariants import parse_ack_spec
+
+        assert parse_ack_spec("a.py:foo, b.py:bar\n  c.py:baz") == ["a.py:foo", "b.py:bar", "c.py:baz"]
+
+    def test_an_empty_spec_acknowledges_nothing(self):
+        from upstream_sync_invariants import parse_ack_spec
+
+        assert parse_ack_spec("") == []
+        assert parse_ack_spec("  ,  , ") == []
+
+    def test_an_acknowledged_finding_stops_blocking(self):
+        from upstream_sync_invariants import split_acked
+
+        kept, matched, unmatched = split_acked(
+            [self._finding("a.py", "foo")], ["a.py:foo"]
+        )
+
+        assert kept == []
+        assert matched == ["a.py:foo"]
+        assert unmatched == []
+
+    def test_other_findings_on_the_same_file_still_block(self):
+        from upstream_sync_invariants import split_acked
+
+        kept, matched, _ = split_acked(
+            [self._finding("a.py", "foo"), self._finding("a.py", "bar")], ["a.py:foo"]
+        )
+
+        assert [f.symbol for f in kept] == ["bar"]
+        assert matched == ["a.py:foo"]
+
+    def test_a_finding_without_a_symbol_can_never_be_acknowledged(self):
+        """An unparseable file is not a judgement call — there is nothing to confirm."""
+        from upstream_sync_invariants import split_acked
+
+        broken = self._finding("a.py", None, kind="unparseable")
+
+        kept, matched, unmatched = split_acked([broken], ["a.py:", "a.py:None", "a.py"])
+
+        assert kept == [broken]
+        assert matched == []
+        assert unmatched == ["a.py", "a.py:", "a.py:None"]
+
+    def test_an_entry_that_matches_nothing_is_reported_back(self):
+        """A stale acknowledgement is drift, and drift has to be visible."""
+        from upstream_sync_invariants import split_acked
+
+        kept, matched, unmatched = split_acked([self._finding("a.py", "foo")],
+                                               ["a.py:foo", "gone.py:old"])
+
+        assert kept == []
+        assert matched == ["a.py:foo"]
+        assert unmatched == ["gone.py:old"]
 
 
 class TestUnparseableParent:

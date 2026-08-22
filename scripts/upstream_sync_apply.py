@@ -443,7 +443,11 @@ def _invariant_report(scratch: Path, prep: dict):
     parse_only = [p for p in paths if p not in both_sides]
     full = [p for p in paths if p in both_sides]
 
-    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p), read_result)
+    # The merge base is what tells an accepted deletion from a dropped one; it
+    # is already computed above for both_sides, and withholding it here is what
+    # made every finding of 2026-08-21/22 a false positive.
+    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p),
+                         read_result, lambda p: _blob(base, p))
     report.findings.extend(
         f for f in check_merge(parse_only, lambda p: "", lambda p: "", read_result).findings
         if f.kind == "unparseable"
@@ -487,13 +491,29 @@ def _commit_merge(args) -> tuple:
     # is not a merge anyone should be able to hand off, and leaving the clone
     # untouched is what makes the repair a plain edit rather than a rewrite.
     skipped = os.environ.get("HERMES_SYNC_SKIP_INVARIANTS") == "1"
+    acked, ack_unmatched = [], []
     if not skipped:
+        from upstream_sync_invariants import Report, parse_ack_spec, split_acked
+
         report = _invariant_report(scratch, prep)
+        # Answering findings one by one instead of all at once: the whole-merge
+        # bypass below is the only other option, and reaching for it to clear a
+        # single accepted deletion takes every other resolved file out of the
+        # check with it.
+        entries = parse_ack_spec(os.environ.get("HERMES_SYNC_ACK_FINDINGS", ""))
+        blocking, acked, ack_unmatched = split_acked(report.findings, entries)
+        report = Report(findings=blocking)
         if not report.ok:
             payload = {"status": "invariants_failed", **report.as_dict()}
+            if acked:
+                payload["invariants_acked"] = acked
+            if ack_unmatched:
+                payload["invariants_ack_unmatched"] = ack_unmatched
             payload["hint"] = ("nothing was committed and the clone is preserved; fix the "
-                               "resolution there, or set HERMES_SYNC_SKIP_INVARIANTS=1 if every "
-                               "finding is intended")
+                               "resolution there, or acknowledge the findings you have confirmed "
+                               "with HERMES_SYNC_ACK_FINDINGS=\"path.py:symbol …\" — which leaves "
+                               "the check armed for everything else. HERMES_SYNC_SKIP_INVARIANTS=1 "
+                               "disarms the whole merge and is the last resort, not the first")
             return EXIT_UNRESOLVED, payload
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
@@ -533,10 +553,21 @@ def _commit_merge(args) -> tuple:
         # Recorded on the merge record, not only in this reply: whoever reads
         # the result later must see that the structural gate did not run.
         prep["invariants_skipped"] = True
+    # The scope of an override belongs on the record too. "Acknowledged these
+    # two symbols" and "turned the gate off" are different events, and a reader
+    # who cannot tell them apart cannot audit the merge.
+    if acked:
+        prep["invariants_acked"] = acked
+    if ack_unmatched:
+        prep["invariants_ack_unmatched"] = ack_unmatched
     _write_json(prep_path, prep)
     payload = {"status": "committed", "merge_sha": merge_sha, "prep": prep}
     if skipped:
         payload["invariants_skipped"] = True
+    if acked:
+        payload["invariants_acked"] = acked
+    if ack_unmatched:
+        payload["invariants_ack_unmatched"] = ack_unmatched
     return EXIT_OK, payload
 
 

@@ -593,7 +593,9 @@ apply_decisions() {
       write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.
 ${findings:-(see finalize-detail.log)}
 
-Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case re-run with HERMES_SYNC_SKIP_INVARIANTS=1."
+Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or a finding is intended — confirm the ones you checked BY NAME and re-run:
+  HERMES_SYNC_ACK_FINDINGS=\"path.py:symbol another.py:symbol\"
+That keeps the gate armed for every finding you did not name. HERMES_SYNC_SKIP_INVARIANTS=1 disarms the structural check for the whole merge and is the last resort, not the first."
       exit 0
     fi
     write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"

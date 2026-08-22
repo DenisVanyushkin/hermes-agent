@@ -17,8 +17,20 @@ parsing the result and diffing its definitions against both parents.
 Deliberately reports rather than repairs. During the incident audit three
 symbols came up missing and two were *supposed* to be gone: one deleted on
 purpose locally, one retired with an implementation upstream had rewritten.
-Only a human can tell those from a resolver dropping code, so the checks state
-what changed and stop.
+The checks state what changed and stop; they never restore anything.
+
+Telling those two apart is what the merge base is for. A symbol the base had
+and exactly one side removed was deleted on purpose — the other side never
+touched it — and reporting that is noise. Without the base every accepted
+deletion and every rename in an upstream batch became a finding, which taught
+the operator to answer the gate with the whole-merge bypass; on 2026-08-22 one
+false positive took the structural check off five files nobody had inspected.
+So: base known and exactly one side deleted -> silent; anything else -> report.
+Base absent or unparseable -> report, because unknown intent is not consent.
+
+What remains a judgement call is answered by name rather than wholesale:
+``split_acked`` lets an operator confirm the findings they actually checked and
+leaves the rest blocking.
 """
 
 from __future__ import annotations
@@ -51,6 +63,45 @@ class Report:
                 {k: v for k, v in vars(f).items() if v is not None} for f in self.findings
             ],
         }
+
+
+# ---------------------------------------------------------------------------
+# Acknowledgement
+# ---------------------------------------------------------------------------
+
+def parse_ack_spec(text: str) -> list:
+    """Split an acknowledgement spec into ``path:symbol`` entries.
+
+    Commas and whitespace both separate, because an operator pasting a list
+    from a report should not have to think about which. Nothing here validates
+    the shape: an entry that names no real finding simply matches nothing and
+    comes back as unmatched, which is how a stale acknowledgement stays visible
+    instead of quietly meaning something else.
+    """
+    return sorted({e for e in text.replace(",", " ").split() if e})
+
+
+def split_acked(findings, entries) -> tuple:
+    """Partition *findings* into (still blocking, acknowledged, unmatched entries).
+
+    Only a finding that names a symbol can be acknowledged. An unparseable file
+    is not a judgement call about intent — there is nothing for a human to
+    confirm — so no entry can ever silence one.
+
+    Acknowledging by name is what keeps one legitimate finding from costing the
+    check on every other file, which is exactly what the whole-merge bypass
+    does (2026-08-22: one false positive disarmed the gate for five files
+    nobody had inspected).
+    """
+    wanted = set(entries)
+    matched, kept = set(), []
+    for finding in findings:
+        key = f"{finding.path}:{finding.symbol}" if finding.symbol else None
+        if key is not None and key in wanted:
+            matched.add(key)
+        else:
+            kept.append(finding)
+    return kept, sorted(matched), sorted(wanted - matched)
 
 
 def _is_python(path: str) -> bool:
@@ -101,11 +152,20 @@ def parse_failures(files: dict) -> list:
     return findings
 
 
-def lost_definitions(*, ours: str, theirs: str, result: str, path: str) -> list:
+def lost_definitions(*, ours: str, theirs: str, result: str, path: str,
+                     base: str | None = None) -> list:
     """Report definitions present on either parent but absent from the result.
 
     Both parents count: dropping upstream's new function is as much a loss as
     dropping ours.
+
+    *base* is the merge base of the same file, and it is what separates a
+    resolver dropping code from one side deliberately deleting it. Without it
+    the check can only ask "was this on a parent?", which fires on every
+    accepted deletion and every rename an upstream batch brings — and a gate
+    that cries wolf teaches its operator to reach for the global bypass, which
+    is worse than no gate at all. Omitted (or unparseable) means the intent is
+    unknown, and unknown intent is reported, never assumed away.
     """
     if not _is_python(path):
         return []
@@ -127,6 +187,7 @@ def lost_definitions(*, ours: str, theirs: str, result: str, path: str) -> list:
                 )
             ]
     missing = (sides["ours"] | sides["theirs"]) - sides["result"]
+    missing -= _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
     return [
         Finding(
             path=path,
@@ -141,8 +202,34 @@ def lost_definitions(*, ours: str, theirs: str, result: str, path: str) -> list:
     ]
 
 
-def check_merge(paths, read_ours, read_theirs, read_result) -> Report:
-    """Run every check over ``paths``; readers return file text for one side."""
+def _accepted_deletions(base: str | None, *, ours: set, theirs: set) -> set:
+    """Names the merge base had that exactly one side removed on purpose.
+
+    One side deleted it, the other never touched it — so a resolution without
+    it followed the deletion instead of losing anything. A name both sides
+    still define, or one no side had to begin with, is not in here: dropping
+    either of those is a resolver defect.
+
+    Returns the empty set when the base is unknown or does not parse, so the
+    fallback is noise rather than silence.
+    """
+    if base is None:
+        return set()
+    try:
+        base_names = _definitions(base)
+    except SyntaxError:
+        # The base is not a parent of this merge and its syntax is not this
+        # merge's problem; it simply stops being usable evidence.
+        return set()
+    return {n for n in base_names if (n in ours) != (n in theirs)}
+
+
+def check_merge(paths, read_ours, read_theirs, read_result, read_base=None) -> Report:
+    """Run every check over ``paths``; readers return file text for one side.
+
+    ``read_base`` is optional so a caller with no merge base (the parse-only
+    sweep) keeps working; supplying it is what silences accepted deletions.
+    """
     report = Report()
     for path in paths:
         result = read_result(path)
@@ -154,7 +241,8 @@ def check_merge(paths, read_ours, read_theirs, read_result) -> Report:
             continue
         report.findings.extend(
             lost_definitions(
-                ours=read_ours(path), theirs=read_theirs(path), result=result, path=path
+                ours=read_ours(path), theirs=read_theirs(path), result=result, path=path,
+                base=read_base(path) if read_base is not None else None,
             )
         )
     return report
