@@ -53,6 +53,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 EVALUATOR_CONTRACT_VERSION = "gate-b-gate-evaluator-v2"
+SUPERVISED_COLLECTION_SPINE_INVARIANT = "supervised_collection_spine_v1"
 
 
 class _StrictFrozenModel(BaseModel):
@@ -1323,6 +1324,14 @@ def _main(arguments: list[str]) -> int:
         default=os.environ.get("GATE_B_MANIFEST_SHA256"),
     )
 
+    supervised = subparsers.add_parser("run-supervised")
+    supervised.add_argument("--corpus", type=Path, required=True)
+    supervised.add_argument("--manifest", type=Path, required=True)
+    supervised.add_argument("--manifest-sha256", required=True)
+    supervised.add_argument("--output", type=Path, required=True)
+    supervised.add_argument("--provider-factory", required=True)
+    supervised.add_argument("--decision-request-factory", required=True)
+
     run = subparsers.add_parser("run-collection")
     run.add_argument(
         "--manifest",
@@ -1344,6 +1353,11 @@ def _main(arguments: list[str]) -> int:
         default=os.environ.get("GATE_B_MANIFEST_SHA256"),
     )
     args = parser.parse_args(arguments)
+    if args.command == "run-supervised":
+        parser.error(
+            "supervised collection refused: invariant "
+            f"{SUPERVISED_COLLECTION_SPINE_INVARIANT} is unsatisfied"
+        )
     if args.command == "init-run":
         if args.manifest is None or args.state_directory is None:
             parser.error("init-run requires manifest and STATE_DIRECTORY")

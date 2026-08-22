@@ -50,6 +50,19 @@ def make_source_commit(root: Path) -> str:
         subprocess.run(["git", "archive", "HEAD"], cwd=REPO, stdout=stream, check=True)
     with tarfile.open(archive, "r:") as tar:
         tar.extractall(root, filter="data")
+    working_diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD"],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+    ).stdout
+    if working_diff:
+        subprocess.run(
+            ["git", "apply", "--whitespace=nowarn"],
+            cwd=root,
+            input=working_diff,
+            check=True,
+        )
     shutil.copy2(
         REPO / "tests/product_search/gate_b_cli_smoke_fixture.py",
         root / "gate_b_cli_smoke_fixture.py",
@@ -141,33 +154,80 @@ def main() -> int:
         wrapper_copy.chmod(0o755)
         state = root / "state"
         state.mkdir()
-        env = os.environ.copy()
-        env.pop("GATE_B_COLLECTION_CONFIG", None)
-        env.pop("GATE_B_EVIDENCE_MANIFEST", None)
-        env.pop("GATE_B_MANIFEST_SHA256", None)
-        env["STATE_DIRECTORY"] = str(state)
-        attempt_started = time.perf_counter()
-        attempt = subprocess.run(
-            [str(wrapper_copy), "run-description-evidence"],
+        artifact_python = install_root / "python-runtime/venv/bin/python"
+        target_env = os.environ.copy()
+        target_env["PYTHONHOME"] = str(install_root / "python-runtime/venv")
+        target_env["LD_LIBRARY_PATH"] = str(install_root / "python-runtime/venv/lib")
+        target_env["PYTHONNOUSERSITE"] = "1"
+        target_env["PYTHONPATH"] = str(install_root / "runtime")
+        target_started = time.perf_counter()
+        target_attempt = subprocess.run(
+            [
+                str(artifact_python),
+                "-m",
+                "job_intel.product_search.gate_b_evidence_runner_v1",
+                "run-supervised",
+                "--corpus",
+                str(fixture_root / "corpus-rows.json"),
+                "--manifest",
+                str(manifest_path),
+                "--manifest-sha256",
+                manifest_sha,
+                "--output",
+                str(state),
+                "--provider-factory",
+                "gate_b_cli_smoke_fixture:provider_factory",
+                "--decision-request-factory",
+                "gate_b_cli_smoke_fixture:decision_request_factory",
+            ],
             cwd=install_root / "runtime",
-            env=env,
+            env=target_env,
             text=True,
             capture_output=True,
         )
-        attempt_seconds = time.perf_counter() - attempt_started
+        target_seconds = time.perf_counter() - target_started
+        target_expected = "invariant supervised_collection_spine_v1 is unsatisfied"
+        if target_attempt.returncode == 0 or target_expected not in target_attempt.stderr:
+            raise RuntimeError(
+                "target supervised entrypoint did not fail closed on the named spine invariant"
+            )
+
+        old_env = os.environ.copy()
+        old_env.pop("GATE_B_COLLECTION_CONFIG", None)
+        old_env.pop("GATE_B_EVIDENCE_MANIFEST", None)
+        old_env.pop("GATE_B_MANIFEST_SHA256", None)
+        old_env["STATE_DIRECTORY"] = str(state)
+        old_started = time.perf_counter()
+        old_attempt = subprocess.run(
+            [str(wrapper_copy), "run-description-evidence"],
+            cwd=install_root / "runtime",
+            env=old_env,
+            text=True,
+            capture_output=True,
+        )
+        old_seconds = time.perf_counter() - old_started
+        old_expected = "requires config, manifest and STATE_DIRECTORY"
+        if old_attempt.returncode != 2 or old_expected not in old_attempt.stderr:
+            raise RuntimeError(
+                "old unit wrapper was not inert: expected exit 2 input validation"
+            )
         report = {
             "head": run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip(),
             "artifact_build_seconds": round(build_seconds, 3),
             "artifact_install_seconds": round(install_seconds, 3),
-            "first_attempt_seconds": round(attempt_seconds, 3),
+            "target_attempt_seconds": round(target_seconds, 3),
+            "old_unit_attempt_seconds": round(old_seconds, 3),
             "harness_lines": len(Path(__file__).read_text(encoding="utf-8").splitlines()),
             "artifact_tree_sha256": artifact_hash,
             "manifest_sha256": manifest_sha,
             "provider_fixture": str(config_path),
-            "returncode": attempt.returncode,
-            "stdout": attempt.stdout,
-            "stderr": attempt.stderr,
-            "first_stop": "wrapper run-collection input validation",
+            "target_returncode": target_attempt.returncode,
+            "target_stdout": target_attempt.stdout,
+            "target_stderr": target_attempt.stderr,
+            "old_unit_returncode": old_attempt.returncode,
+            "old_unit_stdout": old_attempt.stdout,
+            "old_unit_stderr": old_attempt.stderr,
+            "first_stop": "target supervised entrypoint named-invariant guard",
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")
             ),
