@@ -211,6 +211,7 @@ def test_frozen_runtime_materializes_shim_and_matches_gateway_parity(tmp_path: P
         destination=tmp_path / "frozen-runtime",
         python_executable=Path(sys.executable),
     )
+    assert not runtime.python_executable.is_symlink()
     probe = subprocess.check_output(
         [
             str(runtime.python_executable),

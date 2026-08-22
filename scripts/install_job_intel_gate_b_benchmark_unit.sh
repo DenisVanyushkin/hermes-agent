@@ -164,7 +164,7 @@ else
   verify_artifact_hash "$temporary" "$artifact_tree_sha256" || exit 66
   chown -R root:hermes "$temporary"
   find "$temporary" -type d -exec chmod u=rwx,g=rx,o= {} +
-  find "$temporary" -type f -exec chmod u=rw,g=r,o= {} +
+  find "$temporary" -type f -exec chmod u=rwX,g=rX,o= {} +
   find "$temporary" -type f -perm /111 -exec chmod u=rwx,g=rx,o= {} +
   mv -T -n -- "$temporary" "$destination"
   [[ -d "$destination" ]] || {

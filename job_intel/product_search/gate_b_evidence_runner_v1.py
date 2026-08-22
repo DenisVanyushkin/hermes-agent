@@ -12,10 +12,14 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+import argparse
 import hashlib
+import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -25,11 +29,13 @@ from job_intel.product_search.decision_v2 import (
     DecisionResultV2,
     LoadedDecisionPolicyV2,
     canonical_decision_bytes,
+    load_decision_policy,
     run_decision_v2,
 )
 from job_intel.product_search.evidence_synthesis import EvidenceSynthesisStatus
 from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
+    load_reviewed_fragment_allowlist_v3,
     project_vacancy_evidence_v3,
     validate_provider_payload_v3,
 )
@@ -893,6 +899,331 @@ class CollectionReport(_StrictFrozenModel):
     metrics: CollectionMetrics
 
 
+class CollectionConfig(_StrictFrozenModel):
+    """External paths and anchored callables for one collection attempt."""
+
+    manifest_path: Path
+    corpus_rows_path: Path | None = None
+    corpus_package_root: Path | None = None
+    gate_a_root: Path | None = None
+    run_manifest_path: Path | None = None
+    run_manifest_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    corpus_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    reviewed_allowlist_path: Path
+    decision_policy_path: Path
+    provider_factory: str
+    decision_request_factory: str
+    authority_paths: dict[str, Path]
+    journal_mode: Literal["create", "open"]
+
+    @model_validator(mode="after")
+    def validate_corpus_source(self) -> CollectionConfig:
+        direct = self.corpus_rows_path is not None
+        package = (
+            self.corpus_package_root is not None
+            and self.gate_a_root is not None
+            and self.run_manifest_path is not None
+            and self.run_manifest_sha256 is not None
+            and self.corpus_sha256 is not None
+        )
+        if direct == package:
+            raise ValueError("configure exactly one corpus source")
+        return self
+
+
+def _load_collection_config(path: Path) -> CollectionConfig:
+    try:
+        payload = json.loads(path.read_bytes())
+        config = CollectionConfig.model_validate(payload)
+    except Exception as exc:
+        raise ValueError("collection config is invalid") from exc
+    base = path.parent.resolve()
+    relative_fields = (
+        "manifest_path",
+        "corpus_rows_path",
+        "corpus_package_root",
+        "gate_a_root",
+        "run_manifest_path",
+        "reviewed_allowlist_path",
+        "decision_policy_path",
+    )
+    updates = {
+        name: value if value is None or value.is_absolute() else (base / value).resolve()
+        for name in relative_fields
+        for value in [getattr(config, name)]
+    }
+    updates["authority_paths"] = {
+        key: value if value.is_absolute() else (base / value).resolve()
+        for key, value in config.authority_paths.items()
+    }
+    return config.model_copy(update=updates)
+
+
+def _load_artifact_callable(specification: str, artifact_root: Path) -> Callable[..., Any]:
+    module_name, separator, attribute = specification.partition(":")
+    if not separator or not module_name or not attribute:
+        raise ValueError("artifact callable must use module:attribute syntax")
+    try:
+        module_spec = importlib.util.find_spec(module_name)
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise ValueError("artifact callable module is unavailable") from exc
+    if module_spec is None or module_spec.origin is None:
+        raise ValueError("artifact callable module has no file origin")
+    origin = Path(module_spec.origin).resolve()
+    root = artifact_root.resolve()
+    if origin != root and root not in origin.parents:
+        raise ValueError("artifact callable is outside the anchored artifact")
+    module = importlib.import_module(module_name)
+    value = getattr(module, attribute, None)
+    if not callable(value):
+        raise ValueError("artifact callable attribute is not callable")
+    return value
+
+
+def _load_manifest(path: Path, expected_sha256: str) -> EvidenceManifest:
+    encoded = path.read_bytes()
+    if _sha256(encoded) != expected_sha256:
+        raise ValueError("evidence manifest hash mismatch")
+    try:
+        payload = json.loads(encoded)
+        return EvidenceManifest.model_validate(payload)
+    except Exception as exc:
+        raise ValueError("evidence manifest is invalid") from exc
+
+
+def _artifact_binding_context(
+    manifest: EvidenceManifest,
+    artifact_root: Path,
+    authority_paths: dict[str, Path],
+) -> tuple[object, object, object]:
+    """Derive binding values from the published artifact, never from a factory."""
+    from job_intel.product_search.gate_b_runtime_v1 import (
+        AuthorityInputs,
+        FrozenRuntime,
+        RuntimeParity,
+        SourceArtifact,
+    )
+
+    runtime_manifest_path = artifact_root / "runtime-manifest.json"
+    payload = json.loads(runtime_manifest_path.read_bytes())
+    if payload.get("artifact_tree_sha256") != artifact_root.name:
+        raise ValueError("artifact tree anchor mismatch")
+    python_executable = artifact_root / "python-runtime/venv/bin/python"
+    if python_executable.is_symlink() or not python_executable.is_file():
+        raise ValueError("artifact interpreter is not a regular file")
+    shim = artifact_root / "python-runtime/venv/lib" / (
+        f"python{sys.version_info.major}.{sys.version_info.minor}"
+    ) / "site-packages/00-pysqlite3-shim.pth"
+    if not shim.is_file() or shim.is_symlink():
+        raise ValueError("artifact sqlite shim is unavailable")
+    if _sha256(python_executable.read_bytes()) != manifest.runtime.interpreter_sha256:
+        raise ValueError("artifact interpreter hash mismatch")
+    if _sha256(shim.read_bytes()) != manifest.runtime.shim_sha256:
+        raise ValueError("artifact shim hash mismatch")
+    known_manifest_fields = {
+        "artifact_sha256": payload.get("artifact_sha256"),
+        "artifact_tree_sha256": payload.get("artifact_tree_sha256"),
+        "shim_sha256": payload.get("shim_sha256", manifest.runtime.shim_sha256),
+        "interpreter_sha256": payload.get(
+            "python_executable_sha256", manifest.runtime.interpreter_sha256
+        ),
+        "stdlib_inventory_sha256": payload.get(
+            "stdlib_tree_sha256", manifest.runtime.stdlib_inventory_sha256
+        ),
+        "installed_distributions_sha256": payload.get(
+            "installed_distributions_sha256", manifest.runtime.installed_distributions_sha256
+        ),
+        "installed_files_sha256": payload.get(
+            "installed_files_sha256", manifest.runtime.installed_files_sha256
+        ),
+        "sys_path_sha256": payload.get("sys_path_sha256", manifest.runtime.sys_path_sha256),
+        "native_extensions_sha256": payload.get(
+            "native_extensions_sha256", manifest.runtime.native_extensions_sha256
+        ),
+        "shared_libraries_sha256": payload.get(
+            "shared_libraries_sha256", manifest.runtime.shared_libraries_sha256
+        ),
+    }
+    if manifest.runtime.model_dump(mode="json") != manifest.runtime.model_validate(
+        known_manifest_fields
+    ).model_dump(mode="json"):
+        raise ValueError("artifact runtime identity mismatch")
+    runtime = FrozenRuntime(
+        root=artifact_root / "python-runtime/venv",
+        python_executable=python_executable,
+        # The CLI module is executed as ``__main__`` by ``python -m`` while
+        # runtime_v1 imports its qualified sibling name.  Pass the canonical
+        # value across that module boundary instead of leaking a duplicate
+        # Pydantic class identity into FrozenRuntime validation.
+        runtime_identity=manifest.runtime.model_dump(mode="json"),
+        parity=RuntimeParity(
+            python_version=str(payload.get("python_version", "unknown")),
+            sqlite_module="pysqlite3",
+            sqlite_version="unknown",
+        ),
+        shim_sha256=manifest.runtime.shim_sha256,
+        reproducibility="frozen_non_editable",
+    )
+    source_artifact = SourceArtifact(
+        commit=str(payload.get("candidate_commit", "0" * 40)),
+        source_root=artifact_root / "runtime",
+        archive_sha256="0" * 64,
+        artifact_sha256=manifest.runtime.artifact_sha256,
+    )
+    names = (
+        "model_bytes",
+        "prompt_bytes",
+        "response_schema_bytes",
+        "profile_bytes",
+        "policy_bytes",
+        "decision_v2_bytes",
+    )
+    missing = [name for name in names if name not in authority_paths]
+    if missing:
+        raise ValueError(f"authority paths missing: {','.join(missing)}")
+    authorities = AuthorityInputs(
+        **{
+            name: authority_paths[name].read_bytes()
+            for name in names
+        },
+        source_authority_bytes={
+            key.removeprefix("source:"): path.read_bytes()
+            for key, path in authority_paths.items()
+            if key.startswith("source:")
+        },
+    )
+    return source_artifact, runtime, authorities
+
+
+def _write_measurement_report(
+    report: CollectionReport,
+    state_directory: Path,
+) -> Path:
+    measurement = MeasurementReport(
+        expected_row_count=report.metrics.expected_row_count,
+        observed_row_count=report.metrics.observed_row_count,
+        deliverable_count=report.metrics.deliverable_count,
+        terminal_unknown_count=report.metrics.terminal_unknown_count,
+        adjudicated_count=0,
+        adjudication_denominator=0,
+        adjudicated_correct=0,
+        recording_sha256s=tuple(
+            row.recording_ref.recording_sha256 for row in report.rows
+        ),
+        decision_sha256s=tuple(row.decision_ref.decision_sha256 for row in report.rows),
+    )
+    destination = state_directory / "measurement-report.json"
+    destination.write_bytes(_canonical_bytes(measurement.model_dump(mode="json")))
+    return destination
+
+
+def _load_corpus_rows_file(path: Path, manifest: EvidenceManifest) -> tuple[CorpusRow, ...]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("corpus rows file is unavailable")
+    try:
+        payload = json.loads(path.read_bytes())
+        if not isinstance(payload, list):
+            raise ValueError("corpus rows must be a list")
+        rows = tuple(CorpusRow.model_validate(item) for item in payload)
+    except Exception as exc:
+        raise ValueError("corpus rows file is invalid") from exc
+    if tuple(row.ordinal for row in rows) != tuple(range(manifest.row_count)):
+        raise ValueError("corpus rows are not in manifest order")
+    for row in rows:
+        expected = manifest.row(row.ordinal).raw_sha256
+        if _sha256(_canonical_bytes(row.raw)) != expected:
+            raise ValueError("corpus raw hash does not match manifest row")
+    return rows
+
+
+def _main(arguments: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="gate_b_evidence_runner_v1")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    run = subparsers.add_parser("run-collection")
+    run.add_argument(
+        "--manifest",
+        type=Path,
+        default=os.environ.get("GATE_B_EVIDENCE_MANIFEST"),
+    )
+    run.add_argument(
+        "--state-directory",
+        type=Path,
+        default=os.environ.get("STATE_DIRECTORY"),
+    )
+    run.add_argument(
+        "--config",
+        type=Path,
+        default=os.environ.get("GATE_B_COLLECTION_CONFIG"),
+    )
+    run.add_argument(
+        "--manifest-sha256",
+        default=os.environ.get("GATE_B_MANIFEST_SHA256"),
+    )
+    args = parser.parse_args(arguments)
+    if args.command == "run-collection":
+        if args.manifest is None or args.state_directory is None or args.config is None:
+            parser.error(
+                "run-collection requires config, manifest and STATE_DIRECTORY"
+            )
+        if args.manifest_sha256 is None:
+            parser.error("run-collection requires an external manifest SHA-256")
+        config = _load_collection_config(args.config)
+        if config.manifest_path.resolve() != Path(args.manifest).resolve():
+            parser.error("manifest path disagrees with collection config")
+        manifest = _load_manifest(args.manifest, args.manifest_sha256)
+        artifact_root = Path(__file__).resolve().parents[3]
+        provider_factory = _load_artifact_callable(config.provider_factory, artifact_root)
+        decision_request_factory = _load_artifact_callable(
+            config.decision_request_factory, artifact_root
+        )
+        reviewed_allowlist = load_reviewed_fragment_allowlist_v3(
+            config.reviewed_allowlist_path
+        )
+        decision_policy = load_decision_policy(config.decision_policy_path)
+        source_artifact, runtime, authorities = _artifact_binding_context(
+            manifest, artifact_root, config.authority_paths
+        )
+        state_directory = args.state_directory.resolve()
+        state_directory.mkdir(parents=True, exist_ok=True)
+        journal_path = state_directory / "journal.jsonl"
+        journal = (
+            AppendOnlyJournal.create(manifest, journal_path)
+            if config.journal_mode == "create"
+            else AppendOnlyJournal.open(manifest, journal_path)
+        )
+        recordings = RecordingStore(state_directory / "recordings")
+        decision_evidence = DecisionEvidenceStore(state_directory / "decisions")
+        if config.corpus_rows_path is not None:
+            corpus_rows = _load_corpus_rows_file(config.corpus_rows_path, manifest)
+        else:
+            corpus_rows = load_gate_b_corpus_rows(
+                package_root=config.corpus_package_root,
+                gate_a_root=config.gate_a_root,
+                run_manifest_path=config.run_manifest_path,
+                expected_sha256=config.run_manifest_sha256,
+                expected_corpus_sha256=config.corpus_sha256,
+            )
+        report = run_collection(
+            manifest=manifest,
+            corpus_rows=corpus_rows,
+            reviewed_allowlist=reviewed_allowlist,
+            provider_factory=provider_factory,
+            journal=journal,
+            recordings=recordings,
+            decision_evidence=decision_evidence,
+            decision_policy=decision_policy,
+            decision_request_factory=decision_request_factory,
+            source_artifact=source_artifact,
+            runtime=runtime,
+            authorities=authorities,
+        )
+        report_path = _write_measurement_report(report, state_directory)
+        if not report_path.is_file() or not journal.path.is_file():
+            raise RuntimeError("collection evidence publication incomplete")
+        return 0
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
 def load_gate_b_corpus_rows(
     *,
     package_root: Path,
@@ -1184,3 +1515,7 @@ def run_one_row(
         ),
         decision_bytes=decision_bytes,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

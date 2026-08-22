@@ -355,7 +355,7 @@ def build_frozen_runtime(
     builder_python = python_executable or gateway_python
     try:
         subprocess.run(
-            [str(builder_python), "-m", "venv", str(destination)],
+            [str(builder_python), "-m", "venv", "--copies", str(destination)],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -364,6 +364,8 @@ def build_frozen_runtime(
     except subprocess.CalledProcessError as exc:
         raise ArtifactBuildError("frozen_venv_create_failed") from exc
     target_python = destination / "bin" / "python"
+    if target_python.is_symlink() or not target_python.is_file():
+        raise ArtifactBuildError("frozen_interpreter_not_materialized")
     target_site = _site_packages(target_python)
     target_site.mkdir(parents=True, exist_ok=True)
     _copy_entries(gateway_site, target_site)
@@ -487,10 +489,14 @@ def build_assembled_artifact(
         "python_executable_sha256": _sha256_bytes(
             frozen_runtime.python_executable.read_bytes()
         ),
+        "shim_sha256": runtime_identity.shim_sha256,
         "stdlib_tree_sha256": runtime_identity.stdlib_inventory_sha256,
         "dependency_lock_sha256": _sha256_bytes(dependency_lock.read_bytes()),
         "installed_distributions_sha256": _sha256_bytes(distributions_bytes),
+        "installed_files_sha256": runtime_identity.installed_files_sha256,
         "sys_path_sha256": runtime_identity.sys_path_sha256,
+        "native_extensions_sha256": runtime_identity.native_extensions_sha256,
+        "shared_libraries_sha256": runtime_identity.shared_libraries_sha256,
         "editable_installs": [],
     }
     manifest_path = destination / "runtime-manifest.json"
@@ -591,14 +597,25 @@ def verify_manifest_binding(
         raise ArtifactBuildError("corpus_order_mismatch")
     if source_artifact.artifact_sha256 != manifest.runtime.artifact_sha256:
         raise ArtifactBuildError("artifact_hash_mismatch")
-    if runtime.runtime_identity != manifest.runtime:
+    # The deployed ``python -m`` entrypoint can load the evidence runner once
+    # as ``__main__`` and once under its qualified name.  Compare the
+    # manifest-bound value, not Pydantic class identity across those modules.
+    if runtime.runtime_identity.model_dump(mode="json") != manifest.runtime.model_dump(
+        mode="json"
+    ):
         raise ArtifactBuildError("runtime_identity_mismatch")
     expected = _authority_identity(authorities)
     if expected.policy_sha256 != manifest.authorities.policy_sha256:
         raise ArtifactBuildError("policy_hash_mismatch")
     if expected.prompt_sha256 != manifest.authorities.prompt_sha256:
         raise ArtifactBuildError("prompt_hash_mismatch")
-    if expected != manifest.authorities:
+    # See the runtime identity comparison above: the ``-m`` entrypoint may
+    # hold the manifest model under ``__main__`` while this module owns a
+    # qualified copy.  The authority bytes are the contract, not class
+    # identity across those import names.
+    if expected.model_dump(mode="json") != manifest.authorities.model_dump(
+        mode="json"
+    ):
         raise ArtifactBuildError("authority_hash_mismatch")
 
 
