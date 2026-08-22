@@ -32,6 +32,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     AdjudicationVerdict,
     AppendOnlyJournal,
     AuthorityIdentity,
+    DecisionEvidenceStore,
     EvidenceManifest,
     EvidenceManifestRow,
     GateDecisionKind,
@@ -248,6 +249,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
 
     journal = AppendOnlyJournal.create(manifest, tmp_path / "journal.jsonl")
     recordings = RecordingStore(tmp_path / "recordings")
+    decision_evidence = DecisionEvidenceStore(tmp_path / "decisions")
     calls: list[dict[str, object]] = []
 
     class FakeGovernedProvider:
@@ -267,6 +269,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         provider=FakeGovernedProvider(),
         journal=journal,
         recordings=recordings,
+        decision_evidence=decision_evidence,
         decision_request_factory=lambda payload, row: _decision_result(
             payload, row.input_sha256
         ),
@@ -278,6 +281,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     assert result.decision.status.value == "assessed"
     assert result.decision_ref.manifest_ref == result.manifest_ref
     assert result.decision_ref.decision_sha256 == _sha256_bytes(result.decision_bytes)
+    assert decision_evidence.bytes_for(result.decision_ref) == result.decision_bytes
     assert journal.state(0).value == "success"
 
     replay = recordings.replay(result.recording_ref, manifest, journal.entries()[0])

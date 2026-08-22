@@ -108,7 +108,11 @@ ManifestRef = {
 
 Consumers reject a reference if it does not match the loaded manifest row.
 `recording_sha256` and `decision_sha256` are artifact hashes attached to this
-reference; they do not replace it.
+reference; they do not replace it. Decision evidence storage keys each path by
+the canonical pair `(ManifestRef, decision_sha256)`, so equal Decision v2 bytes
+from different ordinals remain distinct artifacts. A `DecisionEvidenceRef` may
+be returned only after `save_exclusive` has durably stored the bytes; reading a
+missing reference fails with a named error rather than an empty result.
 
 ## 3. Dispatch journal interface
 

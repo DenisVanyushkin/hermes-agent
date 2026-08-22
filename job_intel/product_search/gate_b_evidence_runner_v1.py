@@ -398,8 +398,13 @@ class DecisionEvidenceStore:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _path(self, decision_sha256: str) -> Path:
-        return self.root / f"{decision_sha256}.json"
+    def _path(self, manifest_ref: ManifestRef, decision_sha256: str) -> Path:
+        storage_identity = {
+            "manifest_ref": manifest_ref.model_dump(mode="json"),
+            "decision_sha256": decision_sha256,
+        }
+        storage_key = hashlib.sha256(_canonical_bytes(storage_identity)).hexdigest()
+        return self.root / f"{storage_key}.json"
 
     def save_exclusive(
         self,
@@ -410,10 +415,11 @@ class DecisionEvidenceStore:
         payload = {
             "schema_version": "gate-b-decision-evidence-v1",
             "manifest_ref": manifest_ref.model_dump(mode="json"),
+            "decision_sha256": decision_sha256,
             "decision_b64": base64.b64encode(decision_bytes).decode("ascii"),
         }
         encoded = _canonical_bytes(payload)
-        path = self._path(decision_sha256)
+        path = self._path(manifest_ref, decision_sha256)
         try:
             with path.open("xb") as stream:
                 stream.write(encoded)
@@ -421,14 +427,17 @@ class DecisionEvidenceStore:
                 os.fsync(stream.fileno())
         except FileExistsError:
             if path.read_bytes() != encoded:
-                raise ValueError("decision hash collision with different bytes")
+                raise ValueError("decision evidence collision with different bytes")
         return DecisionEvidenceRef(
             manifest_ref=manifest_ref,
             decision_sha256=decision_sha256,
         )
 
     def bytes_for(self, ref: DecisionEvidenceRef) -> bytes:
-        encoded = self._path(ref.decision_sha256).read_bytes()
+        try:
+            encoded = self._path(ref.manifest_ref, ref.decision_sha256).read_bytes()
+        except FileNotFoundError as exc:
+            raise ValueError("decision evidence missing") from exc
         try:
             payload = json.loads(encoded)
             decision_bytes = base64.b64decode(payload["decision_b64"], validate=True)
@@ -439,6 +448,7 @@ class DecisionEvidenceStore:
             _canonical_bytes(payload) != encoded
             or payload.get("schema_version") != "gate-b-decision-evidence-v1"
             or loaded_ref != ref.manifest_ref
+            or payload.get("decision_sha256") != ref.decision_sha256
             or _sha256(decision_bytes) != ref.decision_sha256
         ):
             raise ValueError("decision evidence binding mismatch")
@@ -453,9 +463,13 @@ class DecisionEvidenceStore:
                 continue
             if loaded_ref != manifest_ref:
                 continue
+            try:
+                decision_bytes = base64.b64decode(payload["decision_b64"], validate=True)
+            except Exception:
+                continue
             ref = DecisionEvidenceRef(
                 manifest_ref=manifest_ref,
-                decision_sha256=path.stem,
+                decision_sha256=_sha256(decision_bytes),
             )
             self.bytes_for(ref)
             return ref
@@ -1993,6 +2007,7 @@ def run_one_row(
     provider: GovernedProvider,
     journal: AppendOnlyJournal,
     recordings: RecordingStore,
+    decision_evidence: DecisionEvidenceStore,
     decision_request_factory: Callable[[dict[str, object], ManifestRef], DecisionRequestV2],
     decision_policy: LoadedDecisionPolicyV2 | None = None,
 ) -> OneRowResult:
@@ -2055,17 +2070,15 @@ def run_one_row(
         policy=decision_policy,
     )
     decision_bytes = canonical_decision_bytes(decision)
+    decision_ref = decision_evidence.save_exclusive(ref, decision_bytes)
     return OneRowResult(
         manifest_ref=ref,
         validation_status=validation_status,
         recording_ref=recording_ref,
         recording_bytes=recordings.bytes_for(recording_ref),
         decision=decision,
-        decision_ref=DecisionEvidenceRef(
-            manifest_ref=ref,
-            decision_sha256=_sha256(decision_bytes),
-        ),
-        decision_bytes=decision_bytes,
+        decision_ref=decision_ref,
+        decision_bytes=decision_evidence.bytes_for(decision_ref),
     )
 
 

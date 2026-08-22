@@ -29,6 +29,49 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 from job_intel.product_search.decision_v2 import DecisionResultV2, DecisionRunStatus
 
 
+def test_decision_evidence_store_namespaces_identical_bytes_by_manifest_ref(
+    tmp_path: Path,
+) -> None:
+    store = DecisionEvidenceStore(tmp_path / "decisions")
+    refs = tuple(
+        ManifestRef(
+            run_id="gate-b-evidence-v1-0123456789abcdef",
+            manifest_sha256="a" * 64,
+            ordinal=ordinal,
+            input_sha256="b" * 64,
+            projection_sha256="c" * 64,
+        )
+        for ordinal in (0, 1)
+    )
+
+    first = store.save_exclusive(refs[0], b"identical decision bytes")
+    second = store.save_exclusive(refs[1], b"identical decision bytes")
+
+    assert first.decision_sha256 == second.decision_sha256
+    assert len(tuple((tmp_path / "decisions").glob("*.json"))) == 2
+    assert store.bytes_for(first) == b"identical decision bytes"
+    assert store.bytes_for(second) == b"identical decision bytes"
+    assert store.find_for_manifest_ref(refs[0]) == first
+    assert store.find_for_manifest_ref(refs[1]) == second
+
+
+def test_decision_evidence_missing_ref_fails_with_named_error(tmp_path: Path) -> None:
+    store = DecisionEvidenceStore(tmp_path / "decisions")
+    ref = DecisionEvidenceRef(
+        manifest_ref=ManifestRef(
+            run_id="gate-b-evidence-v1-0123456789abcdef",
+            manifest_sha256="a" * 64,
+            ordinal=0,
+            input_sha256="b" * 64,
+            projection_sha256="c" * 64,
+        ),
+        decision_sha256="d" * 64,
+    )
+
+    with pytest.raises(ValueError, match="decision evidence missing"):
+        store.bytes_for(ref)
+
+
 @pytest.mark.parametrize("provider_outcome", ["success", "terminal_unknown"])
 def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     tmp_path: Path, monkeypatch: object, provider_outcome: str,
