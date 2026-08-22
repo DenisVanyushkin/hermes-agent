@@ -341,3 +341,13 @@ class TestUnparseableParent:
 
         kinds = {f.kind for f in findings}
         assert "unreadable_parent" in kinds
+
+
+def test_merge_both_reports_a_dropped_duplicate_definition_occurrence():
+    from upstream_sync_invariants import lost_definitions
+
+    ours = "def foo():\n    return 1\n\ndef foo():\n    return 2\n"
+    theirs = ours
+    result = "def foo():\n    return 1\n"
+    findings = lost_definitions(ours=ours, theirs=theirs, result=result, path="x.py", policy="merge-both")
+    assert any(f.symbol == "foo#2" for f in findings)

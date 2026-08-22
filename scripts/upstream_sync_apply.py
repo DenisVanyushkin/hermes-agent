@@ -41,6 +41,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from upstream_sync_gate import parse_merge_tree  # noqa: E402
+from upstream_sync_index import (  # noqa: E402
+    read_blob, read_stage_zero_blob, snapshot, stage_zero_entries, tree_entries, zlist,
+)
+from upstream_sync_receipts import finding_key, fingerprint, receipt_matches  # noqa: E402
 from upstream_sync_policy import decide_paths, number_features  # noqa: E402
 
 SCHEMA = "upstream-sync-apply/v1"
@@ -173,6 +177,85 @@ def unmerged_stages(repo: Path) -> dict:
     return stages
 
 
+def _cached_paths(repo: Path, base: str) -> set[str]:
+    return set(zlist(repo, "diff", "--cached", "--name-only", "-z", base, "--"))
+
+
+def _changed_paths(repo: Path, left: str, right: str) -> set[str]:
+    return set(zlist(repo, "diff", "--name-only", "-z", left, right, "--"))
+
+
+def _commit_tree_contract_error(scratch: Path) -> str | None:
+    unstaged = git(scratch, "diff", "--quiet", "--", check=False)
+    if unstaged.returncode not in (0, 1):
+        return f"could not inspect unstaged changes: {unstaged.stderr.strip()}"
+    untracked = zlist(scratch, "ls-files", "--others", "--exclude-standard", "-z")
+    if unstaged.returncode == 1 or untracked:
+        details = []
+        if unstaged.returncode == 1:
+            details.append("unstaged tracked changes")
+        if untracked:
+            details.append("untracked files: " + ", ".join(untracked[:8]))
+        return ("the clone has " + " and ".join(details) + "; the gate only examines "
+                "the tree that will be committed — the edit was preserved; execute "
+                "`git add -- <paths>` and retry")
+    return None
+
+
+def _decision_conflicts(pending: dict) -> list[str]:
+    seen: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for feature in pending.get("features", []):
+        decision = feature.get("decision")
+        if decision not in VALID_DECISIONS:
+            continue
+        for path in feature.get("files", []):
+            previous = seen.get(path)
+            if previous is not None and previous != decision:
+                conflicts.add(path)
+            seen[path] = decision
+    return sorted(conflicts)
+
+
+def _resolution_policy_snapshot(scratch: Path, pending: dict, local_base: str,
+                                upstream_head: str, conflicts: list[str]) -> tuple[dict, str]:
+    base = git(scratch, "merge-base", local_base, upstream_head).stdout.strip()
+    by_file, missing = decisions_by_file(pending)
+    ambiguous = _decision_conflicts(pending)
+    if missing:
+        raise ValueError("resolution policy has undecided features: " + ", ".join(map(str, missing)))
+    if ambiguous:
+        raise ValueError("resolution policy is ambiguous for path(s): " + ", ".join(ambiguous))
+    missing_policy = sorted(set(conflicts) - set(by_file))
+    if missing_policy:
+        raise ValueError("conflicted path has no immutable resolution policy: " + ", ".join(missing_policy))
+    changed = _changed_paths(scratch, base, local_base) | _changed_paths(scratch, base, upstream_head)
+    return {path: by_file.get(path, "merge-both") for path in sorted(changed)}, base
+
+
+def _decorate_findings(scratch: Path, prep: dict, report) -> None:
+    base_entries = tree_entries(scratch, prep["merge_scope"]["merge_base"])
+    ours_entries = tree_entries(scratch, prep["local_base"])
+    theirs_entries = tree_entries(scratch, prep["upstream_head"])
+    result_entries = stage_zero_entries(scratch)
+    policies = prep.get("resolution_policy_by_path") or {}
+    for item in report.findings:
+        policy = policies.get(item.path, "merge-both")
+        fp = fingerprint(
+            path=item.path,
+            kind=item.kind,
+            symbol=item.symbol,
+            policy=policy,
+            base=snapshot(base_entries, item.path),
+            ours=snapshot(ours_entries, item.path),
+            theirs=snapshot(theirs_entries, item.path),
+            result=snapshot(result_entries, item.path),
+        )
+        object.__setattr__(item, "finding_id", fp["id"])
+        object.__setattr__(item, "fingerprint", fp)
+        object.__setattr__(item, "policy", policy)
+
+
 def take_side(repo: Path, path: str, stages: set, *, ours: bool) -> None:
     """keep-local / take-upstream for one path, honouring delete/modify conflicts."""
     stage = 2 if ours else 3
@@ -298,6 +381,12 @@ def cmd_prepare(args) -> int:
                       "reason": f"{name} exists — a finalize is in flight; wait for it first"})
                 return EXIT_USAGE
     pending = load_pending(state)
+    # A new prepare deliberately rebases the decision set onto the current live
+    # HEAD. Any prior invariant receipt state is invalidated below; the pending
+    # conflict decision itself is still evaluated against this live snapshot.
+    stale_receipts = state / "invariants-pending.json"
+    if stale_receipts.exists():
+        stale_receipts.unlink()
     upstream_head = pending["upstream_head"]
     by_file, missing = decisions_by_file(pending)
     if missing:
@@ -335,6 +424,9 @@ def cmd_prepare(args) -> int:
         "new_conflicts": sorted(set(conflicts) - set(by_file)),
         "no_longer_conflicting": sorted(set(by_file) - set(conflicts)),
         "auto_resolved": [], "needs_manual": [], "policy_decided": [],
+        "merge_scope": {"local_parent": local_base, "upstream_parent": upstream_head,
+                        "merge_base": None},
+        "resolution_policy_by_path": {},
         "handed_off_at": None, "merge_sha": None,
     }
     if summary["new_conflicts"] and args.auto_policy:
@@ -349,6 +441,19 @@ def cmd_prepare(args) -> int:
         _write_json(state / "apply-prepare.json", summary)
         emit(summary)
         return EXIT_NEW_CONFLICTS
+
+    try:
+        policy_by_path, merge_base = _resolution_policy_snapshot(
+            scratch, pending, local_base, upstream_head, conflicts
+        )
+    except ValueError as exc:
+        summary["status"] = "policy_error"
+        summary["reason"] = str(exc)
+        _write_json(state / "apply-prepare.json", summary)
+        emit(summary)
+        return EXIT_UNRESOLVED
+    summary["merge_scope"]["merge_base"] = merge_base
+    summary["resolution_policy_by_path"] = policy_by_path
 
     # Identity is passed explicitly: the sandbox has none configured, and a
     # conflict-free merge commits on the spot.
@@ -410,51 +515,114 @@ def cmd_prepare(args) -> int:
 # --------------------------------------------------------------------------- handoff
 
 def _invariant_report(scratch: Path, prep: dict):
-    """Structural checks over the resolved tree, before it becomes a commit.
+    """Check the stage-0 index tree that the next commit will contain.
 
-    Parsing is cheap enough to run over everything the merge touches. The
-    definition diff is not - it needs both parents of every file - so it runs
-    only where both sides actually edited the same file. Nowhere else can a
-    resolver drop code: a file taken wholesale from one side cannot lose any.
+    All path sets and blobs come from the index/tree object database. The work
+    tree is deliberately not consulted here: an unstaged edit is rejected by
+    ``_commit_tree_contract_error`` before this function runs.
     """
     from upstream_sync_invariants import check_merge
 
-    local_base, upstream_head = prep["local_base"], prep["upstream_head"]
-    base = git(scratch, "merge-base", local_base, upstream_head).stdout.strip()
+    local_base = prep["local_base"]
+    upstream_head = prep["upstream_head"]
+    base = prep.get("merge_scope", {}).get("merge_base") or git(
+        scratch, "merge-base", local_base, upstream_head
+    ).stdout.strip()
+    touched = _cached_paths(scratch, local_base)
+    both_sides = _changed_paths(scratch, base, local_base) & _changed_paths(
+        scratch, base, upstream_head
+    )
+    paths = sorted(touched | both_sides)
+    index = stage_zero_entries(scratch)
+    base_entries = tree_entries(scratch, base)
+    ours_entries = tree_entries(scratch, local_base)
+    theirs_entries = tree_entries(scratch, upstream_head)
 
-    def _names(*args) -> set:
-        out = git(scratch, "diff", "--name-only", *args).stdout.split("\n")
-        return {n for n in out if n}
-
-    touched = _names(local_base)
-    both_sides = _names(base, local_base) & _names(base, upstream_head)
-
-    def _blob(rev, path):
-        # None, not "": a revision without the file says nothing about intent,
-        # while an empty file is a side that removed its definitions on purpose.
-        # Collapsing the two excuses every base-era name in a modify/delete.
-        proc = git(scratch, "show", f"{rev}:{path}", check=False)
-        return proc.stdout if proc.returncode == 0 else None
+    def read_from(entries, path):
+        entry = entries.get(path)
+        if entry is None or entry.mode == "160000":
+            return None
+        return read_blob(scratch, entry.oid)
 
     def read_result(path):
-        f = scratch / path
-        return f.read_text(encoding="utf-8", errors="surrogateescape") if f.is_file() else ""
+        return read_stage_zero_blob(scratch, index, path)
 
-    # A path missing from the result is a delete/modify conflict, which prepare
-    # reports on its own; flagging every symbol in it here would only add noise.
-    paths = sorted(p for p in touched if (scratch / p).is_file())
-    parse_only = [p for p in paths if p not in both_sides]
-    full = [p for p in paths if p in both_sides]
-
-    # The merge base is already computed above for both_sides; withholding it
-    # from the check is what made every finding of 2026-08-21/22 a false alarm.
-    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p),
-                         read_result, lambda p: _blob(base, p))
-    report.findings.extend(
-        f for f in check_merge(parse_only, lambda p: "", lambda p: "", read_result).findings
-        if f.kind == "unparseable"
+    full = sorted(both_sides)
+    parse_only = [path for path in paths if path not in both_sides]
+    policy = prep.get("resolution_policy_by_path") or {}
+    report = check_merge(
+        full,
+        lambda path: read_from(ours_entries, path),
+        lambda path: read_from(theirs_entries, path),
+        read_result,
+        lambda path: read_from(base_entries, path),
+        policy_by_path=policy,
     )
+    parse_report = check_merge(
+        parse_only,
+        lambda _path: None,
+        lambda _path: None,
+        read_result,
+        policy_by_path=policy,
+    )
+    report.findings.extend(f for f in parse_report.findings if f.kind == "unparseable")
+    _decorate_findings(scratch, prep, report)
     return report
+
+
+_HARD_INVARIANT_KINDS = {"unparseable", "unreadable_parent"}
+
+
+def _arm_invariant_state(state: Path, prep: dict, findings: list[dict]) -> None:
+    """Persist the merge-scoped receipt state without rereading pending later."""
+    path = state / "invariants-pending.json"
+    old: dict = {}
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = {}
+    scope = prep.get("merge_scope") or {}
+    if old.get("merge_scope") != scope:
+        old = {}
+    pending = {}
+    try:
+        pending = load_pending(state)
+    except (OSError, ValueError):
+        pass
+    origin = {
+        "platform": pending.get("slack_platform"),
+        "chat_id": pending.get("slack_channel"),
+        "thread_id": pending.get("slack_thread_ts"),
+        "user_id": pending.get("slack_user_id"),
+    }
+    payload = {
+        "schema": "upstream-sync-invariants-pending/v1",
+        "version": 1,
+        "status": "blocked" if any(f.get("kind") in _HARD_INVARIANT_KINDS for f in findings) else "awaiting_ack",
+        "created_at": old.get("created_at") or _now(),
+        "updated_at": _now(),
+        "merge_scope": scope,
+        "merge_record": "apply-prepare.json",
+        "origin": old.get("origin") or origin,
+        "findings": findings,
+        "receipts": old.get("receipts") or [],
+        "journal": old.get("journal") or [],
+    }
+    _write_json(path, payload)
+
+
+def _unacknowledged_findings(state: Path, findings: list[dict]) -> list[dict]:
+    try:
+        data = json.loads((state / "invariants-pending.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return findings
+    receipts = data.get("receipts") or []
+    return [
+        finding for finding in findings
+        if finding.get("kind") in _HARD_INVARIANT_KINDS
+        or not any(receipt_matches(receipt, finding) for receipt in receipts)
+    ]
 
 
 def _commit_merge(args) -> tuple:
@@ -473,13 +641,17 @@ def _commit_merge(args) -> tuple:
         return EXIT_USAGE, {"status": "error", "reason": f"prepare ended with {prep.get('status')!r}, not ready"}
 
     stages = unmerged_stages(scratch)
-    marked = [
-        p for p in prep["conflicts"]
-        if (scratch / p).exists()
-        and has_conflict_markers((scratch / p).read_text(encoding="utf-8", errors="surrogateescape"))
-    ]
+    marked = []
+    index = stage_zero_entries(scratch)
+    for path in prep["conflicts"]:
+        text = read_stage_zero_blob(scratch, index, path)
+        if text is not None and has_conflict_markers(text):
+            marked.append(path)
     if stages or marked:
         return EXIT_UNRESOLVED, {"status": "unresolved", "unmerged": sorted(stages), "with_markers": marked}
+    contract_error = _commit_tree_contract_error(scratch)
+    if contract_error:
+        return EXIT_UNRESOLVED, {"status": "unstaged_tree", "reason": contract_error}
 
     # Check the race before committing anything: the host refuses a merge whose
     # first parent is not its current HEAD, so there is nothing to gain from
@@ -490,17 +662,24 @@ def _commit_merge(args) -> tuple:
                                  "hint": "the live branch moved since prepare; run prepare again and redo the resolution"}
 
     # Structural gate. Deliberately before the commit: a merge that fails here
-    # is not a merge anyone should be able to hand off, and leaving the clone
-    # untouched is what makes the repair a plain edit rather than a rewrite.
-    skipped = os.environ.get("HERMES_SYNC_SKIP_INVARIANTS") == "1"
-    if not skipped:
+    # is not a merge anyone should be able to hand off. The preserved clone is
+    # the repair surface; the commit object is not rewritten on refusal.
+    break_glass = bool(getattr(args, "break_glass", False))
+    if break_glass:
+        prep["invariants_break_glass"] = {"used_at": _now(), "mode": "manual-only"}
+    else:
         report = _invariant_report(scratch, prep)
         if not report.ok:
-            payload = {"status": "invariants_failed", **report.as_dict()}
-            payload["hint"] = ("nothing was committed and the clone is preserved; fix the "
-                               "resolution there, or set HERMES_SYNC_SKIP_INVARIANTS=1 if every "
-                               "finding is intended")
-            return EXIT_UNRESOLVED, payload
+            records = report.as_dict()["findings"]
+            _arm_invariant_state(state, prep, records)
+            active = _unacknowledged_findings(state, records)
+            if active:
+                payload = {"status": "invariants_failed", "ok": False, "findings": active}
+                payload["acknowledgements_required"] = [f.get("finding_id") for f in active if f.get("kind") not in _HARD_INVARIANT_KINDS]
+                payload["hint"] = ("nothing was committed and the clone is preserved; hard findings "
+                                   "must be repaired, while soft findings require one matching "
+                                   "fingerprint receipt each")
+                return EXIT_UNRESOLVED, payload
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
     amend = bool(getattr(args, "amend", False))
@@ -535,14 +714,10 @@ def _commit_merge(args) -> tuple:
                                  "reason": f"merge parents {parents} are not (local_base, upstream_head) — "
                                            "run prepare again"}
     prep["merge_sha"] = merge_sha
-    if skipped:
-        # Recorded on the merge record, not only in this reply: whoever reads
-        # the result later must see that the structural gate did not run.
-        prep["invariants_skipped"] = True
     _write_json(prep_path, prep)
     payload = {"status": "committed", "merge_sha": merge_sha, "prep": prep}
-    if skipped:
-        payload["invariants_skipped"] = True
+    if break_glass:
+        payload["invariants_break_glass"] = prep["invariants_break_glass"]
     return EXIT_OK, payload
 
 
@@ -698,11 +873,16 @@ def main(argv=None) -> int:
     p_prep.set_defaults(func=cmd_prepare)
     sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
     p_commit = sub.add_parser("commit", parents=[common])
+    p_commit.add_argument("--break-glass", action="store_true",
+                          help="manual audited emergency bypass; never supplied by systemd")
     p_commit.add_argument("--amend", action="store_true",
                           help="fold staged changes into the existing merge commit (gate-triage fixes), "
                                "preserving its parents")
     p_commit.set_defaults(func=cmd_commit)
-    sub.add_parser("handoff", parents=[common]).set_defaults(func=cmd_handoff)
+    p_handoff = sub.add_parser("handoff", parents=[common])
+    p_handoff.add_argument("--break-glass", action="store_true",
+                           help="manual audited emergency bypass; never supplied by systemd")
+    p_handoff.set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
     p_wait.add_argument("--after", default="",
                         help="ISO time; results not newer than this are ignored")

@@ -4660,8 +4660,19 @@ def _reconnect_backoff(attempt: int) -> int:
 #: (2026-07-29): апрув «коммить» не дошёл до гейта дважды, без исключения и без
 #: строки в логе, потому что возврат None здесь штатный и потому тихий.
 def _operator_reply_text(message: str, raw_message: str | None) -> str:
+    """Extract one canonical author body before any gate parser runs."""
     if isinstance(raw_message, str) and raw_message.strip():
-        return raw_message
+        return raw_message.strip()
+    if not isinstance(message, str):
+        return ""
+    # Some internal callers have only the assembled display message. Remove the
+    # exact reply envelope once, so no parser can interpret quoted gate text.
+    if message.startswith("[Replying to:"):
+        end = message.find("]\n")
+        if end < 0:
+            end = message.find("]\r\n")
+        if end >= 0:
+            return message[end + 2:].strip()
     return message
 def _reconnect_needs_attention(info: dict, now: float) -> bool:
     """Return True when a reconnect-queue entry has been continuously queued
@@ -28510,6 +28521,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return "\u26a0\ufe0f Not applied: " + (outcome.get("reason") or "nothing to apply") + "."
 
     @staticmethod
+    def _build_upstream_sync_invariant_ack(message, source):
+        """Record one fingerprint-bound structural-gate receipt, if armed."""
+        try:
+            from hermes_cli.upstream_sync_reply import (
+                parse_upstream_sync_ack_reply,
+                has_pending_upstream_invariant_ack,
+                record_invariant_ack,
+                default_upstream_sync_state_dir,
+            )
+            finding_id = parse_upstream_sync_ack_reply(message)
+            if not finding_id:
+                return None
+            state_dir = default_upstream_sync_state_dir()
+            if not has_pending_upstream_invariant_ack(state_dir):
+                return None
+            source_dict = {
+                "platform": str(getattr(source, "platform", "") or "") or None,
+                "chat_id": str(getattr(source, "chat_id", "") or "") or None,
+                "thread_id": str(getattr(source, "thread_id", "") or "") or None,
+                "user_id": str(getattr(source, "user_id", "") or "") or None,
+            }
+            outcome = record_invariant_ack(state_dir, finding_id, source_dict)
+        except Exception:
+            logger.warning("upstream-sync invariant ack intercept failed", exc_info=True)
+            return None
+        if outcome.get("requested"):
+            return f"✅ Receipt recorded for {finding_id}; the host will re-check this exact merge finding."
+        if outcome.get("duplicate"):
+            return f"✅ Receipt for {finding_id} was already recorded."
+        return "⚠️ Not recorded: " + (outcome.get("reason") or "the finding is stale") + "."
+
+    @staticmethod
     def _build_upstream_sync_decision_ack(message, source):
         """Record an operator decision reply and hand the apply to the host.
 
@@ -29678,6 +29721,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # The triage gate answers to a bare word and is matched whole-message;
         # the decision gate's parser is looser. Strict first: it cannot take an
         # answer meant for the other one, but the loose one could.
+        _ops_ack = self._build_ops_approval_ack(_operator_text, source)
+        if _ops_ack is not None:
+            logger.info("ops-approval intercept: handled reply: session=%s platform=%s", session_id, platform_key)
+            return {
+                "final_response": _ops_ack,
+                "messages": [{"role": "user", "content": message}, {"role": "assistant", "content": _ops_ack}],
+                "api_calls": 0, "tools": [], "history_offset": len(history),
+                "completed": True, "interrupted": False, "compression_exhausted": False,
+            }
+
         _triage_ack = self._build_upstream_sync_triage_ack(_operator_text, source)
         if _triage_ack is not None:
             logger.info(
@@ -29697,6 +29750,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "completed": True,
                 "interrupted": False,
                 "compression_exhausted": False,
+            }
+
+        _invariant_ack = self._build_upstream_sync_invariant_ack(_operator_text, source)
+        if _invariant_ack is not None:
+            logger.info("upstream-sync invariant ack intercept: handled: session=%s platform=%s", session_id, platform_key)
+            return {
+                "final_response": _invariant_ack,
+                "messages": [{"role": "user", "content": message}, {"role": "assistant", "content": _invariant_ack}],
+                "api_calls": 0, "tools": [], "history_offset": len(history),
+                "completed": True, "interrupted": False, "compression_exhausted": False,
             }
 
         _us_ack = self._build_upstream_sync_decision_ack(_operator_text, source)
@@ -29732,39 +29795,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "messages": [
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": _doctor_ack},
-                ],
-                "api_calls": 0,
-                "tools": [],
-                "history_offset": len(history),
-                "completed": True,
-                "interrupted": False,
-                "compression_exhausted": False,
-            }
-
-        # Порядок гейтов задан явно: ops ПЕРЕД коммитным. Один прогон может
-        # оставить оба маркера (правки файлов + мутирующий план), а отвечают на
-        # них обычным текстом, и наборы слов пересекаются.
-        #  1) Парсер ops строгий (сообщение должно БЫТЬ ответом целиком), а
-        #     коммитный ищет подстроку в сообщении до 40 символов. Строгий парсер
-        #     идёт первым: он не может забрать чужой ответ, а подстрочный -- может,
-        #     поэтому право первого отказа принадлежит тому, кто ошибается реже.
-        #  2) Слова аппрува не пересекаются («выполни» vs «коммить/запушь»), так
-        #     что ops-интерцепт возвращает None на коммитных ответах и живой
-        #     коммитный путь не меняется.
-        #  3) Слова отмены пересекаются; их разводит сам _build_ops_approval_ack,
-        #     снимая оба маркера (см. комментарий в ветке cancel).
-        _ops_ack = self._build_ops_approval_ack(_operator_text, source)
-        if _ops_ack is not None:
-            logger.info(
-                "ops-approval intercept: handled reply: session=%s platform=%s",
-                session_id,
-                platform_key,
-            )
-            return {
-                "final_response": _ops_ack,
-                "messages": [
-                    {"role": "user", "content": message},
-                    {"role": "assistant", "content": _ops_ack},
                 ],
                 "api_calls": 0,
                 "tools": [],

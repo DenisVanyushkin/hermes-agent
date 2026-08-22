@@ -36,7 +36,15 @@ def render(findings: list) -> str:
     lines = []
     for f in findings:
         where = f.get("symbol") or (f"line {f['line']}" if f.get("line") else "?")
-        lines.append(f"- {f.get('path')}: {f.get('kind')} ({where})")
+        # A receipt is offered only when the finding has a symbol. Hard parse
+        # failures and line-only diagnostics must be repaired, never clicked
+        # through. Keep the command at column zero so copying a report bullet
+        # cannot accidentally execute it.
+        finding_id = f.get("finding_id")
+        if finding_id and f.get("symbol"):
+            lines.append(f"ack {finding_id} — {f.get('path')}: {f.get('kind')} ({where})")
+        else:
+            lines.append(f"- {f.get('path')}: {f.get('kind')} ({where})")
     return "\n".join(lines)
 
 

@@ -593,7 +593,7 @@ apply_decisions() {
       write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.
 ${findings:-(see finalize-detail.log)}
 
-Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case re-run with HERMES_SYNC_SKIP_INVARIANTS=1."
+Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case repair the resolution, or answer each listed soft finding with its exact `ack INV-...` receipt; hard findings cannot be acknowledged."
       exit 0
     fi
     write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"
@@ -602,6 +602,43 @@ Not a stale-test failure — do not answer with the triage vocabulary. Either th
   MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"merge_sha\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
   if [ -z "$MERGE_SHA" ]; then
     write_result failed "apply-decisions: commit reported no merge_sha; clone preserved."
+    exit 0
+  fi
+  land_merge
+}
+
+# ack-invariant — the operator acknowledged one exact soft finding. The
+# Python gate re-reads the merge record and all receipts; it commits only when
+# every soft finding still has a matching fingerprint and hard findings are gone.
+resume_invariant_ack() {
+  local py apply rc
+  py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  apply="$SCRIPTS_DIR/upstream_sync_apply.py"
+  [ -f "$apply" ] || apply="$REPO/scripts/upstream_sync_apply.py"
+  SCRATCH_NAME="scratch"
+  SCRATCH="$STATE_DIR/$SCRATCH_NAME"
+  SCRATCH_FOR_REPORT="$SCRATCH"
+  if [ ! -f "$STATE_DIR/invariants-pending.json" ] || [ ! -d "$SCRATCH/.git" ]; then
+    write_result failed "ack-invariant: no armed invariant state or preserved clone; repo untouched."
+    exit 0
+  fi
+  set +e
+  "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    if grep -q 'invariants_failed' "$DETAIL_LOG"; then
+      write_result awaiting_decision "ack-invariant: receipt recorded, but other findings remain or a fingerprint changed; repo untouched. $(cat "$DETAIL_LOG")"
+    else
+      write_result failed "ack-invariant: commit refused (rc=$rc); clone preserved, repo untouched. $(cat "$DETAIL_LOG")"
+    fi
+    exit 0
+  fi
+  UPSTREAM_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('upstream_head') or '')" "$STATE_DIR/pending.json" 2>/dev/null || true)"
+  MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('merge_sha') or '')" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
+    write_result failed "ack-invariant: committed merge or gated upstream point is unknown; clone preserved."
     exit 0
   fi
   land_merge
@@ -736,6 +773,9 @@ case "$ACTION" in
     ;;
   apply-triage-fixes)
     apply_triage_fixes
+    ;;
+  ack-invariant)
+    resume_invariant_ack
     ;;
   rollback)
     if [ -z "$BACKUP_REF" ]; then

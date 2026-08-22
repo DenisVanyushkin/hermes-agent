@@ -1,0 +1,16 @@
+{
+  "merge": "9f3feebcd3",
+  "base": "9ef9b2d2d01eb4bcf9420973c5ef6c98f2176455",
+  "ours_commit": "50b47b36e7ceba9cbc05a33740705ba3a77d1e03",
+  "theirs_commit": "f7a5c9e520b4da422b2c088a52a6a0165d8ed788",
+  "path": "tools/approval.py",
+  "orientation": "ours=first-parent(local/customizations), theirs=second-parent(upstream)",
+  "expected_raw_findings": [],
+  "manual_classifications": [
+    {"case": "gateway/run.py:_stale_guard_*", "classification": "real loss; restore"},
+    {"case": "tools/approval.py:submit_pending", "classification": "expected keep-local deletion"},
+    {"case": "tools/approval.py:_ALLOWLIST_SHELL_OPERATOR_RE", "classification": "expected upstream retirement"},
+    {"case": "tools/approval.py:check_all_command_guards", "classification": "upstream body contribution; candidate-set regression"},
+    {"case": "tools/approval.py:check_execute_code_guard", "classification": "upstream body contribution; candidate-set regression"}
+  ]
+}

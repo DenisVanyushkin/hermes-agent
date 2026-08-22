@@ -76,9 +76,9 @@ def test_the_operator_text_is_preferred_over_the_assembled_one():
 def test_the_assembled_text_is_used_when_there_is_no_raw_one():
     composed = _as_reply("коммить")
 
-    assert _operator_reply_text(composed, None) == composed
-    assert _operator_reply_text(composed, "") == composed
-    assert _operator_reply_text(composed, "   ") == composed
+    assert _operator_reply_text(composed, None) == "коммить"
+    assert _operator_reply_text(composed, "") == "коммить"
+    assert _operator_reply_text(composed, "   ") == "коммить"
 
 
 @pytest.mark.asyncio

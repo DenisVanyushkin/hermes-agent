@@ -183,7 +183,7 @@ def pyworld_upstream_deletes(tmp_path: Path):
         "status": "awaiting_decision",
         "local_head": local_head,
         "upstream_head": upstream_head,
-        "features": [{"id": "F1", "decision": "merge-both", "files": ["mod.py"],
+        "features": [{"id": "F1", "decision": "keep-local", "files": ["mod.py"],
                       "local_subjects": ["local change"]}],
     }))
     return {"live": live, "state": state, "local_head": local_head,
@@ -248,8 +248,8 @@ class TestHandoffIsCheckedToo:
 
 
 class TestOverride:
-    def test_the_escape_hatch_commits_and_says_so(self, pyworld):
-        """A legitimate mass deletion must not wedge the pipeline forever."""
+    def test_environment_escape_hatch_is_ignored_and_gate_stays_blocked(self, pyworld):
+        """The old global skip cannot discharge a finding."""
         scratch = _prepared(pyworld)
         (scratch / "mod.py").write_text("def kept():\n    return 100\n")
         _git(scratch, "add", "mod.py")
@@ -257,8 +257,9 @@ class TestOverride:
         out = _out(_run("commit", pyworld["state"], pyworld["live"],
                         env={"HERMES_SYNC_SKIP_INVARIANTS": "1"}))
 
-        assert out["status"] == "committed"
-        assert out["invariants_skipped"] is True
+        assert out["status"] == "invariants_failed"
+        assert "invariants_skipped" not in out
+        assert not (pyworld["state"] / "finalize-request.json").exists()
 
 
 class TestMechanicalResolutionValidatesItsOutput:
@@ -415,3 +416,78 @@ class TestFindingsRenderer:
         m = self._mod()
 
         assert "finalize-detail.log" in m.render([])
+
+
+class TestStageZeroCommitContract:
+    def test_unstaged_tracked_edit_is_refused_with_add_hint(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "unstaged_tree"
+        assert "git add -- <paths>" in out["reason"]
+
+    def test_untracked_file_is_refused(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "operator-note.txt").write_text("not part of the merge")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "unstaged_tree"
+        assert "untracked" in out["reason"]
+
+    def test_break_glass_is_explicit_and_audited(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"], "--break-glass"))
+        assert out["status"] == "committed"
+        assert out["invariants_break_glass"]["mode"] == "manual-only"
+
+
+class TestResolutionPolicySnapshot:
+    def test_conflicting_policies_for_one_path_are_a_hard_refusal(self, pyworld):
+        pending_path = pyworld["state"] / "pending.json"
+        data = json.loads(pending_path.read_text())
+        data["features"].append({"id": "F2", "decision": "take-upstream", "files": ["mod.py"]})
+        pending_path.write_text(json.dumps(data))
+        out = _out(_run("prepare", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "policy_error"
+        assert "ambiguous" in out["reason"]
+
+    def test_merge_both_catches_a_dropped_body_contribution(self, pyworld):
+        pending_path = pyworld["state"] / "pending.json"
+        data = json.loads(pending_path.read_text())
+        data["features"][0]["decision"] = "merge-both"
+        pending_path.write_text(json.dumps(data))
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "invariants_failed"
+        assert any(f.get("symbol") == "kept" for f in out["findings"])
+
+
+class TestReceiptAndAmendLifecycle:
+    def test_matching_receipt_survives_amend_of_unrelated_file(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        failed = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert failed["status"] == "invariants_failed"
+        finding_id = failed["acknowledgements_required"][0]
+        from hermes_cli.upstream_sync_reply import record_invariant_ack
+        ack = record_invariant_ack(pyworld["state"], finding_id, {})
+        assert ack["requested"] is True
+        committed = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert committed["status"] == "committed"
+        (scratch / "unrelated.txt").write_text("amend\n")
+        _git(scratch, "add", "unrelated.txt")
+        amended = _out(_run("commit", pyworld["state"], pyworld["live"], "--amend"))
+        assert amended["status"] == "committed"
+
+    def test_new_prepare_invalidates_old_receipt_state_when_live_head_moves(self, pyworld):
+        (pyworld["state"] / "invariants-pending.json").write_text(json.dumps({"merge_scope": {"local_parent": "old"}}))
+        (pyworld["live"] / "new.txt").write_text("moved\n")
+        _git(pyworld["live"], "add", "new.txt")
+        _git(pyworld["live"], "commit", "-qm", "move live head")
+        out = _out(_run("prepare", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "ready"
+        assert not (pyworld["state"] / "invariants-pending.json").exists()

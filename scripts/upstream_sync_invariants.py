@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from typing import Mapping
+
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,9 @@ class Finding:
     message: str
     symbol: str | None = None
     line: int | None = None
+    policy: str | None = None
+    finding_id: str | None = None
+    fingerprint: dict | None = None
 
 
 @dataclass
@@ -76,6 +81,24 @@ class Report:
 
 def _is_python(path: str) -> bool:
     return path.endswith(".py")
+
+
+def _definition_segments(src: str) -> dict[str, tuple[str, ...]]:
+    """Return exact top-level source segments, retaining duplicate occurrences."""
+    tree = ast.parse(src)
+    states: dict[str, list[str]] = {}
+    for node in tree.body:
+        names: list[str] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        segment = ast.get_source_segment(src, node) or ""
+        for name in names:
+            states.setdefault(name, []).append(segment)
+    return {name: tuple(segments) for name, segments in states.items()}
 
 
 def _definitions(src: str) -> set:
@@ -108,6 +131,8 @@ def parse_failures(files: dict) -> list:
     for path, src in sorted(files.items()):
         if not _is_python(path):
             continue
+        if src is None:
+            continue
         try:
             ast.parse(src)
         except SyntaxError as exc:
@@ -122,7 +147,8 @@ def parse_failures(files: dict) -> list:
     return findings
 
 
-def lost_definitions(*, ours, theirs, result, path: str, base=None) -> list:
+def lost_definitions(*, ours, theirs, result, path: str, base=None,
+                     policy: str | None = None) -> list:
     """Report definitions present on either parent but absent from the result.
 
     Both parents count: dropping upstream's new function is as much a loss as
@@ -139,9 +165,11 @@ def lost_definitions(*, ours, theirs, result, path: str, base=None) -> list:
     if not _is_python(path):
         return []
     sides = {}
+    segments = {}
     for label, src in (("result", result), ("ours", ours), ("theirs", theirs)):
         try:
             sides[label] = _definitions(src or "")
+            segments[label] = _definition_segments(src or "")
         except SyntaxError as exc:
             return [
                 Finding(
@@ -156,8 +184,56 @@ def lost_definitions(*, ours, theirs, result, path: str, base=None) -> list:
                 )
             ]
     missing = (sides["ours"] | sides["theirs"]) - sides["result"]
+    if policy in {"keep-local", "take-upstream"}:
+        base_names = set()
+        if base is not None:
+            try:
+                base_names = _definitions(base)
+            except SyntaxError:
+                base_names = set()
+        if policy == "keep-local":
+            missing -= {n for n in missing if n in sides["theirs"]
+                        and n not in sides["ours"] and n not in base_names}
+        else:
+            missing -= {n for n in missing if n in sides["ours"]
+                        and n not in sides["theirs"] and n not in base_names}
+    accepted = set()
     if ours is not None and theirs is not None:
-        missing -= _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
+        accepted = _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
+        missing -= accepted
+
+    # Under merge-both, presence by name is not enough: a resolver can keep the
+    # local definition while silently dropping an upstream body edit. Compare
+    # exact top-level source segments and apply the file policy to the side that
+    # was discarded. keep-local/take-upstream intentionally suppress only their
+    # corresponding one-sided loss; merge-both reports it.
+    contribution_loss = set()
+    if policy == "merge-both":
+        base_segments = {}
+        if base is not None:
+            try:
+                base_segments = _definition_segments(base)
+            except SyntaxError:
+                base_segments = {}
+        for name in set(segments["ours"]) | set(segments["theirs"]):
+            if name in accepted:
+                continue
+            ours_state = segments["ours"].get(name, ())
+            theirs_state = segments["theirs"].get(name, ())
+            result_state = segments["result"].get(name, ())
+            base_state = base_segments.get(name, ())
+            if result_state == ours_state and theirs_state != base_state and theirs_state != ours_state:
+                contribution_loss.add(name)
+            elif result_state == theirs_state and ours_state != base_state and ours_state != theirs_state:
+                contribution_loss.add(name)
+            # A module-level set loses the second definition. Keep the raw
+            # compromise for old callers, but make the blocking policy report
+            # the missing occurrence explicitly instead of silently collapsing it.
+            max_count = max(len(ours_state), len(theirs_state))
+            if len(result_state) < max_count:
+                for occurrence in range(len(result_state), max_count):
+                    contribution_loss.add(f"{name}#{occurrence + 1}")
+    missing |= contribution_loss
     return [
         Finding(
             path=path,
@@ -167,6 +243,7 @@ def lost_definitions(*, ours, theirs, result, path: str, base=None) -> list:
                 f"{name!r} is defined on a parent of this merge but absent from the "
                 f"resolution - confirm the removal was intended"
             ),
+            policy=policy,
         )
         for name in sorted(missing)
     ]
@@ -197,7 +274,8 @@ def _accepted_deletions(base, *, ours: set, theirs: set) -> set:
     return {n for n in base_names if (n in ours) != (n in theirs)}
 
 
-def check_merge(paths, read_ours, read_theirs, read_result, read_base=None) -> Report:
+def check_merge(paths, read_ours, read_theirs, read_result, read_base=None,
+                policy_by_path: Mapping[str, str] | None = None) -> Report:
     """Run every check over ``paths``; readers return file text for one side.
 
     A reader returns ``None`` for a side that has no such file. ``read_base`` is
@@ -217,6 +295,7 @@ def check_merge(paths, read_ours, read_theirs, read_result, read_base=None) -> R
             lost_definitions(
                 ours=read_ours(path), theirs=read_theirs(path), result=result, path=path,
                 base=read_base(path) if read_base is not None else None,
+                policy=(policy_by_path or {}).get(path),
             )
         )
     return report
