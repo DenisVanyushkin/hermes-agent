@@ -386,15 +386,28 @@ def test_supervised_wrapper_is_the_single_systemd_enforcement_root() -> None:
     script = SUPERVISED_RUNNER.read_text(encoding="utf-8")
     assert "sudo -n systemd-run --wait --pipe --uid=hermes" in script
     assert 'protected_paths=(' in script
-    assert '"${#protected_paths[@]}" -eq 6' in script
-    assert 'namespace_properties+=(--property="InaccessiblePaths=-${protected_path}")' in script
+    assert '"${#protected_paths[@]}" -eq 5' in script
+    assert 'namespace_properties+=(--property="InaccessiblePaths=${protected_path}")' in script
+    for protected in (
+        "/home/hermes/.hermes/state.db",
+        "/var/lib/job-intel/state",
+        "/home/hermes/.cache",
+        "/var/lib/browser-desktop/profiles",
+        "/home/hermes/.hermes/sessions",
+    ):
+        assert f'"{protected}"' in script
+    for retired in (
+        "/home/hermes/.hermes/job_intel/job_intel.sqlite3",
+        "/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal",
+        "/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm",
+    ):
+        assert f'"{retired}"' not in script
     assert ":/home/hermes/.hermes" not in script
     assert "state.db" in script
-    assert "job_intel.sqlite3" in script
-    assert "job_intel.sqlite3-wal" in script
-    assert "job_intel.sqlite3-shm" in script
+    assert "/var/lib/job-intel/state" in script
     assert "/home/hermes/.cache" in script
     assert "/var/lib/browser-desktop/profiles" in script
+    assert "/home/hermes/.hermes/sessions" in script
     assert "chown -R root:hermes" in INSTALLER.read_text(encoding="utf-8")
     syntax = subprocess.run(
         ["bash", "-n", str(SUPERVISED_RUNNER)],

@@ -22,19 +22,18 @@ readonly module="job_intel.product_search.gate_b_evidence_runner_v1"
 }
 readonly protected_paths=(
   "/home/hermes/.hermes/state.db"
-  "/home/hermes/.hermes/job_intel/job_intel.sqlite3"
-  "/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal"
-  "/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm"
+  "/var/lib/job-intel/state"
   "/home/hermes/.cache"
   "/var/lib/browser-desktop/profiles"
+  "/home/hermes/.hermes/sessions"
 )
-[[ "${#protected_paths[@]}" -eq 6 ]] || {
+[[ "${#protected_paths[@]}" -eq 5 ]] || {
   echo "supervised Gate B protected path set is incomplete" >&2
   exit 66
 }
 namespace_properties=()
 for protected_path in "${protected_paths[@]}"; do
-  namespace_properties+=(--property="InaccessiblePaths=-${protected_path}")
+  namespace_properties+=(--property="InaccessiblePaths=${protected_path}")
 done
 readonly namespace_properties
 [[ "$#" -ge 1 ]] || {

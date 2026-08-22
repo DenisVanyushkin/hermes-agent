@@ -169,11 +169,10 @@ def _record_isolation_probe() -> None:
         return
     protected_paths = (
         "/home/hermes/.hermes/state.db",
-        "/home/hermes/.hermes/job_intel/job_intel.sqlite3",
-        "/home/hermes/.hermes/job_intel/job_intel.sqlite3-wal",
-        "/home/hermes/.hermes/job_intel/job_intel.sqlite3-shm",
+        "/var/lib/job-intel/state",
         "/home/hermes/.cache",
         "/var/lib/browser-desktop/profiles",
+        "/home/hermes/.hermes/sessions",
     )
     observed: dict[str, dict[str, object]] = {}
     for raw_path in protected_paths:
