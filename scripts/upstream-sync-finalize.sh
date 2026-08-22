@@ -154,6 +154,7 @@ PY
     if [ -f "$STATE_DIR/pending.json" ]; then
       archived="$STATE_DIR/pending.json.applied-$(date +%Y%m%d-%H%M%S)"
       if mv -f "$STATE_DIR/pending.json" "$archived" 2>/dev/null; then
+        ARCHIVED_PENDING="$archived"
         record_decisions_from "$archived"
         cp -f "$DETAIL_LOG" "$STATE_DIR/finalize-detail.log" 2>/dev/null || true
       else
@@ -177,9 +178,9 @@ report_to_thread() {
   [ -f "$helper" ] || return 0
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  "$py" - "$helper" "$STATE_DIR" "$RESULT" "$status" "$ACTION" "$SCRATCH_FOR_REPORT" >>"$DETAIL_LOG" 2>&1 <<'PY' || echo "warning: thread report not posted (see above)" >>"$DETAIL_LOG"
+  "$py" - "$helper" "$STATE_DIR" "$RESULT" "$status" "$ACTION" "$SCRATCH_FOR_REPORT" "$ARCHIVED_PENDING" >>"$DETAIL_LOG" 2>&1 <<'PY' || echo "warning: thread report not posted (see above)" >>"$DETAIL_LOG"
 import glob, importlib.util, json, os, sys
-helper, state, result_path, status, action, scratch = sys.argv[1:7]
+helper, state, result_path, status, action, scratch, archived_pending = sys.argv[1:8]
 spec = importlib.util.spec_from_file_location("upstream_sync_slack", helper)
 slack = importlib.util.module_from_spec(spec); spec.loader.exec_module(slack)
 def load(p):
@@ -188,9 +189,18 @@ def load(p):
     except Exception:
         return {}
 pending = load(os.path.join(state, "pending.json"))
+if not pending and archived_pending:
+    # The archive this very run created. On success pending.json is renamed
+    # before the report runs, so the caller hands us the path rather than
+    # letting us re-derive it.
+    pending = load(archived_pending)
 if not pending:
-    archived = sorted(glob.glob(os.path.join(state, "pending.json.applied-*")))
-    pending = load(archived[-1]) if archived else {}
+    # Last resort: newest by mtime. NEVER by name — a hand-made archive
+    # (pending.json.applied-manual-20260724) sorts above every dated one
+    # because "m" outranks any digit, and it carries no channel, so the
+    # report would exit 0 having posted nowhere (silent since 2026-07-24).
+    archived = glob.glob(os.path.join(state, "pending.json.applied-*"))
+    pending = load(max(archived, key=os.path.getmtime)) if archived else {}
 channel = pending.get("slack_channel") or os.environ.get("HERMES_SYNC_SLACK_CHANNEL") or ""
 thread = pending.get("slack_thread_ts") or None
 if not channel:
@@ -210,6 +220,7 @@ slack.post(channel, text, thread_ts=thread)
 PY
 }
 SCRATCH_FOR_REPORT=""
+ARCHIVED_PENDING=""
 # Recording the operator's decisions used to be the LAST step of Mode B, run by
 # the agent — but its session dies with the gateway restart the smoketest
 # triggers, so on 2026-08-12 the record never ran and the memory had to be

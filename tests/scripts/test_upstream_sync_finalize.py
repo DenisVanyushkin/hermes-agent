@@ -1028,6 +1028,43 @@ class TestApplyDecisions:
         # the clone is gone on success
         assert not (state / "scratch").exists()
 
+    def test_success_report_is_not_hijacked_by_an_older_non_dated_archive(self, tmp_path, state):
+        """A stale ``applied-manual-*`` archive must not steal the thread lookup.
+
+        On success pending.json is archived BEFORE the report runs, so the report
+        recovers channel and thread from the archive. Picking that archive by name
+        sorts ``pending.json.applied-manual-20260724`` above every ``applied-2026…``
+        — ``m`` outranks any digit — and a hand-made archive carries no channel, so
+        the report exits 0 having posted nothing. Failures never hit this (their
+        pending.json is still live), which is why it stayed invisible.
+        """
+        world = self._conflicting_repo(tmp_path)
+        repo, local_head, upstream_head = world
+        self._pending(state, world)
+        (state / "pending.json.applied-manual-20260724").write_text(
+            json.dumps({"upstream_head": "deadbeef"}), encoding="utf-8"
+        )
+        scripts, _calls = _stub_scripts(tmp_path)
+        slack_cmd, slack_log = _slack_recorder(tmp_path)
+        resolver = _resolver(
+            tmp_path,
+            "import json,sys\nh=json.load(sys.stdin)\nsys.stdout.write('two\\nthree\\n')\n",
+        )
+
+        _decisions_request(state)
+        proc = _run_finalize(repo, state, scripts, extra_env={
+            "HERMES_SYNC_RESOLVER_CMD": resolver, "HERMES_SYNC_SLACK_CMD": str(slack_cmd)})
+
+        res = _result(state)
+        assert res["status"] == "ok", proc.stderr + res.get("detail", "")
+        raw = slack_log.read_text() if slack_log.exists() else ""
+        posts = [json.loads(l) for l in raw.splitlines() if l.strip()]
+        threaded = [q for q in posts if q.get("thread_ts")]
+        assert threaded, "the success report never reached the operator's thread"
+        assert threaded[-1]["channel"] == "C0TEST"
+        assert threaded[-1]["thread_ts"] == "1786.001"
+        assert "applied" in threaded[-1]["text"].lower()
+
     def test_unresolvable_hunk_fails_at_resolve_keeps_clone_and_reports(self, tmp_path, state):
         world = self._conflicting_repo(tmp_path)
         repo, local_head, upstream_head = world
