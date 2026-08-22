@@ -246,7 +246,13 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
     interpreter = artifact_root / "python-runtime/venv/bin/python"
     interpreter.parent.mkdir(parents=True, exist_ok=True)
     interpreter.write_text(
-        f'#!/usr/bin/env bash\nexec {sys.executable!s} "$@"\n',
+        f'''#!/usr/bin/env bash
+if [[ "$1" == "-c" && "$2" == *"sysconfig.get_paths()['purelib']"* ]]; then
+  printf '%s\\n' "$PYTHONHOME/lib/python3.12/site-packages"
+  exit 0
+fi
+exec {sys.executable!s} "$@"
+''',
         encoding="utf-8",
     )
     interpreter.chmod(0o755)

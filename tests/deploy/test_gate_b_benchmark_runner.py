@@ -300,30 +300,30 @@ def test_published_wrapper_runs_positive_collection_with_anchored_fake_provider(
         repo_root=ROOT,
     )
     fake_python = artifact_root / "python-runtime/venv/bin/python"
-    fake_python.write_text(
-        f"#!/usr/bin/env bash\nexec {sys.executable!s} \"$@\"\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o755)
     shutil.copytree(
         Path(sysconfig.get_paths()["stdlib"]),
         artifact_root / "python-runtime/venv/lib" / f"python{sys.version_info.major}.{sys.version_info.minor}",
         symlinks=False,
         dirs_exist_ok=True,
     )
-    # The configured purelib may be under local/.../dist-packages
-    # rather than the conventional lib/.../site-packages. Resolve the
-    # path through the same runtime helper production uses, then place the
-    # fixture shim there while preserving its manifest-bound bytes.
-    from job_intel.product_search.gate_b_runtime_v1 import _site_packages
+    # Resolve the path through the same runtime helper production uses, then
+    # prove the direct write is still inside the temporary artifact.
+    from job_intel.product_search.gate_b_runtime_v1 import (
+        _site_packages,
+        assert_artifact_destination_safe,
+    )
 
     fixture_shim = artifact_root / "python-runtime/venv/lib/python3.12/site-packages/00-pysqlite3-shim.pth"
     resolved_shim = _site_packages(
         fake_python,
         python_home=artifact_root / "python-runtime/venv",
     ) / "00-pysqlite3-shim.pth"
+    assert_artifact_destination_safe(resolved_shim)
+    fixture_shim_source = tmp_path / "fixture-shim.pth"
+    shutil.copy2(fixture_shim, fixture_shim_source)
+    assert_artifact_destination_safe(resolved_shim)
     resolved_shim.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(fixture_shim, resolved_shim)
+    shutil.copy2(fixture_shim_source, resolved_shim)
     wrapper = runtime_source / "scripts/runner.sh"
     wrapper.write_text(
         wrapper.read_text(encoding="utf-8").replace(
