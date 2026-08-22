@@ -37,7 +37,7 @@ for protected_path in "${protected_paths[@]}"; do
 done
 readonly namespace_properties
 [[ "$#" -ge 1 ]] || {
-  echo "usage: job_intel_gate_b_supervised.sh {init-run|run-supervised} ..." >&2
+  echo "usage: job_intel_gate_b_supervised.sh run-supervised ..." >&2
   exit 64
 }
 

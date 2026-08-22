@@ -1,7 +1,7 @@
 """Gate B evidence pipeline over the governed structured-call boundary.
 
-This module owns the manifest, append-only journal, sealed recording and
-decision/adjudication evidence stores, the collection runner, and the
+This module owns the manifest, foreground dispatch ledger, sealed recording
+and decision/adjudication evidence stores, the collection runner, and the
 post-collection gate evaluator. Collection publishes per-row Decision v2
 evidence; the separate evaluator produces the run-level gate decision.
 """
@@ -212,133 +212,22 @@ class JournalEntry(_StrictFrozenModel):
     conservative_cost_usd: Decimal = Field(ge=Decimal("0"))
 
 
-class AppendOnlyJournal:
-    """Durable append-only dispatch state for exactly one manifest."""
+class ForegroundDispatchLedger:
+    """Process-local dispatch ledger for the supervised run.
 
-    def __init__(self, manifest: EvidenceManifest, path: Path) -> None:
+    This deliberately has no file, reopen, recovery, or replay path.  It
+    keeps the canonical provider-record anchor and the no-duplicate/cap
+    invariants alive for one foreground process; restart durability belongs to
+    the retired unattended design and is not promised here.
+    """
+
+    def __init__(self, manifest: EvidenceManifest) -> None:
         self.manifest = manifest
-        self.path = path
         self._entries: dict[int, JournalEntry] = {}
-        self._valid_end = 0
-        self._has_incomplete_tail = False
-        if not self.path.exists():
-            raise ValueError("journal missing")
-        self._load()
-
-    @classmethod
-    def create(cls, manifest: EvidenceManifest, path: Path) -> AppendOnlyJournal:
-        """Create the first journal; never replace an existing state file."""
-        # This protects against accidental or confused-deputy replay (a
-        # rerun, stale unit, or script must inherit state). It is not a
-        # boundary against hermes: passwordless sudo means a malicious
-        # operator can still alter files, so this is an operational safety
-        # primitive only.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as exc:
-            raise ValueError("journal already exists") from exc
-        else:
-            os.close(descriptor)
-        return cls(manifest, path)
-
-    @classmethod
-    def open(cls, manifest: EvidenceManifest, path: Path) -> AppendOnlyJournal:
-        """Open only an existing journal; missing is a recovery error."""
-        if not path.exists():
-            raise ValueError("journal missing")
-        journal = cls(manifest, path)
-        journal._repair_incomplete_tail()
-        return journal
 
     def _validate_ref(self, ref: ManifestRef) -> None:
         if ref != self.manifest.row_ref(ref.ordinal):
-            raise ValueError("journal manifest reference mismatch")
-
-    def _parse_entry(self, payload: object) -> tuple[str, JournalEntry]:
-        if not isinstance(payload, dict):
-            raise ValueError("journal corrupt")
-        event = payload.get("event")
-        body = {key: value for key, value in payload.items() if key != "event"}
-        try:
-            entry = JournalEntry.model_validate(body)
-        except Exception as exc:
-            raise ValueError("journal corrupt") from exc
-        if event not in {"dispatch", "terminal"}:
-            raise ValueError("journal corrupt")
-        return str(event), entry
-
-    def _load(self) -> None:
-        payload = self.path.read_bytes()
-        entries: dict[int, JournalEntry] = {}
-        valid_end = 0
-        has_incomplete_tail = False
-        for line in payload.splitlines(keepends=True):
-            if not line.endswith(b"\n"):
-                has_incomplete_tail = True
-                break
-            try:
-                event, entry = self._parse_entry(json.loads(line))
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                raise ValueError("journal corrupt") from exc
-            self._validate_ref(entry.manifest_ref)
-            ordinal = entry.manifest_ref.ordinal
-            if event == "dispatch":
-                if (
-                    entry.state is not JournalState.DISPATCHED
-                    or ordinal in entries
-                    or entry.sequence != len(entries)
-                ):
-                    raise ValueError("journal corrupt")
-            else:
-                previous = entries.get(ordinal)
-                if (
-                    previous is None
-                    or previous.state is not JournalState.DISPATCHED
-                    or entry.sequence != previous.sequence
-                    or entry.state
-                    not in {
-                        JournalState.SUCCESS,
-                        JournalState.TERMINAL_FAILURE,
-                        JournalState.TERMINAL_UNKNOWN,
-                    }
-                    or entry.recording_sha256 is None
-                ):
-                    if previous is not None and previous == entry:
-                        valid_end += len(line)
-                        continue
-                    raise ValueError("journal corrupt")
-            entries[ordinal] = entry
-            valid_end += len(line)
-        self._entries = entries
-        self._valid_end = valid_end
-        self._has_incomplete_tail = has_incomplete_tail
-
-    def _repair_incomplete_tail(self) -> None:
-        if not self._has_incomplete_tail:
-            return
-        with self.path.open("r+b") as stream:
-            stream.truncate(self._valid_end)
-            stream.flush()
-            os.fsync(stream.fileno())
-        self._load()
-
-    def verify(self) -> None:
-        self._entries = {}
-        self._load()
-        if self._has_incomplete_tail:
-            raise ValueError("journal incomplete tail")
-
-    def _append(self, payload: dict[str, Any]) -> None:
-        encoded = _canonical_bytes(payload) + b"\n"
-        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND)
-        try:
-            written = 0
-            while written < len(encoded):
-                written += os.write(descriptor, encoded[written:])
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            raise ValueError("dispatch manifest reference mismatch")
 
     def state(self, ordinal: int) -> JournalState:
         entry = self._entries.get(ordinal)
@@ -346,10 +235,10 @@ class AppendOnlyJournal:
 
     def append_pre_dispatch(self, ref: ManifestRef) -> DispatchReceipt:
         self._validate_ref(ref)
-        if self.state(ref.ordinal) is not JournalState.PENDING:
-            raise ValueError("journal row is already claimed")
         if len(self._entries) >= self.manifest.limits.ordered_call_cap:
             raise ValueError("call_cap_exhausted")
+        if self.state(ref.ordinal) is not JournalState.PENDING:
+            raise ValueError("dispatch row is already claimed")
         conservative_cost = self.manifest.limits.per_call_maximum_usd
         reserved = sum(entry.conservative_cost_usd for entry in self._entries.values())
         if reserved + conservative_cost > self.manifest.limits.aggregate_maximum_usd:
@@ -361,7 +250,6 @@ class AppendOnlyJournal:
             state=JournalState.DISPATCHED,
             conservative_cost_usd=conservative_cost,
         )
-        self._append({"event": "dispatch", **entry.model_dump(mode="json")})
         self._entries[ref.ordinal] = entry
         return DispatchReceipt(manifest_ref=ref, sequence=sequence)
 
@@ -376,7 +264,7 @@ class AppendOnlyJournal:
         self._validate_ref(receipt.manifest_ref)
         current = self._entries.get(receipt.manifest_ref.ordinal)
         if current is None or current.state is JournalState.PENDING:
-            raise ValueError("journal terminal commit requires dispatched state")
+            raise ValueError("dispatch terminal commit requires dispatched state")
         entry = JournalEntry(
             manifest_ref=receipt.manifest_ref,
             sequence=receipt.sequence,
@@ -398,15 +286,10 @@ class AppendOnlyJournal:
         )
         if other_cost + conservative_cost_usd > self.manifest.limits.aggregate_maximum_usd:
             raise ValueError("spend_cap_exhausted")
-        self._append({"event": "terminal", **entry.model_dump(mode="json")})
         self._entries[receipt.manifest_ref.ordinal] = entry
 
     def entries(self) -> tuple[JournalEntry, ...]:
         return tuple(self._entries[index] for index in sorted(self._entries))
-
-    def snapshot(self) -> tuple[JournalEntry, ...]:
-        return self.entries()
-
 
 class RecordingRef(_StrictFrozenModel):
     manifest_ref: ManifestRef
@@ -603,31 +486,31 @@ class RecordingStore:
             raise ValueError("recording manifest reference mismatch")
         return payload
 
-    def _verify_journal_anchor(
+    def _verify_dispatch_anchor(
         self,
         ref: RecordingRef,
         manifest: EvidenceManifest,
-        terminal_entry: JournalEntry,
+        dispatch_entry: JournalEntry,
         metadata: Mapping[str, object],
     ) -> None:
-        if terminal_entry.manifest_ref != ref.manifest_ref:
-            raise ValueError("recording journal reference mismatch")
-        if terminal_entry.state not in {
+        if dispatch_entry.manifest_ref != ref.manifest_ref:
+            raise ValueError("recording dispatch reference mismatch")
+        if dispatch_entry.state not in {
             JournalState.SUCCESS,
             JournalState.TERMINAL_FAILURE,
             JournalState.TERMINAL_UNKNOWN,
         }:
-            raise ValueError("recording journal entry is not terminal")
-        if terminal_entry.recording_sha256 is None:
-            raise ValueError("recording journal anchor missing")
-        if metadata.get("provider_record_sha256") != terminal_entry.recording_sha256:
+            raise ValueError("recording dispatch entry is not terminal")
+        if dispatch_entry.recording_sha256 is None:
+            raise ValueError("recording provider anchor missing")
+        if metadata.get("provider_record_sha256") != dispatch_entry.recording_sha256:
             raise ValueError("recording provider anchor mismatch")
 
     def verify(
         self,
         ref: RecordingRef,
         manifest: EvidenceManifest,
-        terminal_entry: JournalEntry,
+        dispatch_entry: JournalEntry,
     ) -> None:
         payload = self._payload(ref)
         expected_ref = manifest.row_ref(ref.manifest_ref.ordinal)
@@ -652,7 +535,7 @@ class RecordingStore:
             raise ValueError("recording projection hash mismatch")
         if metadata.get("response_sha256") != _sha256(response_bytes):
             raise ValueError("recording response hash mismatch")
-        self._verify_journal_anchor(ref, manifest, terminal_entry, metadata)
+        self._verify_dispatch_anchor(ref, manifest, dispatch_entry, metadata)
         if TerminalOutcome(payload["outcome"]) is TerminalOutcome.TERMINAL_UNKNOWN:
             if response_bytes:
                 raise ValueError("terminal unknown must have empty response")
@@ -667,9 +550,9 @@ class RecordingStore:
         self,
         ref: RecordingRef,
         manifest: EvidenceManifest,
-        terminal_entry: JournalEntry,
+        dispatch_entry: JournalEntry,
     ) -> ReplayObservation:
-        self.verify(ref, manifest, terminal_entry)
+        self.verify(ref, manifest, dispatch_entry)
         payload = self._payload(ref)
         metadata = payload["metadata"]
         if not isinstance(metadata, dict) or any(
@@ -1396,7 +1279,7 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
     )
     state_directory = args.output.resolve()
     state_directory.mkdir(parents=True, exist_ok=True)
-    journal = AppendOnlyJournal.open(manifest, state_directory / "journal.jsonl")
+    ledger = ForegroundDispatchLedger(manifest)
     recordings = RecordingStore(state_directory / "recordings")
     decision_evidence = DecisionEvidenceStore(state_directory / "decisions")
     corpus_rows = _load_corpus_rows_file(args.corpus, manifest)
@@ -1405,7 +1288,7 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
         corpus_rows=corpus_rows,
         reviewed_allowlist=reviewed_allowlist,
         provider_factory=provider_factory,
-        journal=journal,
+        ledger=ledger,
         recordings=recordings,
         decision_evidence=decision_evidence,
         decision_policy=decision_policy,
@@ -1415,7 +1298,7 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
         authorities=authorities,
     )
     report_path = _write_measurement_report(report, state_directory)
-    if not report_path.is_file() or not journal.path.is_file():
+    if not report_path.is_file():
         raise RuntimeError("collection evidence publication incomplete")
     return 0
 
@@ -1456,22 +1339,6 @@ def _run_evaluate_run(args: argparse.Namespace) -> int:
 def _main(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gate_b_evidence_runner_v1")
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    init = subparsers.add_parser("init-run")
-    init.add_argument(
-        "--manifest",
-        type=Path,
-        default=os.environ.get("GATE_B_EVIDENCE_MANIFEST"),
-    )
-    init.add_argument(
-        "--state-directory",
-        type=Path,
-        default=os.environ.get("STATE_DIRECTORY"),
-    )
-    init.add_argument(
-        "--manifest-sha256",
-        default=os.environ.get("GATE_B_MANIFEST_SHA256"),
-    )
 
     supervised = subparsers.add_parser("run-supervised")
     supervised.add_argument("--corpus", type=Path, required=True)
@@ -1518,16 +1385,6 @@ def _main(arguments: list[str]) -> int:
         return _run_supervised_collection(args)
     if args.command == "evaluate-run":
         return _run_evaluate_run(args)
-    if args.command == "init-run":
-        if args.manifest is None or args.state_directory is None:
-            parser.error("init-run requires manifest and STATE_DIRECTORY")
-        if args.manifest_sha256 is None:
-            parser.error("init-run requires an external manifest SHA-256")
-        manifest = _load_manifest(args.manifest, args.manifest_sha256)
-        state_directory = args.state_directory.resolve()
-        state_directory.mkdir(parents=True, exist_ok=True)
-        AppendOnlyJournal.create(manifest, state_directory / "journal.jsonl")
-        return 0
     if args.command == "run-collection":
         if args.manifest is None or args.state_directory is None or args.config is None:
             parser.error(
@@ -1555,8 +1412,7 @@ def _main(arguments: list[str]) -> int:
         )
         state_directory = args.state_directory.resolve()
         state_directory.mkdir(parents=True, exist_ok=True)
-        journal_path = state_directory / "journal.jsonl"
-        journal = AppendOnlyJournal.open(manifest, journal_path)
+        ledger = ForegroundDispatchLedger(manifest)
         recordings = RecordingStore(state_directory / "recordings")
         decision_evidence = DecisionEvidenceStore(state_directory / "decisions")
         if config.corpus_rows_path is not None:
@@ -1574,7 +1430,7 @@ def _main(arguments: list[str]) -> int:
             corpus_rows=corpus_rows,
             reviewed_allowlist=reviewed_allowlist,
             provider_factory=provider_factory,
-            journal=journal,
+            ledger=ledger,
             recordings=recordings,
             decision_evidence=decision_evidence,
             decision_policy=decision_policy,
@@ -1584,7 +1440,7 @@ def _main(arguments: list[str]) -> int:
             authorities=authorities,
         )
         report_path = _write_measurement_report(report, state_directory)
-        if not report_path.is_file() or not journal.path.is_file():
+        if not report_path.is_file():
             raise RuntimeError("collection evidence publication incomplete")
         return 0
     raise AssertionError(f"unhandled command: {args.command}")
@@ -1836,124 +1692,11 @@ def _provider_dispatch_result(
     return record, provider_record_sha256, outcome, raw_response.encode("utf-8"), measured, conservative
 
 
-def _provider_record_is_missing(exc: Exception) -> bool:
-    return isinstance(exc, KeyError) or getattr(exc, "reason", None) == "recording_missing"
-
-
-def _recover_dispatched_row(
-    *,
-    manifest: EvidenceManifest,
-    provider: GovernedProvider,
-    journal: AppendOnlyJournal,
-    entry: JournalEntry,
-) -> tuple[dict[str, object], str, str, bytes, Decimal | None, Decimal]:
-    """Reconcile a durable dispatch without ever entering transport again."""
-    ref = entry.manifest_ref
-    dispatch_key = _reservation_input_hash(ref)
-    try:
-        record = _provider_record(provider, dispatch_key)
-    except Exception as exc:
-        if not _provider_record_is_missing(exc):
-            raise
-        identity = _provider_authority_identity(provider)
-        record = {
-            "input_hash": dispatch_key,
-            "provider_id": "gate_b_recovery",
-            "model_id": "gate_b_recovery",
-            **identity,
-            "raw_response_text": "",
-            "post_dispatch_outcome_v3": TerminalOutcome.TERMINAL_UNKNOWN.value,
-            "measured_cost_usd": None,
-            "conservative_cost_usd": str(manifest.limits.per_call_maximum_usd),
-            "recovery_artifact": True,
-            "recovery_reason": "dispatch_intent_without_provider_record",
-        }
-        saver = getattr(getattr(provider, "store", None), "save_exclusive", None)
-        if not callable(saver):
-            raise ValueError("provider_record_recovery_store_required")
-        saver(record)
-    _assert_provider_record_authority(manifest, record)
-    (
-        record,
-        provider_record_sha256,
-        outcome,
-        response_bytes,
-        measured_cost,
-        conservative_cost,
-    ) = _provider_dispatch_result(provider, dispatch_key, record)
-    journal.commit_terminal(
-        DispatchReceipt(manifest_ref=ref, sequence=entry.sequence),
-        TerminalOutcome(outcome),
-        provider_record_sha256,
-        measured_cost,
-        conservative_cost,
-    )
-    return (
-        record,
-        provider_record_sha256,
-        outcome,
-        response_bytes,
-        measured_cost,
-        conservative_cost,
-    )
-
-
-def _reconstruct_terminal_result(
-    *,
-    manifest: EvidenceManifest,
-    provider: GovernedProvider,
-    journal_entry: JournalEntry,
-    recordings: RecordingStore,
-    decision_evidence: DecisionEvidenceStore,
-    ref: ManifestRef,
-    row: EvidenceManifestRow,
-    projected: object,
-    reviewed_allowlist: ReviewedFragmentAllowlistV3,
-) -> CollectionRowResult:
-    dispatch_key = _reservation_input_hash(ref)
-    (
-        provider_record,
-        provider_record_sha256,
-        provider_outcome,
-        response_bytes,
-        _measured_cost,
-        _conservative_cost,
-    ) = _provider_dispatch_result(provider, dispatch_key, None)
-    if journal_entry.recording_sha256 != provider_record_sha256:
-        raise ValueError("journal provider record anchor mismatch")
-    response_payload = json.loads(response_bytes) if response_bytes else {}
-    if not isinstance(response_payload, dict):
-        raise ValueError("provider record response invalid")
-    validation_status = validate_provider_payload_v3(
-        response_payload,
-        synthesis_input=projected,
-        reviewed_allowlist=reviewed_allowlist,
-    )
-    recording_ref = recordings.find_for_manifest_ref(ref)
-    replay = recordings.replay(recording_ref, manifest, journal_entry)
-    decision_ref = decision_evidence.find_for_manifest_ref(ref)
-    decision_bytes = decision_evidence.bytes_for(decision_ref)
-    try:
-        decision = DecisionResultV2.model_validate(json.loads(decision_bytes))
-    except Exception as exc:
-        raise ValueError("decision evidence payload invalid") from exc
-    return CollectionRowResult(
-        manifest_ref=ref,
-        validation_status=validation_status,
-        recording_ref=recording_ref,
-        recording_bytes=recordings.bytes_for(recording_ref),
-        outcome=TerminalOutcome(provider_outcome),
-        decision=decision,
-        decision_ref=decision_ref,
-        decision_bytes=decision_bytes,
-    )
-
-
 def _issue_collection_capability(
     *,
     manifest: EvidenceManifest,
     provider: GovernedProvider,
-    journal: AppendOnlyJournal,
+    ledger: ForegroundDispatchLedger,
 ) -> object:
     try:
         from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
@@ -1996,7 +1739,7 @@ def _issue_collection_capability(
         ref = reservation_refs.get(dispatch_key)
         if ref is None:
             raise ValueError("reservation_manifest_ref_missing")
-        receipts[reservation_id] = journal.append_pre_dispatch(ref)
+        receipts[reservation_id] = ledger.append_pre_dispatch(ref)
 
     def reconcile(
         reservation_id: str, actual_cost: Decimal, outcome: str
@@ -2014,7 +1757,7 @@ def _issue_collection_capability(
             else Decimal(str(record["measured_cost_usd"]))
         )
         conservative = Decimal(str(record.get("conservative_cost_usd")))
-        journal.commit_terminal(
+        ledger.commit_terminal(
             receipt,
             TerminalOutcome(outcome),
             provider_record_sha256,
@@ -2043,7 +1786,7 @@ def run_collection(
     corpus_rows: Sequence[CorpusRow],
     reviewed_allowlist: ReviewedFragmentAllowlistV3 | None = None,
     provider_factory: Callable[[], GovernedProvider],
-    journal: AppendOnlyJournal | None = None,
+    ledger: ForegroundDispatchLedger | None = None,
     recordings: RecordingStore | None = None,
     decision_evidence: DecisionEvidenceStore | None = None,
     decision_policy: LoadedDecisionPolicyV2,
@@ -2069,8 +1812,8 @@ def run_collection(
         raise ValueError("collection rows are not in manifest order")
     if reviewed_allowlist is None:
         raise ValueError("reviewed_allowlist_required")
-    if journal is None or recordings is None or decision_evidence is None:
-        raise ValueError("journal_recordings_and_decision_evidence_required")
+    if ledger is None or recordings is None or decision_evidence is None:
+        raise ValueError("dispatch_ledger_recordings_and_decision_evidence_required")
     if decision_policy is None or decision_request_factory is None:
         raise ValueError("decision_policy_and_request_factory_required")
     verifier = binding_verifier or _default_binding_verifier
@@ -2085,7 +1828,7 @@ def run_collection(
     provider = provider_factory()
     _assert_provider_authority(manifest, provider)
     capability = _issue_collection_capability(
-        manifest=manifest, provider=provider, journal=journal
+        manifest=manifest, provider=provider, ledger=ledger
     )
     results: list[CollectionRowResult] = []
     for corpus_row in rows:
@@ -2106,75 +1849,20 @@ def run_collection(
             raise ValueError("provider input hash does not match manifest row")
         ref = manifest.row_ref(corpus_row.ordinal)
         dispatch_input_hash = _reservation_input_hash(ref)
-        current_state = journal.state(ref.ordinal)
-        if current_state in {
-            JournalState.SUCCESS,
-            JournalState.TERMINAL_FAILURE,
-            JournalState.TERMINAL_UNKNOWN,
-        }:
-            terminal_entry = next(
-                (
-                    entry
-                    for entry in journal.entries()
-                    if entry.manifest_ref.ordinal == ref.ordinal
-                ),
-                None,
-            )
-            if terminal_entry is None:
-                raise ValueError("journal terminal entry missing")
-            results.append(
-                _reconstruct_terminal_result(
-                    manifest=manifest,
-                    provider=provider,
-                    journal_entry=terminal_entry,
-                    recordings=recordings,
-                    decision_evidence=decision_evidence,
-                    ref=ref,
-                    row=row,
-                    projected=projected,
-                    reviewed_allowlist=reviewed_allowlist,
-                )
-            )
-            continue
-        if current_state is JournalState.DISPATCHED:
-            terminal_entry = next(
-                (
-                    entry
-                    for entry in journal.entries()
-                    if entry.manifest_ref.ordinal == ref.ordinal
-                ),
-                None,
-            )
-            if terminal_entry is None:
-                raise ValueError("journal dispatched entry missing")
-            (
-                provider_record,
-                provider_record_sha256,
-                provider_outcome,
-                response_bytes,
-                measured_cost,
-                conservative_cost,
-            ) = _recover_dispatched_row(
-                manifest=manifest,
-                provider=provider,
-                journal=journal,
-                entry=terminal_entry,
-            )
-        else:
-            dispatch_result = provider.dispatch(
-                request_payload,
-                input_hash=dispatch_input_hash,
-                capability=capability,
-            )
-            (
-                provider_record,
-                provider_record_sha256,
-                provider_outcome,
-                response_bytes,
-                measured_cost,
-                conservative_cost,
-            ) = _provider_dispatch_result(provider, dispatch_input_hash, dispatch_result)
-            _assert_provider_record_authority(manifest, provider_record)
+        dispatch_result = provider.dispatch(
+            request_payload,
+            input_hash=dispatch_input_hash,
+            capability=capability,
+        )
+        (
+            provider_record,
+            provider_record_sha256,
+            provider_outcome,
+            response_bytes,
+            measured_cost,
+            conservative_cost,
+        ) = _provider_dispatch_result(provider, dispatch_input_hash, dispatch_result)
+        _assert_provider_record_authority(manifest, provider_record)
         outcome = TerminalOutcome(provider_outcome)
         response_payload = json.loads(response_bytes) if response_bytes else {}
         canonical_response_bytes = _canonical_bytes(response_payload)
@@ -2228,17 +1916,12 @@ def run_collection(
                 },
             )
         )
-        terminal_entry = next(
-            (
-                entry
-                for entry in journal.entries()
-                if entry.manifest_ref.ordinal == ref.ordinal
-            ),
-            None,
+        dispatch_entry = next(
+            entry
+            for entry in ledger.entries()
+            if entry.manifest_ref.ordinal == ref.ordinal
         )
-        if terminal_entry is None:
-            raise ValueError("recording journal entry missing")
-        recordings.verify(recording_ref, manifest, terminal_entry)
+        recordings.verify(recording_ref, manifest, dispatch_entry)
         results.append(
             CollectionRowResult(
                 manifest_ref=ref,
@@ -2287,7 +1970,7 @@ def run_one_row(
     raw: Mapping[str, object],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
     provider: GovernedProvider,
-    journal: AppendOnlyJournal,
+    ledger: ForegroundDispatchLedger,
     recordings: RecordingStore,
     decision_evidence: DecisionEvidenceStore,
     decision_request_factory: Callable[[dict[str, object], ManifestRef], DecisionRequestV2],
@@ -2306,7 +1989,7 @@ def run_one_row(
     ref = manifest.row_ref(ordinal)
 
     # This append/fsync is intentionally before the fake transport call.
-    receipt = journal.append_pre_dispatch(ref)
+    receipt = ledger.append_pre_dispatch(ref)
     response_payload = dict(provider.dispatch(request_payload))
     response_bytes = _canonical_bytes(response_payload)
     validation_status = validate_provider_payload_v3(
@@ -2336,7 +2019,7 @@ def run_one_row(
             },
         ),
     )
-    journal.commit_terminal(
+    ledger.commit_terminal(
         receipt,
         outcome,
         provider_record_sha256,

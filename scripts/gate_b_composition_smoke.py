@@ -148,15 +148,6 @@ def main() -> int:
         manifest_sha = bind_manifest_runtime(
             manifest_path, install_root / "runtime-manifest.json"
         )
-        old_wrapper = install_root / "runtime/scripts/job_intel_gate_b_benchmark.sh"
-        old_wrapper_copy = install_root / "runtime/scripts/.composition-smoke-old.sh"
-        old_wrapper_copy.write_text(
-            old_wrapper.read_text(encoding="utf-8").replace(
-                "/var/lib/job-intel-gate-b-artifacts", str(install_parent)
-            ),
-            encoding="utf-8",
-        )
-        old_wrapper_copy.chmod(0o755)
         supervised_wrapper = install_root / "runtime/scripts/job_intel_gate_b_supervised.sh"
         supervised_wrapper_copy = install_root / "runtime/scripts/.composition-smoke-supervised.sh"
         supervised_wrapper_copy.write_text(
@@ -168,14 +159,6 @@ def main() -> int:
         supervised_wrapper_copy.chmod(0o755)
         state = root / "state"
         state.mkdir()
-        init_args = [
-            "--manifest",
-            str(manifest_path),
-            "--manifest-sha256",
-            manifest_sha,
-            "--state-directory",
-            str(state),
-        ]
         target_args = [
             "--manifest",
             str(manifest_path),
@@ -184,18 +167,8 @@ def main() -> int:
             "--output",
             str(state),
         ]
-        init_started = time.perf_counter()
-        init_attempt = subprocess.run(
-            [
-                str(supervised_wrapper_copy),
-                "init-run",
-                *init_args,
-            ],
-            cwd=install_root / "runtime",
-            text=True,
-            capture_output=True,
-        )
-        init_seconds = time.perf_counter() - init_started
+        init_attempt = None
+        init_seconds = 0.0
         target_attempt = None
         target_seconds = 0.0
         evaluation_attempt = None
@@ -206,9 +179,8 @@ def main() -> int:
             **os.environ,
             "GATE_B_SMOKE_ISOLATION_PROBE": str(probe_path),
         }
-        if init_attempt.returncode == 0:
-            target_started = time.perf_counter()
-            target_attempt = subprocess.run(
+        target_started = time.perf_counter()
+        target_attempt = subprocess.run(
                 [
                     str(supervised_wrapper_copy),
                     "run-supervised",
@@ -230,12 +202,8 @@ def main() -> int:
                 env=target_env,
                 text=True,
                 capture_output=True,
-            )
-            target_seconds = time.perf_counter() - target_started
-        if init_attempt.returncode != 0:
-            raise RuntimeError(
-                f"supervised init-run failed: {init_attempt.stderr.strip()}"
-            )
+        )
+        target_seconds = time.perf_counter() - target_started
         if target_attempt is None or target_attempt.returncode != 0:
             detail = "no target attempt"
             if target_attempt is not None:
@@ -339,25 +307,6 @@ def main() -> int:
                 raise RuntimeError(isolation_probe_error)
         else:
             isolation_probe = {}
-        old_env = os.environ.copy()
-        old_env.pop("GATE_B_COLLECTION_CONFIG", None)
-        old_env.pop("GATE_B_EVIDENCE_MANIFEST", None)
-        old_env.pop("GATE_B_MANIFEST_SHA256", None)
-        old_env["STATE_DIRECTORY"] = str(state)
-        old_started = time.perf_counter()
-        old_attempt = subprocess.run(
-            [str(old_wrapper_copy), "run-description-evidence"],
-            cwd=install_root / "runtime",
-            env=old_env,
-            text=True,
-            capture_output=True,
-        )
-        old_seconds = time.perf_counter() - old_started
-        old_expected = "requires config, manifest and STATE_DIRECTORY"
-        if old_attempt.returncode != 2 or old_expected not in old_attempt.stderr:
-            raise RuntimeError(
-                "old unit wrapper was not inert: expected exit 2 input validation"
-            )
         first_stop = "gate decision publication"
         report = {
             "head": run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip(),
@@ -366,14 +315,13 @@ def main() -> int:
             "init_attempt_seconds": round(init_seconds, 3),
             "target_attempt_seconds": round(target_seconds, 3),
             "evaluation_attempt_seconds": round(evaluation_seconds, 3),
-            "old_unit_attempt_seconds": round(old_seconds, 3),
             "harness_lines": len(Path(__file__).read_text(encoding="utf-8").splitlines()),
             "artifact_tree_sha256": artifact_hash,
             "manifest_sha256": manifest_sha,
             "provider_fixture": str(config_path),
-            "init_returncode": init_attempt.returncode,
-            "init_stdout": init_attempt.stdout,
-            "init_stderr": init_attempt.stderr,
+            "init_returncode": None,
+            "init_stdout": "",
+            "init_stderr": "",
             "target_returncode": None if target_attempt is None else target_attempt.returncode,
             "target_stdout": "" if target_attempt is None else target_attempt.stdout,
             "target_stderr": "" if target_attempt is None else target_attempt.stderr,
@@ -388,9 +336,6 @@ def main() -> int:
             ),
             "isolation_probe": isolation_probe,
             "isolation_probe_error": isolation_probe_error,
-            "old_unit_returncode": old_attempt.returncode,
-            "old_unit_stdout": old_attempt.stdout,
-            "old_unit_stderr": old_attempt.stderr,
             "first_stop": first_stop,
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")

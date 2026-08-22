@@ -9,7 +9,7 @@ import pytest
 
 from tests.product_search.test_gate_b_evidence_skeleton import _manifest
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
-    AppendOnlyJournal,
+    ForegroundDispatchLedger,
     EvidenceManifest,
     JournalEntry,
     JournalState,
@@ -22,19 +22,18 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 
 def _terminal_entry(
     manifest: EvidenceManifest,
-    path: Path,
     outcome: TerminalOutcome,
 ) -> JournalEntry:
-    journal = AppendOnlyJournal.create(manifest, path)
-    receipt = journal.append_pre_dispatch(manifest.row_ref(0))
-    journal.commit_terminal(
+    ledger = ForegroundDispatchLedger(manifest)
+    receipt = ledger.append_pre_dispatch(manifest.row_ref(0))
+    ledger.commit_terminal(
         receipt,
         outcome,
         recording_sha256="a" * 64,
         measured_cost_usd=None,
         conservative_cost_usd=Decimal("0.01"),
     )
-    entry = journal.entries()[0]
+    entry = ledger.entries()[0]
     assert entry.state in {
         JournalState.SUCCESS,
         JournalState.TERMINAL_UNKNOWN,
@@ -65,9 +64,7 @@ def test_terminal_unknown_replays_cost_and_manifest_bound_metadata(tmp_path: Pat
             },
         )
     )
-    terminal_entry = _terminal_entry(
-        manifest, tmp_path / "journal.jsonl", TerminalOutcome.TERMINAL_UNKNOWN
-    )
+    terminal_entry = _terminal_entry(manifest, TerminalOutcome.TERMINAL_UNKNOWN)
     replay = store.replay(recording_ref, manifest, terminal_entry)
     assert replay.response_bytes == b""
     assert replay.outcome is TerminalOutcome.TERMINAL_UNKNOWN
@@ -103,9 +100,7 @@ def test_mutated_recording_fails_closed_against_manifest_and_internal_hashes(
     payload = path.read_bytes().replace(b"cmVzcG9uc2U=", b"dGFtcGVyZWQ=")
     path.write_bytes(payload)
     with pytest.raises(ValueError, match="recording bytes do not match"):
-        terminal_entry = _terminal_entry(
-            manifest, tmp_path / "journal.jsonl", TerminalOutcome.SUCCESS
-        )
+        terminal_entry = _terminal_entry(manifest, TerminalOutcome.SUCCESS)
         store.verify(recording_ref, manifest, terminal_entry)
 
 
@@ -145,13 +140,11 @@ def test_rehashed_refiled_recording_is_refused_by_replay_manifest_binding(
         recording_sha256=mutated_hash,
     )
     with pytest.raises(ValueError, match="recording projection hash mismatch"):
-        terminal_entry = _terminal_entry(
-            manifest, tmp_path / "journal.jsonl", TerminalOutcome.SUCCESS
-        )
+        terminal_entry = _terminal_entry(manifest, TerminalOutcome.SUCCESS)
         store.replay(forged_ref, manifest, terminal_entry)
 
 
-def test_recording_anchor_requires_terminal_journal_entry(tmp_path: Path) -> None:
+def test_recording_anchor_requires_terminal_dispatch_entry(tmp_path: Path) -> None:
     manifest = _manifest(
         input_sha256=sha256(b"request").hexdigest(),
         projection_sha256="2" * 64,
@@ -173,14 +166,12 @@ def test_recording_anchor_requires_terminal_journal_entry(tmp_path: Path) -> Non
             },
         )
     )
-    journal = AppendOnlyJournal.create(manifest, tmp_path / "journal.jsonl")
-    journal.append_pre_dispatch(ref)
-    with pytest.raises(ValueError, match="recording journal entry is not terminal"):
-        store.verify(recording_ref, manifest, journal.entries()[0])
+    ledger = ForegroundDispatchLedger(manifest)
+    ledger.append_pre_dispatch(ref)
+    with pytest.raises(ValueError, match="recording dispatch entry is not terminal"):
+        store.verify(recording_ref, manifest, ledger.entries()[0])
 
-    terminal_entry = _terminal_entry(
-        manifest, tmp_path / "recovered-journal.jsonl", TerminalOutcome.SUCCESS
-    )
+    terminal_entry = _terminal_entry(manifest, TerminalOutcome.SUCCESS)
     payload = json.loads(store._path(recording_ref.recording_sha256).read_bytes())
     payload["metadata"]["provider_record_sha256"] = "b" * 64
     mutated = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

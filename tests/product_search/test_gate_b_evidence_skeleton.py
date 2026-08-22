@@ -33,7 +33,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
     AdjudicationSet,
     AdjudicationVerdict,
-    AppendOnlyJournal,
+    ForegroundDispatchLedger,
     AuthorityIdentity,
     DecisionEvidenceStore,
     EvidenceManifest,
@@ -44,6 +44,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     MeasurementReport,
     RecordingStore,
     RuntimeIdentity,
+    TerminalOutcome,
     run_one_row,
 )
 
@@ -181,6 +182,42 @@ def _manifest(*, input_sha256: str, projection_sha256: str, raw_sha256: str) -> 
     return EvidenceManifest.model_validate(payload)
 
 
+def test_foreground_ledger_refuses_the_forty_ninth_dispatch() -> None:
+    manifest = _manifest(
+        input_sha256=_sha256_bytes(b"request"),
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    ledger = ForegroundDispatchLedger(manifest)
+    for ordinal in range(48):
+        receipt = ledger.append_pre_dispatch(manifest.row_ref(ordinal))
+        ledger.commit_terminal(
+            receipt,
+            TerminalOutcome.SUCCESS,
+            recording_sha256="a" * 64,
+            measured_cost_usd=Decimal("0"),
+            conservative_cost_usd=Decimal("0.01"),
+        )
+
+    with pytest.raises(ValueError, match="call_cap_exhausted"):
+        ledger.append_pre_dispatch(manifest.row_ref(0))
+
+
+def test_foreground_ledger_refuses_dispatch_past_spend_ceiling() -> None:
+    manifest = _manifest(
+        input_sha256=_sha256_bytes(b"request"),
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    object.__setattr__(manifest.limits, "aggregate_maximum_usd", Decimal("0.47"))
+    ledger = ForegroundDispatchLedger(manifest)
+    for ordinal in range(47):
+        ledger.append_pre_dispatch(manifest.row_ref(ordinal))
+
+    with pytest.raises(ValueError, match="spend_cap_exhausted"):
+        ledger.append_pre_dispatch(manifest.row_ref(47))
+
+
 def _decision_result(payload: dict[str, object], input_sha256: str) -> object:
     claims = tuple(EvidenceClaimV1.model_validate(item) for item in payload["claims"])
     output_payload = {
@@ -250,7 +287,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         raw_sha256=candidates.vacancy_artifact_sha256,
     )
 
-    journal = AppendOnlyJournal.create(manifest, tmp_path / "journal.jsonl")
+    ledger = ForegroundDispatchLedger(manifest)
     recordings = RecordingStore(tmp_path / "recordings")
     decision_evidence = DecisionEvidenceStore(tmp_path / "decisions")
     calls: list[dict[str, object]] = []
@@ -259,7 +296,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         provider_record_sha256 = "a" * 64
 
         def dispatch(self, payload: dict[str, object]) -> dict[str, object]:
-            assert journal.state(0).value == "dispatched"
+            assert ledger.state(0).value == "dispatched"
             calls.append(payload)
             return _provider_payload(projected)
 
@@ -270,7 +307,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         raw=raw,
         reviewed_allowlist=allowlist,
         provider=FakeGovernedProvider(),
-        journal=journal,
+        ledger=ledger,
         recordings=recordings,
         decision_evidence=decision_evidence,
         decision_request_factory=lambda payload, row: _decision_result(
@@ -285,9 +322,9 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     assert result.decision_ref.manifest_ref == result.manifest_ref
     assert result.decision_ref.decision_sha256 == _sha256_bytes(result.decision_bytes)
     assert decision_evidence.bytes_for(result.decision_ref) == result.decision_bytes
-    assert journal.state(0).value == "success"
+    assert ledger.state(0).value == "success"
 
-    replay = recordings.replay(result.recording_ref, manifest, journal.entries()[0])
+    replay = recordings.replay(result.recording_ref, manifest, ledger.entries()[0])
     assert replay.manifest_ref == result.manifest_ref
     assert replay.request_bytes == _canonical_bytes(projected.provider_payload())
     assert replay.response_bytes == _canonical_bytes(_provider_payload(projected))
