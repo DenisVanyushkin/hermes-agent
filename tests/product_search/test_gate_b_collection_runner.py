@@ -15,6 +15,8 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     DecisionEvidenceRef,
     DecisionEvidenceStore,
     EvidenceManifestRow,
+    JournalEntry,
+    JournalState,
     ManifestRef,
     RecordingRef,
     TerminalOutcome,
@@ -113,6 +115,16 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     journal = Mock()
     journal.append_pre_dispatch.return_value = DispatchReceipt(
         manifest_ref=ref, sequence=0
+    )
+    journal.entries.return_value = (
+        JournalEntry(
+            manifest_ref=ref,
+            sequence=0,
+            state=JournalState.SUCCESS,
+            recording_sha256="a" * 64,
+            measured_cost_usd=Decimal("0"),
+            conservative_cost_usd=Decimal("0.01"),
+        ),
     )
     recordings = Mock()
     recording_ref = RecordingRef(manifest_ref=ref, recording_sha256="5" * 64)
@@ -333,6 +345,17 @@ def test_reservation_callbacks_bind_duplicate_inputs_to_their_ordinal() -> None:
     journal.append_pre_dispatch.side_effect = lambda ref: DispatchReceipt(
         manifest_ref=ref, sequence=ref.ordinal
     )
+    journal.entries.return_value = tuple(
+        JournalEntry(
+            manifest_ref=refs[ordinal],
+            sequence=ordinal,
+            state=JournalState.SUCCESS,
+            recording_sha256="a" * 64,
+            measured_cost_usd=Decimal("0"),
+            conservative_cost_usd=Decimal("0.01"),
+        )
+        for ordinal in (0, 1)
+    )
     capability = runner._issue_collection_capability(
         manifest=manifest, provider=provider, journal=journal
     )
@@ -445,6 +468,17 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
     journal.append_pre_dispatch.side_effect = lambda ref: DispatchReceipt(
         manifest_ref=ref, sequence=ref.ordinal
     )
+    journal.entries.return_value = tuple(
+        JournalEntry(
+            manifest_ref=refs[ordinal],
+            sequence=ordinal,
+            state=JournalState.SUCCESS,
+            recording_sha256="a" * 64,
+            measured_cost_usd=Decimal("0"),
+            conservative_cost_usd=Decimal("0.01"),
+        )
+        for ordinal in (0, 1)
+    )
     recordings = Mock()
     recordings.save_exclusive.side_effect = lambda recording: RecordingRef(
         manifest_ref=recording.manifest_ref,
@@ -506,6 +540,148 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
     ]
     assert journal.commit_terminal.call_count == 2
     assert [result.manifest_ref for result in report.rows] == [refs[0], refs[1]]
+
+
+def test_recovery_reconciles_existing_provider_record_without_dispatch() -> None:
+    input_hash = "1" * 64
+    ref = ManifestRef(
+        run_id="gate-b-evidence-v1-0123456789abcdef",
+        manifest_sha256="4" * 64,
+        ordinal=0,
+        input_sha256=input_hash,
+        projection_sha256="2" * 64,
+    )
+    row = SimpleNamespace(ordinal=0)
+    manifest = SimpleNamespace(
+        rows=(row,),
+        limits=SimpleNamespace(per_call_maximum_usd=Decimal("0.01")),
+        row_ref=lambda ordinal: ref,
+        authorities=SimpleNamespace(
+            pricing_sha256="q",
+            model_sha256="m",
+            prompt_sha256="p",
+            response_schema_sha256="s",
+            source_authority_sha256s={"provider": "v"},
+        ),
+    )
+    dispatch_key = runner._reservation_input_hash(ref)
+    record = {
+        "provider_id": "provider",
+        "model_id": "model",
+        "provider_sha256": "v",
+        "model_sha256": "m",
+        "prompt_sha256": "p",
+        "response_schema_sha256": "s",
+        "pricing_sha256": "q",
+        "raw_response_text": "{}",
+        "post_dispatch_outcome_v3": "success",
+        "measured_cost_usd": "0",
+        "conservative_cost_usd": "0.01",
+    }
+    provider = SimpleNamespace(
+        store=SimpleNamespace(load=lambda key: record),
+        authority_identity={
+            "provider_sha256": "v",
+            "model_sha256": "m",
+            "prompt_sha256": "p",
+            "response_schema_sha256": "s",
+            "pricing_sha256": "q",
+        },
+    )
+    journal = Mock()
+    entry = JournalEntry(
+        manifest_ref=ref,
+        sequence=0,
+        state=JournalState.DISPATCHED,
+        recording_sha256=None,
+        measured_cost_usd=None,
+        conservative_cost_usd=Decimal("0.01"),
+    )
+
+    recovered = runner._recover_dispatched_row(
+        manifest=manifest,
+        provider=provider,
+        journal=journal,
+        entry=entry,
+    )
+
+    assert recovered[2] == "success"
+    assert recovered[3] == b"{}"
+    assert journal.commit_terminal.call_args.args[1] is TerminalOutcome.SUCCESS
+    assert dispatch_key == runner._reservation_input_hash(ref)
+
+
+def test_recovery_publishes_explicit_unknown_record_when_provider_record_missing() -> None:
+    input_hash = "1" * 64
+    ref = ManifestRef(
+        run_id="gate-b-evidence-v1-0123456789abcdef",
+        manifest_sha256="4" * 64,
+        ordinal=0,
+        input_sha256=input_hash,
+        projection_sha256="2" * 64,
+    )
+    manifest = SimpleNamespace(
+        rows=(SimpleNamespace(ordinal=0),),
+        limits=SimpleNamespace(per_call_maximum_usd=Decimal("0.01")),
+        row_ref=lambda ordinal: ref,
+        authorities=SimpleNamespace(
+            pricing_sha256="q",
+            model_sha256="m",
+            prompt_sha256="p",
+            response_schema_sha256="s",
+            source_authority_sha256s={"provider": "v"},
+        ),
+    )
+
+    class Store:
+        def __init__(self) -> None:
+            self.records: dict[str, dict[str, object]] = {}
+
+        def load(self, key: str) -> dict[str, object]:
+            if key not in self.records:
+                raise KeyError(key)
+            return self.records[key]
+
+        def save_exclusive(self, record: dict[str, object]) -> None:
+            self.records[str(record["input_hash"])] = record
+
+    store = Store()
+    provider = SimpleNamespace(
+        store=store,
+        authority_identity={
+            "provider_sha256": "v",
+            "model_sha256": "m",
+            "prompt_sha256": "p",
+            "response_schema_sha256": "s",
+            "pricing_sha256": "q",
+        },
+    )
+    journal = Mock()
+    entry = JournalEntry(
+        manifest_ref=ref,
+        sequence=0,
+        state=JournalState.DISPATCHED,
+        recording_sha256=None,
+        measured_cost_usd=None,
+        conservative_cost_usd=Decimal("0.01"),
+    )
+
+    recovered = runner._recover_dispatched_row(
+        manifest=manifest,
+        provider=provider,
+        journal=journal,
+        entry=entry,
+    )
+
+    assert recovered[2] == "terminal_unknown"
+    assert recovered[3] == b""
+    assert recovered[4] is None
+    assert recovered[5] == Decimal("0.01")
+    assert next(iter(store.records.values()))["recovery_artifact"] is True
+    assert (
+        journal.commit_terminal.call_args.args[1]
+        is TerminalOutcome.TERMINAL_UNKNOWN
+    )
 
 
 def test_provider_authority_drift_fails_before_dispatch() -> None:

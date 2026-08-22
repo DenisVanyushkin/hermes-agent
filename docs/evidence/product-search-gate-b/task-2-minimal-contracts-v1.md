@@ -132,10 +132,15 @@ Journal.verify() -> None
 
 `create` is only for first publication and fails if the path already
 exists. `open` is only for an existing journal and fails if the path is absent;
-it never initializes, truncates, or replaces state. A missing journal therefore
-requires the explicit offline recovery operation and can never reset the cap.
+it never initializes or replaces state. If a torn trailing record is present,
+`open` may explicitly truncate only that incomplete tail after parsing it;
+`verify` parses without writing and reports the incomplete tail. A missing
+journal therefore fails the run entry point; calling `create` on that path
+would intentionally start a fresh cap and is not an implicit recovery path.
 This is an operational defense against accidental or confused-deputy replay,
 not a tamper boundary against the hermes user, who has passwordless sudo.
+The deployed `run-collection` entry point has no create switch; only the
+separate `init-run` provisioning command may call `Journal.create`.
 
 `append_pre_dispatch` must fsync the `DISPATCHED` intent before entering the
 provider transport. It is the durable point after which a crash is ambiguous
@@ -143,11 +148,20 @@ and no implicit retry is allowed. `commit_terminal` is idempotent only for the
 same reference, outcome, recording hash, and cost; a conflict is fatal. A
 terminal commit is permitted only after the recording is sealed and verified.
 
+Recovery distinguishes two post-dispatch windows. If a canonical provider
+record is present, recovery loads and verifies it, then reconciles its actual
+terminal outcome and cost without a second provider call. If no provider
+record exists, recovery writes a self-describing provider-runtime recovery
+record stating only that dispatch was durably intended and no transport record
+was found; it anchors that record and commits `TERMINAL_UNKNOWN` at the
+conservative maximum. The recovery artifact is not evidence that transport
+occurred and must never be interpreted as one.
+
 The only row states are `PENDING`, `DISPATCHED`, `SUCCESS`,
 `TERMINAL_FAILURE`, and `TERMINAL_UNKNOWN`. `DISPATCHED` and
-`TERMINAL_UNKNOWN` never transition back to `PENDING`. Recovery is an explicit,
-offline operation outside this interface; opening a journal cannot reinitialize
-or reset it. The journal enforces the manifest's exact call/spend limits and
+`TERMINAL_UNKNOWN` never transition back to `PENDING`. Recovery is an explicit
+branch of the run over existing journal state; opening a journal cannot
+reinitialize or reset it. The journal enforces the manifest's exact call/spend limits and
 records conservative maximum cost for ambiguous post-dispatch outcomes.
 
 `JournalEntry` always embeds `ManifestRef`, state, an event sequence, recording
@@ -159,15 +173,27 @@ event without the manifest run/hash/ordinal/input/projection tuple is invalid.
 ```text
 RecordingStore.save_exclusive(record: SealedRecording) -> RecordingRef
 RecordingStore.load(ref: RecordingRef) -> SealedRecording
-RecordingStore.verify(ref: RecordingRef, manifest: EvidenceManifest) -> None
-RecordingStore.replay(ref: RecordingRef) -> ReplayObservation
+RecordingStore.verify(
+    ref: RecordingRef,
+    manifest: EvidenceManifest,
+    terminal_entry: JournalEntry,
+) -> None
+RecordingStore.replay(
+    ref: RecordingRef,
+    manifest: EvidenceManifest,
+    terminal_entry: JournalEntry,
+) -> ReplayObservation
 ```
 
 `SealedRecording` contains the shared `ManifestRef`, `recording_sha256`, the
 canonical request bytes, response bytes (or an explicit empty response for a
 terminal unknown), response/schema/model/prompt hashes, normalized usage and
 cost, latency, terminal outcome, and sanitized failure diagnostics. Its hash is
-over the canonical sealed bytes. `save_exclusive` is create-once: an existing
+over the canonical sealed bytes. The journal's terminal entry is the external
+anchor for the canonical provider-runtime record; the derived recording must
+carry the same provider-record hash in metadata. Verification rejects a
+missing/non-terminal entry, a mismatched reference, or a provider-record hash
+that is not the journal anchor. `save_exclusive` is create-once: an existing
 hash with different bytes is an error, never an overwrite or delete/recreate.
 
 `verify` checks all manifest and row hashes, schema/model/prompt identity,

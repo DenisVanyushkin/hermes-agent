@@ -316,7 +316,6 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
         "provider_factory": "gate_b_cli_smoke_fixture:provider_factory",
         "decision_request_factory": "gate_b_cli_smoke_fixture:decision_request_factory",
         "authority_paths": {key: str(path) for key, path in authority_paths.items()},
-        "journal_mode": "create",
     }
     config_path = root / "collection-config.json"
     config_path.write_bytes(_canonical(config))

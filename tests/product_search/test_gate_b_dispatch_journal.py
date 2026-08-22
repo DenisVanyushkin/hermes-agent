@@ -97,6 +97,24 @@ def test_sigkill_partial_tail_is_truncated_without_resetting_state(tmp_path: Pat
     assert path.read_bytes() == valid_bytes
 
 
+def test_verify_reports_partial_tail_without_mutating_the_journal(tmp_path: Path) -> None:
+    manifest = _manifest(
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    path = tmp_path / "dispatch.jsonl"
+    journal = AppendOnlyJournal.create(manifest, path)
+    journal.append_pre_dispatch(manifest.row_ref(0))
+    valid_bytes = path.read_bytes()
+    path.write_bytes(valid_bytes + b'{"event":"terminal"')
+
+    with pytest.raises(ValueError, match="journal incomplete tail"):
+        journal.verify()
+
+    assert path.read_bytes() == valid_bytes + b'{"event":"terminal"'
+
+
 def test_existing_corrupt_journal_is_not_reinitialized(tmp_path: Path) -> None:
     manifest = _manifest(
         input_sha256="1" * 64,

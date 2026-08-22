@@ -251,6 +251,8 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     calls: list[dict[str, object]] = []
 
     class FakeGovernedProvider:
+        provider_record_sha256 = "a" * 64
+
         def dispatch(self, payload: dict[str, object]) -> dict[str, object]:
             assert journal.state(0).value == "dispatched"
             calls.append(payload)
@@ -278,7 +280,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     assert result.decision_ref.decision_sha256 == _sha256_bytes(result.decision_bytes)
     assert journal.state(0).value == "success"
 
-    replay = recordings.replay(result.recording_ref, manifest)
+    replay = recordings.replay(result.recording_ref, manifest, journal.entries()[0])
     assert replay.manifest_ref == result.manifest_ref
     assert replay.request_bytes == _canonical_bytes(projected.provider_payload())
     assert replay.response_bytes == _canonical_bytes(_provider_payload(projected))

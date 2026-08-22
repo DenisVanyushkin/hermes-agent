@@ -319,6 +319,28 @@ def test_published_wrapper_runs_positive_collection_with_anchored_fake_provider(
     )
     state = tmp_path / "state"
     state.mkdir()
+    init = subprocess.run(
+        [
+            str(fake_python),
+            "-m",
+            "job_intel.product_search.gate_b_evidence_runner_v1",
+            "init-run",
+            "--manifest",
+            str(manifest_path),
+            "--state-directory",
+            str(state),
+            "--manifest-sha256",
+            manifest_sha256,
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(runtime_source),
+            "STATE_DIRECTORY": str(state),
+        },
+        text=True,
+        capture_output=True,
+    )
+    assert init.returncode == 0, init.stderr
 
     result = subprocess.run(
         ["bash", str(wrapper), "run-description-evidence"],
