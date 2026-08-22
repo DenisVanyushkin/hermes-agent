@@ -29,6 +29,31 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 from job_intel.product_search.decision_v2 import DecisionResultV2, DecisionRunStatus
 
 
+def _bound_request(payload: dict[str, object], ref: ManifestRef) -> object:
+    claims = payload.get("claims", [])
+    if not isinstance(claims, list):
+        claims = []
+    output_sha256 = runner._sha256(
+        runner._canonical_bytes(
+            {
+                "schema_version": "1.0.0",
+                "claims": claims,
+                "conflicts": [],
+                "question_candidates": [],
+            }
+        )
+    )
+    metadata = SimpleNamespace(
+        input_sha256=ref.input_sha256,
+        output_sha256=output_sha256,
+    )
+    references = SimpleNamespace(
+        provider_input_sha256=ref.input_sha256,
+        provider_output_sha256=output_sha256,
+    )
+    return SimpleNamespace(references=references, synthesis=SimpleNamespace(metadata=metadata))
+
+
 def test_decision_evidence_store_namespaces_identical_bytes_by_manifest_ref(
     tmp_path: Path,
 ) -> None:
@@ -203,7 +228,7 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
         recordings=recordings,
         decision_evidence=decision_store,
         decision_policy=pinned_policy,
-        decision_request_factory=lambda payload, row: Mock(),
+        decision_request_factory=_bound_request,
         source_artifact=Mock(),
         runtime=Mock(),
         authorities=Mock(),
@@ -558,7 +583,7 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         recordings=recordings,
         decision_evidence=decision_store,
         decision_policy=Mock(),
-        decision_request_factory=lambda payload, ref: Mock(),
+        decision_request_factory=_bound_request,
         source_artifact=Mock(),
         runtime=Mock(),
         authorities=Mock(),

@@ -894,6 +894,9 @@ class GateEvaluator:
             update={
                 "audited_ordinals": adjudication.audited_ordinals,
                 "adjudication_set_sha256": adjudication.adjudication_sha256,
+                "adjudicated_count": adjudication.audited_count,
+                "adjudication_denominator": adjudication.denominator,
+                "adjudicated_correct": adjudication.correct_count,
             }
         )
         return GateEvaluationReport(
@@ -915,6 +918,15 @@ class GateEvaluator:
         policy: GateBBenchmarkPolicyV3,
     ) -> GateDecision:
         evaluator_contract_sha256 = _evaluator_contract_sha256(policy)
+        if measurements.expected_row_count != manifest.row_count:
+            return GateDecision(
+                run_id=manifest.run_id,
+                manifest_sha256=manifest.manifest_sha256,
+                evaluator_contract_sha256=evaluator_contract_sha256,
+                measurement_status="incomplete",
+                decision=GateDecisionKind.REVISE,
+                violated_rules=("measurement_cardinality_mismatch",),
+            )
         if measurements.observed_row_count != measurements.expected_row_count:
             return GateDecision(
                 run_id=manifest.run_id,
@@ -928,9 +940,9 @@ class GateEvaluator:
             adjudication.audited_count != measurements.adjudicated_count
             or adjudication.denominator != measurements.adjudication_denominator
             or adjudication.correct_count != measurements.adjudicated_correct
-            or adjudication.denominator != measurements.expected_row_count
-            or adjudication.audited_ordinals != tuple(range(measurements.expected_row_count))
-            or len(measurements.decision_sha256s) != measurements.expected_row_count
+            or adjudication.denominator != manifest.row_count
+            or adjudication.audited_ordinals != tuple(range(manifest.row_count))
+            or len(measurements.decision_sha256s) != manifest.row_count
             or any(
                 verdict.manifest_ref != manifest.row_ref(verdict.manifest_ref.ordinal)
                 for verdict in adjudication.verdicts
@@ -1339,6 +1351,15 @@ def _load_corpus_rows_file(path: Path, manifest: EvidenceManifest) -> tuple[Corp
     return rows
 
 
+def _load_manifest_bound_decision_policy(
+    path: Path, manifest: EvidenceManifest
+) -> LoadedDecisionPolicyV2:
+    policy_bytes = path.read_bytes()
+    if _sha256(policy_bytes) != manifest.authorities.policy_sha256:
+        raise ValueError("decision_policy_authority_mismatch")
+    return load_decision_policy(path)
+
+
 
 def _run_supervised_collection(args: argparse.Namespace) -> int:
     """Run one foreground collection under the canonical supervised wrapper."""
@@ -1351,7 +1372,9 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
     reviewed_allowlist = load_reviewed_fragment_allowlist_v3(
         args.reviewed_allowlist
     )
-    decision_policy = load_decision_policy(args.decision_policy)
+    decision_policy = _load_manifest_bound_decision_policy(
+        args.decision_policy, manifest
+    )
     authority_root = args.authority_root.resolve()
     authority_keys = (
         "model_bytes",
@@ -1524,7 +1547,9 @@ def _main(arguments: list[str]) -> int:
         reviewed_allowlist = load_reviewed_fragment_allowlist_v3(
             config.reviewed_allowlist_path
         )
-        decision_policy = load_decision_policy(config.decision_policy_path)
+        decision_policy = _load_manifest_bound_decision_policy(
+            config.decision_policy_path, manifest
+        )
         source_artifact, runtime, authorities = _artifact_binding_context(
             manifest, artifact_root, config.authority_paths
         )
@@ -1676,6 +1701,35 @@ def _provider_record(provider: GovernedProvider, input_hash: str) -> dict[str, o
     return record
 
 
+def _validate_decision_request_binding(
+    request: DecisionRequestV2,
+    *,
+    row: EvidenceManifestRow,
+    response_payload: Mapping[str, object],
+) -> None:
+    claims = response_payload.get("claims", ())
+    if not isinstance(claims, list):
+        claims = []
+    expected_output_sha256 = _sha256(
+        _canonical_bytes(
+            {
+                "schema_version": "1.0.0",
+                "claims": claims,
+                "conflicts": [],
+                "question_candidates": [],
+            }
+        )
+    )
+    if request.references.provider_input_sha256 != row.input_sha256:
+        raise ValueError("decision_request_input_binding_mismatch")
+    if request.synthesis.metadata.input_sha256 != row.input_sha256:
+        raise ValueError("decision_request_input_binding_mismatch")
+    if request.references.provider_output_sha256 != expected_output_sha256:
+        raise ValueError("decision_request_output_binding_mismatch")
+    if request.synthesis.metadata.output_sha256 != expected_output_sha256:
+        raise ValueError("decision_request_output_binding_mismatch")
+
+
 def _reservation_input_hash(ref: ManifestRef) -> str:
     """Namespace provider-runtime records by the complete row identity."""
     return _sha256(_canonical_bytes(ref.model_dump(mode="json")))
@@ -1724,7 +1778,8 @@ def _assert_provider_record_authority(
             _sha256(str(model_id).encode("utf-8")) if model_id else None,
         ),
         "prompt_sha256": record.get(
-            "prompt_sha256", record.get("semantic_prompt_sha256")
+            "structured_prompt_sha256",
+            record.get("prompt_sha256", record.get("semantic_prompt_sha256")),
         ),
         "response_schema_sha256": record.get("response_schema_sha256"),
         "pricing_sha256": record.get("pricing_sha256"),
@@ -2120,17 +2175,23 @@ def run_collection(
                 conservative_cost,
             ) = _provider_dispatch_result(provider, dispatch_input_hash, dispatch_result)
             _assert_provider_record_authority(manifest, provider_record)
-        response_payload = (
-            json.loads(response_bytes) if response_bytes else {}
+        outcome = TerminalOutcome(provider_outcome)
+        response_payload = json.loads(response_bytes) if response_bytes else {}
+        canonical_response_bytes = _canonical_bytes(response_payload)
+        sealed_response_bytes = (
+            b"" if outcome is TerminalOutcome.TERMINAL_UNKNOWN else canonical_response_bytes
         )
-        response_bytes = _canonical_bytes(response_payload)
         validation_status = validate_provider_payload_v3(
             response_payload,
             synthesis_input=projected,
             reviewed_allowlist=reviewed_allowlist,
         )
-        outcome = TerminalOutcome(provider_outcome)
         decision_request = decision_request_factory(response_payload, ref)
+        _validate_decision_request_binding(
+            decision_request,
+            row=row,
+            response_payload=response_payload,
+        )
         decision = run_decision_v2(decision_request, policy=decision_policy)
         decision_bytes = canonical_decision_bytes(decision)
         decision_ref = decision_evidence.save_exclusive(ref, decision_bytes)
@@ -2138,12 +2199,12 @@ def run_collection(
             SealedRecording(
                 manifest_ref=ref,
                 request_bytes=request_bytes,
-                response_bytes=response_bytes,
+                response_bytes=sealed_response_bytes,
                 outcome=outcome,
                 metadata={
                     "input_sha256": row.input_sha256,
                     "projection_sha256": row.projection_sha256,
-                    "response_sha256": _sha256(response_bytes),
+                    "response_sha256": _sha256(sealed_response_bytes),
                     "provider_record_sha256": provider_record_sha256,
                     "provider_id": str(provider_record.get("provider_id", "")),
                     "model_id": str(provider_record.get("model_id", "")),
@@ -2151,8 +2212,11 @@ def run_collection(
                     "model_sha256": str(provider_record.get("model_sha256", "")),
                     "prompt_sha256": str(
                         provider_record.get(
-                            "prompt_sha256",
-                            provider_record.get("semantic_prompt_sha256", ""),
+                            "structured_prompt_sha256",
+                            provider_record.get(
+                                "prompt_sha256",
+                                provider_record.get("semantic_prompt_sha256", ""),
+                            ),
                         )
                     ),
                     "response_schema_sha256": str(
@@ -2195,7 +2259,9 @@ def run_collection(
         authorities=authorities,
     )
     deliverable_count = sum(
-        result.outcome is TerminalOutcome.SUCCESS for result in results
+        result.outcome is TerminalOutcome.SUCCESS
+        and result.validation_status is None
+        for result in results
     )
     terminal_unknown_count = sum(
         result.outcome is TerminalOutcome.TERMINAL_UNKNOWN for result in results

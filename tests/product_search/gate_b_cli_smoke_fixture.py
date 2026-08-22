@@ -114,9 +114,40 @@ _SEED_INPUT = evidence.project_vacancy_evidence_v3(
 _SEED_PROVIDER_PAYLOAD = _provider_payload(_SEED_INPUT)
 
 
+def _provider_payload_from_serialized(payload: dict[str, object]) -> dict[str, object]:
+    claims: list[dict[str, object]] = []
+    for fragment in payload.get("fragments", []):
+        if not isinstance(fragment, dict):
+            continue
+        fragment_id = fragment.get("fragment_id")
+        for allowed in fragment.get("allowed_claims", []):
+            if not isinstance(allowed, dict):
+                continue
+            dimension = allowed.get("dimension")
+            if any(claim["dimension"] == dimension for claim in claims):
+                continue
+            claims.append(
+                {
+                    "claim_id": f"claim:{dimension}",
+                    "dimension": dimension,
+                    "status": allowed.get("status"),
+                    "claim_code": allowed.get("claim_code"),
+                    "statement": allowed.get("statement"),
+                    "citations": [fragment_id],
+                }
+            )
+    return {
+        "schema_version": "2.0.0",
+        "claims": claims,
+        "conflicts": [],
+        "question_candidates": [],
+    }
+
+
 class FakeProvider:
     def __init__(self) -> None:
         self.store = SimpleNamespace(records={})
+        self.dispatch_count = 0
         self.pricing = SimpleNamespace(
             identity_sha256=_sha(b"pricing:smoke"),
             reservation_cost_usd=Decimal("0.01"),
@@ -143,23 +174,37 @@ class FakeProvider:
     ) -> object:
         reservation = capability.reserve(input_hash)
         capability.mark_dispatching(reservation)
-        # Empty output is deliberate: the validator records a terminal
-        # failure while the real Decision v2 request remains deterministic.
+        ordinal = self.dispatch_count
+        self.dispatch_count += 1
+        if ordinal % 10 == 0:
+            outcome = "terminal_unknown"
+            raw_response_text = ""
+        elif ordinal % 2 == 0:
+            outcome = "success"
+            raw_response_text = json.dumps(
+                _provider_payload_from_serialized(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        else:
+            outcome = "terminal_failure"
+            raw_response_text = "{}"
         record = {
             "provider_id": "fake-provider",
             "model_id": "fake-model",
             "provider_sha256": _sha(b"provider:smoke"),
             "model_sha256": _sha(b"model:smoke"),
             "prompt_sha256": _sha(b"prompt:smoke"),
+            "structured_prompt_sha256": _sha(b"prompt:smoke"),
             "response_schema_sha256": _sha(b"schema:smoke"),
-            "raw_response_text": "{}",
-            "post_dispatch_outcome_v3": "terminal_failure",
+            "raw_response_text": raw_response_text,
+            "post_dispatch_outcome_v3": outcome,
             "measured_cost_usd": "0",
             "conservative_cost_usd": "0.01",
             "pricing_sha256": _sha(b"pricing:smoke"),
         }
         self.store.records[input_hash] = record
-        capability.reconcile(reservation, Decimal("0"), "terminal_failure")
+        capability.reconcile(reservation, Decimal("0"), outcome)
         return SimpleNamespace(record=record)
 
 
@@ -197,7 +242,11 @@ def provider_factory() -> FakeProvider:
 def decision_request_factory(payload: dict[str, object], ref: Any) -> Any:
     from tests.product_search.test_gate_b_evidence_skeleton import _decision_result
 
-    return _decision_result(_SEED_PROVIDER_PAYLOAD, ref.input_sha256)
+    if isinstance(payload.get("claims"), list) and payload["claims"]:
+        decision_payload = payload
+    else:
+        decision_payload = {"claims": []}
+    return _decision_result(decision_payload, ref.input_sha256)
 
 
 def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, Path, str]:

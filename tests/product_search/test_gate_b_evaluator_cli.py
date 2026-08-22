@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 
 from job_intel.product_search import gate_b_evidence_runner_v1 as runner
+from job_intel.product_search.gate_b_benchmark_policy_v3 import (
+    load_gate_b_benchmark_policy_v3,
+)
 from tests.product_search.test_gate_b_gate_evaluator import (
     _complete_adjudication,
     _manifest,
@@ -125,3 +128,50 @@ def test_evaluate_run_cli_publishes_revise_for_incomplete_adjudication(
     assert decision["measurement_status"] == "incomplete"
     assert decision["decision"] == "revise"
     assert decision["violated_rules"] == ["adjudication_incomplete"]
+
+
+def test_evaluate_report_finalizes_published_adjudication_counts() -> None:
+    manifest = _manifest(
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    adjudication = _complete_adjudication(manifest)
+    measurements = _metrics(
+        adjudicated_count=0,
+        adjudication_denominator=0,
+        adjudicated_correct=0,
+    )
+
+    report = runner.GateEvaluator.evaluate_report(
+        manifest,
+        measurements,
+        adjudication,
+        policy=load_gate_b_benchmark_policy_v3(),
+    )
+
+    assert report.metrics.adjudicated_count == 48
+    assert report.metrics.adjudication_denominator == 48
+    assert report.metrics.adjudicated_correct == 48
+    assert report.gate_decision.decision.value == "proceed_to_shadow"
+
+
+def test_evaluate_refuses_measurement_cardinality_not_matching_manifest() -> None:
+    manifest = _manifest(
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    adjudication = _complete_adjudication(manifest)
+    measurements = _metrics(expected_row_count=1)
+
+    decision = runner.GateEvaluator.evaluate(
+        manifest,
+        measurements,
+        adjudication,
+        policy=load_gate_b_benchmark_policy_v3(),
+    )
+
+    assert decision.measurement_status == "incomplete"
+    assert decision.decision.value == "revise"
+    assert decision.violated_rules == ("measurement_cardinality_mismatch",)

@@ -303,6 +303,30 @@ def main() -> int:
             "violated_rules",
         } <= gate_decision.keys():
             raise RuntimeError("gate decision publication is incomplete")
+        measurement_report = json.loads(
+            (state / "measurement-report.json").read_bytes()
+        )
+        if measurement_report["terminal_unknown_count"] != 5:
+            raise RuntimeError(
+                "mixed-outcome fixture did not exercise five terminal-unknown rows"
+            )
+        if not 0 < measurement_report["deliverable_count"] < 43:
+            raise RuntimeError(
+                "mixed-outcome fixture did not publish a bounded deliverable count"
+            )
+        terminal_unknown_recordings = 0
+        for recording_path in (state / "recordings").glob("*.json"):
+            recording = json.loads(recording_path.read_bytes())
+            if recording.get("outcome") == "terminal_unknown":
+                terminal_unknown_recordings += 1
+                if recording.get("response_b64") != "":
+                    raise RuntimeError(
+                        "terminal-unknown recording did not preserve an empty response"
+                    )
+        if terminal_unknown_recordings != 5:
+            raise RuntimeError(
+                "terminal-unknown recordings were not durably published"
+            )
         isolation_probe_error = None
         if target_attempt is not None:
             if not probe_path.is_file():
@@ -357,6 +381,8 @@ def main() -> int:
             "evaluation_stdout": evaluation_attempt.stdout,
             "evaluation_stderr": evaluation_attempt.stderr,
             "gate_decision": gate_decision,
+            "measurement_report": measurement_report,
+            "terminal_unknown_recordings": terminal_unknown_recordings,
             "isolation_observed": bool(isolation_probe) and not any(
                 item.get("reachable") for item in isolation_probe.values()
             ),
