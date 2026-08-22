@@ -427,6 +427,7 @@ def cmd_prepare(args) -> int:
         "merge_scope": {"local_parent": local_base, "upstream_parent": upstream_head,
                         "merge_base": None},
         "resolution_policy_by_path": {},
+        "invariant_mode": _invariant_mode(args, pending),
         "handed_off_at": None, "merge_sha": None,
     }
     if summary["new_conflicts"] and args.auto_policy:
@@ -554,7 +555,10 @@ def _invariant_report(scratch: Path, prep: dict):
         if path not in both_sides and path in paths_in_result
     ]
     policy = prep.get("resolution_policy_by_path") or {}
-    deleted = sorted(path for path in paths if path not in paths_in_result)
+    deleted = sorted(
+        path for path in both_sides
+        if path.endswith(".py") and path not in paths_in_result
+    )
     report = check_merge(
         full,
         lambda path: read_from(ours_entries, path),
@@ -616,7 +620,7 @@ def _arm_invariant_state(state: Path, prep: dict, findings: list[dict], *, expec
         finding for finding in findings
         if not (mode == "report" and finding.get("kind") == "discarded_contribution")
     ]
-    if mode == "report" and not blocking:
+    if not blocking:
         status = "reported"
     else:
         status = "blocked" if any(
@@ -662,14 +666,30 @@ def _unacknowledged_findings(state: Path, findings: list[dict]) -> list[dict]:
         or not any(receipt_matches(receipt, finding) for receipt in receipts)
     ]
 
-def _invariant_mode(args) -> str:
-    value = getattr(args, "invariant_mode", None) or os.getenv(
-        "HERMES_SYNC_INVARIANT_MODE", "block"
+def _invariant_mode(args, pending=None) -> str:
+    value = (
+        getattr(args, "invariant_mode", None)
+        or (pending or {}).get("invariant_mode")
+        or os.getenv("HERMES_SYNC_INVARIANT_MODE", "block")
     )
     value = str(value).strip().lower()
     if value not in {"block", "report"}:
         raise ValueError("invariant mode must be 'block' or 'report'")
     return value
+
+
+def _missing_invariant_origin(state: Path) -> list[str]:
+    try:
+        pending = load_pending(state)
+    except (OSError, ValueError, KeyError):
+        return ["pending.json"]
+    fields = {
+        "platform": pending.get("slack_platform"),
+        "chat_id": pending.get("slack_channel"),
+        "thread_id": pending.get("slack_thread_ts"),
+        "user_id": pending.get("slack_user_id"),
+    }
+    return [name for name, value in fields.items() if not value]
 
 
 def _commit_merge(args) -> tuple:
@@ -712,7 +732,12 @@ def _commit_merge(args) -> tuple:
     # is not a merge anyone should be able to hand off. The preserved clone is
     # the repair surface; the commit object is not rewritten on refusal.
     break_glass = bool(getattr(args, "break_glass", False))
-    invariant_mode = _invariant_mode(args)
+    invariant_mode = prep.get("invariant_mode") or "block"
+    if invariant_mode not in {"block", "report"}:
+        return EXIT_USAGE, {
+            "status": "error",
+            "reason": "apply-prepare.json has invalid invariant_mode; run prepare again",
+        }
     if break_glass:
         prep["invariants_break_glass"] = {"used_at": _now(), "mode": "manual-only"}
         prep["invariant_report"] = {
@@ -732,10 +757,6 @@ def _commit_merge(args) -> tuple:
             "findings": records,
             "expected_policy_losses": expected,
         }
-        if records or expected:
-            _arm_invariant_state(
-                state, prep, records, expected=expected, mode=invariant_mode,
-            )
         blocking = [
             finding for finding in records
             if not (
@@ -743,6 +764,24 @@ def _commit_merge(args) -> tuple:
                 and finding.get("kind") == "discarded_contribution"
             )
         ]
+        if blocking:
+            missing_origin = _missing_invariant_origin(state)
+            if missing_origin:
+                prep["invariant_report"]["origin_error"] = (
+                    "receipt origin is incomplete; missing " + ", ".join(missing_origin)
+                )
+                _write_json(prep_path, prep)
+                return EXIT_UNRESOLVED, {
+                    "status": "invariant_origin_incomplete",
+                    "ok": False,
+                    "findings": blocking,
+                    "invariant_report": prep["invariant_report"],
+                    "reason": prep["invariant_report"]["origin_error"],
+                }
+        if records or expected:
+            _arm_invariant_state(
+                state, prep, records, expected=expected, mode=invariant_mode,
+            )
         if blocking:
             active = _unacknowledged_findings(state, blocking)
             if active:
@@ -966,13 +1005,13 @@ def main(argv=None) -> int:
                         help="decide undecided plain paths by policy (merge-both); security paths still ask")
     p_prep.add_argument("--in-flight-ok", action="store_true",
                         help="do not refuse when a finalize request is in flight (the finalizer's own call)")
+    p_prep.add_argument("--invariant-mode", choices=("block", "report"),
+                        help="snapshot invariant handling in apply-prepare.json")
     p_prep.set_defaults(func=cmd_prepare)
     sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
     p_commit = sub.add_parser("commit", parents=[common])
     p_commit.add_argument("--break-glass", action="store_true",
                           help="manual audited emergency bypass; never supplied by systemd")
-    p_commit.add_argument("--invariant-mode", choices=("block", "report"),
-                          help="block findings (default) or report discarded contributions without blocking")
     p_commit.add_argument("--amend", action="store_true",
                           help="fold staged changes into the existing merge commit (gate-triage fixes), "
                                "preserving its parents")
@@ -980,8 +1019,6 @@ def main(argv=None) -> int:
     p_handoff = sub.add_parser("handoff", parents=[common])
     p_handoff.add_argument("--break-glass", action="store_true",
                            help="manual audited emergency bypass; never supplied by systemd")
-    p_handoff.add_argument("--invariant-mode", choices=("block", "report"),
-                           help="block findings (default) or report discarded contributions without blocking")
     p_handoff.set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
     p_wait.add_argument("--after", default="",

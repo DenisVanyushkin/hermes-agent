@@ -61,6 +61,25 @@ class TestParseFailures:
         assert parse_failures({"website/docs/security.md": "{ not python at all"}) == []
 
 
+def test_expected_policy_loss_does_not_duplicate_one_discarded_fact():
+    from upstream_sync_invariants import expected_policy_losses
+
+    events = expected_policy_losses(
+        ours="def kept():\n    return 1\n",
+        theirs="def kept():\n    return 1\n\ndef upstream_only():\n    return 2\n",
+        result="def kept():\n    return 1\n",
+        base="def kept():\n    return 0\n",
+        path="mod.py",
+        policy="keep-local",
+    )
+
+    facts = [
+        (item["path"], item["symbol"], item["discarded_side"])
+        for item in events
+    ]
+    assert facts == [("mod.py", "upstream_only", "upstream")]
+
+
 class TestLostDefinitions:
     def test_reports_every_definition_the_resolver_dropped(self):
         """The 211-vs-1 block: the model kept the signature, dropped the payload."""

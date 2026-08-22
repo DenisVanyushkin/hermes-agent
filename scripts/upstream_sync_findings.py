@@ -17,13 +17,16 @@ def findings_from_log(text: str) -> list:
     """Findings of the most recent invariants_failed payload in ``text``."""
     for line in reversed(text.splitlines()):
         line = line.strip()
-        if not line.startswith("{") or "invariants_failed" not in line:
+        if not line.startswith("{"):
             continue
         try:
             payload = json.loads(line)
         except ValueError:
             continue
-        if payload.get("status") == "invariants_failed":
+        if payload.get("status") in {
+            "invariants_failed",
+            "invariant_origin_incomplete",
+        }:
             return payload.get("findings", [])
     return []
 

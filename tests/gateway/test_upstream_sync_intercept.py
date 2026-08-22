@@ -171,6 +171,19 @@ async def test_real_handler_consumes_an_armed_invariant_ack_only(tmp_path, monke
     assert called["n"] == 0
 
 
+@pytest.mark.parametrize("body", [
+    "apply fix",
+    "keep test",
+    "1: merge both",
+    "ack INV-abc123456789",
+])
+def test_reply_envelope_is_removed_before_each_gate_parser(body):
+    from gateway.run import _operator_reply_text
+
+    assembled = f'[Replying to: "quoted gate text"]\n{body}'
+    assert _operator_reply_text(assembled, None) == body
+
+
 def test_gate_order_comment_preserves_the_ops_first_rationale():
     import inspect
     source = inspect.getsource(GatewayRunner._run_agent_inner)

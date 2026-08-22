@@ -594,7 +594,7 @@ apply_decisions() {
     # tests went stale, which is what the triage flow offers to patch. Here the
     # merge itself lost something: patching tests would bury the finding along
     # with the code it points at (2026-08-19).
-    if grep -q "invariants_failed" "$DETAIL_LOG"; then
+    if grep -Eq "invariants_failed|invariant_origin_incomplete" "$DETAIL_LOG"; then
       FAILED_STAGE=invariants
       findings="$(python3 "$SCRIPTS_DIR/upstream_sync_findings.py" "$DETAIL_LOG" 2>/dev/null || true)"
       write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.

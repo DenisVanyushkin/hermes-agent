@@ -58,6 +58,7 @@ def pyworld(tmp_path: Path):
     _git(live, "config", "user.email", "t@t")
     _git(live, "config", "user.name", "t")
     (live / "mod.py").write_text(MODULE_BASE)
+    (live / "untouched.py").write_text("def untouched():\n    return 7\n")
     _git(live, "add", "-A")
     _git(live, "commit", "-qm", "base")
     base = _git(live, "rev-parse", "HEAD")
@@ -164,6 +165,7 @@ def pyworld_upstream_deletes(tmp_path: Path):
     _git(live, "config", "user.email", "t@t")
     _git(live, "config", "user.name", "t")
     (live / "mod.py").write_text(MODULE_BASE)
+    (live / "untouched.py").write_text("def untouched():\n    return 7\n")
     _git(live, "add", "-A")
     _git(live, "commit", "-qm", "base")
     base = _git(live, "rev-parse", "HEAD")
@@ -175,6 +177,7 @@ def pyworld_upstream_deletes(tmp_path: Path):
 
     _git(live, "checkout", "-qb", "up", base)
     (live / "mod.py").write_text("def kept():\n    return 999\n")
+    (live / "untouched.py").unlink()
     _git(live, "add", "-A")
     _git(live, "commit", "-qm", "upstream drops local_only")
     upstream_head = _git(live, "rev-parse", "HEAD")
@@ -213,6 +216,7 @@ class TestAcceptedDeletionsDoNotBlock:
                         pyworld_upstream_deletes["live"]))
 
         assert out["status"] == "committed", out
+        assert out["invariant_report"]["findings"] == []
         assert "invariants_skipped" not in out
 
     def test_dropping_a_definition_both_parents_kept_still_blocks(self, pyworld):
@@ -481,6 +485,27 @@ class TestResolutionPolicySnapshot:
         assert any(item["symbol"] == "kept" for item in expected)
         pending = json.loads((pyworld["state"] / "invariants-pending.json").read_text())
         assert any(item["event"] == "expected_policy_loss" for item in pending["journal"])
+        assert pending["status"] == "reported"
+
+
+    def test_invariant_mode_is_snapshotted_at_prepare(self, pyworld, monkeypatch):
+        pending_path = pyworld["state"] / "pending.json"
+        pending = json.loads(pending_path.read_text())
+        pending["features"][0]["decision"] = "merge-both"
+        pending_path.write_text(json.dumps(pending))
+        monkeypatch.setenv("HERMES_SYNC_INVARIANT_MODE", "report")
+        scratch = _prepared(pyworld)
+        prep = json.loads((pyworld["state"] / "apply-prepare.json").read_text())
+        assert prep["invariant_mode"] == "report"
+
+        monkeypatch.setenv("HERMES_SYNC_INVARIANT_MODE", "block")
+        (scratch / "mod.py").write_text(
+            "def kept():\n    return 100\n\n\ndef local_only():\n    return 2\n"
+        )
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "committed"
+        assert out["invariant_report"]["mode"] == "report"
 
 
     def test_report_only_mode_records_contribution_without_blocking(self, pyworld):
@@ -488,20 +513,39 @@ class TestResolutionPolicySnapshot:
         pending = json.loads(pending_path.read_text())
         pending["features"][0]["decision"] = "merge-both"
         pending_path.write_text(json.dumps(pending))
-        scratch = _prepared(pyworld)
+        prep = _run(
+            "prepare", pyworld["state"], pyworld["live"], "--invariant-mode", "report",
+        )
+        assert _out(prep)["status"] == "ready", prep.stdout
+        scratch = pyworld["state"] / "scratch"
         (scratch / "mod.py").write_text(
             "def kept():\n    return 100\n\n\ndef local_only():\n    return 2\n"
         )
         _git(scratch, "add", "mod.py")
 
         out = _out(_run(
-            "commit", pyworld["state"], pyworld["live"], "--invariant-mode", "report",
+            "commit", pyworld["state"], pyworld["live"],
         ))
 
         assert out["status"] == "committed"
         report = out["invariant_report"]
         assert report["mode"] == "report"
         assert any(f["kind"] == "discarded_contribution" for f in report["findings"])
+
+
+    def test_incomplete_origin_is_reported_before_arming_receipts(self, pyworld):
+        scratch = _prepared(pyworld)
+        pending_path = pyworld["state"] / "pending.json"
+        pending = json.loads(pending_path.read_text())
+        pending.pop("slack_user_id")
+        pending_path.write_text(json.dumps(pending))
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "invariant_origin_incomplete"
+        assert "user_id" in out["reason"]
+        assert not (pyworld["state"] / "invariants-pending.json").exists()
 
 
     def test_blocked_hard_finding_explains_that_receipts_are_disabled(self, pyworld):

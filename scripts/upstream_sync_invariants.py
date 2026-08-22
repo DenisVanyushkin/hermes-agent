@@ -302,6 +302,7 @@ def expected_policy_losses(*, ours, theirs, result, path: str, base=None,
 
     accepted = _accepted_deletions(base, ours=sides["ours"], theirs=sides["theirs"])
     events: list[dict] = []
+    expected_definition_losses: set[str] = set()
     missing = (sides["ours"] | sides["theirs"]) - sides["result"]
     if policy == "keep-local":
         one_sided = {
@@ -320,6 +321,7 @@ def expected_policy_losses(*, ours, theirs, result, path: str, base=None,
         }
         discarded_side = "local"
     for name in sorted(one_sided):
+        expected_definition_losses.add(name)
         events.append({
             "event": "expected_policy_loss",
             "path": path,
@@ -331,7 +333,7 @@ def expected_policy_losses(*, ours, theirs, result, path: str, base=None,
         })
 
     for name in sorted(set(segments["ours"]) | set(segments["theirs"])):
-        if name in accepted:
+        if name in accepted or name in expected_definition_losses:
             continue
         ours_state = segments["ours"].get(name, ())
         theirs_state = segments["theirs"].get(name, ())
