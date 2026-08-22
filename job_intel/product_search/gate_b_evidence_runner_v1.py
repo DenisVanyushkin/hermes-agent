@@ -27,6 +27,9 @@ from job_intel.product_search.decision_v2 import (
     run_decision_v2,
 )
 from job_intel.product_search.evidence_synthesis import EvidenceSynthesisStatus
+from job_intel.product_search.gate_b_benchmark_policy_v3 import (
+    GateBBenchmarkPolicyV3,
+)
 from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
     load_reviewed_fragment_allowlist_v3,
@@ -36,9 +39,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
-EVALUATOR_CONTRACT_SHA256 = hashlib.sha256(
-    b"gate-b-gate-evaluator-v1"
-).hexdigest()
+EVALUATOR_CONTRACT_VERSION = "gate-b-gate-evaluator-v2"
 
 
 class _StrictFrozenModel(BaseModel):
@@ -56,6 +57,17 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _evaluator_contract_sha256(policy: GateBBenchmarkPolicyV3) -> str:
+    return _sha256(
+        _canonical_bytes(
+            {
+                "evaluator_version": EVALUATOR_CONTRACT_VERSION,
+                "policy": policy.model_dump(mode="json"),
+            }
+        )
+    )
 
 
 class RuntimeIdentity(_StrictFrozenModel):
@@ -856,6 +868,8 @@ class GateEvaluator:
         manifest: EvidenceManifest,
         measurements: MeasurementReport,
         adjudication: AdjudicationSet,
+        *,
+        policy: GateBBenchmarkPolicyV3,
     ) -> GateEvaluationReport:
         """Evaluate a finalized run while preserving all immutable metrics."""
         if (
@@ -875,6 +889,7 @@ class GateEvaluator:
                 manifest,
                 finalized_metrics,
                 adjudication,
+                policy=policy,
             ),
         )
 
@@ -883,12 +898,15 @@ class GateEvaluator:
         manifest: EvidenceManifest,
         measurements: MeasurementReport,
         adjudication: AdjudicationSet,
+        *,
+        policy: GateBBenchmarkPolicyV3,
     ) -> GateDecision:
+        evaluator_contract_sha256 = _evaluator_contract_sha256(policy)
         if measurements.observed_row_count != measurements.expected_row_count:
             return GateDecision(
                 run_id=manifest.run_id,
                 manifest_sha256=manifest.manifest_sha256,
-                evaluator_contract_sha256=EVALUATOR_CONTRACT_SHA256,
+                evaluator_contract_sha256=evaluator_contract_sha256,
                 measurement_status="incomplete",
                 decision=GateDecisionKind.REVISE,
                 violated_rules=("collection_incomplete",),
@@ -901,6 +919,10 @@ class GateEvaluator:
             or adjudication.audited_ordinals != tuple(range(measurements.expected_row_count))
             or len(measurements.decision_sha256s) != measurements.expected_row_count
             or any(
+                verdict.manifest_ref != manifest.row_ref(verdict.manifest_ref.ordinal)
+                for verdict in adjudication.verdicts
+            )
+            or any(
                 verdict.decision_sha256 != measurements.decision_sha256s[verdict.manifest_ref.ordinal]
                 for verdict in adjudication.verdicts
             )
@@ -908,26 +930,26 @@ class GateEvaluator:
             return GateDecision(
                 run_id=manifest.run_id,
                 manifest_sha256=manifest.manifest_sha256,
-                evaluator_contract_sha256=EVALUATOR_CONTRACT_SHA256,
+                evaluator_contract_sha256=evaluator_contract_sha256,
                 measurement_status="incomplete",
                 decision=GateDecisionKind.REVISE,
                 violated_rules=("adjudication_incomplete",),
             )
         violated: list[str] = []
-        if measurements.deliverable_count < 43:
+        if measurements.deliverable_count < policy.minimum_deliverable_results:
             violated.append("minimum_deliverable_results")
-        if measurements.terminal_unknown_count > 5:
+        if measurements.terminal_unknown_count > policy.maximum_terminal_unknown:
             violated.append("maximum_terminal_unknown")
         if (
             adjudication.denominator == 0
             or Decimal(adjudication.correct_count) / Decimal(adjudication.denominator)
-            < Decimal("0.80")
+            < Decimal(policy.minimum_manual_triage_accuracy)
         ):
             violated.append("minimum_manual_triage_accuracy")
         return GateDecision(
             run_id=manifest.run_id,
             manifest_sha256=manifest.manifest_sha256,
-            evaluator_contract_sha256=EVALUATOR_CONTRACT_SHA256,
+            evaluator_contract_sha256=evaluator_contract_sha256,
             measurement_status="complete",
             decision=(GateDecisionKind.REFUSE if violated else GateDecisionKind.PROCEED_TO_SHADOW),
             violated_rules=tuple(sorted(violated)),

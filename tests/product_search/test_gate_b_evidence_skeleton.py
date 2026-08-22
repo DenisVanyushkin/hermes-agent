@@ -22,6 +22,9 @@ from job_intel.product_search.evidence_synthesis import (
     EvidenceSynthesisResultV1,
     EvidenceSynthesisStatus,
 )
+from job_intel.product_search.gate_b_benchmark_policy_v3 import (
+    load_gate_b_benchmark_policy_v3,
+)
 from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
     ReviewedFragmentDecisionV3,
@@ -330,7 +333,9 @@ def test_gate_evaluator_distinguishes_complete_negative_from_incomplete() -> Non
             for index in range(48)
         )
     )
-    decision = GateEvaluator.evaluate(manifest, complete, adjudication)
+    decision = GateEvaluator.evaluate(
+        manifest, complete, adjudication, policy=load_gate_b_benchmark_policy_v3()
+    )
     assert decision.measurement_status == "complete"
     assert decision.decision is GateDecisionKind.REFUSE
     assert decision.violated_rules == ("minimum_deliverable_results",)

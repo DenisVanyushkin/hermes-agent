@@ -217,6 +217,8 @@ GateEvaluator.evaluate(
     manifest: EvidenceManifest,
     measurements: MeasurementReport,
     adjudication: AdjudicationSet,
+    *,
+    policy: GateBBenchmarkPolicyV3,
 ) -> GateDecision
 ```
 
@@ -250,3 +252,7 @@ and `decision: refuse`, while a complete measurement satisfying every rule
 produces `proceed_to_shadow`. The evaluator is deterministic, side-effect free,
 and cannot dispatch, mutate production state, or alter the manifest, recordings,
 journal, or Decision v2 result.
+Thresholds are read from the explicitly supplied `GateBBenchmarkPolicyV3`;
+there is no evaluator-local copy. `evaluator_contract_sha256` is the canonical
+SHA-256 of the evaluator version together with the policy bytes, so changing a
+threshold changes the published evaluator contract identity.
