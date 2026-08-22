@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -52,12 +53,58 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     LLMProviderError,
+    build_live_llm_provider,
 )
+from job_intel.product_search.gate_b_spend_record_v1 import SpendRecordStore
 
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 EVALUATOR_CONTRACT_VERSION = "gate-b-gate-evaluator-v2"
 SUPERVISED_COLLECTION_SPINE_INVARIANT = "supervised_collection_spine_v1"
+
+
+def _build_committed_budget_reserver(
+    manifest: EvidenceManifest,
+) -> Callable[[Decimal], object]:
+    root_value = os.environ.get("GATE_B_SPEND_RECORD_ROOT")
+    if not root_value:
+        raise ValueError("committed_budget_record_root_required")
+    spend_record = SpendRecordStore.open(
+        root=Path(root_value), manifest_sha256=manifest.manifest_sha256
+    )
+    required_cents = int(
+        (manifest.limits.per_call_maximum_usd * Decimal("100")).to_integral_exact()
+    )
+    if spend_record.remaining_cents < required_cents:
+        raise ValueError("committed_budget_exhausted")
+
+    def reserve(amount: Decimal) -> object:
+        cents = int((amount * Decimal("100")).to_integral_exact())
+        completed = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                sys.executable,
+                "-m",
+                "job_intel.product_search.gate_b_spend_record_v1",
+                "reserve",
+                "--root",
+                root_value,
+                "--manifest-sha256",
+                manifest.manifest_sha256,
+                "--amount-cents",
+                str(cents),
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise ValueError("committed_budget_reservation_failed")
+        return completed.stdout.strip()
+
+    return reserve
 
 
 class _StrictFrozenModel(BaseModel):
@@ -215,6 +262,13 @@ class JournalEntry(_StrictFrozenModel):
     conservative_cost_usd: Decimal = Field(ge=Decimal("0"))
 
 
+class NoDurableAccounting:
+    """Explicit test-only opt-out from the production spend record."""
+
+    def __call__(self, amount: Decimal) -> None:
+        del amount
+
+
 class ForegroundDispatchLedger:
     """Process-local dispatch ledger for the supervised run.
 
@@ -224,9 +278,15 @@ class ForegroundDispatchLedger:
     the retired unattended design and is not promised here.
     """
 
-    def __init__(self, manifest: EvidenceManifest) -> None:
+    def __init__(
+        self,
+        manifest: EvidenceManifest,
+        *,
+        committed_budget_reserver: Callable[[Decimal], object],
+    ) -> None:
         self.manifest = manifest
         self._entries: dict[int, JournalEntry] = {}
+        self._committed_budget_reserver = committed_budget_reserver
 
     def _validate_ref(self, ref: ManifestRef) -> None:
         if ref != self.manifest.row_ref(ref.ordinal):
@@ -246,6 +306,7 @@ class ForegroundDispatchLedger:
         reserved = sum(entry.conservative_cost_usd for entry in self._entries.values())
         if reserved + conservative_cost > self.manifest.limits.aggregate_maximum_usd:
             raise ValueError("spend_cap_exhausted")
+        self._committed_budget_reserver(conservative_cost)
         sequence = len(self._entries)
         entry = JournalEntry(
             manifest_ref=ref,
@@ -931,6 +992,109 @@ class GovernedStructuredProviderAdapter:
         )
 
 
+class _LiveGateBProvider:
+    """Production provider implementing the same seam as the smoke fake."""
+
+    def __init__(self, semantic_provider: object) -> None:
+        from job_intel.product_search.evidence_synthesis import (
+            RecordedEvidenceSynthesisProviderV2,
+            load_evidence_synthesis_policy,
+            provider_output_schema_v2_sha256,
+            task10_prompt_v2_sha256,
+        )
+        from job_intel.product_search.gate_b import governed_pricing_schedule
+
+        manifest_sha256 = os.environ.get("GATE_B_MANIFEST_SHA256", "")
+        if not manifest_sha256 or not os.environ.get("GATE_B_PROVIDER_STORE_DIR"):
+            raise ValueError("live_provider_context_missing")
+        policy = load_evidence_synthesis_policy()
+        pricing = governed_pricing_schedule()
+        self._semantic_provider = semantic_provider
+        self._policy = policy
+        self._adapter = None
+        inner_store = getattr(semantic_provider, "store", None)
+        if inner_store is None:
+            raise ValueError("live_provider_store_missing")
+        self.pricing = pricing
+        self.authority_identity = {
+            "provider_sha256": _sha256(
+                Path(
+                    os.environ.get("GATE_B_PROVIDER_AUTHORITY_PATH", "")
+                ).read_bytes()
+                if os.environ.get("GATE_B_PROVIDER_AUTHORITY_PATH")
+                else str(getattr(semantic_provider, "provider_id", "")).encode("utf-8")
+            ),
+            "model_sha256": _sha256(policy.model_id.encode("utf-8")),
+            "prompt_sha256": task10_prompt_v2_sha256(policy),
+            "response_schema_sha256": provider_output_schema_v2_sha256(),
+            "pricing_sha256": pricing.identity_sha256,
+        }
+        self.store = _AuthorityRecordingStore(inner_store, self.authority_identity)
+        semantic_provider.store = self.store
+
+    def dispatch(
+        self,
+        payload: dict[str, object],
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object:
+        if self._adapter is None:
+            from job_intel.product_search.evidence_synthesis import (
+                RecordedEvidenceSynthesisProviderV2,
+            )
+            self._adapter = RecordedEvidenceSynthesisProviderV2(
+                semantic_provider=self._semantic_provider,
+                policy=self._policy,
+                pricing=self.pricing,
+                record_capability=None,
+                run_identity_sha256=os.environ["GATE_B_MANIFEST_SHA256"],
+            )
+        self._adapter.record_capability = capability
+        try:
+            return self._adapter._record_call(input_hash, payload)
+        finally:
+            self._adapter.record_capability = None
+
+
+class _AuthorityRecordingStore:
+    """Persist provider authority fields alongside every canonical record."""
+
+    def __init__(self, inner: object, identity: Mapping[str, str]) -> None:
+        self._inner = inner
+        self._identity = dict(identity)
+
+    def _with_identity(self, record: dict[str, object]) -> dict[str, object]:
+        enriched = dict(record)
+        enriched.update(self._identity)
+        return enriched
+
+    def save(self, record: dict[str, object]) -> object:
+        return self._inner.save(self._with_identity(record))
+
+    def save_exclusive(self, record: dict[str, object]) -> object:
+        return self._inner.save_exclusive(self._with_identity(record))
+
+    def load(self, input_hash: str) -> dict[str, object]:
+        return self._with_identity(self._inner.load(input_hash))
+
+    def exists(self, input_hash: str) -> bool:
+        return bool(self._inner.exists(input_hash))
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+def build_live_provider_factory() -> GovernedProvider:
+    """Build the real provider only through the explicit approval gate."""
+    if os.environ.get("JOB_INTEL_LLM_LIVE_APPROVED") != "1":
+        raise LLMProviderError("live_calls_not_approved", "explicit approval required")
+    store_dir = os.environ.get("GATE_B_PROVIDER_STORE_DIR")
+    if not store_dir:
+        raise ValueError("live_provider_store_dir_required")
+    return _LiveGateBProvider(build_live_llm_provider(store_dir=store_dir))
+
+
 class OneRowResult(_StrictFrozenModel):
     manifest_ref: ManifestRef
     validation_status: EvidenceSynthesisStatus | None
@@ -992,7 +1156,9 @@ class CollectionConfig(_StrictFrozenModel):
     corpus_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     reviewed_allowlist_path: Path
     decision_policy_path: Path
-    provider_factory: str
+    provider_factory: str = (
+        "job_intel.product_search.gate_b_evidence_runner_v1:build_live_provider_factory"
+    )
     decision_request_factory: str
     authority_paths: dict[str, Path]
 
@@ -1278,6 +1444,17 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
     """Run one foreground collection under the canonical supervised wrapper."""
     manifest = _load_manifest(args.manifest, args.manifest_sha256)
     artifact_root = Path(__file__).resolve().parents[3]
+    state_directory = args.output.resolve()
+    state_directory.mkdir(parents=True, exist_ok=True)
+    os.environ["GATE_B_MANIFEST_SHA256"] = manifest.manifest_sha256
+    os.environ["GATE_B_PROVIDER_STORE_DIR"] = str(state_directory / "provider-records")
+    spend_root_value = os.environ.get("GATE_B_SPEND_RECORD_ROOT")
+    if not spend_root_value:
+        raise ValueError("committed_budget_record_root_required")
+    committed_budget_reserver = _build_committed_budget_reserver(manifest)
+    os.environ["GATE_B_PROVIDER_AUTHORITY_PATH"] = str(
+        args.authority_root.resolve() / "source-provider.bin"
+    )
     provider_factory = _load_artifact_callable(args.provider_factory, artifact_root)
     decision_request_factory = _load_artifact_callable(
         args.decision_request_factory, artifact_root
@@ -1307,9 +1484,9 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
     source_artifact, runtime, authorities = _artifact_binding_context(
         manifest, artifact_root, authority_paths
     )
-    state_directory = args.output.resolve()
-    state_directory.mkdir(parents=True, exist_ok=True)
-    ledger = ForegroundDispatchLedger(manifest)
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=committed_budget_reserver
+    )
     recordings = RecordingStore(state_directory / "recordings")
     decision_evidence = DecisionEvidenceStore(state_directory / "decisions")
     corpus_rows = _load_corpus_rows_file(args.corpus, manifest)
@@ -1433,6 +1610,22 @@ def _main(arguments: list[str]) -> int:
             parser.error("manifest path disagrees with collection config")
         manifest = _load_manifest(args.manifest, args.manifest_sha256)
         artifact_root = Path(__file__).resolve().parents[3]
+        state_directory = Path(args.state_directory).resolve()
+        state_directory.mkdir(parents=True, exist_ok=True)
+        spend_root_value = os.environ.get("GATE_B_SPEND_RECORD_ROOT")
+        if not spend_root_value:
+            parser.error("run-collection requires GATE_B_SPEND_RECORD_ROOT")
+        committed_budget_reserver = _build_committed_budget_reserver(manifest)
+        os.environ["GATE_B_MANIFEST_SHA256"] = manifest.manifest_sha256
+        os.environ["GATE_B_PROVIDER_STORE_DIR"] = str(state_directory / "provider-records")
+        provider_authority_path = config.authority_paths.get("source:provider")
+        if provider_authority_path is not None:
+            os.environ["GATE_B_PROVIDER_AUTHORITY_PATH"] = str(provider_authority_path)
+        if os.environ.get("JOB_INTEL_LLM_LIVE_APPROVED") == "1" and (
+            config.provider_factory
+            != "job_intel.product_search.gate_b_evidence_runner_v1:build_live_provider_factory"
+        ):
+            parser.error("live approval requires live provider factory")
         provider_factory = _load_artifact_callable(config.provider_factory, artifact_root)
         decision_request_factory = _load_artifact_callable(
             config.decision_request_factory, artifact_root
@@ -1446,9 +1639,9 @@ def _main(arguments: list[str]) -> int:
         source_artifact, runtime, authorities = _artifact_binding_context(
             manifest, artifact_root, config.authority_paths
         )
-        state_directory = args.state_directory.resolve()
-        state_directory.mkdir(parents=True, exist_ok=True)
-        ledger = ForegroundDispatchLedger(manifest)
+        ledger = ForegroundDispatchLedger(
+            manifest, committed_budget_reserver=committed_budget_reserver
+        )
         recordings = RecordingStore(state_directory / "recordings")
         decision_evidence = DecisionEvidenceStore(state_directory / "decisions")
         if config.corpus_rows_path is not None:

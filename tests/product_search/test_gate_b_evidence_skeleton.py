@@ -42,6 +42,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     GateEvaluator,
     Limits,
     MeasurementReport,
+    NoDurableAccounting,
     RecordingStore,
     RuntimeIdentity,
     TerminalOutcome,
@@ -75,6 +76,16 @@ def _raw() -> dict[str, str]:
             "<p>Lead quarterly roadmap planning with engineering and design.</p>"
         ),
     }
+
+
+def test_foreground_ledger_requires_explicit_budget_reserver() -> None:
+    manifest = _manifest(
+        input_sha256=_sha256_bytes(b"request"),
+        projection_sha256="2" * 64,
+        raw_sha256="3" * 64,
+    )
+    with pytest.raises(TypeError, match="committed_budget_reserver"):
+        ForegroundDispatchLedger(manifest)
 
 
 def _allowlist(candidates: object) -> ReviewedFragmentAllowlistV3:
@@ -188,7 +199,9 @@ def test_foreground_ledger_refuses_the_forty_ninth_dispatch() -> None:
         projection_sha256="2" * 64,
         raw_sha256="3" * 64,
     )
-    ledger = ForegroundDispatchLedger(manifest)
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=NoDurableAccounting()
+    )
     for ordinal in range(48):
         receipt = ledger.append_pre_dispatch(manifest.row_ref(ordinal))
         ledger.commit_terminal(
@@ -210,7 +223,9 @@ def test_foreground_ledger_refuses_dispatch_past_spend_ceiling() -> None:
         raw_sha256="3" * 64,
     )
     object.__setattr__(manifest.limits, "aggregate_maximum_usd", Decimal("0.47"))
-    ledger = ForegroundDispatchLedger(manifest)
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=NoDurableAccounting()
+    )
     for ordinal in range(47):
         ledger.append_pre_dispatch(manifest.row_ref(ordinal))
 
@@ -287,7 +302,9 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         raw_sha256=candidates.vacancy_artifact_sha256,
     )
 
-    ledger = ForegroundDispatchLedger(manifest)
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=NoDurableAccounting()
+    )
     recordings = RecordingStore(tmp_path / "recordings")
     decision_evidence = DecisionEvidenceStore(tmp_path / "decisions")
     calls: list[dict[str, object]] = []

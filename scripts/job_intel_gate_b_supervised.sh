@@ -48,6 +48,9 @@ exec sudo -n systemd-run --wait --pipe --uid=hermes \
   --setenv=PYTHONHOME="$artifact_root/python-runtime/venv" \
   --setenv=LD_LIBRARY_PATH="$artifact_root/python-runtime/venv/lib" \
   --setenv=PYTHONPATH="$runtime_source" \
+  --setenv=GATE_B_SPEND_RECORD_ROOT=/var/lib/job-intel-gate-b-spend \
+  --setenv=JOB_INTEL_LLM_LIVE_APPROVED="${JOB_INTEL_LLM_LIVE_APPROVED:-}" \
+  --property=EnvironmentFile=/etc/job-intel/gate-b-provider.env \
   --setenv=GATE_B_SMOKE_ISOLATION_PROBE="${GATE_B_SMOKE_ISOLATION_PROBE:-}" \
   --setenv=GATE_B_SMOKE_DISPATCH_LOG="${GATE_B_SMOKE_DISPATCH_LOG:-}" \
   --setenv=GATE_B_SMOKE_PROBE_CAP="${GATE_B_SMOKE_PROBE_CAP:-}" \

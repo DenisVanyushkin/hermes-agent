@@ -13,6 +13,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     EvidenceManifest,
     JournalEntry,
     JournalState,
+    NoDurableAccounting,
     RecordingRef,
     RecordingStore,
     SealedRecording,
@@ -24,7 +25,9 @@ def _terminal_entry(
     manifest: EvidenceManifest,
     outcome: TerminalOutcome,
 ) -> JournalEntry:
-    ledger = ForegroundDispatchLedger(manifest)
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=NoDurableAccounting()
+    )
     receipt = ledger.append_pre_dispatch(manifest.row_ref(0))
     ledger.commit_terminal(
         receipt,
@@ -166,7 +169,9 @@ def test_recording_anchor_requires_terminal_dispatch_entry(tmp_path: Path) -> No
             },
         )
     )
-    ledger = ForegroundDispatchLedger(manifest)
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=NoDurableAccounting()
+    )
     ledger.append_pre_dispatch(ref)
     with pytest.raises(ValueError, match="recording dispatch entry is not terminal"):
         store.verify(recording_ref, manifest, ledger.entries()[0])
