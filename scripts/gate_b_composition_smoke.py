@@ -198,6 +198,9 @@ def main() -> int:
         init_seconds = time.perf_counter() - init_started
         target_attempt = None
         target_seconds = 0.0
+        evaluation_attempt = None
+        evaluation_seconds = 0.0
+        gate_decision = None
         probe_path = state / "isolation-probe.json"
         target_env = {
             **os.environ,
@@ -229,6 +232,77 @@ def main() -> int:
                 capture_output=True,
             )
             target_seconds = time.perf_counter() - target_started
+        if init_attempt.returncode != 0:
+            raise RuntimeError(
+                f"supervised init-run failed: {init_attempt.stderr.strip()}"
+            )
+        if target_attempt is None or target_attempt.returncode != 0:
+            detail = "no target attempt"
+            if target_attempt is not None:
+                detail = target_attempt.stderr.strip()
+            raise RuntimeError(f"supervised collection failed: {detail}")
+        from job_intel.product_search.gate_b_evidence_runner_v1 import (
+            AdjudicationSet,
+            AdjudicationVerdict,
+            DecisionEvidenceStore,
+            EvidenceManifest,
+        )
+
+        manifest = EvidenceManifest.model_validate(json.loads(manifest_path.read_bytes()))
+        decision_store = DecisionEvidenceStore(state / "decisions")
+        verdicts = tuple(
+            AdjudicationVerdict(
+                manifest_ref=manifest.row_ref(ordinal),
+                decision_sha256=decision_store.find_for_manifest_ref(
+                    manifest.row_ref(ordinal)
+                ).decision_sha256,
+                correct=True,
+            )
+            for ordinal in range(manifest.row_count)
+        )
+        adjudication = AdjudicationSet.from_verdicts(verdicts)
+        adjudication_path = state / "adjudication.json"
+        adjudication_path.write_bytes(canonical(adjudication.model_dump(mode="json")))
+        evaluation_started = time.perf_counter()
+        evaluation_attempt = subprocess.run(
+            [
+                str(supervised_wrapper_copy),
+                "evaluate-run",
+                "--manifest",
+                str(manifest_path),
+                "--manifest-sha256",
+                manifest_sha,
+                "--measurement-report",
+                str(state / "measurement-report.json"),
+                "--adjudication",
+                str(adjudication_path),
+                "--adjudication-sha256",
+                adjudication.adjudication_sha256,
+                "--gate-policy",
+                str(install_root / "runtime/config/product_search/gate_b_benchmark.v3.yaml"),
+                "--output",
+                str(state),
+            ],
+            cwd=install_root / "runtime",
+            env=target_env,
+            text=True,
+            capture_output=True,
+        )
+        evaluation_seconds = time.perf_counter() - evaluation_started
+        if evaluation_attempt.returncode != 0:
+            raise RuntimeError(
+                f"gate evaluation failed: {evaluation_attempt.stderr.strip()}"
+            )
+        decision_path = state / "gate-decision.json"
+        if not decision_path.is_file():
+            raise RuntimeError("gate evaluator did not publish gate-decision.json")
+        gate_decision = json.loads(decision_path.read_bytes())
+        if not {
+            "measurement_status",
+            "decision",
+            "violated_rules",
+        } <= gate_decision.keys():
+            raise RuntimeError("gate decision publication is incomplete")
         isolation_probe_error = None
         if target_attempt is not None:
             if not probe_path.is_file():
@@ -260,18 +334,14 @@ def main() -> int:
             raise RuntimeError(
                 "old unit wrapper was not inert: expected exit 2 input validation"
             )
-        first_attempt = target_attempt or init_attempt
-        first_stop = (
-            "target supervised collection"
-            if target_attempt is not None
-            else "supervised init-run"
-        )
+        first_stop = "gate decision publication"
         report = {
             "head": run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO).stdout.strip(),
             "artifact_build_seconds": round(build_seconds, 3),
             "artifact_install_seconds": round(install_seconds, 3),
             "init_attempt_seconds": round(init_seconds, 3),
             "target_attempt_seconds": round(target_seconds, 3),
+            "evaluation_attempt_seconds": round(evaluation_seconds, 3),
             "old_unit_attempt_seconds": round(old_seconds, 3),
             "harness_lines": len(Path(__file__).read_text(encoding="utf-8").splitlines()),
             "artifact_tree_sha256": artifact_hash,
@@ -283,6 +353,10 @@ def main() -> int:
             "target_returncode": None if target_attempt is None else target_attempt.returncode,
             "target_stdout": "" if target_attempt is None else target_attempt.stdout,
             "target_stderr": "" if target_attempt is None else target_attempt.stderr,
+            "evaluation_returncode": evaluation_attempt.returncode,
+            "evaluation_stdout": evaluation_attempt.stdout,
+            "evaluation_stderr": evaluation_attempt.stderr,
+            "gate_decision": gate_decision,
             "isolation_observed": bool(isolation_probe) and not any(
                 item.get("reachable") for item in isolation_probe.values()
             ),

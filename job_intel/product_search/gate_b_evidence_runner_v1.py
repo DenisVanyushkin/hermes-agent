@@ -42,6 +42,7 @@ from job_intel.product_search.decision_v2 import (
 from job_intel.product_search.evidence_synthesis import EvidenceSynthesisStatus
 from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     GateBBenchmarkPolicyV3,
+    load_gate_b_benchmark_policy_v3,
 )
 from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
@@ -1287,6 +1288,38 @@ def _write_measurement_report(
     return destination
 
 
+def _load_measurement_report(path: Path) -> MeasurementReport:
+    try:
+        encoded = path.read_bytes()
+        payload = json.loads(encoded)
+        if _canonical_bytes(payload) != encoded:
+            raise ValueError("measurement report is not canonical")
+        return MeasurementReport.model_validate(payload)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("measurement report is invalid") from exc
+
+
+def _load_adjudication_file(path: Path, expected_sha256: str) -> AdjudicationSet:
+    try:
+        encoded = path.read_bytes()
+    except OSError as exc:
+        raise ValueError("adjudication set is unavailable") from exc
+    try:
+        payload = json.loads(encoded)
+        if _canonical_bytes(payload) != encoded:
+            raise ValueError("adjudication set is not canonical")
+        adjudication = AdjudicationSet.model_validate(payload)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("adjudication set is invalid") from exc
+    if adjudication.adjudication_sha256 != expected_sha256:
+        raise ValueError("adjudication set hash mismatch")
+    return adjudication
+
+
 def _load_corpus_rows_file(path: Path, manifest: EvidenceManifest) -> tuple[CorpusRow, ...]:
     if path.is_symlink() or not path.is_file():
         raise ValueError("corpus rows file is unavailable")
@@ -1363,6 +1396,40 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
         raise RuntimeError("collection evidence publication incomplete")
     return 0
 
+
+def _run_evaluate_run(args: argparse.Namespace) -> int:
+    """Evaluate finalized collection evidence in a separate foreground step."""
+    manifest = _load_manifest(args.manifest, args.manifest_sha256)
+    measurements = _load_measurement_report(args.measurement_report)
+    adjudication = _load_adjudication_file(
+        args.adjudication,
+        args.adjudication_sha256,
+    )
+    policy = load_gate_b_benchmark_policy_v3(args.gate_policy)
+    measurements = measurements.model_copy(
+        update={
+            "adjudicated_count": adjudication.audited_count,
+            "adjudication_denominator": adjudication.denominator,
+            "adjudicated_correct": adjudication.correct_count,
+        }
+    )
+    evaluation = GateEvaluator.evaluate_report(
+        manifest,
+        measurements,
+        adjudication,
+        policy=policy,
+    )
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    evaluation_bytes = _canonical_bytes(evaluation.model_dump(mode="json"))
+    decision_bytes = _canonical_bytes(
+        evaluation.gate_decision.model_dump(mode="json")
+    )
+    (output / "gate-evaluation-report.json").write_bytes(evaluation_bytes)
+    (output / "gate-decision.json").write_bytes(decision_bytes)
+    print(decision_bytes.decode("utf-8"))
+    return 0
+
 def _main(arguments: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="gate_b_evidence_runner_v1")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1394,6 +1461,15 @@ def _main(arguments: list[str]) -> int:
     supervised.add_argument("--provider-factory", required=True)
     supervised.add_argument("--decision-request-factory", required=True)
 
+    evaluate = subparsers.add_parser("evaluate-run")
+    evaluate.add_argument("--manifest", type=Path, required=True)
+    evaluate.add_argument("--manifest-sha256", required=True)
+    evaluate.add_argument("--measurement-report", type=Path, required=True)
+    evaluate.add_argument("--adjudication", type=Path, required=True)
+    evaluate.add_argument("--adjudication-sha256", required=True)
+    evaluate.add_argument("--gate-policy", type=Path, required=True)
+    evaluate.add_argument("--output", type=Path, required=True)
+
     run = subparsers.add_parser("run-collection")
     run.add_argument(
         "--manifest",
@@ -1417,6 +1493,8 @@ def _main(arguments: list[str]) -> int:
     args = parser.parse_args(arguments)
     if args.command == "run-supervised":
         return _run_supervised_collection(args)
+    if args.command == "evaluate-run":
+        return _run_evaluate_run(args)
     if args.command == "init-run":
         if args.manifest is None or args.state_directory is None:
             parser.error("init-run requires manifest and STATE_DIRECTORY")
