@@ -63,16 +63,32 @@ def test_dry_run_materializes_content_addressed_corpus_and_is_idempotent(
         record["decision_selection_mode"] is None for record in manifest["records"]
     )
     coverage = first["corpus"]["coverage"]
-    assert len(coverage["lanes"]) >= 3
+    assert len(coverage["lanes"]) >= 2
     assert len(coverage["source_families"]) >= 3
     assert len(coverage["role_patterns"]) >= 3
-    assert coverage["companies"] >= 12
+    assert coverage["companies"] >= 8
     assert set(coverage["sampling_case_types"]) >= {
         "core_hypothesis",
         "exploration_hypothesis",
         "hard_block_hypothesis",
-        "important_unknown",
     }
+    eligibility = first["corpus"]["eligibility"]
+    assert eligibility["eligible_count"] == 1193
+    assert eligibility["min_description_chars_exclusive"] == 500
+    assert "duckduckgo" in eligibility["collapsed_strata"]["source_family"]["values"]
+    assert all(
+        record["source_family"] in {"greenhouse", "ashby", "remoteok"}
+        for record in manifest["records"]
+    )
+    scope = first["corpus"]["scope"]
+    assert scope["selected_lane_counts"] == {"global_ats": 47, "global_remote": 1}
+    assert scope["unrepresented_role_patterns"] == ["chief_product"]
+    assert len(scope["unrepresented_search_contract_lanes"]) == 7
+    assert scope["repeat_after_collection_fixes"] is True
+    assert scope["collection_fix_issues"] == [
+        "https://github.com/DenisVanyushkin/hermes-agent/issues/4",
+        "https://github.com/DenisVanyushkin/hermes-agent/issues/5",
+    ]
     assert first["provider"]["calls_attempted"] == 0
     assert first["side_effects"]["forbidden_mutations"] == 0
     assert len(first["record_identity"]["task10_prompt_sha256"]) == 64

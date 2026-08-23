@@ -84,6 +84,32 @@ GATE_A_MANIFEST_SHA256 = (
     "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d"
 )
 DEFAULT_SAMPLE_SIZE = 48
+# Gate A canonical-pool measurement: the short title-distinct tail ends at 481
+# chars and the next observation is 2,809 chars; >500 retains 1,193/1,314.
+MIN_ELIGIBLE_DESCRIPTION_CHARS = 500
+# This is an explicit limitation of the current decision-grade slice, not a
+# claim that the full Search Contract has been covered.
+GATE_B_SCOPE_DECLARATION = {
+    "selected_lane_counts": {"global_ats": 47, "global_remote": 1},
+    "search_contract_lane_count": 8,
+    "represented_search_contract_lanes": {"global_remote": 1},
+    "unrepresented_search_contract_lanes": [
+        "europe_including_uk",
+        "apac_excluding_australia_new_zealand",
+        "gcc",
+        "americas",
+        "australia_new_zealand",
+        "kazakhstan",
+        "other_central_asia",
+    ],
+    "unrepresented_role_patterns": ["chief_product"],
+    "limitation_reason": "eligible source evidence was unavailable without substantive text",
+    "repeat_after_collection_fixes": True,
+    "collection_fix_issues": [
+        "https://github.com/DenisVanyushkin/hermes-agent/issues/4",
+        "https://github.com/DenisVanyushkin/hermes-agent/issues/5",
+    ],
+}
 DEFAULT_MAX_COST_PER_CALL_USD = Decimal("0.01")
 EXACT_CALL_CAP = 48
 EXACT_SPEND_CAP_USD = Decimal("0.48")
@@ -101,7 +127,7 @@ GATE_B_RECONCILIATION_WITNESS_PATH = Path(
 GATE_B_LAUNCH_WITNESS_SCHEMA_VERSION = "1.0.0"
 GATE_B_RECONCILIATION_SCHEMA_VERSION = "1.0.0"
 GATE_B_CORPUS_SHA256 = (
-    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
+    "a11ee9bc8bb18da71fec8b40a024c33f65b4ed4272c82fb63e6e4be2b2cf679c"
 )
 PRODUCTION_DATABASE_PATH = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -732,11 +758,20 @@ def _sampling_case_type(payload: Mapping[str, Any], role_pattern: str) -> str:
     return "exploration_hypothesis"
 
 
-def _corpus_records(
+def _eligible_description(payload: Mapping[str, Any]) -> bool:
+    """Keep evidence with a substantive description, independent of source."""
+    title = str(payload.get("title") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    if not description:
+        return False
+    return description != title and len(description) > MIN_ELIGIBLE_DESCRIPTION_CHARS
+
+
+def _corpus_selection(
     records: list[dict[str, Any]], sample_size: int
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     lanes = _cell_lanes()
-    enriched: list[dict[str, Any]] = []
+    enriched_with_payload: list[tuple[dict[str, Any], Mapping[str, Any]]] = []
     for item in records:
         payload = item["payload"]
         evidence = item["evidence"]
@@ -766,8 +801,41 @@ def _corpus_records(
             "source_id": record["source_id"],
             "raw_content_sha256": record["raw_content_sha256"],
         })
-        enriched.append(record)
-    enriched.sort(key=lambda item: item["selection_key"])
+        enriched_with_payload.append((record, payload))
+    all_enriched = [record for record, _ in enriched_with_payload]
+    eligible_enriched = [
+        record
+        for record, payload in enriched_with_payload
+        if _eligible_description(payload)
+    ]
+    all_enriched.sort(key=lambda item: item["selection_key"])
+    eligible_enriched.sort(key=lambda item: item["selection_key"])
+
+    collapsed_strata: dict[str, dict[str, Any]] = {}
+    for field in (
+        "lane",
+        "role_pattern",
+        "company",
+        "source_family",
+        "sampling_case_type",
+    ):
+        all_values = {str(item[field]) for item in all_enriched}
+        eligible_values = {str(item[field]) for item in eligible_enriched}
+        collapsed = sorted(all_values - eligible_values)
+        if collapsed:
+            collapsed_strata[field] = {
+                "count": len(collapsed),
+                "values": collapsed,
+            }
+
+    if len(eligible_enriched) < sample_size:
+        raise GateBPreflightError(
+            "corpus_eligible_sample_size_unavailable:"
+            f"{len(eligible_enriched)}:required={sample_size}:"
+            f"min_description_chars={MIN_ELIGIBLE_DESCRIPTION_CHARS}"
+        )
+
+    enriched = eligible_enriched
 
     selected: list[dict[str, Any]] = []
     selected_keys: set[str] = set()
@@ -815,7 +883,23 @@ def _corpus_records(
             break
     if len(selected) != sample_size:
         raise GateBPreflightError(f"corpus_sample_size_unavailable:{len(selected)}")
-    return sorted(selected, key=lambda item: item["selection_key"])
+    return sorted(selected, key=lambda item: item["selection_key"]), {
+        "predicate": (
+            "description is non-empty, differs from title, and has more than "
+            f"{MIN_ELIGIBLE_DESCRIPTION_CHARS} characters"
+        ),
+        "min_description_chars_exclusive": MIN_ELIGIBLE_DESCRIPTION_CHARS,
+        "eligible_count": len(eligible_enriched),
+        "excluded_count": len(all_enriched) - len(eligible_enriched),
+        "collapsed_strata": collapsed_strata,
+    }
+
+
+def _corpus_records(
+    records: list[dict[str, Any]], sample_size: int
+) -> list[dict[str, Any]]:
+    selected, _ = _corpus_selection(records, sample_size)
+    return selected
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -1487,7 +1571,7 @@ def _build_dry_run_preflight_core(
         finally:
             policy.callback_active = False
     records, protected_paths = _load_gate_a(gate_a_root, boundary)
-    selected = _corpus_records(records, sample_size)
+    selected, eligibility = _corpus_selection(records, sample_size)
     corpus = {
         "schema_version": "1.0.0",
         "gate": "gate-b",
@@ -1497,12 +1581,17 @@ def _build_dry_run_preflight_core(
             "manifest_sha256": GATE_A_MANIFEST_SHA256,
         },
         "selection": {
-            "algorithm": "deterministic-coverage-first-stratified-round-robin-v1",
+            "algorithm": (
+                "deterministic-content-eligible-coverage-first-"
+                "stratified-round-robin-v2"
+            ),
             "denominator": 1314,
             "sample_size": sample_size,
             "core_exploration_values_are_sampling_hypotheses_not_decision_outputs": True,
+            "eligibility": eligibility,
         },
         "records": selected,
+        "scope": GATE_B_SCOPE_DECLARATION,
     }
 
     corpus_bytes = (
@@ -1567,6 +1656,8 @@ def _build_dry_run_preflight_core(
             "manifest_path": str(manifest_path),
             "manifest_sha256": corpus_sha256,
             "coverage": coverage,
+            "eligibility": eligibility,
+            "scope": GATE_B_SCOPE_DECLARATION,
         },
         "inputs": input_package,
         "budget": {
