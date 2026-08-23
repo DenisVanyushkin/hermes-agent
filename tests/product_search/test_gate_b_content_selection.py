@@ -123,3 +123,22 @@ def test_collapsed_strata_are_reported_after_content_filter(
         "count": 1,
         "values": ["europe"],
     }
+
+
+def test_scope_declaration_is_derived_from_selected_rows() -> None:
+    global_remote = {"lane": "global_remote", "role_pattern": "adjacent"}
+    regional_chief = {
+        "lane": "europe_including_uk",
+        "role_pattern": "chief_product",
+    }
+
+    first = gate_b._scope_declaration([global_remote])
+    second = gate_b._scope_declaration([global_remote, regional_chief])
+
+    assert first["selected_lane_counts"] == {"global_remote": 1}
+    assert second["selected_lane_counts"] == {
+        "europe_including_uk": 1,
+        "global_remote": 1,
+    }
+    assert "europe_including_uk" in second["represented_search_contract_lanes"]
+    assert "chief_product" not in second["unrepresented_role_patterns"]

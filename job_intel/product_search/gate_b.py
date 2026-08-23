@@ -87,24 +87,7 @@ DEFAULT_SAMPLE_SIZE = 48
 # Gate A canonical-pool measurement: the short title-distinct tail ends at 481
 # chars and the next observation is 2,809 chars; >500 retains 1,193/1,314.
 MIN_ELIGIBLE_DESCRIPTION_CHARS = 500
-# This is an explicit limitation of the current decision-grade slice, not a
-# claim that the full Search Contract has been covered.
-GATE_B_SCOPE_DECLARATION = {
-    "selected_lane_counts": {"global_ats": 47, "global_remote": 1},
-    "synthetic_lane_counts": {"global_ats": 47},
-    "synthetic_lanes_not_in_search_contract": ["global_ats"],
-    "search_contract_lane_count": 8,
-    "represented_search_contract_lanes": {"global_remote": 1},
-    "unrepresented_search_contract_lanes": [
-        "europe_including_uk",
-        "apac_excluding_australia_new_zealand",
-        "gcc",
-        "americas",
-        "australia_new_zealand",
-        "kazakhstan",
-        "other_central_asia",
-    ],
-    "unrepresented_role_patterns": ["chief_product"],
+GATE_B_SCOPE_JUDGEMENTS = {
     "limitation_reason": "eligible source evidence was unavailable without substantive text",
     "repeat_after_collection_fixes": True,
     "collection_fix_issues": [
@@ -112,6 +95,15 @@ GATE_B_SCOPE_DECLARATION = {
         "https://github.com/DenisVanyushkin/hermes-agent/issues/5",
     ],
 }
+ROLE_PATTERN_VALUES = (
+    "chief_product",
+    "vp_product",
+    "head_product",
+    "director",
+    "general_manager",
+    "product_other",
+    "adjacent",
+)
 DEFAULT_MAX_COST_PER_CALL_USD = Decimal("0.01")
 EXACT_CALL_CAP = 48
 EXACT_SPEND_CAP_USD = Decimal("0.48")
@@ -129,7 +121,7 @@ GATE_B_RECONCILIATION_WITNESS_PATH = Path(
 GATE_B_LAUNCH_WITNESS_SCHEMA_VERSION = "1.0.0"
 GATE_B_RECONCILIATION_SCHEMA_VERSION = "1.0.0"
 GATE_B_CORPUS_SHA256 = (
-    "9d4c3ec5ba7bb2c668fe5b42b65c5cdf36c01a0c958799e59770e469579cd697"
+    "5b8e29b07e5ff042c09d98dba7913c406211cb2d9ca5d0613f1a76082aec530a"
 )
 PRODUCTION_DATABASE_PATH = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -716,6 +708,15 @@ def _cell_lanes() -> dict[str, str]:
     return result
 
 
+def _search_contract_lane_ids() -> tuple[str, ...]:
+    payload = yaml.safe_load(
+        (REPO_ROOT / "config/product_search/search_contract.v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    return tuple(sorted(str(lane_id) for lane_id in payload["lanes"]))
+
+
 def _role_pattern(title: str) -> str:
     value = title.casefold()
     if "chief product" in value or "cpo" in value:
@@ -901,6 +902,43 @@ def _corpus_records(
 ) -> list[dict[str, Any]]:
     selected, _ = _corpus_selection(records, sample_size)
     return selected
+
+
+def _scope_declaration(selected: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Describe the selected slice from rows, not from a stale snapshot."""
+    lane_counts: dict[str, int] = {}
+    selected_roles: set[str] = set()
+    for item in selected:
+        lane = str(item["lane"])
+        lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        selected_roles.add(str(item["role_pattern"]))
+    lane_counts = dict(sorted(lane_counts.items()))
+    contract_lanes = set(_search_contract_lane_ids())
+    represented = {
+        lane: count
+        for lane, count in lane_counts.items()
+        if lane in contract_lanes
+    }
+    synthetic = {
+        lane: count
+        for lane, count in lane_counts.items()
+        if lane not in contract_lanes
+    }
+    declaration = {
+        "selected_lane_counts": lane_counts,
+        "synthetic_lane_counts": synthetic,
+        "synthetic_lanes_not_in_search_contract": sorted(synthetic),
+        "search_contract_lane_count": len(contract_lanes),
+        "represented_search_contract_lanes": represented,
+        "unrepresented_search_contract_lanes": sorted(
+            contract_lanes - set(represented)
+        ),
+        "unrepresented_role_patterns": sorted(
+            set(ROLE_PATTERN_VALUES) - selected_roles
+        ),
+    }
+    declaration.update(GATE_B_SCOPE_JUDGEMENTS)
+    return declaration
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -1573,6 +1611,7 @@ def _build_dry_run_preflight_core(
             policy.callback_active = False
     records, protected_paths = _load_gate_a(gate_a_root, boundary)
     selected, eligibility = _corpus_selection(records, sample_size)
+    scope = _scope_declaration(selected)
     corpus = {
         "schema_version": "1.0.0",
         "gate": "gate-b",
@@ -1592,7 +1631,7 @@ def _build_dry_run_preflight_core(
             "eligibility": eligibility,
         },
         "records": selected,
-        "scope": GATE_B_SCOPE_DECLARATION,
+        "scope": scope,
     }
 
     corpus_bytes = (
@@ -1658,7 +1697,7 @@ def _build_dry_run_preflight_core(
             "manifest_sha256": corpus_sha256,
             "coverage": coverage,
             "eligibility": eligibility,
-            "scope": GATE_B_SCOPE_DECLARATION,
+            "scope": scope,
         },
         "inputs": input_package,
         "budget": {
