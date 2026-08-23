@@ -201,7 +201,7 @@ def main() -> int:
                     "--provider-factory",
                     "gate_b_cli_smoke_fixture:provider_factory",
                     "--decision-request-factory",
-                    "gate_b_cli_smoke_fixture:decision_request_factory",
+                    "job_intel.product_search.gate_b_evidence_runner_v1:build_decision_request_from_context_v2",
                 ],
                 cwd=install_root / "runtime",
                 env=target_env,

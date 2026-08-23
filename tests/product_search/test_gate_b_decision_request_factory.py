@@ -12,9 +12,13 @@ from job_intel.product_search.company_evidence import (
     load_company_thesis_input,
 )
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
+    DecisionRequestFactoryContextV1,
+    ManifestRef,
     _load_company_authority_inputs,
+    build_decision_request_from_context_v2,
     build_decision_request_v2,
 )
+import job_intel.product_search.gate_b_evidence_runner_v1 as evidence_runner
 from job_intel.product_search.gate_b_evidence_v3 import (
     CompanyEvidenceCatalogV3,
     ReviewedFragmentAllowlistV3,
@@ -163,3 +167,49 @@ def test_company_authority_loader_returns_only_valid_thesis_inputs() -> None:
     assert catalog is not None
     assert len(catalog.bundles) == 1
     assert set(theses) == {catalog.bundles[0].company_identity.company_id}
+
+
+def test_context_adapter_forwards_context_and_manifest_input_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projected = _projected()
+    policy = load_decision_policy()
+    manifest_ref = ManifestRef(
+        run_id="gate-b-evidence-v1-" + "a" * 16,
+        manifest_sha256="b" * 64,
+        ordinal=7,
+        input_sha256="c" * 64,
+        projection_sha256="d" * 64,
+    )
+    context = DecisionRequestFactoryContextV1(
+        response_payload={"claims": []},
+        projected=projected,
+        manifest_ref=manifest_ref,
+        raw={"company": "Northstar"},
+        provider_record={"output_sha256": "e" * 64},
+        validation_status=None,
+        decision_policy=policy,
+        decision_clock=datetime(2026, 8, 23, tzinfo=timezone.utc),
+        company_thesis_input=None,
+    )
+    captured: dict[str, object] = {}
+    sentinel = object()
+
+    def fake_factory(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(evidence_runner, "build_decision_request_v2", fake_factory)
+
+    assert build_decision_request_from_context_v2(context) is sentinel
+    assert captured == {
+        "response_payload": context.response_payload,
+        "projected": context.projected,
+        "provider_input_sha256": manifest_ref.input_sha256,
+        "raw": context.raw,
+        "provider_record": context.provider_record,
+        "validation_status": context.validation_status,
+        "decision_policy": context.decision_policy,
+        "decision_clock": context.decision_clock,
+        "company_thesis_input": context.company_thesis_input,
+    }

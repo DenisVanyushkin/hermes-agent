@@ -463,7 +463,7 @@ exec {sys.executable!s} "$@"
         "decision_policy_path": str(policy_path),
         "company_evidence_root": str(company_evidence_root),
         "provider_factory": "gate_b_cli_smoke_fixture:provider_factory",
-        "decision_request_factory": "gate_b_cli_smoke_fixture:decision_request_factory",
+        "decision_request_factory": "job_intel.product_search.gate_b_evidence_runner_v1:build_decision_request_from_context_v2",
         "authority_paths": {key: str(path) for key, path in authority_paths.items()},
     }
     config_path = root / "collection-config.json"

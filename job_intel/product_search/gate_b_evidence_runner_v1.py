@@ -408,6 +408,23 @@ def build_decision_request_v2(
     )
 
 
+def build_decision_request_from_context_v2(
+    context: DecisionRequestFactoryContextV1,
+) -> DecisionRequestV2:
+    """Adapt the positional runtime factory contract to the V2 builder."""
+    return build_decision_request_v2(
+        response_payload=context.response_payload,
+        projected=context.projected,
+        provider_input_sha256=context.manifest_ref.input_sha256,
+        raw=context.raw,
+        provider_record=context.provider_record,
+        validation_status=context.validation_status,
+        decision_policy=context.decision_policy,
+        decision_clock=context.decision_clock,
+        company_thesis_input=context.company_thesis_input,
+    )
+
+
 class JournalState(str, Enum):
     PENDING = "pending"
     DISPATCHED = "dispatched"
