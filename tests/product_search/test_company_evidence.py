@@ -108,7 +108,8 @@ def _closed_source_artifact() -> dict[str, Any]:
                 "claim_id": "claim:scale-stage:1",
                 "dimension": "scale_stage",
                 "value_codes": ["growth_stage"],
-                "integer_value": None,
+                "quote": "Public profile describes Northstar Commerce as growth-stage.",
+                "locator": "company profile, scale section",
             }
         ],
     }
@@ -221,9 +222,7 @@ def test_source_artifacts_are_content_addressed_and_tamper_evident(
     """Mutation caught: source bytes change while their immutable hash stays pinned."""
     load_company_evidence_bundle = _symbol("load_company_evidence_bundle")
     bundle = load_company_evidence_bundle(BUNDLE_PATH)
-    assert bundle.sources[0].artifact_ref.sha256 == (
-        "036468876716f27743dfaabfeabf6e54625cafb556cdef6161cf901159810bcd"
-    )
+    assert bundle.sources[0].artifact_ref.sha256 == "cdad8d20ed284623c16e35f64af9c9671cfc5c73dae698139f971506538e3083"
 
     copied = tmp_path / "company_evidence"
     shutil.copytree(FIXTURES, copied)
@@ -471,9 +470,7 @@ def test_content_hash_is_literal_tamper_evident_and_replay_is_deterministic() ->
     load_company_evidence_bundle = _symbol("load_company_evidence_bundle")
     first = load_company_evidence_bundle(BUNDLE_PATH)
     second = load_company_evidence_bundle(BUNDLE_PATH)
-    assert first.content_sha256 == (
-        "340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a"
-    )
+    assert first.content_sha256 == "4a430ff92b0e7b3720183a4e0f28afdb2cff7489368ddfd270f112979f0194e3"
     assert first.model_dump_json() == second.model_dump_json()
 
     tampered = _bundle_payload()

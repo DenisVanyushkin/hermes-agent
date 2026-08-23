@@ -235,12 +235,13 @@ class CompanyEvidenceSourceV1(_StrictFrozenModel):
 
 
 class PublicCompanyEvidenceClaimV1(_StrictFrozenModel):
-    """One redacted machine-readable claim; arbitrary prose is not accepted."""
+    """One redacted claim with a bounded quote and source locator."""
 
     claim_id: str = Field(pattern=CLAIM_ID_PATTERN)
     dimension: CompanyEvidenceDimension
     value_codes: tuple[str, ...] = Field(min_length=1)
-    integer_value: int | None = None
+    quote: str = Field(min_length=1)
+    locator: str = Field(min_length=1)
 
     @field_validator("value_codes")
     @classmethod
@@ -251,6 +252,11 @@ class PublicCompanyEvidenceClaimV1(_StrictFrozenModel):
             if not re.fullmatch(MACHINE_CODE_PATTERN, code):
                 raise ValueError("value_codes must contain bounded machine codes")
         return value
+
+    @field_validator("quote", "locator")
+    @classmethod
+    def validate_traceability_text(cls, value: str, info: Any) -> str:
+        return _clean_text(value, info.field_name)
 
 
 class PublicCompanyEvidenceArtifactV1(_StrictFrozenModel):
