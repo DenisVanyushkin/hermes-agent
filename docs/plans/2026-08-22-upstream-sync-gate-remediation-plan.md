@@ -274,6 +274,31 @@ systemd `ExecStart`, канареечный прогон и post-restart smoke. 
 выкатки включён host-state режим `report`, чтобы собрать живой отчёт перед
 переходом к `block`.
 
+## T12 / live rollout evidence (2026-08-23)
+
+- Main VPS checkout fast-forwarded from `760bbc1066` to `307427a343`;
+  recoverable ref `backup/pre-upstream-sync-t12-20260823` points to the old tip.
+- Runtime scripts were synced to `/home/hermes/.hermes/scripts`; source and
+  runtime SHA-256 match for the finalizer and invariant helpers.
+- Host state
+  `/home/hermes/.hermes/state/upstream-sync/invariant-mode.json` is owned by
+  `hat:hermes`, mode `0640`, and sets `invariant_mode=report`.
+- Published-wrapper canary forwarded `--invariant-mode report` into prepare
+  and persisted the report snapshot without touching the live checkout.
+- `upstream-sync-finalize.service` was executed through its real `ExecStart`
+  with no request and completed successfully. The actual user unit
+  Bthermes-gateway.service` was restarted; it is active with `NRestarts=0`,
+  and Slack, Telegram, and email connected after startup.
+- Focused validation: `212 passed, 1 failed`; the sole failure is the known
+  pre-existing `TestRepoLock` ownership-repair fixture failure. Ruff,
+  compileall, `bash -n`, and `git diff --check` passed.
+
+No git push was performed. No real pending merge or operator receipt was
+consumed during the canary; the host remains in report-only observation mode
+until the live report is reviewed and the state file is deliberately switched
+to `block`.
+
+
 ## Статус после review round 2 (2026-08-22)
 
 Коммит a088677973 закрывал F1-F15; по повторной проверке исправлены

@@ -79,6 +79,14 @@ The old global invariant skip remains rejected. The standalone ack line is
 intentional: it keeps the receipt command copyable and is the parser's
 whole-message contract.
 
-No live deployment, restart, or push is part of this remediation. T12 remains
-an operational follow-up: exercise the published wrapper/ExecStart path
-end-to-end after these source and test changes are published.
+R3-1 and the runtime portion of T12 were deployed on 2026-08-23. The main
+VPS checkout is `307427a343`, runtime copies match source, the host-owned mode
+file selects `report`, the published finalizer wrapper canary forwarded that
+mode into prepare, the real finalizer `ExecStart` completed with no request,
+and the user gateway restarted cleanly with all three configured platforms
+connected. A recoverable backup ref is
+`backup/pre-upstream-sync-t12-20260823`.
+
+No git push was performed and no real pending merge or operator receipt was
+consumed. The first live observation therefore remains report-only; switch the
+host-state file to `block` only after reviewing the resulting live report.
