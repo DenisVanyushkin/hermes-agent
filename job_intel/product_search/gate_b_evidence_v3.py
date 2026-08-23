@@ -408,14 +408,9 @@ class DescriptionCandidateV3(_StrictFrozenModel):
     source_locator: Annotated[
         str, StringConstraints(pattern=r"^/description#[0-9]{3}$")
     ]
-    section: Literal[
-        "responsibilities",
-        "what_you_will_do",
-        "requirements",
-        "qualifications",
-        "skills",
-        "experience",
-    ]
+    # Preserve any observed heading for explicit classification.  Only the
+    # closed ALLOWED_SECTIONS set can subsequently be admitted to projection.
+    section: str | None
     text: str
     text_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -737,15 +732,14 @@ def build_vacancy_projection_candidates_v3(
             artifact_fragments.append(
                 VacancyEvidenceArtifactFragmentV1(source_locator=locator, text=text)
             )
-            if block.section in ALLOWED_SECTIONS:
-                description_candidates.append(
-                    DescriptionCandidateV3(
-                        source_locator=locator,
-                        section=block.section,
-                        text=text,
-                        text_sha256=_sha256_text(text),
-                    )
+            description_candidates.append(
+                DescriptionCandidateV3(
+                    source_locator=locator,
+                    section=block.section,
+                    text=text,
+                    text_sha256=_sha256_text(text),
                 )
+            )
     if not artifact_fragments:
         raise ProjectionBlockedV3("vacancy has no immutable admissible fragment")
     artifact = VacancyEvidenceArtifactV1(
@@ -930,6 +924,10 @@ def _build_projection_v3(
             if entry.decision is ReviewedFragmentDecisionV3.EXCLUDE_AMBIGUOUS:
                 ambiguous_fragments_excluded += 1
                 continue
+            if candidate.section not in ALLOWED_SECTIONS:
+                raise ProjectionBlockedV3(
+                    "review decision may not admit an unrecognized description section"
+                )
             expected_decision = (
                 ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY
                 if candidate.section in _RESPONSIBILITY_SECTIONS
