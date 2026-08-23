@@ -29,7 +29,9 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 from job_intel.product_search.decision_v2 import DecisionResultV2, DecisionRunStatus
 
 
-def _bound_request(payload: dict[str, object], ref: ManifestRef) -> object:
+def _bound_request(context: runner.DecisionRequestFactoryContextV1) -> object:
+    payload = context.response_payload
+    ref = context.manifest_ref
     claims = payload.get("claims", [])
     if not isinstance(claims, list):
         claims = []

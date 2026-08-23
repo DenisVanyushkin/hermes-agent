@@ -267,8 +267,11 @@ def provider_factory() -> FakeProvider:
     return FakeProvider()
 
 
-def decision_request_factory(payload: dict[str, object], ref: Any) -> Any:
+def decision_request_factory(context: Any) -> Any:
     from tests.product_search.test_gate_b_evidence_skeleton import _decision_result
+
+    payload = context.response_payload
+    ref = context.manifest_ref
 
     if isinstance(payload.get("claims"), list) and payload["claims"]:
         decision_payload = payload

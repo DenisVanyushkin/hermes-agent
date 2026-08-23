@@ -499,6 +499,7 @@ def test_manifest_binding_rejects_reorder_policy_and_prompt_drift_distinctly(
     manifest = build_evidence_manifest(
         run_id="gate-b-evidence-v1-0123456789abcdef",
         created_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
+        decision_clock=datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
         source_artifact=artifact,
         runtime=runtime,
         rows=rows,

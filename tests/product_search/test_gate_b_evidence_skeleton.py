@@ -328,10 +328,11 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         ledger=ledger,
         recordings=recordings,
         decision_evidence=decision_evidence,
-        decision_request_factory=lambda payload, row: _decision_result(
-            payload, row.input_sha256
+        decision_request_factory=lambda context: _decision_result(
+            context.response_payload, context.manifest_ref.input_sha256
         ),
         decision_policy=load_decision_policy(),
+        decision_clock=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
     )
 
     assert len(calls) == 1

@@ -22,8 +22,13 @@ from pathlib import Path
 import sys
 import subprocess
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
+from dataclasses import dataclass
+
+import yaml
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from job_intel.product_search.contracts import ImmutableArtifactRef
 
 if TYPE_CHECKING:
     from job_intel.product_search.gate_b_runtime_v1 import (
@@ -33,14 +38,28 @@ if TYPE_CHECKING:
     )
 
 from job_intel.product_search.decision_v2 import (
+    DecisionAuthorityInputsV2,
+    DecisionImmutableReferencesV2,
     DecisionRequestV2,
     DecisionResultV2,
     LoadedDecisionPolicyV2,
+    SelectionEvidenceV2,
+    StageEvidenceV2,
     canonical_decision_bytes,
+    company_thesis_input_ref,
     load_decision_policy,
     run_decision_v2,
 )
-from job_intel.product_search.evidence_synthesis import EvidenceSynthesisStatus
+from job_intel.product_search.evidence_synthesis import (
+    EvidenceSynthesisInputV2,
+    EvidenceSynthesisMetadataV1,
+    EvidenceSynthesisResultV1,
+    EvidenceSynthesisStatus,
+)
+from job_intel.product_search.company_evidence import CompanyThesisInputV1
+from job_intel.product_search.company_evidence import (
+    load_company_thesis_input,
+)
 from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     GateBBenchmarkPolicyV3,
     load_gate_b_benchmark_policy_v3,
@@ -52,6 +71,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
     project_vacancy_evidence_v3,
     validate_reviewed_fragment_allowlist_corpus_v3,
     validate_provider_payload_v3,
+    load_company_evidence_catalog_v3,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     LLMProviderError,
@@ -238,6 +258,146 @@ class ManifestRef(_StrictFrozenModel):
     ordinal: int = Field(ge=0, lt=48)
     input_sha256: str = Field(pattern=SHA256_PATTERN)
     projection_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+@dataclass(frozen=True)
+class DecisionRequestFactoryContextV1:
+    """Explicit composition inputs for the production Decision v2 factory."""
+
+    response_payload: dict[str, object]
+    projected: EvidenceSynthesisInputV2
+    manifest_ref: ManifestRef
+    raw: dict[str, object]
+    provider_record: dict[str, object]
+    validation_status: EvidenceSynthesisStatus | None
+    decision_policy: LoadedDecisionPolicyV2
+    decision_clock: datetime
+    company_thesis_input: CompanyThesisInputV1 | None = None
+
+
+def _required_provider_value(record: Mapping[str, object], name: str) -> object:
+    value = record.get(name)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"provider_record_missing:{name}")
+    return value
+
+
+def build_decision_request_v2(
+    *,
+    response_payload: Mapping[str, object],
+    projected: EvidenceSynthesisInputV2,
+    manifest_ref: ManifestRef,
+    raw: Mapping[str, object],
+    provider_record: Mapping[str, object],
+    validation_status: EvidenceSynthesisStatus | None,
+    decision_policy: LoadedDecisionPolicyV2,
+    decision_clock: datetime,
+    company_thesis_input: CompanyThesisInputV1 | None = None,
+) -> DecisionRequestV2:
+    """Build a fully bound DecisionRequest from one collected provider result."""
+    claims = response_payload.get("claims", [])
+    conflicts = response_payload.get("conflicts", [])
+    questions = response_payload.get("question_candidates", [])
+    if not all(isinstance(value, list) for value in (claims, conflicts, questions)):
+        raise ValueError("provider_response_payload_shape_invalid")
+    output_payload = {
+        "schema_version": "1.0.0",
+        "claims": claims,
+        "conflicts": conflicts,
+        "question_candidates": questions,
+    }
+    output_sha256 = _sha256(_canonical_bytes(output_payload))
+    status = validation_status or EvidenceSynthesisStatus.REFUSAL
+    deliverable = status is EvidenceSynthesisStatus.DELIVERABLE
+    metadata = EvidenceSynthesisMetadataV1(
+        provider_id=str(_required_provider_value(provider_record, "provider_id")),
+        provider_version=str(
+            _required_provider_value(provider_record, "provider_version")
+        ),
+        model_id=str(_required_provider_value(provider_record, "model_id")),
+        semantic_prompt_version=str(
+            _required_provider_value(provider_record, "semantic_prompt_version")
+        ),
+        prompt_version=str(
+            _required_provider_value(provider_record, "prompt_version")
+        ),
+        schema_version="1.0.0",
+        latency_ms=int(_required_provider_value(provider_record, "latency_ms")),
+        cost_usd=(
+            None
+            if provider_record.get("cost_usd") is None
+            else str(provider_record["cost_usd"])
+        ),
+        input_sha256=manifest_ref.input_sha256,
+        output_sha256=output_sha256,
+    )
+    synthesis = EvidenceSynthesisResultV1(
+        schema_version="1.0.0",
+        status=status,
+        deliverable=deliverable,
+        claims=tuple(claims) if deliverable else (),
+        conflicts=tuple(conflicts) if deliverable else (),
+        question_candidates=tuple(questions) if deliverable else (),
+        failure_reason=None if deliverable else f"provider_validation:{status.value}",
+        metadata=metadata,
+    )
+    authority = projected.company_authority
+    bundle = getattr(authority, "company_evidence_bundle", None)
+    if bundle is None:
+        raise ValueError("company_evidence_bundle_required")
+    bundle_ref = ImmutableArtifactRef(
+        artifact_id=bundle.bundle_id,
+        version=bundle.schema_version,
+        sha256=bundle.content_sha256,
+    )
+    policy_hashes = decision_policy.policy.authority_hashes
+    refs = projected.assessment_input.references
+    references = DecisionImmutableReferencesV2(
+        **policy_hashes.model_dump(),
+        decision_contract_sha256=decision_policy.source_sha256,
+        semantic_contract_sha256=refs.semantic_contract_ref.sha256,
+        evidence_snapshot_sha256=refs.evidence_snapshot_ref.sha256,
+        company_evidence_bundle_sha256=bundle_ref.sha256,
+        provider_input_sha256=manifest_ref.input_sha256,
+        provider_output_sha256=output_sha256,
+    )
+    stages = StageEvidenceV2(
+        raw_observed=bool(raw),
+        identity_resolved=bool(raw.get("company")) and authority.status == "available",
+        duplicates_consolidated=True,
+        freshness_confirmed=bool(raw.get("posted_at")),
+        role_identified=bool(raw.get("title")),
+        company_identified=bool(raw.get("company")) and authority.status == "available",
+        location_and_work_format_identified=bool(raw.get("location")),
+        material_responsibilities_identified=bool(
+            projected.assessment_input.dimensions.mandate_fit.evidence_refs
+        ),
+        known_feasibility_constraints_identified=bool(
+            projected.assessment_input.dimensions.feasibility.evidence_refs
+        ),
+    )
+    return DecisionRequestV2(
+        schema_version="2.0.0",
+        assessment_id=projected.assessment_input.assessment_id,
+        stages=stages,
+        references=references,
+        authority_inputs=DecisionAuthorityInputsV2(
+            assessment_references=refs,
+            company_evidence_bundle_ref=bundle_ref,
+            company_thesis_input_ref=(
+                company_thesis_input_ref(company_thesis_input)
+                if company_thesis_input is not None
+                else None
+            ),
+        ),
+        synthesis=synthesis,
+        selection=SelectionEvidenceV2(),
+        company_action=None,
+        urgency_evidence=None,
+        daily_digest_at=decision_clock,
+        assessed_at=decision_clock,
+        evaluated_at=decision_clock,
+    )
 
 
 class JournalState(str, Enum):
@@ -1162,6 +1322,7 @@ class CollectionConfig(_StrictFrozenModel):
     corpus_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     reviewed_allowlist_path: Path
     decision_policy_path: Path
+    company_evidence_root: Path | None = None
     provider_factory: str = (
         "job_intel.product_search.gate_b_evidence_runner_v1:build_live_provider_factory"
     )
@@ -1198,6 +1359,7 @@ def _load_collection_config(path: Path) -> CollectionConfig:
         "run_manifest_path",
         "reviewed_allowlist_path",
         "decision_policy_path",
+        "company_evidence_root",
     )
     updates = {
         name: value if value is None or value.is_absolute() else (base / value).resolve()
@@ -1209,6 +1371,41 @@ def _load_collection_config(path: Path) -> CollectionConfig:
         for key, value in config.authority_paths.items()
     }
     return config.model_copy(update=updates)
+
+
+def _load_company_authority_inputs(
+    root: Path | None,
+    manifest: EvidenceManifest,
+) -> tuple[CompanyEvidenceCatalogV3 | None, dict[str, CompanyThesisInputV1]]:
+    """Load the immutable company bundles and only the theses that validate."""
+    if root is None:
+        return None, {}
+    contract_sha256 = manifest.authorities.source_authority_sha256s.get(
+        "company_evidence_contract"
+    )
+    if contract_sha256 is None:
+        raise ValueError("company_evidence_contract_authority_missing")
+    catalog = load_company_evidence_catalog_v3(
+        root,
+        company_evidence_contract_sha256=contract_sha256,
+    )
+    bundles = {
+        bundle.company_identity.company_id: bundle for bundle in catalog.bundles
+    }
+    theses: dict[str, CompanyThesisInputV1] = {}
+    for path in sorted(root.rglob("company-thesis-input.v1.yaml")):
+        raw_payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(raw_payload, Mapping):
+            raise ValueError("company thesis input is invalid")
+        thesis_company_id = raw_payload.get("company_id")
+        if not isinstance(thesis_company_id, str) or thesis_company_id not in bundles:
+            raise ValueError("company thesis company identity is unknown")
+        thesis = load_company_thesis_input(
+            path,
+            evidence_bundle=bundles[thesis_company_id],
+        )
+        theses[thesis.company_id] = thesis
+    return catalog, theses
 
 
 def _load_artifact_callable(specification: str, artifact_root: Path) -> Callable[..., Any]:
@@ -1471,6 +1668,9 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
     decision_policy = _load_manifest_bound_decision_policy(
         args.decision_policy, manifest
     )
+    company_evidence_catalog, company_thesis_inputs = _load_company_authority_inputs(
+        args.company_evidence_root, manifest
+    )
     authority_root = args.authority_root.resolve()
     authority_keys = (
         "model_bytes",
@@ -1506,6 +1706,8 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
         decision_evidence=decision_evidence,
         decision_policy=decision_policy,
         decision_request_factory=decision_request_factory,
+        company_evidence_catalog=company_evidence_catalog,
+        company_thesis_inputs=company_thesis_inputs,
         source_artifact=source_artifact,
         runtime=runtime,
         authorities=authorities,
@@ -1566,6 +1768,7 @@ def _main(arguments: list[str]) -> int:
     supervised.add_argument("--reviewed-allowlist", type=Path, required=True)
     supervised.add_argument("--decision-policy", type=Path, required=True)
     supervised.add_argument("--authority-root", type=Path, required=True)
+    supervised.add_argument("--company-evidence-root", type=Path)
     supervised.add_argument("--provider-factory", required=True)
     supervised.add_argument("--decision-request-factory", required=True)
 
@@ -1642,6 +1845,9 @@ def _main(arguments: list[str]) -> int:
         decision_policy = _load_manifest_bound_decision_policy(
             config.decision_policy_path, manifest
         )
+        company_evidence_catalog, company_thesis_inputs = _load_company_authority_inputs(
+            config.company_evidence_root, manifest
+        )
         source_artifact, runtime, authorities = _artifact_binding_context(
             manifest, artifact_root, config.authority_paths
         )
@@ -1670,6 +1876,8 @@ def _main(arguments: list[str]) -> int:
             decision_evidence=decision_evidence,
             decision_policy=decision_policy,
             decision_request_factory=decision_request_factory,
+            company_evidence_catalog=company_evidence_catalog,
+            company_thesis_inputs=company_thesis_inputs,
             source_artifact=source_artifact,
             runtime=runtime,
             authorities=authorities,
@@ -1807,15 +2015,21 @@ def _validate_decision_request_binding(
     response_payload: Mapping[str, object],
 ) -> None:
     claims = response_payload.get("claims", ())
+    conflicts = response_payload.get("conflicts", ())
+    questions = response_payload.get("question_candidates", ())
     if not isinstance(claims, list):
         claims = []
+    if not isinstance(conflicts, list):
+        conflicts = []
+    if not isinstance(questions, list):
+        questions = []
     expected_output_sha256 = _sha256(
         _canonical_bytes(
             {
                 "schema_version": "1.0.0",
                 "claims": claims,
-                "conflicts": [],
-                "question_candidates": [],
+                "conflicts": conflicts,
+                "question_candidates": questions,
             }
         )
     )
@@ -2029,13 +2243,14 @@ def run_collection(
     corpus_rows: Sequence[CorpusRow],
     reviewed_allowlist: ReviewedFragmentAllowlistV3 | None = None,
     company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
+    company_thesis_inputs: Mapping[str, CompanyThesisInputV1] | None = None,
     provider_factory: Callable[[], GovernedProvider],
     ledger: ForegroundDispatchLedger | None = None,
     recordings: RecordingStore | None = None,
     decision_evidence: DecisionEvidenceStore | None = None,
     decision_policy: LoadedDecisionPolicyV2,
     decision_request_factory: Callable[
-        [dict[str, object], ManifestRef], DecisionRequestV2
+        [DecisionRequestFactoryContextV1], DecisionRequestV2
     ] | None = None,
     source_artifact: SourceArtifact,
     runtime: FrozenRuntime,
@@ -2145,7 +2360,25 @@ def run_collection(
             synthesis_input=projected,
             reviewed_allowlist=reviewed_allowlist,
         )
-        decision_request = decision_request_factory(response_payload, ref)
+        company_thesis_input = None
+        if company_thesis_inputs is not None and getattr(
+            projected.company_authority, "status", None
+        ) == "available":
+            company_id = projected.company_authority.company_evidence_bundle.company_identity.company_id
+            company_thesis_input = company_thesis_inputs.get(company_id)
+        decision_request = decision_request_factory(
+            DecisionRequestFactoryContextV1(
+                response_payload=response_payload,
+                projected=projected,
+                manifest_ref=ref,
+                raw=dict(corpus_row.raw),
+                provider_record=dict(provider_record),
+                validation_status=validation_status,
+                decision_policy=decision_policy,
+                decision_clock=manifest.decision_clock,
+                company_thesis_input=company_thesis_input,
+            )
+        )
         _validate_decision_request_binding(
             decision_request,
             row=row,
@@ -2245,8 +2478,12 @@ def run_one_row(
     ledger: ForegroundDispatchLedger,
     recordings: RecordingStore,
     decision_evidence: DecisionEvidenceStore,
-    decision_request_factory: Callable[[dict[str, object], ManifestRef], DecisionRequestV2],
+    decision_request_factory: Callable[
+        [DecisionRequestFactoryContextV1], DecisionRequestV2
+    ],
     decision_policy: LoadedDecisionPolicyV2 | None = None,
+    decision_clock: datetime,
+    provider_record: Mapping[str, object] | None = None,
 ) -> OneRowResult:
     """Task 3 compatibility skeleton with per-row Decision v2 evidence only."""
     row = manifest.row(ordinal)
@@ -2309,7 +2546,20 @@ def run_one_row(
     if validation_status is not None:
         raise ValueError(f"provider payload rejected: {validation_status.value}")
 
-    decision_request = decision_request_factory(response_payload, ref)
+    decision_request = decision_request_factory(
+        DecisionRequestFactoryContextV1(
+            response_payload=response_payload,
+            projected=projected,
+            manifest_ref=ref,
+            raw=dict(raw),
+            provider_record=dict(provider_record or {}),
+            validation_status=validation_status,
+            decision_policy=decision_policy
+            if decision_policy is not None
+            else load_decision_policy(),
+            decision_clock=decision_clock,
+        )
+    )
     decision = run_decision_v2(
         decision_request,
         policy=decision_policy,
