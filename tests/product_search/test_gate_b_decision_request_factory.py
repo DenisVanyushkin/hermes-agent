@@ -10,7 +10,6 @@ from job_intel.product_search.company_evidence import (
     load_company_thesis_input,
 )
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
-    ManifestRef,
     _load_company_authority_inputs,
     build_decision_request_v2,
 )
@@ -57,13 +56,6 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
         evidence_bundle=projected.company_authority.company_evidence_bundle,
     )
     input_sha = hashlib.sha256(b"provider-input").hexdigest()
-    ref = ManifestRef(
-        run_id="gate-b-evidence-v1-0123456789abcdef",
-        manifest_sha256="c" * 64,
-        ordinal=0,
-        input_sha256=input_sha,
-        projection_sha256="d" * 64,
-    )
     claim = next(
         claim
         for fragment in projected.fragments
@@ -88,7 +80,7 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
     request = build_decision_request_v2(
         response_payload=payload,
         projected=projected,
-        manifest_ref=ref,
+        provider_input_sha256=input_sha,
         raw={"company": "Northstar", "title": "Head of Product", "location": "Remote", "posted_at": "2026-08-23T00:00:00Z"},
         provider_record={
             "provider_id": "fake",

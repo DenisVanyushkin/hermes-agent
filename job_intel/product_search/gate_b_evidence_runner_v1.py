@@ -287,7 +287,7 @@ def build_decision_request_v2(
     *,
     response_payload: Mapping[str, object],
     projected: EvidenceSynthesisInputV2,
-    manifest_ref: ManifestRef,
+    provider_input_sha256: str,
     raw: Mapping[str, object],
     provider_record: Mapping[str, object],
     validation_status: EvidenceSynthesisStatus | None,
@@ -331,7 +331,7 @@ def build_decision_request_v2(
             if provider_record.get("cost_usd") is None
             else str(provider_record["cost_usd"])
         ),
-        input_sha256=manifest_ref.input_sha256,
+        input_sha256=provider_input_sha256,
         output_sha256=output_sha256,
     )
     synthesis = EvidenceSynthesisResultV1(
@@ -361,7 +361,7 @@ def build_decision_request_v2(
         semantic_contract_sha256=refs.semantic_contract_ref.sha256,
         evidence_snapshot_sha256=refs.evidence_snapshot_ref.sha256,
         company_evidence_bundle_sha256=bundle_ref.sha256,
-        provider_input_sha256=manifest_ref.input_sha256,
+        provider_input_sha256=provider_input_sha256,
         provider_output_sha256=output_sha256,
     )
     stages = StageEvidenceV2(
