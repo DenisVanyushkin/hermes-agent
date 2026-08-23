@@ -68,10 +68,13 @@ ack INV-... lines; explicit break-glass and blocked-state operator messages;
 a separate report-only invariant mode; decorator-aware definition segments; and
 the documented gate-order rationale.
 
-Report-only mode is selected on prepare (--invariant-mode report or an
-invariant_mode value in pending.json), then snapshotted in apply-prepare.json.
-Commit/handoff never re-read the environment or accept a late override; the
-live scheduler remains block-by-default.
+Report-only mode is selected on prepare from the host-owned
+`$HERMES_HOME/state/upstream-sync/invariant-mode.json` (or explicit prepare
+inputs for manual runs), then snapshotted in `apply-prepare.json`. The
+finalizer accepts only `block` or `report`; missing config is block-by-default
+and invalid config stops prepare. Commit/handoff never re-read the environment
+nor accept a late override. The first live rollout uses `report` deliberately
+for observation before switching the host-state file to `block`.
 The old global invariant skip remains rejected. The standalone ack line is
 intentional: it keeps the receipt command copyable and is the parser's
 whole-message contract.

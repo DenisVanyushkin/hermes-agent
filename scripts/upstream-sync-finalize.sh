@@ -527,6 +527,24 @@ land_merge() {
 # state. Each step writes its outcome to the state dir, so a failed run leaves
 # a precise report and a preserved clone rather than a half-applied branch,
 # and a re-request after a manual fix resumes instead of starting over.
+PREPARE_INVARIANT_MODE_ARGS=()
+
+load_prepare_invariant_mode() {
+  PREPARE_INVARIANT_MODE_ARGS=()
+  local config="$STATE_DIR/invariant-mode.json" mode
+  [ -f "$config" ] || return 0
+  mode="$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")).get("invariant_mode"); print(value or "")' "$config" 2>/dev/null || true)"
+  case "$mode" in
+    block|report)
+      PREPARE_INVARIANT_MODE_ARGS=(--invariant-mode "$mode")
+      ;;
+    *)
+      echo "invalid invariant mode config at $config; expected invariant_mode=block|report" >>"$DETAIL_LOG"
+      return 1
+      ;;
+  esac
+}
+
 apply_decisions() {
   local py apply prep_status
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
@@ -538,6 +556,11 @@ apply_decisions() {
   SCRATCH_FOR_REPORT="$SCRATCH"
   if [ ! -f "$STATE_DIR/pending.json" ]; then
     write_result failed "apply-decisions: no pending.json — nothing decided to apply; repo untouched."
+    exit 0
+  fi
+  if ! load_prepare_invariant_mode; then
+    FAILED_STAGE=prepare
+    write_result failed "apply-decisions: invariant mode config is invalid; repo untouched. $(cat "$DETAIL_LOG")"
     exit 0
   fi
   UPSTREAM_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"upstream_head\") or \"\")" "$STATE_DIR/pending.json" 2>/dev/null || true)"
@@ -556,7 +579,7 @@ apply_decisions() {
   else
     rm -rf "$SCRATCH"
     set +e
-    "$py" "$apply" prepare --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok >>"$DETAIL_LOG" 2>&1
+    "$py" "$apply" prepare --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok "${PREPARE_INVARIANT_MODE_ARGS[@]}" >>"$DETAIL_LOG" 2>&1
     rc=$?
     set -e
     case "$rc" in

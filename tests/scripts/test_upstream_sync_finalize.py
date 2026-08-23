@@ -479,6 +479,13 @@ class TestFinalizeReportsWhichStageFailed:
         assert res["failed_stage"] == "smoketest"
 
 
+def test_finalize_forwards_host_state_invariant_mode_to_prepare():
+    text = FINALIZE.read_text(encoding="utf-8")
+    assert "invariant-mode.json" in text
+    assert "--invariant-mode" in text
+    assert "apply-prepare.json" in text
+
+
 def test_finalize_reports_manual_break_glass_in_detail():
     text = FINALIZE.read_text(encoding="utf-8")
     assert "BREAK_GLASS" in text
