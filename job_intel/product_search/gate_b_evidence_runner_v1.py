@@ -75,6 +75,8 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     LLMProviderError,
+    RECORDING_FORMAT_VERSION as SEMANTIC_RECORDING_FORMAT_VERSION,
+    RecordingStore as SemanticRecordingStore,
     build_live_llm_provider,
 )
 from job_intel.product_search.gate_b_spend_record_v1 import SpendRecordStore
@@ -1220,8 +1222,88 @@ class _LiveGateBProvider:
             "response_schema_sha256": provider_output_schema_v2_sha256(),
             "pricing_sha256": pricing.identity_sha256,
         }
-        self.store = _AuthorityRecordingStore(inner_store, self.authority_identity)
-        semantic_provider.store = self.store
+        self._semantic_store = _AuthorityRecordingStore(
+            inner_store, self.authority_identity
+        )
+        semantic_provider.store = self._semantic_store
+        self.store = SemanticRecordingStore(
+            Path(os.environ["GATE_B_PROVIDER_STORE_DIR"]) / "v2"
+        )
+
+    def _publish_v2_provider_record(
+        self,
+        *,
+        dispatch_input_hash: str,
+        input_payload: dict[str, object],
+        result: EvidenceSynthesisResultV2,
+        capability: object,
+    ) -> dict[str, object]:
+        metadata = result.metadata.model_dump(mode="json")
+        semantic_input_sha256 = str(metadata["input_sha256"])
+        call_metadata = dict(getattr(self._adapter, "last_call_metadata", {}) or {})
+        post_dispatch_outcome = call_metadata.get("post_dispatch_outcome_v3")
+        conservative_cost = call_metadata.get("conservative_cost_usd")
+        if not isinstance(post_dispatch_outcome, str) or not post_dispatch_outcome:
+            raise ValueError("v2_provider_record_post_dispatch_missing")
+        if not isinstance(conservative_cost, str) or not conservative_cost:
+            raise ValueError("v2_provider_record_conservative_cost_missing")
+        raw_response_payload = getattr(self._adapter, "last_response_payload", None)
+        if raw_response_payload is None:
+            if result.deliverable:
+                raise ValueError("v2_provider_record_response_missing")
+            raw_response_text = ""
+        elif isinstance(raw_response_payload, dict):
+            raw_response_text = _canonical_bytes(raw_response_payload).decode("utf-8")
+        else:
+            raise ValueError("v2_provider_record_response_invalid")
+        v2_record = {
+            "recording_format_version": SEMANTIC_RECORDING_FORMAT_VERSION,
+            "input_hash": dispatch_input_hash,
+            "semantic_input_sha256": semantic_input_sha256,
+            "provider_input_sha256": semantic_input_sha256,
+            "input": input_payload,
+            "input_payload_sha256": _sha256(_canonical_bytes(input_payload)),
+            "provider_id": metadata["provider_id"],
+            "provider_version": metadata["provider_version"],
+            "model_id": metadata["model_id"],
+            "requested_model": metadata["model_id"],
+            "response_model": metadata["model_id"],
+            "semantic_prompt_version": metadata["semantic_prompt_version"],
+            "prompt_version": metadata["prompt_version"],
+            "schema_version": result.schema_version,
+            "output_sha256": metadata["output_sha256"],
+            "raw_response_text": raw_response_text,
+            "response_hash": _sha256(raw_response_text.encode("utf-8")),
+            "usage": call_metadata.get("usage"),
+            "cost_usd": call_metadata.get("cost_usd", metadata.get("cost_usd")),
+            "measured_cost_usd": call_metadata.get("measured_cost_usd"),
+            "conservative_cost_usd": conservative_cost,
+            "latency_ms": metadata["latency_ms"],
+            "retry_count": call_metadata.get("retry_count", 0),
+            "post_dispatch_outcome_v3": post_dispatch_outcome,
+            "status": result.status.value,
+            "failure_code": None if result.deliverable else result.failure_reason,
+            "provider_record_kind": "gate-b-evidence-synthesis-v2",
+            "provider_sha256": self.authority_identity["provider_sha256"],
+            "model_sha256": self.authority_identity["model_sha256"],
+            "prompt_sha256": self.authority_identity["prompt_sha256"],
+            "response_schema_sha256": self.authority_identity[
+                "response_schema_sha256"
+            ],
+            "provider_authority_identity": dict(self.authority_identity),
+            "pricing": self.pricing.as_record(),
+            "pricing_sha256": self.pricing.identity_sha256,
+            "max_output_tokens": self.pricing.max_output_tokens,
+            "semantic_transport_record_sha256": call_metadata.get(
+                "sealed_provider_record_sha256"
+            ),
+        }
+        seal_record = getattr(capability, "seal_record", None)
+        if not callable(seal_record):
+            raise ValueError("v2_provider_record_sealer_required")
+        seal_record(v2_record)
+        self.store.save(v2_record)
+        return v2_record
 
     def dispatch(
         self,
@@ -1238,12 +1320,38 @@ class _LiveGateBProvider:
                 semantic_provider=self._semantic_provider,
                 policy=self._policy,
                 pricing=self.pricing,
-                record_capability=None,
+                record_capability=capability,
                 run_identity_sha256=os.environ["GATE_B_MANIFEST_SHA256"],
             )
-        self._adapter.record_capability = capability
+        else:
+            self._adapter.record_capability = capability
         try:
-            return self._adapter._record_call(input_hash, payload)
+            from job_intel.product_search.evidence_synthesis import (
+                run_evidence_synthesis_v2,
+            )
+            result = run_evidence_synthesis_v2(
+                synthesis_input=EvidenceSynthesisInputV2.model_validate(payload),
+                provider=self._adapter,
+                policy=self._policy,
+            )
+            v2_record = self._publish_v2_provider_record(
+                dispatch_input_hash=input_hash,
+                input_payload=payload,
+                result=result,
+                capability=capability,
+            )
+            raw_response_text = v2_record["raw_response_text"]
+            if not isinstance(raw_response_text, str) or not raw_response_text:
+                return {}
+            try:
+                response_payload = json.loads(raw_response_text)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise LLMProviderError(
+                    "schema_invalid", "structured JSON invalid"
+                ) from exc
+            if not isinstance(response_payload, dict):
+                raise LLMProviderError("schema_invalid", "structured JSON object required")
+            return response_payload
         finally:
             self._adapter.record_capability = None
 

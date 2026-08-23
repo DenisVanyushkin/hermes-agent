@@ -873,6 +873,7 @@ class RecordedEvidenceSynthesisProvider:
         self.record_capability = record_capability
         self.run_identity_sha256 = run_identity_sha256
         self.last_call_metadata: dict[str, Any] = {}
+        self.last_response_payload: object | None = None
 
     def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
         input_hash = synthesis_input_sha256(input_payload, provider=self)
@@ -1190,6 +1191,7 @@ class RecordedEvidenceSynthesisProvider:
     def _record_call(self, input_hash: str, input_payload: dict[str, Any]) -> object:
         if self.record_capability is None:
             raise LLMProviderError("structured_capability_required")
+        self.last_response_payload = None
         try:
             response_validator = None
             if self.input_contract_version == "2.0.0":
@@ -1224,9 +1226,11 @@ class RecordedEvidenceSynthesisProvider:
         if isinstance(result, GovernedStructuredTerminalUnknown):
             return result
         try:
-            return json.loads(result.raw_response_text)
+            response_payload = json.loads(result.raw_response_text)
         except (json.JSONDecodeError, TypeError) as exc:
             raise LLMProviderError("schema_invalid", "structured JSON invalid") from exc
+        self.last_response_payload = response_payload
+        return response_payload
 
     @property
     def output_schema_sha256(self) -> str:

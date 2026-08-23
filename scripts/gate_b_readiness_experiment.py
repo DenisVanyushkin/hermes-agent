@@ -260,7 +260,7 @@ def run_experiment(
         "git_commit": _git_commit(),
         "decision_contract_sha256": policy.source_sha256,
         "model_id": "deterministic-fake-v1",
-        "prompt_id": "product-search-evidence-synthesis-1.0.0",
+        "prompt_id": "product-search-evidence-synthesis-2.0.0",
         "schema_id": "evidence-synthesis-2.0.0",
         "decision_clock": decision_clock.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
         "evidence_admission": {
