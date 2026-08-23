@@ -99,7 +99,7 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
             "latency_ms": 1,
             "cost_usd": "0",
         },
-        validation_status=EvidenceSynthesisStatus.DELIVERABLE,
+        validation_status=None,
         decision_policy=load_decision_policy(),
         decision_clock=datetime(2026, 8, 23, tzinfo=timezone.utc),
         company_thesis_input=thesis,
@@ -109,6 +109,8 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
     assert request.authority_inputs.company_evidence_bundle_ref.sha256 == projected.company_authority.company_evidence_bundle.content_sha256
     assert request.company_action is None
     assert request.authority_inputs.company_thesis_input_ref is not None
+    assert request.synthesis.status is EvidenceSynthesisStatus.DELIVERABLE
+    assert request.synthesis.deliverable is True
     assert request.daily_digest_at == request.assessed_at == request.evaluated_at
 
 

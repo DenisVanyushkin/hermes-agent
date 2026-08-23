@@ -307,8 +307,10 @@ def build_decision_request_v2(
         "question_candidates": questions,
     }
     output_sha256 = _sha256(_canonical_bytes(output_payload))
-    status = validation_status or EvidenceSynthesisStatus.REFUSAL
-    deliverable = status is EvidenceSynthesisStatus.DELIVERABLE
+    # The v3 validator returns None for a valid payload; non-None is a
+    # fail-closed status.  Do not turn the normal success path into refusal.
+    status = validation_status or EvidenceSynthesisStatus.DELIVERABLE
+    deliverable = validation_status is None
     metadata = EvidenceSynthesisMetadataV1(
         provider_id=str(_required_provider_value(provider_record, "provider_id")),
         provider_version=str(
