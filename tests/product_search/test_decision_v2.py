@@ -300,6 +300,12 @@ def test_incomplete_company_evidence_is_expressed_as_unknown_claims() -> None:
         result.assessment.dimensions.evidence_confidence.outcome
         is DimensionOutcome.UNKNOWN
     )
+    assert result.assessment.dimensions.company_fit.unknown_codes == (
+        "company_evidence_insufficient_unknown",
+    )
+    assert result.assessment.dimensions.evidence_confidence.unknown_codes == (
+        "company_evidence_insufficient_confidence_unknown",
+    )
     assert "company_evidence_insufficient_unknown" in result.assessment.unknowns
 
 
@@ -1427,7 +1433,7 @@ def test_replay_is_byte_stable_and_trace_carries_all_hashes() -> None:
     assert trace.references == _references()
     assert trace.authority_inputs == _authority_inputs()
     assert trace.canonical_sha256 == (
-        "2ed506b9b8338b357363b4a69418ecdfc49d9b484f5ed7b0f137d25fe86ca306"
+        "b093b8a34bcf951836b09625af4edddb233d9578a17060a7f4f539ff7a8407b8"
     )
 
 

@@ -13,11 +13,11 @@ authority_hashes:
 
 provider_identity:
   provider_id: llm-observation
-  provider_version: product-search-evidence-replay/1.0
+  provider_version: product-search-evidence-replay/2.0
   model_id: openai/gpt-5-mini
   semantic_prompt_version: llm-obs-1.0.0
-  prompt_version: product-search-evidence-synthesis-1.0.0
-  schema_version: 1.0.0
+  prompt_version: product-search-evidence-synthesis-2.0.0
+  schema_version: 2.0.0
 
 positive_claims:
   feasibility:
