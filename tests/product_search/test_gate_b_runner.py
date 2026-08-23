@@ -82,6 +82,8 @@ def test_dry_run_materializes_content_addressed_corpus_and_is_idempotent(
     )
     scope = first["corpus"]["scope"]
     assert scope["selected_lane_counts"] == {"global_ats": 47, "global_remote": 1}
+    assert scope["synthetic_lane_counts"] == {"global_ats": 47}
+    assert scope["synthetic_lanes_not_in_search_contract"] == ["global_ats"]
     assert scope["unrepresented_role_patterns"] == ["chief_product"]
     assert len(scope["unrepresented_search_contract_lanes"]) == 7
     assert scope["repeat_after_collection_fixes"] is True

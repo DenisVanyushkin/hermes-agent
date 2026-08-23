@@ -91,6 +91,8 @@ MIN_ELIGIBLE_DESCRIPTION_CHARS = 500
 # claim that the full Search Contract has been covered.
 GATE_B_SCOPE_DECLARATION = {
     "selected_lane_counts": {"global_ats": 47, "global_remote": 1},
+    "synthetic_lane_counts": {"global_ats": 47},
+    "synthetic_lanes_not_in_search_contract": ["global_ats"],
     "search_contract_lane_count": 8,
     "represented_search_contract_lanes": {"global_remote": 1},
     "unrepresented_search_contract_lanes": [
@@ -127,7 +129,7 @@ GATE_B_RECONCILIATION_WITNESS_PATH = Path(
 GATE_B_LAUNCH_WITNESS_SCHEMA_VERSION = "1.0.0"
 GATE_B_RECONCILIATION_SCHEMA_VERSION = "1.0.0"
 GATE_B_CORPUS_SHA256 = (
-    "a11ee9bc8bb18da71fec8b40a024c33f65b4ed4272c82fb63e6e4be2b2cf679c"
+    "9d4c3ec5ba7bb2c668fe5b42b65c5cdf36c01a0c958799e59770e469579cd697"
 )
 PRODUCTION_DATABASE_PATH = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -762,8 +764,7 @@ def _eligible_description(payload: Mapping[str, Any]) -> bool:
     """Keep evidence with a substantive description, independent of source."""
     title = str(payload.get("title") or "").strip()
     description = str(payload.get("description") or "").strip()
-    if not description:
-        return False
+    # The measured length threshold already implies that description is non-empty.
     return description != title and len(description) > MIN_ELIGIBLE_DESCRIPTION_CHARS
 
 
