@@ -386,6 +386,7 @@ exec {sys.executable!s} "$@"
         "schema_version": "gate-b-evidence-manifest-v1",
         "run_id": "gate-b-evidence-v1-0123456789abcdef",
         "created_at": "2026-08-22T12:00:00Z",
+        "decision_clock": "2026-08-22T12:00:00Z",
         "benchmark_kind": "gate_b_description_evidence",
         "row_count": 48,
         "rows": [row.model_dump(mode="json") for row in rows],

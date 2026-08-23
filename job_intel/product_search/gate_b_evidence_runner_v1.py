@@ -46,9 +46,11 @@ from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     load_gate_b_benchmark_policy_v3,
 )
 from job_intel.product_search.gate_b_evidence_v3 import (
+    CompanyEvidenceCatalogV3,
     ReviewedFragmentAllowlistV3,
     load_reviewed_fragment_allowlist_v3,
     project_vacancy_evidence_v3,
+    validate_reviewed_fragment_allowlist_corpus_v3,
     validate_provider_payload_v3,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
@@ -188,6 +190,8 @@ class EvidenceManifest(_StrictFrozenModel):
     run_id: str = Field(pattern=r"^gate-b-evidence-v1-[0-9a-f]{16}$")
     manifest_sha256: str = Field(pattern=SHA256_PATTERN)
     created_at: datetime
+    decision_clock: datetime
+    corpus_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     benchmark_kind: Literal["gate_b_description_evidence"]
     row_count: Literal[48]
     rows: tuple[EvidenceManifestRow, ...]
@@ -203,9 +207,11 @@ class EvidenceManifest(_StrictFrozenModel):
             raise ValueError("manifest ordinals must be contiguous")
         body = self.model_dump(mode="json")
         body.pop("manifest_sha256")
-        # created_at is audit chronology, not content identity: identical
-        # rebuilds must retain the same manifest hash/run identity.
+        # created_at is audit chronology, not content identity. decision_clock
+        # is the deterministic timestamp used in Decision bytes and is bound.
         body.pop("created_at")
+        if self.corpus_sha256 is None:
+            body.pop("corpus_sha256")
         if _sha256(_canonical_bytes(body)) != self.manifest_sha256:
             raise ValueError("manifest_sha256 does not match canonical identity body")
         return self
@@ -1730,15 +1736,23 @@ def load_gate_b_corpus_rows(
 def _derive_binding_rows(
     rows: Sequence[CorpusRow],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
+    *,
+    company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
 ) -> tuple[EvidenceManifestRow, ...]:
     """Derive binding identities from the loaded corpus, never from the manifest."""
     derived: list[EvidenceManifestRow] = []
     for corpus_row in rows:
-        projected = project_vacancy_evidence_v3(
-            corpus_row.record,
-            corpus_row.raw,
-            reviewed_allowlist,
-        )
+        if company_evidence_catalog is None:
+            projected = project_vacancy_evidence_v3(
+                corpus_row.record, corpus_row.raw, reviewed_allowlist
+            )
+        else:
+            projected = project_vacancy_evidence_v3(
+                corpus_row.record,
+                corpus_row.raw,
+                reviewed_allowlist,
+                company_evidence_catalog=company_evidence_catalog,
+            )
         derived.append(
             EvidenceManifestRow(
                 ordinal=corpus_row.ordinal,
@@ -2014,6 +2028,7 @@ def run_collection(
     manifest: EvidenceManifest,
     corpus_rows: Sequence[CorpusRow],
     reviewed_allowlist: ReviewedFragmentAllowlistV3 | None = None,
+    company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
     provider_factory: Callable[[], GovernedProvider],
     ledger: ForegroundDispatchLedger | None = None,
     recordings: RecordingStore | None = None,
@@ -2041,12 +2056,23 @@ def run_collection(
         raise ValueError("collection rows are not in manifest order")
     if reviewed_allowlist is None:
         raise ValueError("reviewed_allowlist_required")
+    if isinstance(manifest.corpus_sha256, str):
+        validate_reviewed_fragment_allowlist_corpus_v3(
+            reviewed_allowlist,
+            corpus_sha256=manifest.corpus_sha256,
+        )
+    elif isinstance(manifest, EvidenceManifest):
+        raise ValueError("manifest_corpus_sha256_required")
     if ledger is None or recordings is None or decision_evidence is None:
         raise ValueError("dispatch_ledger_recordings_and_decision_evidence_required")
     if decision_policy is None or decision_request_factory is None:
         raise ValueError("decision_policy_and_request_factory_required")
     verifier = binding_verifier or _default_binding_verifier
-    binding_rows = _derive_binding_rows(rows, reviewed_allowlist)
+    binding_rows = _derive_binding_rows(
+        rows,
+        reviewed_allowlist,
+        company_evidence_catalog=company_evidence_catalog,
+    )
     verifier(
         manifest,
         source_artifact=source_artifact,
@@ -2062,11 +2088,17 @@ def run_collection(
     results: list[CollectionRowResult] = []
     for corpus_row in rows:
         row = manifest.row(corpus_row.ordinal)
-        projected = project_vacancy_evidence_v3(
-            corpus_row.record,
-            corpus_row.raw,
-            reviewed_allowlist,
-        )
+        if company_evidence_catalog is None:
+            projected = project_vacancy_evidence_v3(
+                corpus_row.record, corpus_row.raw, reviewed_allowlist
+            )
+        else:
+            projected = project_vacancy_evidence_v3(
+                corpus_row.record,
+                corpus_row.raw,
+                reviewed_allowlist,
+                company_evidence_catalog=company_evidence_catalog,
+            )
         projection_sha256 = _sha256(
             _canonical_bytes(projected.model_dump(mode="json"))
         )
@@ -2208,6 +2240,7 @@ def run_one_row(
     record: Mapping[str, object],
     raw: Mapping[str, object],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
+    company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
     provider: GovernedProvider,
     ledger: ForegroundDispatchLedger,
     recordings: RecordingStore,
@@ -2217,7 +2250,15 @@ def run_one_row(
 ) -> OneRowResult:
     """Task 3 compatibility skeleton with per-row Decision v2 evidence only."""
     row = manifest.row(ordinal)
-    projected = project_vacancy_evidence_v3(record, raw, reviewed_allowlist)
+    if company_evidence_catalog is None:
+        projected = project_vacancy_evidence_v3(record, raw, reviewed_allowlist)
+    else:
+        projected = project_vacancy_evidence_v3(
+            record,
+            raw,
+            reviewed_allowlist,
+            company_evidence_catalog=company_evidence_catalog,
+        )
     projection_sha256 = _sha256(_canonical_bytes(projected.model_dump(mode="json")))
     if projection_sha256 != row.projection_sha256:
         raise ValueError("projection hash does not match manifest row")

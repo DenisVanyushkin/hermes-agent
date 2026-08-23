@@ -500,11 +500,19 @@ def load_company_evidence_bundle(
             raise ValueError("artifacts_root is required for mapping company evidence")
         sources_root = Path(artifacts_root)
     else:
-        sources_root = (
-            Path(artifacts_root)
-            if artifacts_root is not None
-            else Path(path_or_payload).parent / "sources"
-        )
+        if artifacts_root is not None:
+            sources_root = Path(artifacts_root)
+        else:
+            bundle_path = Path(path_or_payload)
+            bundle_parent = bundle_path.parent
+            # Published bundles are content-addressed below <company>/ while
+            # their source artifacts are shared by that company at <company>/sources.
+            # Keep the flat fixture layout working, but do not make callers guess
+            # the sibling source root with an out-of-band parameter.
+            if re.fullmatch(r"[0-9a-f]{64}", bundle_parent.name):
+                sources_root = bundle_parent.parent / "sources"
+            else:
+                sources_root = bundle_parent / "sources"
     for source in bundle.sources:
         artifact_path = sources_root / f"{source.artifact_ref.sha256}.json"
         try:

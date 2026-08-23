@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from enum import StrEnum
 from functools import lru_cache
 import hashlib
@@ -13,11 +14,14 @@ import json
 from pathlib import Path
 import re
 from typing import Annotated, Any, Literal, Self
+from urllib.parse import urlparse
 
 from pydantic import (
     AwareDatetime,
+    AliasChoices,
     BaseModel,
     ConfigDict,
+    Field,
     StringConstraints,
     model_validator,
 )
@@ -34,6 +38,8 @@ from job_intel.product_search.contracts import (
 )
 from job_intel.product_search.evidence_synthesis import (
     AllowedEvidenceClaimV1,
+    CompanyAuthorityAvailableV2,
+    CompanyAuthorityInputV2,
     CompanyAuthorityUnavailableV2,
     EvidenceClaimStatus,
     EvidenceDimension,
@@ -44,6 +50,12 @@ from job_intel.product_search.evidence_synthesis import (
     VacancyEvidenceArtifactFragmentV1,
     VacancyEvidenceArtifactV1,
     validate_provider_payload_v3 as validate_provider_payload_v3_contract,
+)
+from job_intel.product_search.company_evidence import (
+    CompanyEvidenceBundleV1,
+    CompanyIdentityResolutionState,
+    load_company_evidence_bundle,
+    resolve_company_identity,
 )
 from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     DEFAULT_GATE_B_BENCHMARK_POLICY_V3_PATH,
@@ -73,16 +85,26 @@ class ReviewedFragmentEntryV3(_StrictFrozenModel):
     ]
     text_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     decision: ReviewedFragmentDecisionV3
-    reviewer_role: Literal["independent_gate_b_evidence_reviewer"]
-    reviewed_at: AwareDatetime
+    classifier_id: Literal[
+        "automated_fragment_classifier_v1", "independent_gate_b_evidence_reviewer"
+    ] = Field(
+        validation_alias=AliasChoices("classifier_id", "reviewer_role"),
+    )
+    classified_at: AwareDatetime = Field(
+        validation_alias=AliasChoices("classified_at", "reviewed_at"),
+    )
+    classification_rule: Literal[
+        "company_fact_deny_pattern_v1",
+        "role_responsibility_section_v1",
+        "role_requirement_section_v1",
+        "unrecognized_section_ambiguous_v1",
+    ] | None = None
 
 
 class ReviewedFragmentAllowlistV3(_StrictFrozenModel):
-    schema_version: Literal["3.0.0"]
+    schema_version: Literal["3.0.0", "3.1.0"]
     gate_a_run_id: Literal["gate-a-20260816T141344Z"]
-    gate_b_corpus_sha256: Literal[
-        "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
-    ]
+    gate_b_corpus_sha256: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
     entries: tuple[ReviewedFragmentEntryV3, ...]
 
     @model_validator(mode="after")
@@ -108,6 +130,87 @@ def load_reviewed_fragment_allowlist_v3(
     return ReviewedFragmentAllowlistV3.model_validate(payload)
 
 
+def validate_reviewed_fragment_allowlist_corpus_v3(
+    allowlist: ReviewedFragmentAllowlistV3,
+    *,
+    corpus_sha256: str,
+) -> None:
+    """Bind an allowlist to the independently supplied corpus identity."""
+    if allowlist.gate_b_corpus_sha256 != corpus_sha256:
+        raise ProjectionBlockedV3(
+            "reviewed allowlist does not bind the supplied corpus"
+        )
+
+
+def classify_reviewed_fragment_v3(
+    *,
+    section: str | None,
+    text: str,
+    policy: GateBBenchmarkPolicyV3,
+) -> tuple[ReviewedFragmentDecisionV3, str]:
+    """Classify a candidate using only the pinned, deterministic policy rules."""
+    if any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in policy.company_fact_deny_patterns
+    ):
+        return (
+            ReviewedFragmentDecisionV3.EXCLUDE_COMPANY_FACT,
+            "company_fact_deny_pattern_v1",
+        )
+    if section in _RESPONSIBILITY_SECTIONS:
+        return (
+            ReviewedFragmentDecisionV3.ALLOW_ROLE_RESPONSIBILITY,
+            "role_responsibility_section_v1",
+        )
+    if section in ALLOWED_SECTIONS:
+        return (
+            ReviewedFragmentDecisionV3.ALLOW_ROLE_REQUIREMENT,
+            "role_requirement_section_v1",
+        )
+    return (
+        ReviewedFragmentDecisionV3.EXCLUDE_AMBIGUOUS,
+        "unrecognized_section_ambiguous_v1",
+    )
+
+
+def generate_reviewed_fragment_allowlist_v3(
+    rows: Sequence[tuple[Mapping[str, Any], Mapping[str, Any]]],
+    *,
+    corpus_sha256: str,
+    gate_a_run_id: str,
+    classified_at: datetime,
+    policy: GateBBenchmarkPolicyV3,
+) -> ReviewedFragmentAllowlistV3:
+    """Generate a reproducible allowlist without an LLM or human-role claim."""
+    entries: list[ReviewedFragmentEntryV3] = []
+    for record, raw in rows:
+        candidates = build_vacancy_projection_candidates_v3(record, raw)
+        for candidate in candidates.description_candidates:
+            decision, rule = classify_reviewed_fragment_v3(
+                section=candidate.section,
+                text=candidate.text,
+                policy=policy,
+            )
+            entries.append(
+                ReviewedFragmentEntryV3(
+                    selection_key=candidates.selection_key,
+                    vacancy_artifact_sha256=candidates.vacancy_artifact_sha256,
+                    source_locator=candidate.source_locator,
+                    text_sha256=candidate.text_sha256,
+                    decision=decision,
+                    classifier_id="automated_fragment_classifier_v1",
+                    classified_at=classified_at,
+                    classification_rule=rule,
+                )
+            )
+    return ReviewedFragmentAllowlistV3(
+        schema_version="3.1.0",
+        gate_a_run_id=gate_a_run_id,
+        gate_b_corpus_sha256=corpus_sha256,
+        entries=tuple(entries),
+    )
+
+
 def load_gate_b_evidence_policy_v3(
     path: Path | str = DEFAULT_GATE_B_BENCHMARK_POLICY_V3_PATH,
 ) -> GateBBenchmarkPolicyV3:
@@ -130,9 +233,6 @@ _SEMANTIC_CONTRACT_PATH = (
     / "job_intel/vacancy_understanding/semantic/semantic-fact-contract.yaml"
 )
 _GATE_A_RUN_ID = "gate-a-20260816T141344Z"
-_GATE_B_CORPUS_SHA256 = (
-    "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
-)
 _SECTION_NORMALIZATION = {
     "responsibilities": "responsibilities",
     "what_you_will_do": "what_you_will_do",
@@ -176,6 +276,74 @@ _UNKNOWN_REASONS = {
 
 class ProjectionBlockedV3(ValueError):
     """The closed v3 projection cannot prove a safe provider input."""
+
+
+class CompanyEvidenceCatalogV3(_StrictFrozenModel):
+    """Explicit, content-addressed company authority available to projection."""
+
+    company_evidence_contract_sha256: Annotated[
+        str, StringConstraints(pattern=r"^[0-9a-f]{64}$")
+    ]
+    bundles: tuple[CompanyEvidenceBundleV1, ...]
+
+    @model_validator(mode="after")
+    def validate_unique_company_ids(self) -> Self:
+        company_ids = tuple(
+            bundle.company_identity.company_id for bundle in self.bundles
+        )
+        if len(company_ids) != len(set(company_ids)):
+            raise ValueError("company evidence catalog contains duplicate company ids")
+        return self
+
+
+def load_company_evidence_catalog_v3(
+    root: Path | str,
+    *,
+    company_evidence_contract_sha256: str,
+) -> CompanyEvidenceCatalogV3:
+    root_path = Path(root).resolve()
+    paths = sorted(root_path.rglob("company-evidence-bundle.v1.yaml"))
+    if not paths:
+        raise ValueError("company evidence catalog is empty")
+    bundles = tuple(load_company_evidence_bundle(path) for path in paths)
+    return CompanyEvidenceCatalogV3(
+        company_evidence_contract_sha256=company_evidence_contract_sha256,
+        bundles=bundles,
+    )
+
+
+def resolve_company_authority_v3(
+    raw: Mapping[str, Any],
+    catalog: CompanyEvidenceCatalogV3,
+) -> CompanyAuthorityInputV2:
+    company_name = raw.get("company")
+    if not isinstance(company_name, str) or not company_name.strip():
+        return CompanyAuthorityUnavailableV2(
+            status="unavailable", reason="unresolved_company_identity"
+        )
+    company_url = raw.get("company_url")
+    domain = None
+    if isinstance(company_url, str) and company_url.strip():
+        domain = urlparse(company_url).hostname
+    identities = tuple(bundle.company_identity for bundle in catalog.bundles)
+    resolution = resolve_company_identity(
+        identities, name=company_name, domain=domain
+    )
+    if resolution.state is not CompanyIdentityResolutionState.RESOLVED:
+        return CompanyAuthorityUnavailableV2(
+            status="unavailable", reason="unresolved_company_identity"
+        )
+    bundle = next(
+        bundle
+        for bundle in catalog.bundles
+        if bundle.company_identity.company_id == resolution.company_id
+    )
+    return CompanyAuthorityAvailableV2(
+        status="available",
+        company_evidence_contract_sha256=catalog.company_evidence_contract_sha256,
+        company_evidence_bundle_sha256=bundle.content_sha256,
+        company_evidence_bundle=bundle,
+    )
 
 
 class CandidateTupleV3(_StrictFrozenModel):
@@ -609,10 +777,7 @@ def _review_entries(
     candidates: VacancyProjectionCandidatesV3,
     allowlist: ReviewedFragmentAllowlistV3,
 ) -> dict[tuple[str, str, str, str], ReviewedFragmentEntryV3]:
-    if (
-        allowlist.gate_a_run_id != _GATE_A_RUN_ID
-        or allowlist.gate_b_corpus_sha256 != _GATE_B_CORPUS_SHA256
-    ):
+    if allowlist.gate_a_run_id != _GATE_A_RUN_ID:
         raise ProjectionBlockedV3("reviewed allowlist does not bind the pinned corpus")
     entries = {
         _entry_key(
@@ -666,6 +831,7 @@ def _build_projection_v3(
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
     *,
     policy: GateBBenchmarkPolicyV3,
+    company_authority: CompanyAuthorityInputV2 | None = None,
 ) -> tuple[EvidenceSynthesisInputV2, ProjectionAuditV3]:
     candidates = build_vacancy_projection_candidates_v3(record, raw)
     review_entries = _review_entries(candidates, reviewed_allowlist)
@@ -677,6 +843,10 @@ def _build_projection_v3(
         artifact_id=artifact.artifact_id,
         version=artifact.artifact_version,
         sha256=candidates.vacancy_artifact_sha256,
+    )
+    resolved_authority = company_authority or CompanyAuthorityUnavailableV2(
+        status="unavailable",
+        reason="unresolved_company_identity",
     )
     candidate_by_locator = {
         candidate.source_locator: candidate
@@ -792,6 +962,11 @@ def _build_projection_v3(
         if refs and not force_unknown:
             continue
         reason = _UNKNOWN_REASONS[dimension]
+        if (
+            dimension is EvidenceDimension.COMPANY_FIT
+            and resolved_authority.status == "available"
+        ):
+            reason = "company_authority_provider_assessed"
         fragment_id = f"unknown-v3:{candidates.selection_key[:16]}:{dimension.value}"
         fragments.append(
             EvidenceFragmentV1(
@@ -823,7 +998,14 @@ def _build_projection_v3(
             not in {EvidenceDimension.COMPANY_FIT, EvidenceDimension.TRANSFERABILITY}
             else DimensionEvidenceInput(
                 state=DimensionEvidenceState.UNKNOWN,
-                unknown_reasons=(_UNKNOWN_REASONS[dimension],),
+                unknown_reasons=(
+                    "company_authority_provider_assessed"
+                    if (
+                        dimension is EvidenceDimension.COMPANY_FIT
+                        and resolved_authority.status == "available"
+                    )
+                    else _UNKNOWN_REASONS[dimension],
+                ),
             )
         )
         for dimension in EvidenceDimension
@@ -833,15 +1015,12 @@ def _build_projection_v3(
         assessment_id=f"gate-b-v3:{candidates.selection_key}",
         references=_authority_references(artifact_ref),
         dimensions=DecisionDimensionsInput(**dimensions_payload),
-        company_authority_status=CompanyAuthorityStatus.UNAVAILABLE,
+        company_authority_status=CompanyAuthorityStatus(resolved_authority.status),
     )
     result = EvidenceSynthesisInputV3(
         schema_version="2.0.0",
         assessment_input=assessment,
-        company_authority=CompanyAuthorityUnavailableV2(
-            status="unavailable",
-            reason="unresolved_company_identity",
-        ),
+        company_authority=resolved_authority,
         vacancy_evidence_ref=artifact_ref,
         vacancy_evidence=artifact,
         prohibited_company_claim_text_sha256s=tuple(
@@ -868,12 +1047,20 @@ def project_vacancy_evidence_v3(
     record: Mapping[str, Any],
     raw: Mapping[str, Any],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
+    *,
+    company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
 ) -> EvidenceSynthesisInputV2:
+    company_authority = (
+        resolve_company_authority_v3(raw, company_evidence_catalog)
+        if company_evidence_catalog is not None
+        else None
+    )
     result, _ = _build_projection_v3(
         record,
         raw,
         reviewed_allowlist,
         policy=load_gate_b_evidence_policy_v3(),
+        company_authority=company_authority,
     )
     return result
 
@@ -882,12 +1069,20 @@ def audit_vacancy_projection_v3(
     record: Mapping[str, Any],
     raw: Mapping[str, Any],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
+    *,
+    company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
 ) -> ProjectionAuditV3:
+    company_authority = (
+        resolve_company_authority_v3(raw, company_evidence_catalog)
+        if company_evidence_catalog is not None
+        else None
+    )
     _, audit = _build_projection_v3(
         record,
         raw,
         reviewed_allowlist,
         policy=load_gate_b_evidence_policy_v3(),
+        company_authority=company_authority,
     )
     return audit
 

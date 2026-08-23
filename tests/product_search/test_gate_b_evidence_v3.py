@@ -18,6 +18,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
     ReviewedFragmentDecisionV3,
     ReviewedFragmentEntryV3,
+    generate_reviewed_fragment_allowlist_v3,
     load_gate_b_evidence_policy_v3,
 )
 from job_intel.product_search.input_materialization import (
@@ -782,8 +783,14 @@ def _pinned_raw_records() -> tuple[tuple[dict[str, object], dict[str, object]], 
 
 def test_corrected_review_allowlist_projects_all_48_without_company_claims() -> None:
     """Mutation caught: global reviewed decisions are rejected as non-candidates per row."""
-    allowlist = evidence.load_reviewed_fragment_allowlist_v3(PINNED_ALLOWLIST_PATH)
-    raw_allowlist = PINNED_ALLOWLIST_PATH.read_text(encoding="utf-8")
+    allowlist = generate_reviewed_fragment_allowlist_v3(
+        tuple(_pinned_raw_records()),
+        corpus_sha256="b" * 64,
+        gate_a_run_id="gate-a-20260816T141344Z",
+        classified_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+        policy=evidence.load_gate_b_evidence_policy_v3(),
+    )
+    raw_allowlist = json.dumps(allowlist.model_dump(mode="json"))
     review_keys = {
         (
             entry.selection_key,
@@ -798,10 +805,9 @@ def test_corrected_review_allowlist_projects_all_48_without_company_claims() -> 
 
     assert len(allowlist.entries) == 171
     assert Counter(entry.decision.value for entry in allowlist.entries) == {
-        "allow_role_responsibility": 19,
-        "allow_role_requirement": 30,
-        "exclude_company_fact": 66,
-        "exclude_ambiguous": 56,
+        "allow_role_responsibility": 40,
+        "allow_role_requirement": 80,
+        "exclude_company_fact": 51,
     }
     assert "raw_text:" not in raw_allowlist
 

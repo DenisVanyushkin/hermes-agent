@@ -613,6 +613,11 @@ def build_task10_prompt_v2(policy: EvidenceSynthesisPolicyV1) -> str:
         + "state or infer any company fact, treat a vacancy company label as authority, "
         + "or cite company evidence. company_fit must remain explicitly unknown and may "
         + "cite only the admitted assessment_unknown fragment for that dimension."
+        + "\nWhen company_authority.status is available but its bundle.sufficiency_state "
+        + "is insufficient, do not infer company_fit or evidence_confidence from the "
+        + "incomplete dossier; emit the bounded unknown claims "
+        + "company_evidence_insufficient_unknown and "
+        + "company_evidence_insufficient_confidence_unknown."
     )
 
 
