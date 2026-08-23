@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import hashlib
 from types import SimpleNamespace
 
+import pytest
+
 from job_intel.product_search.decision_v2 import load_decision_policy
 from job_intel.product_search.company_evidence import (
     load_company_evidence_bundle,
@@ -53,7 +55,10 @@ def _projected():
     )
 
 
-def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
+@pytest.mark.parametrize("provider_authority_status", [None, "unavailable"])
+def test_factory_binds_provider_output_and_uses_identity_clock(
+    provider_authority_status: str | None,
+) -> None:
     projected = _projected()
     thesis = load_company_thesis_input(
         FIXTURES / "company-thesis-input.v1.yaml",
@@ -83,7 +88,10 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
         "conflicts": [],
         "question_candidates": [],
         "failure_reason": None,
-        "company_authority_status": projected.assessment_input.company_authority_status.value,
+        "company_authority_status": (
+            provider_authority_status
+            or projected.assessment_input.company_authority_status.value
+        ),
         "metadata": {
             "provider_id": "stale-provider",
             "provider_version": "product-search-evidence-replay/2.0",
@@ -97,27 +105,37 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
             "output_sha256": "e" * 64,
         },
     }
-    request = build_decision_request_v2(
-        response_payload=payload,
-        projected=projected,
-        provider_input_sha256=input_sha,
-        raw={"company": "Northstar", "title": "Head of Product", "location": "Remote", "posted_at": "2026-08-23T00:00:00Z"},
-        provider_record={
-            "provider_id": "fake",
-            "provider_version": "product-search-evidence-replay/2.0",
-            "model_id": "model-v2",
-            "semantic_prompt_version": "llm-obs-1.0.0",
-            "prompt_version": "product-search-evidence-synthesis-2.0.0",
-            "schema_version": "2.0.0",
-            "latency_ms": 1,
-            "cost_usd": "0",
-            "output_sha256": "f" * 64,
-        },
-        validation_status=None,
-        decision_policy=load_decision_policy(),
-        decision_clock=datetime(2026, 8, 23, tzinfo=timezone.utc),
-        company_thesis_input=thesis,
-    )
+    try:
+        request = build_decision_request_v2(
+            response_payload=payload,
+            projected=projected,
+            provider_input_sha256=input_sha,
+            raw={"company": "Northstar", "title": "Head of Product", "location": "Remote", "posted_at": "2026-08-23T00:00:00Z"},
+            provider_record={
+                "provider_id": "fake",
+                "provider_version": "product-search-evidence-replay/2.0",
+                "model_id": "model-v2",
+                "semantic_prompt_version": "llm-obs-1.0.0",
+                "prompt_version": "product-search-evidence-synthesis-2.0.0",
+                "schema_version": "2.0.0",
+                "latency_ms": 1,
+                "cost_usd": "0",
+                "output_sha256": "f" * 64,
+            },
+            validation_status=None,
+            decision_policy=load_decision_policy(),
+            decision_clock=datetime(2026, 8, 23, tzinfo=timezone.utc),
+            company_thesis_input=thesis,
+        )
+    except ValueError as exc:
+        if provider_authority_status is None:
+            raise
+        assert str(exc) == (
+            "provider_response_envelope_mismatch:company_authority_status"
+        )
+        return
+    if provider_authority_status is not None:
+        raise AssertionError("provider authority override was accepted")
     assert request.references.provider_input_sha256 == input_sha
     assert isinstance(request.synthesis, EvidenceSynthesisResultV2)
     assert request.synthesis.schema_version == "2.0.0"

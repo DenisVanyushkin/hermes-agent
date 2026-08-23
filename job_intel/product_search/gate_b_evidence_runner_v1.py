@@ -304,25 +304,26 @@ def build_decision_request_v2(
     synthesis_payload["schema_version"] = str(
         _required_provider_value(provider_record, "schema_version")
     )
-    synthesis_payload.setdefault("status", status.value)
-    synthesis_payload.setdefault("deliverable", deliverable)
-    synthesis_payload.setdefault(
-        "failure_reason",
-        None if deliverable else f"provider_validation:{status.value}",
-    )
-    synthesis_payload.setdefault(
-        "company_authority_status",
-        projected.assessment_input.company_authority_status.value,
-    )
-    if validation_status is not None:
+    expected_envelope = {
+        "status": status.value,
+        "deliverable": deliverable,
+        "failure_reason": (
+            None if deliverable else f"provider_validation:{status.value}"
+        ),
+        "company_authority_status": (
+            projected.assessment_input.company_authority_status.value
+        ),
+    }
+    for field_name, expected_value in expected_envelope.items():
+        if field_name in synthesis_payload and synthesis_payload[field_name] != expected_value:
+            raise ValueError(f"provider_response_envelope_mismatch:{field_name}")
+    synthesis_payload.update(expected_envelope)
+    if not deliverable:
         synthesis_payload.update(
             {
-                "status": status.value,
-                "deliverable": False,
                 "claims": [],
                 "conflicts": [],
                 "question_candidates": [],
-                "failure_reason": f"provider_validation:{status.value}",
             }
         )
     synthesis_payload["metadata"] = {
@@ -348,8 +349,6 @@ def build_decision_request_v2(
         "output_sha256": output_sha256,
     }
     synthesis = EvidenceSynthesisResultV2.model_validate(synthesis_payload)
-    if synthesis.metadata.output_sha256 != output_sha256:
-        raise ValueError("provider_output_hash_binding_mismatch")
     authority = projected.company_authority
     bundle = getattr(authority, "company_evidence_bundle", None)
     if bundle is None:
