@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import gate_b_readiness_experiment as experiment
+from job_intel.product_search.evidence_synthesis import _safe_output_sha256
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "scripts/gate_b_readiness_corpus.v1.json"
 ALLOWLIST = ROOT / "docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml"
@@ -45,6 +46,43 @@ def test_allowlist_without_a_row_is_a_named_pre_dispatch_refusal() -> None:
     allowlist = SimpleNamespace(entries=())
     with pytest.raises(ValueError, match=r"allowlist_row_uncovered:0,1,2"):
         experiment.assert_allowlist_covers_rows(rows, allowlist)
+
+
+def test_fake_provider_emits_v2_metadata_and_shared_output_hash() -> None:
+    claims = [
+        {
+            "dimension": dimension,
+            "status": "unknown",
+            "claim_code": f"code:{dimension}",
+            "statement": f"statement:{dimension}",
+        }
+        for dimension in experiment.DIMENSIONS
+    ]
+    projected_payload = {
+        "fragments": [
+            {
+                "fragment_id": "fragment:test",
+                "allowed_claims": claims,
+            }
+        ]
+    }
+
+    class Capability:
+        def reserve(self, row_key: str) -> str:
+            return f"reservation:{row_key}"
+
+        def mark_dispatching(self, reservation_id: str) -> None:
+            del reservation_id
+
+        def reconcile(self, reservation_id: str, amount: Decimal, outcome: str) -> None:
+            del reservation_id, amount, outcome
+
+    call = experiment.fake_provider(projected_payload, "input:test", Capability())
+
+    assert call.provider_record["schema_version"] == "2.0.0"
+    assert call.provider_record["provider_version"] == "product-search-evidence-replay/2.0"
+    assert call.provider_record["prompt_version"] == "product-search-evidence-synthesis-2.0.0"
+    assert call.provider_record["output_sha256"] == _safe_output_sha256(call.response_payload)
 
 
 def test_started_without_terminal_becomes_ambiguous_without_dispatch(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from job_intel.product_search.company_evidence import load_company_thesis_input
 from job_intel.product_search.decision_v2 import DecisionRequestV2, load_decision_policy, run_decision_v2
+from job_intel.product_search.evidence_synthesis import _safe_output_sha256
 from job_intel.product_search.gate_b_evidence_runner_v1 import build_decision_request_v2
 from job_intel.product_search.gate_b import governed_pricing_schedule
 from job_intel.product_search.gate_b_evidence_v3 import (
@@ -194,13 +195,15 @@ def fake_provider(projected_payload: dict[str, object], row_key: str, capability
         response_payload=response,
         raw_response_text=raw,
         provider_record={
-            # Match Decision v2's pinned provider identity.  The fake changes
-            # transport only; it must exercise the same decision binding as live.
+            # Match the V2 provider contract. The fake changes transport only;
+            # it must exercise the same metadata and output-hash binding as live.
             "provider_id": "llm-observation",
-            "provider_version": "product-search-evidence-replay/1.0",
+            "provider_version": "product-search-evidence-replay/2.0",
             "model_id": "openai/gpt-5-mini",
             "semantic_prompt_version": "llm-obs-1.0.0",
-            "prompt_version": "product-search-evidence-synthesis-1.0.0",
+            "prompt_version": "product-search-evidence-synthesis-2.0.0",
+            "schema_version": "2.0.0",
+            "output_sha256": _safe_output_sha256(response),
             "latency_ms": latency_ms,
             "cost_usd": "0",
             "measured_cost_usd": "0",
