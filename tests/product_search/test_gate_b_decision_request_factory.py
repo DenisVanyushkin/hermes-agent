@@ -18,7 +18,11 @@ from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
     project_vacancy_evidence_v3,
 )
-from job_intel.product_search.evidence_synthesis import EvidenceSynthesisStatus, EvidenceDimension
+from job_intel.product_search.evidence_synthesis import (
+    EvidenceDimension,
+    EvidenceSynthesisResultV2,
+    EvidenceSynthesisStatus,
+)
 
 from tests.product_search.test_gate_b_company_authority_v3 import FIXTURES
 
@@ -64,6 +68,8 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
     )
     payload = {
         "schema_version": "2.0.0",
+        "status": "deliverable",
+        "deliverable": True,
         "claims": [
             {
                 "claim_id": "claim:mandate",
@@ -76,6 +82,20 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
         ],
         "conflicts": [],
         "question_candidates": [],
+        "failure_reason": None,
+        "company_authority_status": projected.assessment_input.company_authority_status.value,
+        "metadata": {
+            "provider_id": "stale-provider",
+            "provider_version": "product-search-evidence-replay/2.0",
+            "model_id": "stale-model",
+            "semantic_prompt_version": "llm-obs-1.0.0",
+            "prompt_version": "product-search-evidence-synthesis-2.0.0",
+            "schema_version": "2.0.0",
+            "latency_ms": 99,
+            "cost_usd": "0",
+            "input_sha256": "e" * 64,
+            "output_sha256": "e" * 64,
+        },
     }
     request = build_decision_request_v2(
         response_payload=payload,
@@ -84,12 +104,14 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
         raw={"company": "Northstar", "title": "Head of Product", "location": "Remote", "posted_at": "2026-08-23T00:00:00Z"},
         provider_record={
             "provider_id": "fake",
-            "provider_version": "provider-v1",
-            "model_id": "model-v1",
+            "provider_version": "product-search-evidence-replay/2.0",
+            "model_id": "model-v2",
             "semantic_prompt_version": "llm-obs-1.0.0",
-            "prompt_version": "product-search-evidence-synthesis-1.0.0",
+            "prompt_version": "product-search-evidence-synthesis-2.0.0",
+            "schema_version": "2.0.0",
             "latency_ms": 1,
             "cost_usd": "0",
+            "output_sha256": "f" * 64,
         },
         validation_status=None,
         decision_policy=load_decision_policy(),
@@ -97,7 +119,14 @@ def test_factory_binds_provider_output_and_uses_identity_clock() -> None:
         company_thesis_input=thesis,
     )
     assert request.references.provider_input_sha256 == input_sha
-    assert request.references.provider_output_sha256 == request.synthesis.metadata.output_sha256
+    assert isinstance(request.synthesis, EvidenceSynthesisResultV2)
+    assert request.synthesis.schema_version == "2.0.0"
+    assert request.references.provider_output_sha256 == "f" * 64
+    assert request.synthesis.metadata.output_sha256 == "f" * 64
+    assert (
+        request.synthesis.company_authority_status.value
+        == projected.assessment_input.company_authority_status.value
+    )
     assert request.authority_inputs.company_evidence_bundle_ref.sha256 == projected.company_authority.company_evidence_bundle.content_sha256
     assert request.company_action is None
     assert request.authority_inputs.company_thesis_input_ref is not None

@@ -18,8 +18,8 @@ from job_intel.product_search.decision_v2 import (
 )
 from job_intel.product_search.evidence_synthesis import (
     EvidenceClaimV1,
-    EvidenceSynthesisMetadataV1,
-    EvidenceSynthesisResultV1,
+    EvidenceSynthesisMetadataV2,
+    EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
 )
 from job_intel.product_search.gate_b_benchmark_policy_v3 import (
@@ -237,27 +237,28 @@ def test_foreground_ledger_refuses_dispatch_past_spend_ceiling() -> None:
 def _decision_result(payload: dict[str, object], input_sha256: str) -> object:
     claims = tuple(EvidenceClaimV1.model_validate(item) for item in payload["claims"])
     output_payload = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "claims": [item.model_dump(mode="json") for item in claims],
         "conflicts": [],
         "question_candidates": [],
     }
     output_sha256 = _sha256_bytes(_canonical_bytes(output_payload))
-    synthesis = EvidenceSynthesisResultV1(
-        schema_version="1.0.0",
+    synthesis = EvidenceSynthesisResultV2(
+        schema_version="2.0.0",
         status=EvidenceSynthesisStatus.DELIVERABLE,
         deliverable=True,
         claims=claims,
         conflicts=(),
         question_candidates=(),
         failure_reason=None,
-        metadata=EvidenceSynthesisMetadataV1(
+        company_authority_status="available",
+        metadata=EvidenceSynthesisMetadataV2(
             provider_id="llm-observation",
-            provider_version="product-search-evidence-replay/1.0",
+            provider_version="product-search-evidence-replay/2.0",
             model_id="openai/gpt-5-mini",
             semantic_prompt_version="llm-obs-1.0.0",
-            prompt_version="product-search-evidence-synthesis-1.0.0",
-            schema_version="1.0.0",
+            prompt_version="product-search-evidence-synthesis-2.0.0",
+            schema_version="2.0.0",
             latency_ms=0,
             cost_usd="0",
             input_sha256=input_sha256,

@@ -383,45 +383,6 @@ def test_readiness_summary_uses_v2_provider_schema_hash_consistently() -> None:
     assert summary["candidate_hashes"]["provider_output_schema_sha256"] == expected
 
 
-def test_decision_adapter_never_elevates_unavailable_company_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    task_input = _load_first_input(_preflight(tmp_path, monkeypatch))
-    result_cls = getattr(synthesis, "EvidenceSynthesisResultV2")
-    metadata_cls = getattr(synthesis, "EvidenceSynthesisMetadataV2")
-    result = result_cls(
-        schema_version="2.0.0",
-        status="deliverable",
-        deliverable=True,
-        claims=(),
-        conflicts=(),
-        question_candidates=(),
-        failure_reason=None,
-        company_authority_status="unavailable",
-        metadata=metadata_cls(
-            provider_id="llm-observation",
-            provider_version="product-search-evidence-replay/2.0",
-            model_id="openai/gpt-5-mini",
-            semantic_prompt_version="llm-obs-1.0.0",
-            prompt_version="product-search-evidence-synthesis-2.0.0",
-            schema_version="2.0.0",
-            latency_ms=1,
-            cost_usd="0.000001",
-            input_sha256="1" * 64,
-            output_sha256="2" * 64,
-        ),
-    )
-    decision = getattr(decision_v2, "consume_synthesis_v2_fail_closed")(
-        synthesis_input=task_input,
-        synthesis_result=result,
-    )
-    assert decision.status.value == "fail_closed"
-    assert decision.assessment is None
-    assert decision.failure_reason == (
-        "company_authority_unavailable:company_evidence_unavailable"
-    )
-
-
 @pytest.mark.parametrize(
     "mutation", ["duplicate", "reorder", "mutable_path", "mixed_gate_a_run"]
 )

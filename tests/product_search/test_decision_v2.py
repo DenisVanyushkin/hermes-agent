@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from job_intel.product_search.contracts import (
     AssessmentReferences,
+    CompanyAuthorityStatus,
     CompanyAction,
     HardGate,
     RecommendedActionKind,
@@ -49,8 +50,8 @@ from job_intel.product_search.evidence_synthesis import (
     EvidenceConflictV1,
     EvidenceDimension,
     EvidenceQuestionCandidateV1,
-    EvidenceSynthesisMetadataV1,
-    EvidenceSynthesisResultV1,
+    EvidenceSynthesisMetadataV2,
+    EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
 )
 
@@ -97,13 +98,13 @@ def _synthesis(
     questions: tuple[EvidenceQuestionCandidateV1, ...] = (),
     conflicts: tuple[EvidenceConflictV1, ...] = (),
     status: EvidenceSynthesisStatus = EvidenceSynthesisStatus.DELIVERABLE,
-) -> EvidenceSynthesisResultV1:
+) -> EvidenceSynthesisResultV2:
     deliverable = status is EvidenceSynthesisStatus.DELIVERABLE
     result_claims = (claims if claims is not None else _strong_claims()) if deliverable else ()
     result_conflicts = conflicts if deliverable else ()
     result_questions = questions if deliverable else ()
     output_payload = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "claims": [item.model_dump(mode="json") for item in result_claims],
         "conflicts": [item.model_dump(mode="json") for item in result_conflicts],
         "question_candidates": [item.model_dump(mode="json") for item in result_questions],
@@ -116,21 +117,22 @@ def _synthesis(
             ensure_ascii=False,
         ).encode("utf-8")
     ).hexdigest()
-    return EvidenceSynthesisResultV1(
-        schema_version="1.0.0",
+    return EvidenceSynthesisResultV2(
+        schema_version="2.0.0",
         status=status,
         deliverable=deliverable,
         claims=result_claims,
         conflicts=result_conflicts,
         question_candidates=result_questions,
         failure_reason=None if deliverable else status.value,
-        metadata=EvidenceSynthesisMetadataV1(
+        company_authority_status=CompanyAuthorityStatus.AVAILABLE,
+        metadata=EvidenceSynthesisMetadataV2(
             provider_id="llm-observation",
-            provider_version="product-search-evidence-replay/1.0",
+            provider_version="product-search-evidence-replay/2.0",
             model_id="openai/gpt-5-mini",
             semantic_prompt_version="llm-obs-1.0.0",
-            prompt_version="product-search-evidence-synthesis-1.0.0",
-            schema_version="1.0.0",
+            prompt_version="product-search-evidence-synthesis-2.0.0",
+            schema_version="2.0.0",
             latency_ms=17,
             cost_usd="0.000100",
             input_sha256="1" * 64,
@@ -1432,7 +1434,7 @@ def test_replay_is_byte_stable_and_trace_carries_all_hashes() -> None:
 def test_identical_task10_record_and_replay_results_have_identical_decision_trace() -> None:
     """Break caught: equivalent validated Task 10 replay changes Decision v2."""
     recorded = _synthesis()
-    replayed = EvidenceSynthesisResultV1.model_validate_json(
+    replayed = EvidenceSynthesisResultV2.model_validate_json(
         recorded.model_dump_json()
     )
     first = run_decision_v2(

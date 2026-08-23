@@ -40,13 +40,10 @@ from job_intel.product_search.company_evidence import (
     EvidenceSufficiencyState,
 )
 from job_intel.product_search.evidence_synthesis import (
-    CompanyAuthorityUnavailableV2,
     EvidenceClaimStatus,
     EvidenceClaimV1,
     EvidenceDimension,
     EvidenceQuestionCandidateV1,
-    EvidenceSynthesisResultV1,
-    EvidenceSynthesisInputV2,
     EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
 )
@@ -368,7 +365,7 @@ class DecisionRequestV2(_StrictFrozenModel):
     stages: StageEvidenceV2
     references: DecisionImmutableReferencesV2
     authority_inputs: DecisionAuthorityInputsV2
-    synthesis: EvidenceSynthesisResultV1
+    synthesis: EvidenceSynthesisResultV2
     selection: SelectionEvidenceV2
     company_action: CompanyActionRequestV2 | None
     urgency_evidence: UrgencyEvidenceV2 | None
@@ -668,27 +665,6 @@ def _failure(reason: str) -> DecisionResultV2:
     )
 
 
-def consume_synthesis_v2_fail_closed(
-    *,
-    synthesis_input: EvidenceSynthesisInputV2,
-    synthesis_result: EvidenceSynthesisResultV2,
-) -> DecisionResultV2:
-    """Additive bridge that preserves Decision v2's immutable stage semantics.
-
-    The existing Decision v2 contract requires a resolved company identity in
-    stages 1-3.  Simplified Gate B may benchmark Task 10 without that authority,
-    but it cannot fabricate the completed stage or any downstream decision.
-    """
-    if synthesis_result.company_authority_status.value != (
-        synthesis_input.company_authority.status
-    ):
-        return _failure("synthesis_v2_company_authority_mismatch")
-    if isinstance(synthesis_input.company_authority, CompanyAuthorityUnavailableV2):
-        reason = synthesis_input.company_authority.reason.value
-        return _failure(f"company_authority_unavailable:{reason}")
-    return _failure("synthesis_v2_requires_versioned_decision_authority")
-
-
 def _validate_references(
     request: DecisionRequestV2,
     loaded: LoadedDecisionPolicyV2,
@@ -774,7 +750,7 @@ def _normalized_evidence_sha256(request: DecisionRequestV2) -> str:
     return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
 
 
-def _provider_output_sha256(synthesis: EvidenceSynthesisResultV1) -> str:
+def _provider_output_sha256(synthesis: EvidenceSynthesisResultV2) -> str:
     payload = {
         "schema_version": synthesis.schema_version,
         "claims": [item.model_dump(mode="json") for item in synthesis.claims],

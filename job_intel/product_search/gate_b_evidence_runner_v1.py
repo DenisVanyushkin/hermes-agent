@@ -52,8 +52,7 @@ from job_intel.product_search.decision_v2 import (
 )
 from job_intel.product_search.evidence_synthesis import (
     EvidenceSynthesisInputV2,
-    EvidenceSynthesisMetadataV1,
-    EvidenceSynthesisResultV1,
+    EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
 )
 from job_intel.product_search.company_evidence import CompanyThesisInputV1
@@ -296,54 +295,61 @@ def build_decision_request_v2(
     company_thesis_input: CompanyThesisInputV1 | None = None,
 ) -> DecisionRequestV2:
     """Build a fully bound DecisionRequest from one collected provider result."""
-    claims = response_payload.get("claims", [])
-    conflicts = response_payload.get("conflicts", [])
-    questions = response_payload.get("question_candidates", [])
-    if not all(isinstance(value, list) for value in (claims, conflicts, questions)):
-        raise ValueError("provider_response_payload_shape_invalid")
-    output_payload = {
-        "schema_version": "1.0.0",
-        "claims": claims,
-        "conflicts": conflicts,
-        "question_candidates": questions,
-    }
-    output_sha256 = _sha256(_canonical_bytes(output_payload))
     # The v3 validator returns None for a valid payload; non-None is a
     # fail-closed status.  Do not turn the normal success path into refusal.
     status = validation_status or EvidenceSynthesisStatus.DELIVERABLE
     deliverable = validation_status is None
-    metadata = EvidenceSynthesisMetadataV1(
-        provider_id=str(_required_provider_value(provider_record, "provider_id")),
-        provider_version=str(
+    output_sha256 = str(_required_provider_value(provider_record, "output_sha256"))
+    synthesis_payload = dict(response_payload)
+    synthesis_payload["schema_version"] = str(
+        _required_provider_value(provider_record, "schema_version")
+    )
+    synthesis_payload.setdefault("status", status.value)
+    synthesis_payload.setdefault("deliverable", deliverable)
+    synthesis_payload.setdefault(
+        "failure_reason",
+        None if deliverable else f"provider_validation:{status.value}",
+    )
+    synthesis_payload.setdefault(
+        "company_authority_status",
+        projected.assessment_input.company_authority_status.value,
+    )
+    if validation_status is not None:
+        synthesis_payload.update(
+            {
+                "status": status.value,
+                "deliverable": False,
+                "claims": [],
+                "conflicts": [],
+                "question_candidates": [],
+                "failure_reason": f"provider_validation:{status.value}",
+            }
+        )
+    synthesis_payload["metadata"] = {
+        "provider_id": str(_required_provider_value(provider_record, "provider_id")),
+        "provider_version": str(
             _required_provider_value(provider_record, "provider_version")
         ),
-        model_id=str(_required_provider_value(provider_record, "model_id")),
-        semantic_prompt_version=str(
+        "model_id": str(_required_provider_value(provider_record, "model_id")),
+        "semantic_prompt_version": str(
             _required_provider_value(provider_record, "semantic_prompt_version")
         ),
-        prompt_version=str(
+        "prompt_version": str(
             _required_provider_value(provider_record, "prompt_version")
         ),
-        schema_version="1.0.0",
-        latency_ms=int(_required_provider_value(provider_record, "latency_ms")),
-        cost_usd=(
+        "schema_version": synthesis_payload["schema_version"],
+        "latency_ms": int(_required_provider_value(provider_record, "latency_ms")),
+        "cost_usd": (
             None
             if provider_record.get("cost_usd") is None
             else str(provider_record["cost_usd"])
         ),
-        input_sha256=provider_input_sha256,
-        output_sha256=output_sha256,
-    )
-    synthesis = EvidenceSynthesisResultV1(
-        schema_version="1.0.0",
-        status=status,
-        deliverable=deliverable,
-        claims=tuple(claims) if deliverable else (),
-        conflicts=tuple(conflicts) if deliverable else (),
-        question_candidates=tuple(questions) if deliverable else (),
-        failure_reason=None if deliverable else f"provider_validation:{status.value}",
-        metadata=metadata,
-    )
+        "input_sha256": provider_input_sha256,
+        "output_sha256": output_sha256,
+    }
+    synthesis = EvidenceSynthesisResultV2.model_validate(synthesis_payload)
+    if synthesis.metadata.output_sha256 != output_sha256:
+        raise ValueError("provider_output_hash_binding_mismatch")
     authority = projected.company_authority
     bundle = getattr(authority, "company_evidence_bundle", None)
     if bundle is None:
@@ -2201,26 +2207,10 @@ def _validate_decision_request_binding(
     request: DecisionRequestV2,
     *,
     row: EvidenceManifestRow,
-    response_payload: Mapping[str, object],
+    provider_record: Mapping[str, object],
 ) -> None:
-    claims = response_payload.get("claims", ())
-    conflicts = response_payload.get("conflicts", ())
-    questions = response_payload.get("question_candidates", ())
-    if not isinstance(claims, list):
-        claims = []
-    if not isinstance(conflicts, list):
-        conflicts = []
-    if not isinstance(questions, list):
-        questions = []
-    expected_output_sha256 = _sha256(
-        _canonical_bytes(
-            {
-                "schema_version": "1.0.0",
-                "claims": claims,
-                "conflicts": conflicts,
-                "question_candidates": questions,
-            }
-        )
+    expected_output_sha256 = str(
+        _required_provider_value(provider_record, "output_sha256")
     )
     if request.references.provider_input_sha256 != row.input_sha256:
         raise ValueError("decision_request_input_binding_mismatch")
@@ -2571,7 +2561,7 @@ def run_collection(
         _validate_decision_request_binding(
             decision_request,
             row=row,
-            response_payload=response_payload,
+            provider_record=provider_record,
         )
         decision = run_decision_v2(decision_request, policy=decision_policy)
         decision_bytes = canonical_decision_bytes(decision)
