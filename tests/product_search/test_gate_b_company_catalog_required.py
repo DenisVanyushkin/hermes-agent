@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from job_intel.product_search.gate_b_evidence_runner_v1 import CollectionConfig
+from job_intel.product_search.gate_b_evidence_runner_v1 import (
+    CollectionConfig,
+    _load_manifest_bound_decision_policy,
+)
 import job_intel.product_search.gate_b_evidence_v3 as evidence
 from job_intel.product_search.gate_b_evidence_v3 import (
     ReviewedFragmentAllowlistV3,
@@ -63,3 +69,18 @@ def test_projection_without_catalog_reports_catalog_not_connected() -> None:
     )
 
     assert projected.company_authority.reason.value == "company_evidence_unavailable"
+
+
+def test_decision_policy_binding_uses_decision_v2_authority_hash() -> None:
+    policy_path = Path("config/product_search/decision_contract.v2.yaml")
+    decision_hash = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    manifest = SimpleNamespace(
+        authorities=SimpleNamespace(
+            policy_sha256="6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
+            decision_v2_sha256=decision_hash,
+        )
+    )
+
+    loaded = _load_manifest_bound_decision_policy(policy_path, manifest)
+
+    assert loaded.source_sha256 == decision_hash

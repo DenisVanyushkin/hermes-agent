@@ -1640,7 +1640,7 @@ def _load_manifest_bound_decision_policy(
     path: Path, manifest: EvidenceManifest
 ) -> LoadedDecisionPolicyV2:
     policy_bytes = path.read_bytes()
-    if _sha256(policy_bytes) != manifest.authorities.policy_sha256:
+    if _sha256(policy_bytes) != manifest.authorities.decision_v2_sha256:
         raise ValueError("decision_policy_authority_mismatch")
     return load_decision_policy(path)
 
