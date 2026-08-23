@@ -266,12 +266,20 @@ _UNKNOWN_REASONS = {
     EvidenceDimension.FEASIBILITY: "feasibility_not_stated_in_vacancy",
     EvidenceDimension.MANDATE_FIT: "mandate_not_stated_in_vacancy",
     EvidenceDimension.COMPANY_FIT: (
-        "company_authority_unavailable:unresolved_company_identity"
+        "company_authority_unavailable:company_evidence_unavailable"
     ),
     EvidenceDimension.TRANSFERABILITY: "candidate_profile_evidence_not_materialized",
     EvidenceDimension.CAREER_VALUE: "career_value_not_stated_in_vacancy",
     EvidenceDimension.EVIDENCE_CONFIDENCE: "evidence_confidence_not_established",
 }
+
+
+def _company_authority_unknown_reason(
+    authority: CompanyAuthorityInputV2,
+) -> str:
+    if authority.status == "available":
+        return "company_authority_provider_assessed"
+    return f"company_authority_unavailable:{authority.reason.value}"
 
 
 class ProjectionBlockedV3(ValueError):
@@ -846,7 +854,7 @@ def _build_projection_v3(
     )
     resolved_authority = company_authority or CompanyAuthorityUnavailableV2(
         status="unavailable",
-        reason="unresolved_company_identity",
+        reason="company_evidence_unavailable",
     )
     candidate_by_locator = {
         candidate.source_locator: candidate
@@ -962,11 +970,8 @@ def _build_projection_v3(
         if refs and not force_unknown:
             continue
         reason = _UNKNOWN_REASONS[dimension]
-        if (
-            dimension is EvidenceDimension.COMPANY_FIT
-            and resolved_authority.status == "available"
-        ):
-            reason = "company_authority_provider_assessed"
+        if dimension is EvidenceDimension.COMPANY_FIT:
+            reason = _company_authority_unknown_reason(resolved_authority)
         fragment_id = f"unknown-v3:{candidates.selection_key[:16]}:{dimension.value}"
         fragments.append(
             EvidenceFragmentV1(
@@ -999,11 +1004,8 @@ def _build_projection_v3(
             else DimensionEvidenceInput(
                 state=DimensionEvidenceState.UNKNOWN,
                 unknown_reasons=(
-                    "company_authority_provider_assessed"
-                    if (
-                        dimension is EvidenceDimension.COMPANY_FIT
-                        and resolved_authority.status == "available"
-                    )
+                    _company_authority_unknown_reason(resolved_authority)
+                    if dimension is EvidenceDimension.COMPANY_FIT
                     else _UNKNOWN_REASONS[dimension],
                 ),
             )

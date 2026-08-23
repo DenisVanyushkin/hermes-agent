@@ -194,7 +194,7 @@ def test_projector_characterization_keeps_role_direct_and_unknown_dimensions() -
         "/title#000",
         "/location#000",
         "/description#000",
-        "company_authority_unavailable:unresolved_company_identity",
+        "company_authority_unavailable:company_evidence_unavailable",
         "candidate_profile_evidence_not_materialized",
     ]
     assert projected.assessment_input.dimensions.mandate_fit.state == (

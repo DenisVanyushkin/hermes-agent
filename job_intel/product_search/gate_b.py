@@ -1228,7 +1228,7 @@ def _build_task10_input(
         EvidenceDimension.FEASIBILITY: "feasibility_not_stated_in_vacancy",
         EvidenceDimension.MANDATE_FIT: "mandate_not_stated_in_vacancy",
         EvidenceDimension.COMPANY_FIT: (
-            "company_authority_unavailable:unresolved_company_identity"
+            "company_authority_unavailable:company_evidence_unavailable"
         ),
         EvidenceDimension.TRANSFERABILITY: "candidate_profile_evidence_not_materialized",
         EvidenceDimension.CAREER_VALUE: "career_value_not_stated_in_vacancy",
@@ -1284,7 +1284,7 @@ def _build_task10_input(
         assessment_input=assessment,
         company_authority=CompanyAuthorityUnavailableV2(
             status="unavailable",
-            reason="unresolved_company_identity",
+            reason="company_evidence_unavailable",
         ),
         vacancy_evidence_ref=vacancy_ref,
         vacancy_evidence=artifact,
@@ -1398,7 +1398,7 @@ def _materialize_input_package(
         },
         "company_authority": {
             "status": "unavailable",
-            "reason": "unresolved_company_identity",
+            "reason": "company_evidence_unavailable",
         },
         "authorization_constraints": {
             "provider_allowlist": ordered_hashes,
@@ -1429,7 +1429,7 @@ def _materialize_input_package(
         "ordered_input_sha256s": ordered_hashes,
         "ordered_input_hashes_sha256": _sha256_json(ordered_hashes),
         "company_authority_status": "unavailable",
-        "company_authority_reason": "unresolved_company_identity",
+        "company_authority_reason": "company_evidence_unavailable",
     }
 
 

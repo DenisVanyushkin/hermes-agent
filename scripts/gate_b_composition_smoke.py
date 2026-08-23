@@ -196,6 +196,8 @@ def main() -> int:
                     str(fixture_artifact / "authority/decision_contract.v2.yaml"),
                     "--authority-root",
                     str(fixture_artifact / "authority"),
+                    "--company-evidence-root",
+                    str(fixture_root / "company-evidence"),
                     "--provider-factory",
                     "gate_b_cli_smoke_fixture:provider_factory",
                     "--decision-request-factory",

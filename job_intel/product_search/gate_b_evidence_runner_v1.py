@@ -72,6 +72,7 @@ from job_intel.product_search.gate_b_evidence_v3 import (
     validate_reviewed_fragment_allowlist_corpus_v3,
     validate_provider_payload_v3,
     load_company_evidence_catalog_v3,
+    resolve_company_authority_v3,
 )
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
     LLMProviderError,
@@ -1324,7 +1325,7 @@ class CollectionConfig(_StrictFrozenModel):
     corpus_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     reviewed_allowlist_path: Path
     decision_policy_path: Path
-    company_evidence_root: Path | None = None
+    company_evidence_root: Path
     provider_factory: str = (
         "job_intel.product_search.gate_b_evidence_runner_v1:build_live_provider_factory"
     )
@@ -1376,12 +1377,12 @@ def _load_collection_config(path: Path) -> CollectionConfig:
 
 
 def _load_company_authority_inputs(
-    root: Path | None,
+    root: Path,
     manifest: EvidenceManifest,
-) -> tuple[CompanyEvidenceCatalogV3 | None, dict[str, CompanyThesisInputV1]]:
+) -> tuple[CompanyEvidenceCatalogV3, dict[str, CompanyThesisInputV1]]:
     """Load the immutable company bundles and only the theses that validate."""
     if root is None:
-        return None, {}
+        raise ValueError("company_evidence_root_required")
     contract_sha256 = manifest.authorities.source_authority_sha256s.get(
         "company_evidence_contract"
     )
@@ -1644,6 +1645,117 @@ def _load_manifest_bound_decision_policy(
     return load_decision_policy(path)
 
 
+def build_collection_preflight(
+    *,
+    config: CollectionConfig,
+    manifest: EvidenceManifest,
+) -> dict[str, Any]:
+    """Validate exact collection inputs without constructing a provider."""
+    if config.company_evidence_root is None:
+        raise ValueError("company_evidence_root_required")
+    reviewed_allowlist = load_reviewed_fragment_allowlist_v3(
+        config.reviewed_allowlist_path
+    )
+    if manifest.corpus_sha256 is None:
+        raise ValueError("manifest_corpus_sha256_required")
+    validate_reviewed_fragment_allowlist_corpus_v3(
+        reviewed_allowlist,
+        corpus_sha256=manifest.corpus_sha256,
+    )
+    failures: list[dict[str, str]] = []
+    try:
+        _load_manifest_bound_decision_policy(config.decision_policy_path, manifest)
+    except (OSError, ValueError) as exc:
+        failures.append(
+            {"check": "decision_policy", "error": str(exc)}
+        )
+    catalog, theses = _load_company_authority_inputs(
+        config.company_evidence_root, manifest
+    )
+    if config.corpus_rows_path is not None:
+        corpus_rows = _load_corpus_rows_file(config.corpus_rows_path, manifest)
+    else:
+        if (
+            config.corpus_package_root is None
+            or config.gate_a_root is None
+            or config.run_manifest_path is None
+            or config.run_manifest_sha256 is None
+            or config.corpus_sha256 is None
+        ):
+            raise ValueError("collection corpus source is incomplete")
+        corpus_rows = load_gate_b_corpus_rows(
+            package_root=config.corpus_package_root,
+            gate_a_root=config.gate_a_root,
+            run_manifest_path=config.run_manifest_path,
+            expected_sha256=config.run_manifest_sha256,
+            expected_corpus_sha256=config.corpus_sha256,
+        )
+    authority_counts: dict[str, int] = {}
+    sufficiency_counts: dict[str, int] = {}
+    company_rows: dict[str, dict[str, Any]] = {}
+    derived_rows = _derive_binding_rows(
+        corpus_rows,
+        reviewed_allowlist,
+        company_evidence_catalog=catalog,
+    )
+    for corpus_row, derived in zip(corpus_rows, derived_rows, strict=True):
+        projected = project_vacancy_evidence_v3(
+            corpus_row.record,
+            corpus_row.raw,
+            reviewed_allowlist,
+            company_evidence_catalog=catalog,
+        )
+        expected_authority = resolve_company_authority_v3(corpus_row.raw, catalog)
+        actual_authority = projected.company_authority
+        if expected_authority.status == "available" and actual_authority.status != "available":
+            raise ValueError("company_evidence_not_connected")
+        if actual_authority.status == "unavailable":
+            reason = actual_authority.reason.value
+            authority_counts[reason] = authority_counts.get(reason, 0) + 1
+            company_id = str(corpus_row.raw.get("company", "<unknown>"))
+            company_rows.setdefault(
+                company_id,
+                {"status": "unavailable", "rows": 0, "sufficiency": None},
+            )["rows"] += 1
+        else:
+            authority_counts["available"] = authority_counts.get("available", 0) + 1
+            bundle = actual_authority.company_evidence_bundle
+            sufficiency = bundle.sufficiency_state.value
+            sufficiency_counts[sufficiency] = sufficiency_counts.get(sufficiency, 0) + 1
+            company_id = bundle.company_identity.company_id
+            entry = company_rows.setdefault(
+                company_id,
+                {"status": "available", "rows": 0, "sufficiency": sufficiency},
+            )
+            entry["rows"] += 1
+            if entry["sufficiency"] != sufficiency:
+                raise ValueError("company_sufficiency_inconsistent")
+        expected = manifest.row(corpus_row.ordinal)
+        if derived.raw_sha256 != expected.raw_sha256:
+            raise ValueError("corpus_raw_hash_does_not_match_manifest")
+        if derived.input_sha256 != expected.input_sha256:
+            raise ValueError("provider_input_hash_does_not_match_manifest")
+        if derived.projection_sha256 != expected.projection_sha256:
+            raise ValueError("projection_hash_does_not_match_manifest")
+    return {
+        "status": "ready" if not failures else "blocked",
+        "failures": failures,
+        "manifest_sha256": manifest.manifest_sha256,
+        "corpus_sha256": manifest.corpus_sha256,
+        "row_count": len(corpus_rows),
+        "company_authority": authority_counts,
+        "sufficiency": sufficiency_counts,
+        "companies": company_rows,
+        "thesis_company_ids": sorted(theses),
+        "provider_constructed": False,
+        "network_called": False,
+        "spend_usd": "0.00",
+        "provider_factory": config.provider_factory,
+        "decision_request_factory": config.decision_request_factory,
+        "company_evidence_root": str(config.company_evidence_root),
+    }
+
+
 
 def _run_supervised_collection(args: argparse.Namespace) -> int:
     """Run one foreground collection under the canonical supervised wrapper."""
@@ -1770,7 +1882,7 @@ def _main(arguments: list[str]) -> int:
     supervised.add_argument("--reviewed-allowlist", type=Path, required=True)
     supervised.add_argument("--decision-policy", type=Path, required=True)
     supervised.add_argument("--authority-root", type=Path, required=True)
-    supervised.add_argument("--company-evidence-root", type=Path)
+    supervised.add_argument("--company-evidence-root", type=Path, required=True)
     supervised.add_argument("--provider-factory", required=True)
     supervised.add_argument("--decision-request-factory", required=True)
 
@@ -1783,6 +1895,11 @@ def _main(arguments: list[str]) -> int:
     evaluate.add_argument("--adjudication-sha256", required=True)
     evaluate.add_argument("--gate-policy", type=Path, required=True)
     evaluate.add_argument("--output", type=Path, required=True)
+
+    preflight = subparsers.add_parser("preflight-collection")
+    preflight.add_argument("--config", type=Path, required=True)
+    preflight.add_argument("--manifest-sha256", required=True)
+    preflight.add_argument("--output", type=Path)
 
     run = subparsers.add_parser("run-collection")
     run.add_argument(
@@ -1805,6 +1922,16 @@ def _main(arguments: list[str]) -> int:
         default=os.environ.get("GATE_B_MANIFEST_SHA256"),
     )
     args = parser.parse_args(arguments)
+    if args.command == "preflight-collection":
+        config = _load_collection_config(args.config)
+        manifest = _load_manifest(config.manifest_path, args.manifest_sha256)
+        result = build_collection_preflight(config=config, manifest=manifest)
+        encoded = _canonical_bytes(result)
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_bytes(encoded)
+        print(encoded.decode("utf-8"))
+        return 0 if result["status"] == "ready" else 2
     if args.command == "run-supervised":
         return _run_supervised_collection(args)
     if args.command == "evaluate-run":

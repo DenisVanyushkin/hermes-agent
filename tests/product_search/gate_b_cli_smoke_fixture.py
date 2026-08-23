@@ -6,15 +6,18 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 from types import SimpleNamespace
 from typing import Any
 
 from job_intel.product_search import gate_b_evidence_v3 as evidence
 from job_intel.product_search.gate_b_evidence_v3 import (
+    CompanyEvidenceCatalogV3,
     ReviewedFragmentAllowlistV3,
     ReviewedFragmentDecisionV3,
     ReviewedFragmentEntryV3,
+    load_company_evidence_bundle,
 )
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
     AuthorityIdentity,
@@ -56,6 +59,7 @@ def _make_record(index: int) -> tuple[dict[str, str], dict[str, str]]:
     return (
         {"selection_key": f"{index + 1:064x}"},
         {
+            "company": "Northstar",
             "title": f"Head of Product {index}",
             "location": "Almaty",
             "description": (
@@ -285,6 +289,21 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
     root.mkdir(parents=True, exist_ok=True)
     authority_root = artifact_root / "authority"
     authority_root.mkdir(parents=True)
+    company_evidence_root = root / "company-evidence"
+    shutil.copytree(
+        repo_root / "tests/product_search/fixtures/company_evidence",
+        company_evidence_root,
+        dirs_exist_ok=True,
+    )
+    company_bundle = load_company_evidence_bundle(
+        company_evidence_root / "company-evidence-bundle.v1.yaml"
+    )
+    company_catalog = CompanyEvidenceCatalogV3(
+        company_evidence_contract_sha256=_sha(
+            (repo_root / "config/product_search/company_evidence_contract.v1.yaml").read_bytes()
+        ),
+        bundles=(company_bundle,),
+    )
     policy_path = artifact_root / "authority/decision_contract.v2.yaml"
     policy_path.write_bytes(
         (repo_root / "config/product_search/decision_contract.v2.yaml").read_bytes()
@@ -299,6 +318,9 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
         "pricing_bytes": b"pricing:smoke",
         "source:gate_a": b"gate-a:smoke",
         "source:provider": b"provider:smoke",
+        "source:company_evidence_contract": (
+            repo_root / "config/product_search/company_evidence_contract.v1.yaml"
+        ).read_bytes(),
     }
     authority_paths: dict[str, Path] = {}
     for name, value in authority_values.items():
@@ -317,6 +339,9 @@ def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, 
         source_authority_bytes={
             "gate_a": authority_values["source:gate_a"],
             "provider": authority_values["source:provider"],
+            "company_evidence_contract": authority_values[
+                "source:company_evidence_contract"
+            ],
         },
     )
     shim = artifact_root / "python-runtime/venv/lib/python3.12/site-packages/00-pysqlite3-shim.pth"
@@ -369,7 +394,12 @@ exec {sys.executable!s} "$@"
         ]
         allow_entries.extend(entries)
         allowlist = _allowlist(allow_entries)
-        projected = evidence.project_vacancy_evidence_v3(record, raw, allowlist)
+        projected = evidence.project_vacancy_evidence_v3(
+            record,
+            raw,
+            allowlist,
+            company_evidence_catalog=company_catalog,
+        )
         rows.append(
             EvidenceManifestRow(
                 ordinal=index,
@@ -431,6 +461,7 @@ exec {sys.executable!s} "$@"
         "corpus_rows_path": str(corpus_path),
         "reviewed_allowlist_path": str(allowlist_path),
         "decision_policy_path": str(policy_path),
+        "company_evidence_root": str(company_evidence_root),
         "provider_factory": "gate_b_cli_smoke_fixture:provider_factory",
         "decision_request_factory": "gate_b_cli_smoke_fixture:decision_request_factory",
         "authority_paths": {key: str(path) for key, path in authority_paths.items()},

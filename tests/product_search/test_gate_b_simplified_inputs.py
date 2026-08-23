@@ -152,7 +152,7 @@ def test_dry_preflight_materializes_48_truthful_v2_inputs_in_canonical_order(
     assert package["record_count"] == 48
     assert package["vacancy_artifact_count"] == 48
     assert package["company_authority_status"] == "unavailable"
-    assert package["company_authority_reason"] == "unresolved_company_identity"
+    assert package["company_authority_reason"] == "company_evidence_unavailable"
     assert package["ordered_input_sha256s"] == sorted(
         package["ordered_input_sha256s"],
         key=lambda value: package["ordered_input_sha256s"].index(value),
@@ -196,7 +196,7 @@ def test_dry_preflight_materializes_48_truthful_v2_inputs_in_canonical_order(
         assert task_input.schema_version == "2.0.0"
         assert task_input.company_authority.status == "unavailable"
         assert (
-            task_input.company_authority.reason.value == "unresolved_company_identity"
+            task_input.company_authority.reason.value == "company_evidence_unavailable"
         )
         assert (
             task_input.assessment_input.dimensions.company_fit.state.value == "unknown"
@@ -206,7 +206,7 @@ def test_dry_preflight_materializes_48_truthful_v2_inputs_in_canonical_order(
         assert dumped["company_authority"] == {
             "schema_version": "2.0.0",
             "status": "unavailable",
-            "reason": "unresolved_company_identity",
+            "reason": "company_evidence_unavailable",
             "company_evidence_bundle": None,
             "official_domain_claim": None,
             "company_facts": [],
@@ -418,7 +418,7 @@ def test_decision_adapter_never_elevates_unavailable_company_authority(
     assert decision.status.value == "fail_closed"
     assert decision.assessment is None
     assert decision.failure_reason == (
-        "company_authority_unavailable:unresolved_company_identity"
+        "company_authority_unavailable:company_evidence_unavailable"
     )
 
 
