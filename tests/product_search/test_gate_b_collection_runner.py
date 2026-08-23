@@ -29,6 +29,27 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
 from job_intel.product_search.decision_v2 import DecisionResultV2, DecisionRunStatus
 
 
+def test_authority_paths_follow_manifest_source_authorities(tmp_path: Path) -> None:
+    manifest = SimpleNamespace(
+        authorities=SimpleNamespace(
+            source_authority_sha256s={
+                "company_evidence_contract": "a" * 64,
+                "provider": "b" * 64,
+            }
+        )
+    )
+
+    paths = runner._authority_paths_for_manifest(manifest, tmp_path)
+
+    assert paths["model_bytes"] == tmp_path / "model_bytes.bin"
+    assert paths["decision_v2_bytes"] == tmp_path / "decision_v2_bytes.bin"
+    assert paths["source:company_evidence_contract"] == (
+        tmp_path / "source-company_evidence_contract.bin"
+    )
+    assert paths["source:provider"] == tmp_path / "source-provider.bin"
+    assert "source:gate_a" not in paths
+
+
 def _bound_request(context: runner.DecisionRequestFactoryContextV1) -> object:
     payload = context.response_payload
     ref = context.manifest_ref

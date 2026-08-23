@@ -1757,6 +1757,28 @@ def build_collection_preflight(
 
 
 
+def _authority_paths_for_manifest(
+    manifest: EvidenceManifest, authority_root: Path
+) -> dict[str, Path]:
+    """Resolve authority files from the manifest source-authority contract."""
+    fixed_names = (
+        "model_bytes",
+        "prompt_bytes",
+        "response_schema_bytes",
+        "profile_bytes",
+        "policy_bytes",
+        "decision_v2_bytes",
+        "pricing_bytes",
+    )
+    keys = (*fixed_names, *(f"source:{name}" for name in sorted(
+        manifest.authorities.source_authority_sha256s
+    )))
+    return {
+        key: authority_root / (key.replace(":", "-") + ".bin")
+        for key in keys
+    }
+
+
 def _run_supervised_collection(args: argparse.Namespace) -> int:
     """Run one foreground collection under the canonical supervised wrapper."""
     manifest = _load_manifest(args.manifest, args.manifest_sha256)
@@ -1786,21 +1808,7 @@ def _run_supervised_collection(args: argparse.Namespace) -> int:
         args.company_evidence_root, manifest
     )
     authority_root = args.authority_root.resolve()
-    authority_keys = (
-        "model_bytes",
-        "prompt_bytes",
-        "response_schema_bytes",
-        "profile_bytes",
-        "policy_bytes",
-        "decision_v2_bytes",
-        "pricing_bytes",
-        "source:gate_a",
-        "source:provider",
-    )
-    authority_paths = {
-        key: authority_root / (key.replace(":", "-") + ".bin")
-        for key in authority_keys
-    }
+    authority_paths = _authority_paths_for_manifest(manifest, authority_root)
     source_artifact, runtime, authorities = _artifact_binding_context(
         manifest, artifact_root, authority_paths
     )
