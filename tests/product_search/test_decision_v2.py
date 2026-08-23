@@ -50,7 +50,9 @@ from job_intel.product_search.evidence_synthesis import (
     EvidenceConflictV1,
     EvidenceDimension,
     EvidenceQuestionCandidateV1,
+    EvidenceSynthesisMetadataV1,
     EvidenceSynthesisMetadataV2,
+    EvidenceSynthesisResultV1,
     EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
 )
@@ -1299,6 +1301,76 @@ def test_traced_dynamic_hashes_must_match_authoritative_task_objects(
     assert result.status is DecisionRunStatus.FAIL_CLOSED
     assert result.assessment is None
     assert result.failure_reason == f"immutable_reference_mismatch:{mismatch}"
+
+
+@pytest.mark.parametrize(
+    ("field", "v1_value"),
+    [
+        ("provider_version", "product-search-evidence-replay/1.0"),
+        ("prompt_version", "product-search-evidence-synthesis-1.0.0"),
+        ("schema_version", "1.0.0"),
+    ],
+)
+def test_v2_metadata_rejects_v1_version_values(field: str, v1_value: str) -> None:
+    payload = _synthesis().metadata.model_dump(mode="json")
+    payload[field] = v1_value
+
+    with pytest.raises(ValidationError) as captured:
+        EvidenceSynthesisMetadataV2.model_validate(payload)
+
+    assert any(error["loc"] == (field,) for error in captured.value.errors())
+
+
+def test_decision_request_rejects_an_entire_v1_synthesis() -> None:
+    v2 = _synthesis()
+    v1 = EvidenceSynthesisResultV1(
+        schema_version="1.0.0",
+        status=v2.status,
+        deliverable=v2.deliverable,
+        claims=v2.claims,
+        conflicts=v2.conflicts,
+        question_candidates=v2.question_candidates,
+        failure_reason=v2.failure_reason,
+        metadata=EvidenceSynthesisMetadataV1(
+            provider_id=v2.metadata.provider_id,
+            provider_version="product-search-evidence-replay/1.0",
+            model_id=v2.metadata.model_id,
+            semantic_prompt_version=v2.metadata.semantic_prompt_version,
+            prompt_version="product-search-evidence-synthesis-1.0.0",
+            schema_version="1.0.0",
+            latency_ms=v2.metadata.latency_ms,
+            cost_usd=v2.metadata.cost_usd,
+            input_sha256=v2.metadata.input_sha256,
+            output_sha256=v2.metadata.output_sha256,
+        ),
+    )
+
+    with pytest.raises(ValidationError) as captured:
+        _request(synthesis=v1)
+
+    assert any(
+        error["loc"] == ("synthesis",)
+        and "EvidenceSynthesisResultV2" in error["msg"]
+        for error in captured.value.errors()
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["provider_id", "model_id", "semantic_prompt_version"],
+)
+def test_free_provider_identity_fields_fail_closed_by_policy(field: str) -> None:
+    synthesis = _synthesis()
+    forged_metadata = synthesis.metadata.model_copy(
+        update={field: f"forged-{field}"}
+    )
+    forged = synthesis.model_copy(update={"metadata": forged_metadata})
+
+    result = _run(synthesis=forged)
+
+    assert result.status is DecisionRunStatus.FAIL_CLOSED
+    assert result.assessment is None
+    assert result.failure_reason == f"immutable_reference_mismatch:provider_{field}"
 
 
 @pytest.mark.parametrize(
