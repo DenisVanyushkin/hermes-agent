@@ -104,11 +104,15 @@ class DecisionImmutableReferencesV2(AuthorityHashesV2):
 
 
 class DecisionAuthorityInputsV2(_StrictFrozenModel):
-    """Exact Task 8/9 immutable objects whose hashes Decision v2 traces."""
+    """Immutable authority objects traced by Decision v2.
+
+    Open Market vacancy decisions do not require a weekly company thesis;
+    company-thesis input is required only when a company action is requested.
+    """
 
     assessment_references: AssessmentReferences
     company_evidence_bundle_ref: ImmutableArtifactRef
-    company_thesis_input_ref: ImmutableArtifactRef
+    company_thesis_input_ref: ImmutableArtifactRef | None = None
     multi_axis_exception_refs: tuple[ImmutableArtifactRef, ...] = ()
 
     @model_validator(mode="after")
@@ -723,9 +727,10 @@ def _validate_references(
         )
         if actual_bundle_ref != request.authority_inputs.company_evidence_bundle_ref:
             return "immutable_reference_mismatch:company_evidence_bundle_sha256"
+        expected_thesis_ref = request.authority_inputs.company_thesis_input_ref
         if (
-            company_thesis_input_ref(action.thesis_input)
-            != request.authority_inputs.company_thesis_input_ref
+            expected_thesis_ref is None
+            or company_thesis_input_ref(action.thesis_input) != expected_thesis_ref
         ):
             return "immutable_reference_mismatch:company_thesis_input_sha256"
     metadata = request.synthesis.metadata

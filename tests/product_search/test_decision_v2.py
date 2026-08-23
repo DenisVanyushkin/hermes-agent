@@ -180,7 +180,7 @@ def _authority_inputs(**overrides: object) -> DecisionAuthorityInputsV2:
             version="1.0.0",
             sha256=overrides.get(
                 "company_evidence_bundle_sha256",
-                "340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a",
+                "4a430ff92b0e7b3720183a4e0f28afdb2cff7489368ddfd270f112979f0194e3",
             ),
         ),
         "company_thesis_input_ref": overrides.get(
@@ -200,7 +200,7 @@ def _references(**overrides: str) -> DecisionImmutableReferencesV2:
         "decision_contract_sha256": loaded.source_sha256,
         "semantic_contract_sha256": "b" * 64,
         "evidence_snapshot_sha256": "e" * 64,
-        "company_evidence_bundle_sha256": "340c47d5408893612575f4ba6cee440074e84a8bc427888aba7862501933fa8a",
+        "company_evidence_bundle_sha256": "4a430ff92b0e7b3720183a4e0f28afdb2cff7489368ddfd270f112979f0194e3",
         "provider_input_sha256": "1" * 64,
         "provider_output_sha256": _synthesis().metadata.output_sha256,
     }
@@ -244,6 +244,87 @@ def _request(**overrides: object) -> DecisionRequestV2:
 
 def _run(**overrides: object):
     return run_decision_v2(_request(**overrides), policy=load_decision_policy(POLICY_PATH))
+
+
+def test_open_market_decision_without_thesis_preserves_provider_assessment() -> None:
+    """Open Market does not require a weekly thesis or alter provider output."""
+    result = _run(authority_inputs=_authority_inputs(company_thesis_input_ref=None))
+
+    assert result.status is DecisionRunStatus.ASSESSED
+    assert result.assessment is not None
+    assert (
+        result.assessment.dimensions.company_fit.outcome
+        is DimensionOutcome.POSITIVE
+    )
+    assert (
+        result.assessment.dimensions.evidence_confidence.outcome
+        is DimensionOutcome.POSITIVE
+    )
+    assert result.assessment.system_verdict is SystemVerdict.PRIORITY
+
+
+def test_incomplete_company_evidence_is_expressed_as_unknown_claims() -> None:
+    """Provider uncertainty, not thesis absence, lowers company confidence."""
+    claims = tuple(
+        claim
+        for claim in _strong_claims()
+        if claim.dimension not in {
+            EvidenceDimension.COMPANY_FIT,
+            EvidenceDimension.EVIDENCE_CONFIDENCE,
+        }
+    ) + (
+        _claim(
+            EvidenceDimension.COMPANY_FIT,
+            "company_evidence_insufficient_unknown",
+            status=EvidenceClaimStatus.UNKNOWN,
+        ),
+        _claim(
+            EvidenceDimension.EVIDENCE_CONFIDENCE,
+            "company_evidence_insufficient_confidence_unknown",
+            status=EvidenceClaimStatus.UNKNOWN,
+        ),
+    )
+    result = _run(
+        synthesis=_synthesis(claims=claims),
+    )
+
+    assert result.status is DecisionRunStatus.ASSESSED
+    assert result.assessment is not None
+    assert (
+        result.assessment.dimensions.company_fit.outcome
+        is DimensionOutcome.UNKNOWN
+    )
+    assert (
+        result.assessment.dimensions.evidence_confidence.outcome
+        is DimensionOutcome.UNKNOWN
+    )
+    assert "company_evidence_insufficient_unknown" in result.assessment.unknowns
+
+
+def test_decision_with_company_thesis_reference_remains_bound() -> None:
+    """Company-action decisions continue to carry and validate the thesis ref."""
+    request = _company_request(CompanyAction.NOMINATE, None, None)
+    result = _run(company_action=request)
+
+    assert result.status is DecisionRunStatus.ASSESSED
+    assert result.assessment is not None
+    assert result.assessment.company_action is not None
+    assert result.assessment.company_action.thesis_input_sha256 == (
+        _company_thesis_ref().sha256
+    )
+
+
+def test_company_action_requires_company_thesis_reference() -> None:
+    """Company actions remain fail-closed when their thesis authority is absent."""
+    result = _run(
+        authority_inputs=_authority_inputs(company_thesis_input_ref=None),
+        company_action=_company_request(CompanyAction.NOMINATE, None, None),
+    )
+
+    assert result.status is DecisionRunStatus.FAIL_CLOSED
+    assert result.failure_reason == (
+        "immutable_reference_mismatch:company_thesis_input_sha256"
+    )
 
 
 def test_exact_eight_step_decision_order_is_immutable() -> None:
@@ -1344,7 +1425,7 @@ def test_replay_is_byte_stable_and_trace_carries_all_hashes() -> None:
     assert trace.references == _references()
     assert trace.authority_inputs == _authority_inputs()
     assert trace.canonical_sha256 == (
-        "eb7572569f32aa320c001cb2e374a703bf3a83b3169acd6b01bb145f143174bc"
+        "2ed506b9b8338b357363b4a69418ecdfc49d9b484f5ed7b0f137d25fe86ca306"
     )
 
 
