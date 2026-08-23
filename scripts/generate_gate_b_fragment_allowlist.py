@@ -16,7 +16,7 @@ from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     load_gate_b_benchmark_policy_v3,
 )
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
-    load_gate_b_corpus_rows,
+    load_gate_b_corpus_rows_from_corpus_manifest,
 )
 from job_intel.product_search.gate_b_evidence_v3 import (
     generate_reviewed_fragment_allowlist_v3,
@@ -25,20 +25,16 @@ from job_intel.product_search.gate_b_evidence_v3 import (
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--package-root", type=Path, required=True)
     parser.add_argument("--gate-a-root", type=Path, required=True)
-    parser.add_argument("--run-manifest", type=Path, required=True)
-    parser.add_argument("--manifest-sha256", required=True)
+    parser.add_argument("--corpus-manifest", type=Path, required=True)
     parser.add_argument("--corpus-sha256", required=True)
     parser.add_argument("--classified-at", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
-    rows = load_gate_b_corpus_rows(
-        package_root=args.package_root,
+    rows = load_gate_b_corpus_rows_from_corpus_manifest(
         gate_a_root=args.gate_a_root,
-        run_manifest_path=args.run_manifest,
-        expected_sha256=args.manifest_sha256,
+        corpus_manifest_path=args.corpus_manifest,
         expected_corpus_sha256=args.corpus_sha256,
     )
     allowlist = generate_reviewed_fragment_allowlist_v3(

@@ -1943,6 +1943,58 @@ def load_gate_b_corpus_rows(
     return tuple(loaded)
 
 
+def load_gate_b_corpus_rows_from_corpus_manifest(
+    *,
+    gate_a_root: Path,
+    corpus_manifest_path: Path,
+    expected_corpus_sha256: str,
+) -> tuple[CorpusRow, ...]:
+    """Load rows from the content-addressed corpus manifest itself.
+
+    The run manifest is intentionally not consulted here: it is a derived
+    projection artifact and may be rebuilt after this allowlist is generated.
+    """
+    encoded = corpus_manifest_path.read_bytes()
+    observed_sha256 = _sha256(encoded)
+    if observed_sha256 != expected_corpus_sha256:
+        raise ValueError("corpus_manifest_sha256_mismatch")
+    try:
+        payload = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("corpus manifest is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("gate") != "gate-b":
+        raise ValueError("corpus manifest is invalid")
+    records = payload.get("records")
+    if not isinstance(records, list):
+        raise ValueError("corpus manifest records are invalid")
+    from job_intel.product_search import gate_b
+
+    loaded: list[CorpusRow] = []
+    for ordinal, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError("corpus manifest row is invalid")
+        raw_reference = record.get("raw_reference")
+        if not isinstance(raw_reference, str):
+            raise ValueError("corpus raw reference is invalid")
+        raw_bytes = gate_b.read_contained_nofollow(gate_a_root, raw_reference)
+        try:
+            raw = json.loads(raw_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("corpus raw artifact is invalid") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("corpus raw artifact must be an object")
+        loaded.append(
+            CorpusRow(
+                ordinal=ordinal,
+                record=record,
+                raw=raw,
+            )
+        )
+    if tuple(row.ordinal for row in loaded) != tuple(range(48)):
+        raise ValueError("corpus order does not match the 48-row contract")
+    return tuple(loaded)
+
+
 def _derive_binding_rows(
     rows: Sequence[CorpusRow],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
