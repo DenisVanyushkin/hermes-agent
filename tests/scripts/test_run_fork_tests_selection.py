@@ -212,3 +212,92 @@ def test_fork_own_test_is_selected(world: Path, fake_python: tuple[Path, Path]) 
         "the fork's own test disappeared from the selection; a filter that "
         f"drops it makes the gate blind rather than safe: {selection}"
     )
+
+
+def _print_selection(
+    world: Path, fake_python: tuple[Path, Path]
+) -> subprocess.CompletedProcess[str]:
+    interpreter, argv_file = fake_python
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+        "HERMES_UPSTREAM_REMOTE": "upstream",
+        "HERMES_UPSTREAM_BRANCH": "main",
+    }
+    return subprocess.run(
+        ["bash", str(RUNNER), "--print-selection", str(world)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_print_selection_emits_only_paths_on_stdout(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """stdout — протокол, и в нём не может быть ничего, кроме путей.
+
+    Смысл проверки практический: набор забирают редиректом в файл манифеста.
+    Одна диагностическая строка, попавшая в stdout, станет там «ещё одним
+    путём», и потребитель манифеста упрётся в файл, которого нет.
+    """
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    lines = result.stdout.splitlines()
+    assert lines, "the selection came back empty"
+
+    not_paths = [line for line in lines if not (world / line).is_file()]
+    assert not_paths == [], (
+        "stdout carries lines that are not existing paths, so redirecting it "
+        f"into a manifest would poison the manifest: {not_paths}"
+    )
+    assert "fork test selection:" in result.stderr, (
+        "the diagnostic line vanished instead of moving to stderr; a selection "
+        "that shrinks silently is a gate that reports a clean run"
+    )
+    assert "fork test selection:" not in result.stdout
+
+
+def test_print_selection_does_not_run_the_tests(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """Спросить набор должно быть дёшево — иначе его снова никто не проверит."""
+    _, argv_file = fake_python
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert not argv_file.exists(), (
+        "--print-selection reached the interpreter, so asking for the selection "
+        "costs a full test run"
+    )
+
+
+def test_print_selection_reports_a_path_missing_from_the_working_tree(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """Фильтр существования стережёт не удаления мержем, а расхождение дерева.
+
+    ``--diff-filter=d`` снимает удалённое ещё на входе, поэтому здесь нужен
+    случай, до которого он не достаёт: файл числится в ``HEAD``, а на диске его
+    нет. Так бывает, когда рабочее дерево гейта разошлось с коммитом. Набор
+    берётся из ``ls-tree HEAD``, то есть путь в него попадёт, и без фильтра
+    существования pytest снова обрушил бы прогон целиком.
+
+    И отброшенное обязано быть названо: сенсор, молча уменьшившийся на файл,
+    даёт «прогон чистый» вместо «проверено не всё».
+    """
+    (world / "tests/test_fork_only.py").unlink()
+
+    result = _print_selection(world, fake_python)
+
+    assert "dropped_missing=1" in result.stderr, (
+        f"the missing path was not accounted for; stderr={result.stderr!r}"
+    )
+    assert "tests/test_fork_only.py" in result.stderr, (
+        f"the missing path was not named; stderr={result.stderr!r}"
+    )
+    assert "tests/test_fork_only.py" not in result.stdout.splitlines(), (
+        "the missing path still reached the selection protocol"
+    )
