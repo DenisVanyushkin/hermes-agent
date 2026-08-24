@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import upstream_sync_gate
 from scripts.upstream_sync_gate import new_failures, parse_merge_tree
 
 
@@ -21,6 +22,74 @@ CONFLICTED = (
     "Auto-merging f.txt\n"
     "CONFLICT (content): Merge conflict in f.txt\n"
 )
+
+
+def test_manifest_universe_is_union():
+    """A deletion stays visible even though it exists only before the merge.
+
+    The universe has three independent sources: fork-only paths from the
+    before tree, fork-only paths from the after tree, and every test path in
+    the before..after diff.  Building it from the after tree alone recreates
+    the incident this gate is fixing: the deleted path disappears before its
+    ``exists_pre``/``exists_post`` classification can be reported.
+    """
+    before = "1" * 40
+    after = "2" * 40
+    boundary = "3" * 40
+    deleted = "tests/test_upstream_deleted.py"
+
+    builder = getattr(upstream_sync_gate, "build_selection_manifest", None)
+    assert callable(builder), (
+        "the selection-manifest universe has no builder, so the deleted path "
+        f"{deleted!r} is absent before it can be classified"
+    )
+
+    manifest = builder(
+        before=before,
+        after=after,
+        boundary=boundary,
+        before_paths=[
+            "tests/test_fork_existing.py",
+            "tests/test_upstream_kept.py",
+            deleted,
+        ],
+        after_paths=[
+            "tests/test_fork_added.py",
+            "tests/test_fork_existing.py",
+            "tests/test_upstream_added.py",
+            "tests/test_upstream_kept.py",
+        ],
+        boundary_paths=[
+            "tests/test_upstream_added.py",
+            "tests/test_upstream_kept.py",
+        ],
+        changed_paths=[deleted, "tests/test_upstream_added.py"],
+    )
+
+    assert manifest == {
+        "schema_version": "upstream-sync-test-selection/v1",
+        "before": before,
+        "after": after,
+        "boundary": boundary,
+        "tests": [
+            {
+                "path": "tests/test_fork_added.py",
+                "exists_pre": False,
+                "exists_post": True,
+            },
+            {
+                "path": "tests/test_fork_existing.py",
+                "exists_pre": True,
+                "exists_post": True,
+            },
+            {
+                "path": "tests/test_upstream_added.py",
+                "exists_pre": False,
+                "exists_post": True,
+            },
+            {"path": deleted, "exists_pre": True, "exists_post": False},
+        ],
+    }
 
 
 def test_clean_merge_reports_no_conflicts():
