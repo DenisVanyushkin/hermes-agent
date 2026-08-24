@@ -115,7 +115,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 - [ ] **Пункт 1.1 выполнен**
 
-**Закрывает** направление из Suggested scope #9:
+**Закрывает** направление из Suggested scope [issue #9](https://github.com/DenisVanyushkin/hermes-agent/issues/9):
 
 > - тест round-trip: сохранить через декоратор → прочитать → сверить печать
 
@@ -144,7 +144,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 - [ ] **Пункт 1.2 выполнен**
 
-**Закрывает** направление из Suggested scope #9:
+**Закрывает** направление из Suggested scope [issue #9](https://github.com/DenisVanyushkin/hermes-agent/issues/9):
 
 > - `_AuthorityRecordingStore` в `job_intel/product_search/gate_b_evidence_runner_v1.py`
 
@@ -175,7 +175,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 - [ ] **Пункт 1.3 выполнен**
 
-**Закрывает** критерии приёмки #9:
+**Закрывает** критерии приёмки [issue #9](https://github.com/DenisVanyushkin/hermes-agent/issues/9):
 
 > - `verify_record()` на такой записи проходит, то есть authority-поля покрыты `metadata_sha256` и HMAC
 > - подмена любого authority-поля после сохранения детектируется как нарушение печати
@@ -559,7 +559,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 - [ ] **Пункт 3.1 выполнен**
 
-**Закрывает** направление из Suggested scope #8:
+**Закрывает** направление из Suggested scope [issue #8](https://github.com/DenisVanyushkin/hermes-agent/issues/8):
 
 > - `tests/product_search/gate_b_cli_smoke_fixture.py` — `prepare()` создаёт spend record
 
@@ -585,7 +585,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 - [ ] **Пункт 3.2 выполнен**
 
-**Закрывает** направление из Suggested scope #8 и критерии приёмки:
+**Закрывает** направление из Suggested scope [issue #8](https://github.com/DenisVanyushkin/hermes-agent/issues/8) и критерии приёмки:
 
 > - `scripts/gate_b_composition_smoke.py` — таймауты, адекватные времени сборки артефакта
 
@@ -614,7 +614,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 - [ ] **Пункт 3.3 выполнен**
 
-**Закрывает** критерий приёмки #8:
+**Закрывает** критерий приёмки [issue #8](https://github.com/DenisVanyushkin/hermes-agent/issues/8):
 
 > - прогон доходит до `decision_request_factory`, то есть подтверждает, что smoke реально ходит через
 >   `build_decision_request_from_context_v2`, а не только объявляет это в конфиге
