@@ -362,3 +362,95 @@ def test_ambiguous_argv_is_refused(world: Path, argv: list[str]) -> None:
     assert result.stdout.strip() == "", (
         f"a refused run still emitted output: {result.stdout!r}"
     )
+
+
+def _tests_in(repo: Path, rev: str) -> set[str]:
+    listing = _git(repo, "ls-tree", "-r", "--name-only", rev, "tests/")
+    return {line for line in listing.splitlines() if line.endswith(".py")}
+
+
+def _fork_only(repo: Path, head: str, boundary: str) -> set[str]:
+    """Набор «наших» тестов так, как его считает раннер: HEAD минус граница."""
+    return _tests_in(repo, head) - _tests_in(repo, boundary)
+
+
+@pytest.fixture()
+def drifted_world(tmp_path: Path) -> tuple[Path, str]:
+    """Ref апстрима отстал от коммита, который форк реально влил.
+
+    Это D3 в миниатюре. В бою ``upstream/main`` отставал на 752 коммита, и
+    из-за этого около 105 апстримовых тестовых файлов попадали в набор как
+    «свои»: всё, что апстрим добавил после последнего fetch, выглядит для
+    ``comm`` как файл, которого у апстрима нет.
+    """
+    repo = tmp_path / "drifted"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    _write(repo, "tests/test_upstream_kept.py", "def test_kept():\n    pass\n")
+    base = _commit(repo, "upstream base")
+    # Ref остаётся здесь и дальше не двигается — именно он и отстанет.
+    _git(repo, "update-ref", UPSTREAM_REF, base)
+
+    _git(repo, "checkout", "-q", "-b", "upstream-main")
+    _write(repo, "tests/test_upstream_new.py", "def test_new():\n    pass\n")
+    merged_upstream = _commit(repo, "upstream adds a test after our last fetch")
+
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, "tests/test_fork_only.py", "def test_fork_only():\n    pass\n")
+    _commit(repo, "fork adds a test of its own")
+    _git(
+        repo,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "merge",
+        "-q",
+        "--no-edit",
+        "upstream-main",
+    )
+    return repo, merged_upstream
+
+
+def test_boundary_is_explicit(
+    drifted_world: tuple[Path, str], fake_python: tuple[Path, Path]
+) -> None:
+    """Без явной границы раннер обязан отказать, а не взять отставший ref.
+
+    Молчаливое использование ref — не неточность, а подмена смысла: гейт
+    объявляет чужие тесты своими и гоняет их как сенсор форка. Отказ здесь
+    дешевле, чем отчёт, посчитанный не от той границы.
+    """
+    repo, merged_upstream = drifted_world
+    interpreter, argv_file = fake_python
+
+    stale = _fork_only(repo, "HEAD", UPSTREAM_REF)
+    exact = _fork_only(repo, "HEAD", merged_upstream)
+    assert stale != exact, (
+        "the fixture does not distinguish the stale ref from the merged commit, "
+        f"so it cannot prove anything: {sorted(stale)}"
+    )
+
+    result = subprocess.run(
+        ["bash", str(RUNNER), "--print-selection", str(repo)],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": str(interpreter),
+            "FAKE_ARGV_FILE": str(argv_file),
+            "HERMES_UPSTREAM_REMOTE": "upstream",
+            "HERMES_UPSTREAM_BRANCH": "main",
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2, (
+        "the runner accepted an implicit boundary and computed a selection from "
+        f"the stale ref: {len(stale)} files ({sorted(stale)}) instead of the "
+        f"{len(exact)} it would get from the commit actually merged "
+        f"({sorted(exact)}); rc={result.returncode} stdout={result.stdout!r}"
+    )
+    assert result.stdout.strip() == "", (
+        f"a refused run still emitted a selection: {result.stdout!r}"
+    )
