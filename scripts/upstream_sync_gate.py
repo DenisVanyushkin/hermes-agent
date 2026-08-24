@@ -494,6 +494,9 @@ def classify_node_failures(
         if run.get("collect_ok") is not True:
             unreadable.append((source, "collect"))
         elif run.get("probe_ok") is not True:
+            # Collection is the prerequisite for any probe result. Report
+            # only collect when both stages are bad; a probe without a valid
+            # collection cannot be interpreted independently.
             unreadable.append((source, "probe"))
         invalid = failed[source] - collected[source]
         if invalid:
@@ -501,6 +504,9 @@ def classify_node_failures(
                 _unknown_nodes(source=source, stage="outcome", nodeids=invalid)
             )
     if unreadable:
+        result["unreadable_runs"] = [
+            {"source": source, "stage": stage} for source, stage in unreadable
+        ]
         for source, stage in unreadable:
             result["unknown"].extend(
                 _unknown_nodes(
@@ -570,16 +576,6 @@ def classify_node_failures(
             classification = "fork_regression"
             bucket = "common_path"
         elif nodeid in collected["upstream_parent"]:
-            if not path_presence[1]:
-                result["unknown"].append(
-                    {
-                        "path": path,
-                        "nodeid": nodeid,
-                        "source": "manifest",
-                        "stage": "presence",
-                    }
-                )
-                continue
             if nodeid in failed["upstream_parent"]:
                 classification = "upstream_red_admission_failure"
             else:

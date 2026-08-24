@@ -321,6 +321,9 @@ def _manifest(*entries: tuple[str, bool, bool]) -> dict:
                         "stage": "collect",
                     }
                 ],
+                "unreadable_runs": [
+                    {"source": "upstream_parent", "stage": "collect"}
+                ],
             },
             id="upstream-collect-unreadable",
         ),
@@ -349,6 +352,9 @@ def _manifest(*entries: tuple[str, bool, bool]) -> dict:
                         "source": "upstream_parent",
                         "stage": "probe",
                     }
+                ],
+                "unreadable_runs": [
+                    {"source": "upstream_parent", "stage": "probe"}
                 ],
             },
             id="upstream-probe-unreadable",
@@ -495,6 +501,27 @@ def test_classification_matrix(case, expected):
         merged=case["merged"],
         manifest=case["manifest"],
     ) == expected
+
+
+def test_unreadable_merged_run_with_no_failures_is_not_clean():
+    result = upstream_sync_gate.classify_node_failures(
+        baseline=_node_run(
+            collected={"tests/test_common.py::test_existing"}, failed=set()
+        ),
+        upstream_parent=_node_run(
+            collected={"tests/test_common.py::test_existing"}, failed=set()
+        ),
+        merged=_node_run(
+            collected=set(), failed=set(), collect_ok=False
+        ),
+        manifest=_manifest(("tests/test_common.py", True, True)),
+    )
+
+    assert result["common_path"] == []
+    assert result["post_only_path"] == []
+    assert result["pre_existing"] == []
+    assert result["unknown"] == []
+    assert result["unreadable_runs"] == [{"source": "merged", "stage": "collect"}]
 
 
 def test_node_probe_scope_selects_exact_newly_seen_failing_nodeids():

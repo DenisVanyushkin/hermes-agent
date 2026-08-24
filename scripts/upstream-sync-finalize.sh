@@ -501,7 +501,8 @@ PY
   unknown_count="$("$py" - "$classification_json" <<'PY'
 import json, sys
 from pathlib import Path
-print(len(json.loads(Path(sys.argv[1]).read_text()).get("unknown", [])))
+classification = json.loads(Path(sys.argv[1]).read_text())
+print(len(classification.get("unknown", [])) + len(classification.get("unreadable_runs", [])))
 PY
   )"
   if [ "$blocking_count" -ne 0 ] || [ "$unknown_count" -ne 0 ]; then
@@ -520,7 +521,7 @@ payload = {
     "schema_version": "upstream-sync-gate-failures/v2",
     "merge_sha": sys.argv[3],
     "before": sys.argv[4],
-    **{key: classification.get(key, []) for key in ("common_path", "post_only_path", "pre_existing", "unknown", "blocking_failures")},
+    **{key: classification.get(key, []) for key in ("common_path", "post_only_path", "pre_existing", "unknown", "unreadable_runs", "blocking_failures")},
     "new_failures": legacy,
     "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
 }
