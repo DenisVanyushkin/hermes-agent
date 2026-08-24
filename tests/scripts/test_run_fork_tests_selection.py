@@ -24,6 +24,7 @@ import hashlib
 import itertools
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -141,7 +142,14 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
         "FAKE_ARGV_FILE": str(argv_file),
     }
     result = subprocess.run(
-        ["bash", str(RUNNER), "--boundary", UPSTREAM_REF, str(world)],
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -238,7 +246,15 @@ def _print_selection(
         "FAKE_ARGV_FILE": str(argv_file),
     }
     return subprocess.run(
-        ["bash", str(RUNNER), "--print-selection", "--boundary", UPSTREAM_REF, str(world)],
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -300,6 +316,8 @@ def _consume_manifest(world: Path, manifest: Path) -> subprocess.CompletedProces
             UPSTREAM_REF,
             "--selection-from",
             str(manifest),
+            "--attempt-root",
+            str(manifest.parents[2]),
             str(world),
         ],
         capture_output=True,
@@ -427,6 +445,125 @@ def test_manifest_consumer_rejects_run_id_mismatch(world: Path, tmp_path):
     assert "run_id" in result.stderr
 
 
+def test_manifest_consumer_rejects_identical_before_and_after(
+    world: Path, tmp_path
+):
+    manifest = _manifest_attempt(world, tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    _rewrite_manifest(manifest, after=payload["before"])
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "before and after must be distinct" in result.stderr
+
+
+def test_manifest_consumer_rejects_foreign_attempt_root(world: Path, tmp_path):
+    """A valid generation outside the caller's namespace is still foreign."""
+    manifest = _manifest_attempt(world, tmp_path)
+    foreign_attempt = (
+        tmp_path
+        / "foreign"
+        / "attempts"
+        / manifest.parent.parent.name
+        / manifest.parent.name
+    )
+    foreign_attempt.parent.mkdir(parents=True)
+    shutil.copytree(manifest.parent, foreign_attempt)
+    foreign_manifest = foreign_attempt / manifest.name
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--attempt-root",
+            str(tmp_path / "attempts"),
+            "--selection-from",
+            str(foreign_manifest),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "expected attempt root" in result.stderr.lower()
+
+
+def test_selection_mode_must_be_explicit(world: Path) -> None:
+    """Dropping --selection-from must not silently re-enable computation."""
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "selection mode" in result.stderr.lower()
+
+
+def test_selection_modes_are_mutually_exclusive(world: Path, tmp_path) -> None:
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--selection-from",
+            str(manifest),
+            "--attempt-root",
+            str(tmp_path / "attempts"),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "selection mode is ambiguous" in result.stderr.lower()
+
+
+def test_manifest_selection_requires_attempt_root(world: Path, tmp_path) -> None:
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--selection-from",
+            str(manifest),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "manifest selection needs --attempt-root" in result.stderr.lower()
+
+
 def test_print_selection_emits_only_paths_on_stdout(
     world: Path, fake_python: tuple[Path, Path]
 ) -> None:
@@ -515,7 +652,16 @@ def test_double_dash_separator_still_yields_the_worktree(
         "HERMES_UPSTREAM_BRANCH": "main",
     }
     result = subprocess.run(
-        ["bash", str(RUNNER), "--print-selection", "--boundary", UPSTREAM_REF, "--", str(world)],
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--",
+            str(world),
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -546,7 +692,14 @@ def test_ambiguous_argv_is_refused(world: Path, argv: list[str]) -> None:
     concrete = [str(world / "elsewhere") if arg == "SECOND" else arg for arg in concrete]
 
     result = subprocess.run(
-        ["bash", str(RUNNER), "--boundary", UPSTREAM_REF, *concrete],
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            *concrete,
+        ],
         capture_output=True,
         text=True,
     )
@@ -638,7 +791,7 @@ def test_boundary_is_explicit(
     }
     env.pop("HERMES_UPSTREAM_BOUNDARY", None)
     result = subprocess.run(
-        ["bash", str(RUNNER), "--print-selection", str(repo)],
+        ["bash", str(RUNNER), "--print-selection", "--legacy-selection", str(repo)],
         env=env,
         capture_output=True,
         text=True,
@@ -669,7 +822,15 @@ def test_explicit_boundary_selects_from_that_commit(
     interpreter, argv_file = fake_python
 
     result = subprocess.run(
-        ["bash", str(RUNNER), "--print-selection", "--boundary", merged_upstream, str(repo)],
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            merged_upstream,
+            str(repo),
+        ],
         env={
             **os.environ,
             "HERMES_PYTHON": str(interpreter),

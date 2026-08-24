@@ -612,7 +612,7 @@ BASELINE_LOG_FILE="$(mktemp)"
 POST_LOG_FILE="$(mktemp)"
 
 # Ненулевой код прогона здесь нормален: падения и есть предмет измерения.
-if ! "$TEST_CMD" --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
+if ! "$TEST_CMD" --legacy-selection --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
   :
 fi
 
@@ -640,7 +640,7 @@ if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_FULL" 
 fi
 rm -f "$MERGE_LOG"
 
-if ! "$TEST_CMD" --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
+if ! "$TEST_CMD" --legacy-selection --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
   :
 fi
 

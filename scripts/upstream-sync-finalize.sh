@@ -379,14 +379,16 @@ merge_passes_fork_tests() {
     echo "could not create a worktree for the test gate" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" "$wt" >"$baseline" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
+    --attempt-root "$STATE_DIR/attempts" "$wt" >"$baseline" 2>&1 || true
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
     echo "could not check out the merge in the test-gate worktree" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" "$wt" >"$post" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
+    --attempt-root "$STATE_DIR/attempts" "$wt" >"$post" 2>&1 || true
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
   rm -rf "$wt"
   # Keep both runs. They used to be mktemp'd and deleted, which left a blocked

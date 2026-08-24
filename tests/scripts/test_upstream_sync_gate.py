@@ -146,6 +146,22 @@ def test_manifest_rejects_changed_path_absent_from_both_trees():
         )
 
 
+def test_manifest_rejects_identical_before_and_after():
+    """A differential manifest must describe two distinct candidate trees."""
+    same = "1" * 40
+
+    with pytest.raises(ValueError, match="before.*after.*distinct"):
+        upstream_sync_gate.build_selection_manifest(
+            before=same,
+            after=same,
+            boundary="3" * 40,
+            before_paths=["tests/test_same.py"],
+            after_paths=["tests/test_same.py"],
+            boundary_paths=[],
+            changed_paths=[],
+        )
+
+
 def test_clean_merge_reports_no_conflicts():
     report = parse_merge_tree(CLEAN)
     assert report.tree_oid == "fa64e4b20356cb615af29bad8ffc5ed5f4e95221"

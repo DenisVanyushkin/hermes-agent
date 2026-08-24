@@ -14,9 +14,12 @@ set -uo pipefail
 PRINT_SELECTION=0
 BOUNDARY="${HERMES_UPSTREAM_BOUNDARY:-}"
 SELECTION_FROM=""
+ATTEMPT_ROOT=""
+LEGACY_SELECTION=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print-selection) PRINT_SELECTION=1; shift ;;
+    --legacy-selection) LEGACY_SELECTION=1; shift ;;
     --boundary)
       shift
       [ "$#" -gt 0 ] || { echo "FAILED: --boundary needs a value" >&2; exit 2; }
@@ -27,6 +30,11 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 0 ] || { echo "FAILED: --selection-from needs a value" >&2; exit 2; }
       SELECTION_FROM="$1"; shift ;;
     --selection-from=*) SELECTION_FROM="${1#--selection-from=}"; shift ;;
+    --attempt-root)
+      shift
+      [ "$#" -gt 0 ] || { echo "FAILED: --attempt-root needs a value" >&2; exit 2; }
+      ATTEMPT_ROOT="$1"; shift ;;
+    --attempt-root=*) ATTEMPT_ROOT="${1#--attempt-root=}"; shift ;;
     --) shift; break ;;
     -*) echo "FAILED: unknown option $1" >&2; exit 2 ;;
     *) break ;;
@@ -34,7 +42,7 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$#" -ne 1 ]; then
   echo "FAILED: expected exactly one worktree path, got $#${*:+ ($*)}" >&2
-  echo "usage: run-fork-tests.sh [--print-selection] --boundary <ref|sha> [--selection-from <manifest.json>] [--] <worktree>" >&2
+  echo "usage: run-fork-tests.sh [--print-selection] --boundary <ref|sha> (--legacy-selection | --selection-from <manifest.json> --attempt-root <dir>) [--] <worktree>" >&2
   exit 2
 fi
 WT="$1"
@@ -47,6 +55,22 @@ WT="$1"
 # он исполнитель. Отказ принадлежит тому, кто не может предъявить границу.
 if [ -z "$BOUNDARY" ]; then
   echo "FAILED: no upstream boundary given; pass --boundary <ref|sha> (or HERMES_UPSTREAM_BOUNDARY). Refusing to guess it from a remote-tracking ref that may lag the commit under test." >&2
+  exit 2
+fi
+if [ "$LEGACY_SELECTION" -eq 1 ] && [ -n "$SELECTION_FROM" ]; then
+  echo "FAILED: selection mode is ambiguous; choose exactly one of --legacy-selection or --selection-from" >&2
+  exit 2
+fi
+if [ "$LEGACY_SELECTION" -eq 0 ] && [ -z "$SELECTION_FROM" ]; then
+  echo "FAILED: no selection mode given; choose --legacy-selection or --selection-from" >&2
+  exit 2
+fi
+if [ -n "$SELECTION_FROM" ] && [ -z "$ATTEMPT_ROOT" ]; then
+  echo "FAILED: manifest selection needs --attempt-root" >&2
+  exit 2
+fi
+if [ "$LEGACY_SELECTION" -eq 1 ] && [ -n "$ATTEMPT_ROOT" ]; then
+  echo "FAILED: --attempt-root is only valid with --selection-from" >&2
   exit 2
 fi
 # Интерпретатор берём из ГЛАВНОГО чекаута, а не из worktree: venv лежит в
@@ -87,6 +111,7 @@ if [ -n "$SELECTION_FROM" ]; then
   selection_output="$(
     "$CONTROL_PYTHON" "$GATE_HELPER" selection-paths \
       --manifest "$SELECTION_FROM" \
+      --attempt-root "$ATTEMPT_ROOT" \
       --worktree "$WT" \
       --head "$HEAD_SHA" \
       --boundary "$BOUNDARY_SHA"

@@ -254,11 +254,21 @@ rc 2**, а не тихий пропуск. Пропуск допустим то�
 - сверяет `candidate_id`, `generation` и `run_id` внутри манифеста с тройкой SHA
   и каталогом `$STATE_DIR/attempts/<candidate_id>/<generation>/`, откуда файл
   загружен; скопированный в чужую generation манифест — порча, rc 2.
+- получает ожидаемый корень attempts отдельным обязательным аргументом и после
+  `resolve` требует точного совпадения физического родителя candidate с этим
+  корнем; корректный по форме manifest из `/tmp/attempts/...` остаётся чужим.
+- требует ровно один явный режим раннера: `--legacy-selection` либо
+  `--selection-from ... --attempt-root ...`. Отсутствие обоих не означает
+  молчаливый откат к вычислению, а даёт rc 2; sync-local до T15 явно объявляет
+  временный legacy-режим.
+- отвергает `before == after` и при построении, и при потреблении: у такого
+  кандидата нельзя однозначно выбрать сторону `exists_pre`/`exists_post`.
 
-**DoD.** `pytest tests/scripts/test_run_fork_tests_selection.py -k manifest_consumer`
+**DoD.** `scripts/run_tests.sh tests/scripts/test_run_fork_tests_selection.py tests/scripts/test_upstream_sync_gate.py`
 зелёный; среди случаев все три: unknown schema, foreign HEAD, declared-exists
 mismatch; плюс отсутствующий commit marker и manifest, перемещённый в чужую
-candidate/generation или несущий чужой `run_id`.
+candidate/generation или attempts root, несущий чужой `run_id`, а также
+неявный режим selection и одинаковые `before`/`after`.
 
 **Зависимости.** T6. **Сложность.** M.
 
@@ -420,6 +430,8 @@ post; из-за нечитаемого collect; из-за нечитаемого
 `gate-only` не выполняет ни одну из этих операций: все его улики и итог
 остаются только в новой generation. Эти три места в нынешнем финализаторе
 нельзя оставить общими после выделения shared `run_gate`.
+Manifest consumer получает именно `$STATE_DIR/attempts` этого запуска как
+ожидаемый корень и не может потребить generation из другого state namespace.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k gate_only_isolation`
 зелёный: тест побайтово сравнивает **весь** `$STATE_DIR` до и после, исключая

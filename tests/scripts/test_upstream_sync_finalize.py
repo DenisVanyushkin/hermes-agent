@@ -806,14 +806,16 @@ class TestApplyMergeIsGatedOnForkTests:
             # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
             # worktree больше не $1. Заодно записываем полученную границу —
             # оба прогона гейта обязаны увидеть один и тот же полный SHA.
-            'WT=""; BND=""; SEL=""\n'
+            'WT=""; BND=""; SEL=""; ROOT=""\n'
             'while [ $# -gt 0 ]; do case "$1" in\n'
             '  --boundary) BND="$2"; shift 2 ;;\n'
             '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --attempt-root) ROOT="$2"; shift 2 ;;\n'
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
             'printf "%s\\n" "$SEL" >> "$(dirname "$0")/selection-calls.log"\n'
+            'printf "%s\\n" "$ROOT" >> "$(dirname "$0")/attempt-root-calls.log"\n'
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
             'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
@@ -858,6 +860,11 @@ class TestApplyMergeIsGatedOnForkTests:
         selection = Path(selections[0])
         assert selection.name == "gate-selection.json"
         assert selection.parent.parent.parent == state / "attempts"
+        roots = (scripts / "attempt-root-calls.log").read_text().splitlines()
+        assert roots == [str(state / "attempts")] * 2, (
+            "both consumers must be confined to the finalizer's attempt root; "
+            f"recorded {roots}"
+        )
 
     def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)

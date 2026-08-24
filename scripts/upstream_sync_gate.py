@@ -44,6 +44,11 @@ def _test_paths(paths: list[str]) -> set[str]:
     return {path for path in paths if _is_test_path(path)}
 
 
+def _require_distinct_candidate_trees(before: str, after: str) -> None:
+    if before == after:
+        raise ValueError("selection manifest before and after must be distinct")
+
+
 def build_selection_manifest(
     *,
     before: str,
@@ -55,6 +60,7 @@ def build_selection_manifest(
     changed_paths: list[str],
 ) -> dict[str, Any]:
     """Build one test universe for both sides of the differential gate."""
+    _require_distinct_candidate_trees(before, after)
     before_set = _test_paths(before_paths)
     after_set = _test_paths(after_paths)
     boundary_set = _test_paths(boundary_paths)
@@ -222,6 +228,7 @@ def _read_nul_paths(path: str) -> list[str]:
 def selection_paths_from_manifest(
     manifest_path: Path,
     *,
+    expected_attempts_root: Path,
     worktree: Path,
     checkout_head: str,
     expected_boundary: str,
@@ -234,10 +241,12 @@ def selection_paths_from_manifest(
         )
     attempt_dir = manifest_path.parent
     candidate_dir = attempt_dir.parent
-    if candidate_dir.parent.name != "attempts":
+    expected_attempts_root = Path(expected_attempts_root).resolve(strict=True)
+    if candidate_dir.parent != expected_attempts_root:
         raise ValueError(
-            "selection manifest is outside attempts/<candidate_id>/<generation>: "
-            f"{manifest_path}"
+            "selection manifest is outside the expected attempt root: "
+            f"manifest {manifest_path}, expected attempt root "
+            f"{expected_attempts_root}"
         )
     commit_marker = attempt_dir / "attempt.json"
     if not commit_marker.is_file():
@@ -272,6 +281,7 @@ def selection_paths_from_manifest(
             raise ValueError(f"selection manifest field {name} must be a string")
     if type(generation) is not int or generation < 1:
         raise ValueError("selection manifest generation must be a positive integer")
+    _require_distinct_candidate_trees(before, after)
 
     derived_candidate_id = _candidate_id(before, after, boundary)
     if candidate_id != derived_candidate_id:
@@ -430,6 +440,7 @@ def _main(argv: list[str] | None = None) -> int:
         "selection-paths", help="validate a bound manifest and list checkout paths"
     )
     p_consume.add_argument("--manifest", required=True)
+    p_consume.add_argument("--attempt-root", required=True)
     p_consume.add_argument("--worktree", required=True)
     p_consume.add_argument("--head", required=True)
     p_consume.add_argument("--boundary", required=True)
@@ -461,6 +472,7 @@ def _main(argv: list[str] | None = None) -> int:
         else:
             items = selection_paths_from_manifest(
                 Path(args.manifest),
+                expected_attempts_root=Path(args.attempt_root),
                 worktree=Path(args.worktree),
                 checkout_head=args.head,
                 expected_boundary=args.boundary,
