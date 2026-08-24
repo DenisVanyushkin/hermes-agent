@@ -402,6 +402,192 @@ def parse_merge_tree(output: str) -> MergeTreeReport:
     return MergeTreeReport(tree_oid=tree_oid, conflicted_paths=paths)
 
 
+def _node_ids(run: dict[str, Any], field: str) -> set[str]:
+    if not isinstance(run, dict):
+        raise ValueError("node run must be an object")
+    values = run.get(field)
+    if not isinstance(values, (set, list, tuple)):
+        raise ValueError(f"node run {field} must be a collection of nodeids")
+    if not all(isinstance(value, str) for value in values):
+        raise ValueError(f"node run {field} must contain only strings")
+    return set(values)
+
+
+def _manifest_presence(manifest: dict[str, Any]) -> dict[str, tuple[bool, bool]]:
+    entries = manifest.get("tests")
+    if not isinstance(entries, list):
+        raise ValueError("classification manifest tests must be a list")
+    presence: dict[str, tuple[bool, bool]] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"classification manifest tests[{index}] must be an object")
+        path = entry.get("path")
+        exists_pre = entry.get("exists_pre")
+        exists_post = entry.get("exists_post")
+        if (
+            not isinstance(path, str)
+            or type(exists_pre) is not bool
+            or type(exists_post) is not bool
+        ):
+            raise ValueError(
+                f"classification manifest tests[{index}] has invalid path presence"
+            )
+        if path in presence:
+            raise ValueError(f"classification manifest repeats path {path}")
+        presence[path] = (exists_pre, exists_post)
+    return presence
+
+
+def _unknown_nodes(
+    *,
+    source: str,
+    stage: str,
+    nodeids: set[str],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "path": nodeid.split("::", 1)[0],
+            "nodeid": nodeid,
+            "source": source,
+            "stage": stage,
+        }
+        for nodeid in sorted(nodeids)
+    ]
+
+
+def _empty_classification() -> dict[str, list[dict[str, str]]]:
+    return {
+        "common_path": [],
+        "post_only_path": [],
+        "pre_existing": [],
+        "unknown": [],
+    }
+
+
+def classify_node_failures(
+    *,
+    baseline: dict[str, Any],
+    upstream_parent: dict[str, Any],
+    merged: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, list[dict[str, str]]]:
+    """Classify merged failures using one manifest and three node outcomes.
+
+    This is deliberately a pure decision function. Callers must provide
+    structured collection/probe outcomes and the persisted selection
+    manifest; log parsing and live blocking policy remain outside this layer.
+    """
+    result = _empty_classification()
+    presence = _manifest_presence(manifest)
+    runs = (
+        ("baseline", baseline),
+        ("upstream_parent", upstream_parent),
+        ("merged", merged),
+    )
+    collected: dict[str, set[str]] = {}
+    failed: dict[str, set[str]] = {}
+    incoherent: list[dict[str, str]] = []
+    unreadable: list[tuple[str, str]] = []
+    for source, run in runs:
+        collected[source] = _node_ids(run, "collected_nodeids")
+        failed[source] = _node_ids(run, "failed_nodeids")
+        if run.get("collect_ok") is not True:
+            unreadable.append((source, "collect"))
+        elif run.get("probe_ok") is not True:
+            unreadable.append((source, "probe"))
+        invalid = failed[source] - collected[source]
+        if invalid:
+            incoherent.extend(
+                _unknown_nodes(source=source, stage="outcome", nodeids=invalid)
+            )
+    if unreadable:
+        for source, stage in unreadable:
+            result["unknown"].extend(
+                _unknown_nodes(
+                    source=source,
+                    stage=stage,
+                    nodeids=failed["merged"],
+                )
+            )
+        result["unknown"].sort(key=lambda item: (item["path"], item["nodeid"]))
+        return result
+    if incoherent:
+        result["unknown"] = sorted(
+            incoherent, key=lambda item: (item["path"], item["nodeid"])
+        )
+        return result
+
+    for nodeid in sorted(failed["merged"]):
+        path = nodeid.split("::", 1)[0]
+        path_presence = presence.get(path)
+        if path_presence is None or not path_presence[1]:
+            result["unknown"].append(
+                {
+                    "path": path,
+                    "nodeid": nodeid,
+                    "source": "manifest",
+                    "stage": "presence",
+                }
+            )
+            continue
+        if nodeid in failed["baseline"]:
+            if not path_presence[0]:
+                result["unknown"].append(
+                    {
+                        "path": path,
+                        "nodeid": nodeid,
+                        "source": "manifest",
+                        "stage": "presence",
+                    }
+                )
+                continue
+            classification = "pre_existing_failure"
+            bucket = "pre_existing"
+        elif nodeid in collected["baseline"]:
+            if not path_presence[0]:
+                result["unknown"].append(
+                    {
+                        "path": path,
+                        "nodeid": nodeid,
+                        "source": "manifest",
+                        "stage": "presence",
+                    }
+                )
+                continue
+            classification = "fork_regression"
+            bucket = "common_path"
+        elif nodeid in collected["upstream_parent"]:
+            if not path_presence[1]:
+                result["unknown"].append(
+                    {
+                        "path": path,
+                        "nodeid": nodeid,
+                        "source": "manifest",
+                        "stage": "presence",
+                    }
+                )
+                continue
+            if nodeid in failed["upstream_parent"]:
+                classification = "upstream_red_admission_failure"
+            else:
+                classification = "fork_compatibility_failure"
+            bucket = "common_path" if path_presence[0] else "post_only_path"
+        else:
+            classification = "merge_resolution_or_local_introduced"
+            bucket = "post_only_path" if not path_presence[0] else "common_path"
+        result[bucket].append(
+            {
+                "path": path,
+                "nodeid": nodeid,
+                "classification": classification,
+            }
+        )
+
+    for key in ("common_path", "post_only_path", "pre_existing", "unknown"):
+        result[key].sort(key=lambda item: (item["path"], item["nodeid"]))
+    return result
+
+
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
 _SUMMARY_LINE = re.compile(
     r"^=*\s*\d+\s+(?:failed|passed|error)\b.*\bin\s+[\d.]+s", re.MULTILINE
