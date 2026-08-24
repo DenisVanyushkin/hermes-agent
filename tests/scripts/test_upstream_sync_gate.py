@@ -192,6 +192,149 @@ def _log(failed: list[str], summary: str = "1 failed, 2 passed in 1.00s") -> str
     return body + summary + "\n"
 
 
+def _node_run(
+    *,
+    collected: set[str],
+    failed: set[str],
+    collect_ok: bool = True,
+    probe_ok: bool = True,
+) -> dict:
+    return {
+        "collect_ok": collect_ok,
+        "probe_ok": probe_ok,
+        "collected_nodeids": collected,
+        "failed_nodeids": failed,
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(
+                    collected={"tests/test_common.py::test_added_upstream"},
+                    failed=set(),
+                ),
+                "merged": _node_run(
+                    collected={"tests/test_common.py::test_added_upstream"},
+                    failed={"tests/test_common.py::test_added_upstream"},
+                ),
+                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+            },
+            {
+                "common_path": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_added_upstream",
+                        "classification": "fork_compatibility_failure",
+                    }
+                ],
+                "post_only_path": [],
+                "unknown": [],
+            },
+            id="upstream-node-pass-merged-node-fail",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(
+                    collected={"tests/test_common.py::test_red_upstream"},
+                    failed={"tests/test_common.py::test_red_upstream"},
+                ),
+                "merged": _node_run(
+                    collected={"tests/test_common.py::test_red_upstream"},
+                    failed={"tests/test_common.py::test_red_upstream"},
+                ),
+                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+            },
+            {
+                "common_path": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_red_upstream",
+                        "classification": "upstream_red_admission_failure",
+                    }
+                ],
+                "post_only_path": [],
+                "unknown": [],
+            },
+            id="upstream-node-fail-merged-node-fail",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(collected=set(), failed=set()),
+                "merged": _node_run(
+                    collected={"tests/test_post_only.py::test_local_node"},
+                    failed={"tests/test_post_only.py::test_local_node"},
+                ),
+                "path_presence": {
+                    "tests/test_post_only.py": {"pre": False, "post": True}
+                },
+            },
+            {
+                "common_path": [],
+                "post_only_path": [
+                    {
+                        "path": "tests/test_post_only.py",
+                        "nodeid": "tests/test_post_only.py::test_local_node",
+                        "classification": "merge_resolution_or_local_introduced",
+                    }
+                ],
+                "unknown": [],
+            },
+            id="node-absent-from-baseline-and-upstream",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(
+                    collected=set(), failed=set(), collect_ok=False
+                ),
+                "merged": _node_run(collected=set(), failed=set()),
+                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+            },
+            {
+                "common_path": [],
+                "post_only_path": [],
+                "unknown": [{"source": "upstream_parent", "stage": "collect"}],
+            },
+            id="upstream-collect-unreadable",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(
+                    collected={"tests/test_common.py::test_probe"},
+                    failed=set(),
+                    probe_ok=False,
+                ),
+                "merged": _node_run(
+                    collected={"tests/test_common.py::test_probe"},
+                    failed={"tests/test_common.py::test_probe"},
+                ),
+                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+            },
+            {
+                "common_path": [],
+                "post_only_path": [],
+                "unknown": [{"source": "upstream_parent", "stage": "probe"}],
+            },
+            id="upstream-probe-unreadable",
+        ),
+    ],
+)
+def test_classification_matrix(case, expected):
+    classifier = getattr(upstream_sync_gate, "classify_node_failures", None)
+    assert callable(classifier), (
+        "node-aware classifier is not implemented; classification matrix "
+        f"case={case!r}"
+    )
+    assert classifier(**case) == expected
+
+
 def test_same_failures_before_and_after_mean_no_regression():
     log = _log(["tests/a.py::test_one", "tests/b.py::test_two"])
     assert new_failures(log, log) == []
