@@ -73,6 +73,47 @@ class TestCleanForDisplay:
         assert "MEDIA:" not in result
 
 
+class TestMalformedToolIntentBoundary:
+    def test_protocol_commentary_is_not_sent_as_interim_content(self):
+        """The gateway boundary must not publish the production ChatML shape."""
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        consumer = GatewayStreamConsumer(adapter, "chat_123")
+
+        from agent.codex_runtime import _consume_codex_event_stream
+
+        malformed = (
+            '<|start|>assistant<|channel|>commentary '
+            'to=functions.skill_view<|constrain|>json\n'
+            '{"name":"test-driven-development"}'
+        )
+        item = SimpleNamespace(
+            type="message",
+            phase="commentary",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text=malformed)],
+        )
+        _consume_codex_event_stream(
+            [
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="commentary"),
+                ),
+                SimpleNamespace(type="response.output_text.delta", delta=malformed),
+                SimpleNamespace(type="response.output_item.done", item=item),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ],
+            model="gpt-5-codex",
+            on_commentary_message=consumer.on_commentary,
+            valid_tool_names={"skill_view"},
+        )
+
+        assert consumer._queue.empty()
+
+
 # ── Integration: _send_or_edit strips MEDIA: ─────────────────────────────
 
 
@@ -1487,4 +1528,3 @@ class TestFlushPendingSync:
 
         consumer.finish()
         await task
-

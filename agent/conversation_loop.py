@@ -1520,6 +1520,12 @@ _DROPPED_TOOLCALL_NUDGE_CONTENT = (
     "the actual tool call now to continue the task."
 )
 
+_MALFORMED_TOOL_INTENT_RECOVERY = (
+    "[System: Your previous response expressed a tool request as assistant text. "
+    "No tool was executed. If the action is still required, emit the native structured "
+    "function call now. Do not print tool-call syntax or describe the action.]"
+)
+
 # Re-prompt sent when the model returns an empty response after executing tool
 # calls (#9400). Named for the same reason as the nudges above — its
 # _empty_recovery_synthetic metadata flag doesn't survive SessionDB projection.
@@ -2210,6 +2216,10 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+    # This gate is scoped to the whole user turn, including ordinary
+    # incomplete continuations.  A clean non-native response must not reopen
+    # the bounded malformed-intent recovery window.
+    malformed_tool_intent_recovery_used = False
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -7230,6 +7240,82 @@ def run_conversation(
                 else:
                     assistant_message.content = str(raw)
 
+            malformed_intent = getattr(assistant_message, "malformed_tool_intent", None)
+            if assistant_message.tool_calls:
+                # Native structured calls remain authoritative even if the
+                # same response also contained harmless commentary evidence.
+                malformed_tool_intent_recovery_used = False
+            if malformed_intent is not None and not assistant_message.tool_calls:
+                recovery_attempt = 2 if malformed_tool_intent_recovery_used else 1
+                malformed_tool_intent_recovery_used = True
+                if isinstance(malformed_intent, dict):
+                    _intent_field = malformed_intent.get
+                else:
+                    _intent_field = lambda name, default=None: getattr(
+                        malformed_intent, name, default
+                    )
+                logger.warning(
+                    "event=malformed_tool_intent provider=%s api_mode=%s model=%s "
+                    "tool_name=%s source_phase=%s format=%s fingerprint=%s "
+                    "recovery_attempt=%d",
+                    agent.provider,
+                    agent.api_mode,
+                    agent.model,
+                    _intent_field("tool_name", "unknown"),
+                    _intent_field("source_phase", "unknown"),
+                    _intent_field("format", "unknown"),
+                    _intent_field("fingerprint", "unknown"),
+                    recovery_attempt,
+                )
+                if recovery_attempt == 1:
+                    # Keep the provider's opaque Codex item sidecar available
+                    # to the retry.  Retain the invalid assistant carrier as
+                    # an auditable non-final row and make only the recovery
+                    # prompt ephemeral, so protocol text cannot become a
+                    # durable assistant answer.
+                    interim_msg = agent._build_assistant_message(
+                        assistant_message, "incomplete"
+                    )
+                    interim_msg["_protocol_invalid"] = True
+                    append_message(messages, interim_msg)
+                    append_message(messages, {
+                        "role": "user",
+                        "content": _MALFORMED_TOOL_INTENT_RECOVERY,
+                        "_malformed_tool_intent_recovery": True,
+                    })
+                    agent._session_messages = messages
+                    final_response = None
+                    agent._emit_wait_notice(
+                        "↻ Provider emitted a tool request as text; requesting a native call "
+                        "(1/1)"
+                    )
+                    continue
+
+                while (
+                    messages
+                    and isinstance(messages[-1], dict)
+                    and (
+                        messages[-1].get("_malformed_tool_intent_recovery")
+                    )
+                ):
+                    messages.pop()
+                error_code = "MALFORMED_TOOL_INTENT_REPEATED"
+                error_message = (
+                    "The provider emitted a tool request as text twice. "
+                    "No action was executed. Please try again."
+                )
+                agent._session_messages = messages
+                agent._persist_session(messages, conversation_history)
+                return {
+                    "final_response": error_message,
+                    "messages": messages,
+                    "api_calls": api_call_count,
+                    "completed": False,
+                    "partial": False,
+                    "failed": True,
+                    "error": error_code,
+                    "turn_exit_reason": "malformed_tool_intent_repeated",
+                }
             try:
                 from hermes_cli.lifecycle import (
                     has_hook,

@@ -93,3 +93,24 @@ def test_sanitize_replay_history_noop_on_clean_history():
 
 def test_sanitize_replay_history_empty():
     assert sanitize_replay_history([]) == []
+
+
+def test_protocol_invalid_assistant_record_is_not_replayed_as_final_answer():
+    invalid = {
+        "role": "assistant",
+        "content": "",
+        "finish_reason": "incomplete",
+        "_protocol_invalid": True,
+        "malformed_tool_intent": {
+            "tool_name": "skill_view",
+            "source_phase": "commentary",
+            "format": "codex_chatml",
+            "fingerprint": "sha256:" + "a" * 64,
+        },
+        "codex_message_items": [
+            {"phase": "commentary", "content": [{"text": "to=functions.skill_view"}]}
+        ],
+    }
+    history = [_user("inspect"), invalid, _user("retry")]
+
+    assert sanitize_replay_history(history) == [_user("inspect"), _user("retry")]

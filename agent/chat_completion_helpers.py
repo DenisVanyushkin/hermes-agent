@@ -2478,6 +2478,24 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     if codex_message_items:
         msg["codex_message_items"] = codex_message_items
 
+    # A text-bound tool envelope is audit evidence, never an executable call
+    # or a successful assistant answer. Keep only the bounded classifier
+    # metadata; raw protocol text remains in codex_message_items for RCA.
+    malformed_intent = getattr(assistant_message, "malformed_tool_intent", None)
+    if malformed_intent is not None:
+        if isinstance(malformed_intent, dict):
+            _intent_field = malformed_intent.get
+        else:
+            _intent_field = lambda name, default=None: getattr(
+                malformed_intent, name, default
+            )
+        msg["malformed_tool_intent"] = {
+            "tool_name": str(_intent_field("tool_name", "")),
+            "source_phase": str(_intent_field("source_phase", "")),
+            "format": str(_intent_field("format", "")),
+            "fingerprint": str(_intent_field("fingerprint", "")),
+        }
+
     if assistant_tool_calls:
         tool_calls = []
         for tool_call in assistant_tool_calls:
