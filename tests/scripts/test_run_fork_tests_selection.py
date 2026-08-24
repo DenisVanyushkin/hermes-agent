@@ -274,30 +274,91 @@ def test_print_selection_does_not_run_the_tests(
     )
 
 
-def test_print_selection_reports_a_path_missing_from_the_working_tree(
+def test_a_path_missing_from_the_working_tree_is_refused(
     world: Path, fake_python: tuple[Path, Path]
 ) -> None:
-    """Фильтр существования стережёт не удаления мержем, а расхождение дерева.
+    """Расхождение дерева с HEAD — отказ, а не запись в лог.
 
-    ``--diff-filter=d`` снимает удалённое ещё на входе, поэтому здесь нужен
-    случай, до которого он не достаёт: файл числится в ``HEAD``, а на диске его
-    нет. Так бывает, когда рабочее дерево гейта разошлось с коммитом. Набор
-    берётся из ``ls-tree HEAD``, то есть путь в него попадёт, и без фильтра
-    существования pytest снова обрушил бы прогон целиком.
+    ``--diff-filter=d`` снимает удалённое мержем ещё на входе, поэтому сюда
+    доходит только другой случай: путь числится в ``HEAD``, а на диске его нет.
+    Кандидаты берутся из ``ls-tree HEAD``, значит такой путь войдёт в набор, и
+    это означает, что чекаут не соответствует проверяемому коммиту.
 
-    И отброшенное обязано быть названо: сенсор, молча уменьшившийся на файл,
-    даёт «прогон чистый» вместо «проверено не всё».
+    Логировать и продолжать здесь нельзя. Оставшиеся тесты пройдут, компаратор
+    получит нормальную итоговую строку, а ``dropped_missing`` не читает ни один
+    потребитель — сенсор уменьшится, и гейт отчитается о чистом прогоне.
+    Видимость для человека отказа не заменяет.
     """
     (world / "tests/test_fork_only.py").unlink()
 
     result = _print_selection(world, fake_python)
 
+    assert result.returncode == 2, (
+        "a checkout that does not match its HEAD must stop the gate, not just "
+        f"annotate the log; rc={result.returncode} stdout={result.stdout!r}"
+    )
+    assert result.stdout.strip() == "", (
+        f"a refused run still emitted a selection: {result.stdout!r}"
+    )
     assert "dropped_missing=1" in result.stderr, (
         f"the missing path was not accounted for; stderr={result.stderr!r}"
     )
     assert "tests/test_fork_only.py" in result.stderr, (
         f"the missing path was not named; stderr={result.stderr!r}"
     )
-    assert "tests/test_fork_only.py" not in result.stdout.splitlines(), (
-        "the missing path still reached the selection protocol"
+
+
+def test_double_dash_separator_still_yields_the_worktree(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """`--` снимает маркер, а не проглатывает путь за ним."""
+    interpreter, argv_file = fake_python
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+        "HERMES_UPSTREAM_REMOTE": "upstream",
+        "HERMES_UPSTREAM_BRANCH": "main",
+    }
+    result = subprocess.run(
+        ["bash", str(RUNNER), "--print-selection", "--", str(world)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert "tests/test_fork_only.py" in result.stdout.splitlines(), (
+        f"the worktree after `--` was not used; stdout={result.stdout!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["FIRST", "SECOND"], id="two_worktrees"),
+        pytest.param(["FIRST", "--print-selection"], id="option_after_worktree"),
+        pytest.param([], id="no_worktree"),
+    ],
+)
+def test_ambiguous_argv_is_refused(world: Path, argv: list[str]) -> None:
+    """Лишний argv отвергается, а не разрешается в пользу последнего.
+
+    Прежде из ``/first /second`` брался второй, и первый исчезал молча. Набор
+    тестов решает, поедет ли обновление в прод; тихий выбор одного из двух
+    путей — не та неоднозначность, которую стоит терпеть в этой позиции.
+    """
+    concrete = [str(world) if arg == "FIRST" else arg for arg in argv]
+    concrete = [str(world / "elsewhere") if arg == "SECOND" else arg for arg in concrete]
+
+    result = subprocess.run(
+        ["bash", str(RUNNER), *concrete], capture_output=True, text=True
+    )
+
+    assert result.returncode == 2, (
+        f"ambiguous argv {concrete} was accepted; rc={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert result.stdout.strip() == "", (
+        f"a refused run still emitted output: {result.stdout!r}"
     )

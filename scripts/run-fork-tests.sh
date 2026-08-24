@@ -6,17 +6,26 @@
 # те, что апстрим удалил.
 set -uo pipefail
 
+# Опции читаются до первого позиционного или до `--`, дальше всё оставшееся —
+# позиционные, и их должно быть ровно столько, сколько мы умеем принять. Лишний
+# argv отвергаем, а не проглатываем: набор тестов решает, поедет ли обновление
+# в прод, и «взяли последний путь, остальные молча выбросили» — не то поведение,
+# которое стоит иметь в такой позиции.
 PRINT_SELECTION=0
-WT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print-selection) PRINT_SELECTION=1; shift ;;
     --) shift; break ;;
     -*) echo "FAILED: unknown option $1" >&2; exit 2 ;;
-    *) WT="$1"; shift ;;
+    *) break ;;
   esac
 done
-[ -n "${WT:-}" ] || { echo "usage: run-fork-tests.sh [--print-selection] <worktree>" >&2; exit 2; }
+if [ "$#" -ne 1 ]; then
+  echo "FAILED: expected exactly one worktree path, got $#${*:+ ($*)}" >&2
+  echo "usage: run-fork-tests.sh [--print-selection] [--] <worktree>" >&2
+  exit 2
+fi
+WT="$1"
 
 UPSTREAM_REF="${HERMES_UPSTREAM_REMOTE:-upstream}/${HERMES_UPSTREAM_BRANCH:-main}"
 # Интерпретатор берём из ГЛАВНОГО чекаута, а не из worktree: venv лежит в
@@ -84,8 +93,19 @@ fi
 # строку в манифест как ещё один «путь».
 printf 'fork test selection: boundary=%s files=%s fork_only=%s merge_changed=%s dropped_missing=%s\n' \
   "$UPSTREAM_REF" "${#TESTS[@]}" "${#OURS[@]}" "${#MERGE_CHANGED[@]}" "${#DROPPED[@]}" >&2
+# Отброшенное — не «мелочь, о которой мы сообщили», а признак, что дерево не
+# соответствует своему HEAD: кандидаты берутся из ls-tree HEAD и из diff без
+# удалений, поэтому отсутствие пути на диске означает неполный или разошедшийся
+# чекаут. Продолжить прогон значит отдать компаратору нормальную итоговую
+# строку по уменьшившемуся сенсору — гейт, который «всё прошёл». Ни один
+# потребитель dropped_missing не читает, так что видимость для человека здесь
+# не заменяет отказа.
+#
+# Файл, удалённый мержем, сюда не попадает: его снимает --diff-filter=d выше.
 if [ "${#DROPPED[@]}" -gt 0 ]; then
   printf 'fork test selection: dropped (absent from the tree under test): %s\n' "${DROPPED[*]}" >&2
+  echo "FAILED: ${#DROPPED[@]} selected path(s) are absent from the tree under test; the checkout does not match the HEAD being gated. Refusing to run a shrunken sensor." >&2
+  exit 2
 fi
 
 # Пустой набор — сбой вычисления, а не «проверять нечего»: у форка собственных
