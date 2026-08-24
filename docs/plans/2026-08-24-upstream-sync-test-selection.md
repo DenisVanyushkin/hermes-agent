@@ -83,30 +83,55 @@ v3 — последняя редакция прозы. После неё — bou
 - *Production state* — `$STATE_DIR`: `pending.json`, `apply-prepare.json`,
   `scratch/`, `finalize-result.json`, `last-synced.json`, накопленные
   `gate-*` улики.
-- *Attempt namespace* — `$STATE_DIR/attempts/<attempt_id>/`, где `attempt_id`
-  выводится из тройки `before`, `after`, `boundary` и потому воспроизводим.
+- *Attempt namespace* — `$STATE_DIR/attempts/<candidate_id>/<generation>/`.
   Внутри: `gate-selection.txt`, `gate-baseline.log`, `gate-post.log`,
-  `gate-upstream-probe.log`, `gate-failures.json`, `attempt.json`.
+  `gate-upstream-probe.log`, `gate-failures.json`, `attempt-result.json`,
+  `attempt.json`.
 
-**Права.** `gate-only` вправе создавать и ротировать **только** содержимое
-своего attempt namespace. Ему **запрещено** читать, архивировать и
-перезаписывать `pending.json`, `apply-prepare.json`, `scratch/` и улики прежних
-попыток. `apply` пишет в свой attempt namespace и **дополнительно** публикует
-итог в production state.
+**Две идентичности, а не одна.** `candidate_id` = хеш тройки `before`, `after`,
+`boundary` — он опознаёт *кандидата* и воспроизводим. `run_id` =
+`candidate_id` + монотонная `generation` — он опознаёт *запуск*. Generations
+внутри кандидата **append-only**: повторный `gate-only` на той же тройке
+заводит новую generation и не имеет права переписать предыдущую. Идентичность,
+выведенная только из тройки, этого не даёт — второй запуск легально «ротировал
+бы своё», уничтожив улики первого.
+
+**Права: control-plane отдельно от data-plane.** Запуск через реальный юнит
+физически не может обойтись без служебных файлов, поэтому запрет «только свой
+namespace» в лоб недостижим.
+
+*Control-plane, разрешено:* принять и переместить **свой собственный**
+`finalize-request.json` → `finalize-request.processing.json`, удалить его по
+завершении, держать `finalize.lock` (`flock`). Ничего чужого не трогать.
+
+*Data-plane, запрещено:* менять `finalize-result.json`, `finalize-detail.log`,
+`last-synced.json`, `pending.json`, `apply-prepare.json`, `scratch/` и улики
+прежних generations. Итог `gate-only` пишется в `attempt-result.json` **внутри**
+своей generation.
+
+*Наружу:* Slack-уведомление для репетиции запрещено; если оно нужно, оно
+маршрутизируется в отдельный безопасный канал и помечается как репетиция.
+`notify_slack` вызывается на строке 145 безусловно, поэтому это правило —
+изменение кода, а не соглашение.
+
+`apply` пишет в свою generation и **дополнительно** публикует итог в production
+state.
 
 **Привязка.** `attempt.json` несёт `schema_version`, `before`, `after`,
-`boundary`, `attempt_id`. Потребитель обязан отказать, если тройка не совпадает
-с тем, что он видит.
+`boundary`, `candidate_id`, `generation`, `run_id`. Потребитель обязан отказать,
+если тройка или generation не совпадают с тем, что он видит.
 
 **Два независимых поля исхода.**
 
-- `execution_status` ∈ `ok | failed | awaiting_decision` — отработал ли механизм.
-  Это существующий контракт `finalize-result.json`, он не расширяется.
-- `gate_verdict` ∈ `pass | block | unknown` — что решил гейт.
+- `status` ∈ `ok | failed | awaiting_decision` — отработал ли механизм. Это
+  **существующий** ключ (`upstream-sync-finalize.sh:121`), его читают нынешние
+  потребители. Он **не переименовывается**: переименование — слом схемы.
+- `gate_verdict` ∈ `pass | block | unknown` — что решил гейт. Это **новое** поле.
 
-Успешно отработавшая репетиция, которая честно заблокировала мерж, это
-`execution_status=ok` **и** `gate_verdict=block`. Одно поле `status: ok` в такой
-ситуации читается как разрешение и потому запрещено.
+Новые потребители читают **пару** `status` + `gate_verdict`. Честно
+заблокировавшая репетиция — это `status=ok` **и** `gate_verdict=block`. Голый
+`status: ok` без `gate_verdict` в такой ситуации читается как разрешение и
+потому запрещён.
 
 ---
 
@@ -346,9 +371,11 @@ post; из-за нечитаемого collect; из-за нечитаемого
 ### T19. `gate-only` с изоляцией попытки (D9, контракт)
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k gate_only_isolation`
-зелёный: тест фиксирует `HEAD`, `pending.json`, `apply-prepare.json`, `scratch/`
-и прежние `gate-*` улики до и после и требует побайтового совпадения, а
-созданное — только внутри attempt namespace.
+зелёный: тест побайтово сравнивает **весь** `$STATE_DIR` до и после, исключая
+`attempts/` и перечисленные control-plane файлы (`finalize-request*.json`,
+`finalize.lock`), и требует совпадения; созданное — только внутри своей
+generation; отдельный случай доказывает, что повторный запуск на той же тройке
+заводит новую generation, а не переписывает прежнюю.
 
 **Зависимости.** T18. **Сложность.** M.
 
@@ -409,11 +436,11 @@ smoketest (его меняет T17), triage, slack.
 
 **Что сделать.** При остановленном path-unit положить **gate-only** request в
 боевой handoff, `systemctl start upstream-sync-finalize.service`, дождаться
-терминального состояния, проверить journal и результат попытки. Затем отдельным
-безопасным gate-only request проверить сам `.path`.
+терминального состояния, проверить journal и результат попытки. Проверка самого
+`.path` в T23 **не** входит — она отложена в T27.
 
 **DoD.** `scripts/acceptance/published-gate-smoke.sh` завершается кодом 0:
-`execution_status=ok`, `gate_verdict` присутствует и осмыслен, `HEAD` не менялся.
+`status=ok`, `gate_verdict` присутствует и осмыслен, `HEAD` не менялся.
 Проверка `.path` — отложенная, вынесена в T27.
 
 **Зависимости.** T22. **Сложность.** M.
@@ -450,7 +477,7 @@ T20 выполняется, `upstream_head` равен `git rev-parse upstream/m
 после T25.
 
 **DoD.** `scripts/acceptance/land-sync.sh` завершается кодом 0:
-`execution_status=ok`, `gate_verdict=pass`, `last-synced.json` несёт актуальный
+`status=ok`, `gate_verdict=pass`, `last-synced.json` несёт актуальный
 `upstream_sha` и `result: clean`.
 
 **Зависимости.** T25. **Сложность.** M.
