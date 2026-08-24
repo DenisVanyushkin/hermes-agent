@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0.0",
+  "gate": "gate-a",
+  "status": "decision_pending",
+  "candidate_commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
+  "manifest_sha256": "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d",
+  "run_id": "gate-a-20260816T141344Z",
+  "scheduled_attempts": 1,
+  "completed_attempts": 1,
+  "missed_attempts": 0,
+  "overlap_attempts": 0,
+  "isolated_paths": {
+    "database": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/experiment.sqlite3",
+    "evidence": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/raw-evidence",
+    "logs": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/logs",
+    "locks": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/locks",
+    "browser_profile": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/browser-profile",
+    "cache": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/cache",
+    "tmp": "/home/hermes/.hermes/job_intel/experiments/gate-a/65d60daae16093a9a7e34a11a159e2f789dd14dd/tmp"
+  },
+  "stage_counts": {
+    "raw_observed": 2414,
+    "canonical_current": 1814,
+    "minimum_evidence_sufficient": 1314
+  },
+  "provisional_labels": {
+    "provisionally_eligible": 1314,
+    "unresolved_for_decision_v2": 500
+  },
+  "family_attempts": {
+    "ashby": 1,
+    "duckduckgo": 92,
+    "greenhouse": 1,
+    "headhunter": 20,
+    "lever": 1,
+    "linkedin": 112,
+    "personio": 1,
+    "recruitee": 1,
+    "remoteok": 4,
+    "remotive": 4,
+    "smartrecruiters": 1,
+    "teamtailor": 1
+  },
+  "source_states": {
+    "ashby": "observed",
+    "duckduckgo": "observed_with_failures",
+    "greenhouse": "observed",
+    "headhunter": "observed",
+    "lever": "observed",
+    "linkedin": "observed",
+    "personio": "observed",
+    "recruitee": "observed",
+    "remoteok": "observed",
+    "remotive": "observed",
+    "smartrecruiters": "observed",
+    "teamtailor": "observed"
+  },
+  "source_records": {
+    "ashby": {"raw": 436, "canonical": 436, "duplicates": 0},
+    "duckduckgo": {"raw": 80, "canonical": 79, "duplicates": 1},
+    "greenhouse": {"raw": 756, "canonical": 756, "duplicates": 0},
+    "headhunter": {"raw": 40, "canonical": 32, "duplicates": 8},
+    "lever": {"raw": 0, "canonical": 0, "duplicates": 0},
+    "linkedin": {"raw": 586, "canonical": 7, "duplicates": 579},
+    "personio": {"raw": 0, "canonical": 0, "duplicates": 0},
+    "recruitee": {"raw": 0, "canonical": 0, "duplicates": 0},
+    "remoteok": {"raw": 16, "canonical": 4, "duplicates": 12},
+    "remotive": {"raw": 0, "canonical": 0, "duplicates": 0},
+    "smartrecruiters": {"raw": 500, "canonical": 500, "duplicates": 0},
+    "teamtailor": {"raw": 0, "canonical": 0, "duplicates": 0}
+  },
+  "cell_states": {
+    "ats_global_snapshot": "qualified_results_found",
+    "australia": "qualified_results_found",
+    "bahrain": "qualified_results_found",
+    "benelux": "qualified_results_found",
+    "canada": "qualified_results_found",
+    "cee": "qualified_results_found",
+    "dach": "qualified_results_found",
+    "east_asia_other": "qualified_results_found",
+    "genuinely_location_independent": "qualified_results_found",
+    "india": "qualified_results_found",
+    "japan": "qualified_results_found",
+    "kazakhstan": "qualified_results_found",
+    "kuwait": "qualified_results_found",
+    "kyrgyzstan": "qualified_results_found",
+    "latin_america": "qualified_results_found",
+    "new_zealand": "qualified_results_found",
+    "nordics": "qualified_results_found",
+    "oman": "qualified_results_found",
+    "qatar": "qualified_results_found",
+    "remaining_europe": "qualified_results_found",
+    "saudi_arabia": "qualified_results_found",
+    "singapore": "qualified_results_found",
+    "south_korea": "qualified_results_found",
+    "southeast_asia_other": "qualified_results_found",
+    "tajikistan": "qualified_results_found",
+    "turkmenistan": "qualified_results_found",
+    "uk": "qualified_results_found",
+    "united_arab_emirates": "qualified_results_found",
+    "us_feasibility": "qualified_results_found",
+    "uzbekistan": "qualified_results_found"
+  },
+  "new_company_candidates": 15,
+  "normalized_new_company_candidates_lower_bound": 14,
+  "duplicates": 600,
+  "cost_usd": 0.0,
+  "latency_seconds": 3139.615234,
+  "sample_audit": {
+    "sample_size": 53,
+    "selection": "all strong signals from five productive sources plus deterministic expanded, DuckDuckGo, and negative-control strata",
+    "likely_stage_4_lower_bound": 15,
+    "likely_stage_4_upper_bound": 35,
+    "canonical_stage_4_created": false
+  },
+  "canonicalization_correction": {
+    "commit": "f46d2559d6e26c7981f351dc7be5574aad6ab6b8",
+    "method": "deterministic replay of unchanged content-addressed raw evidence",
+    "original_summary_sha256": "3b9add39efeee87b041c4383e137d60b23710bd43aecedec82b3f0e8ce44ea99",
+    "original_stage_counts": {
+      "raw_observed": 2414,
+      "canonical_current": 2401,
+      "minimum_evidence_sufficient": 1901
+    },
+    "original_duplicates": 13
+  },
+  "side_effects": {
+    "production_database_writes": 0,
+    "slack_calls": 0,
+    "product_state_writes": 0,
+    "unauthorized_profile_writes": 0
+  },
+  "authorized_shared_profile_use": {
+    "linkedin": "/var/lib/browser-desktop/profiles/linkedin",
+    "headhunter": "/var/lib/browser-desktop/profiles/hh",
+    "experiment_local_backups_verified": true
+  },
+  "unverified_effects": {
+    "browser_desktop_global_cache": "no complete before-run file-mtime baseline was captured"
+  },
+  "evidence_hashes_verified": true,
+  "evidence_file_count": 2414,
+  "raw_evidence_filename_set_sha256": "a89f0fac067a58e2302628612d5cbef05975089832b286dac4d06a7de7337adc",
+  "experiment_database_sha256": "08fefb5a0fdcaee7c59b5921b1b74291471e58405fd3299e8834c5a5a6c0d8ff",
+  "sqlite_integrity": "ok",
+  "sqlite_foreign_key_violations": 0,
+  "teardown_state": "complete",
+  "recommendation": "proceed",
+  "owner_decision": "pending",
+  "next_task_authorized": false
+}

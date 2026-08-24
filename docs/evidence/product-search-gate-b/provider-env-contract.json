@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0.0",
+  "contract_kind": "gate_b_slack_blind_provider_environment",
+  "status": "installed_verified",
+  "runtime_path": "/etc/job-intel/gate-b-provider.env",
+  "ownership": {
+    "owner": "root",
+    "group": "root",
+    "mode": "0400",
+    "regular_file_required": true,
+    "single_link_required": true,
+    "symlink_allowed": false
+  },
+  "canonical_template_text": "HERMES_HOME=/var/empty\nOPENROUTER_API_KEY=<OWNER_APPROVED_OPENROUTER_API_KEY>\n",
+  "canonical_template_sha256": "92d46371aa237956959b9a9b2657ca274bac09986556000fa76457e98695e856",
+  "permitted_keys_in_order": [
+    "HERMES_HOME",
+    "OPENROUTER_API_KEY"
+  ],
+  "values": {
+    "HERMES_HOME": {
+      "literal": "/var/empty",
+      "reason": "prevent the reviewed resolver from loading the mixed /home/hermes/.hermes/.env or auth pool"
+    },
+    "OPENROUTER_API_KEY": {
+      "source_path": "/home/hermes/.hermes/.env",
+      "source_key": "OPENROUTER_API_KEY",
+      "source_observation": "owner-authorized root copy completed from exactly one non-empty assignment without printing or logging the value",
+      "owner_authority_required": true,
+      "owner_authority_satisfied": true,
+      "alternate_source_allowed": false
+    }
+  },
+  "forbidden_keys": [
+    "SLACK_APP_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_HOME_CHANNEL",
+    "JOB_INTEL_DB_PATH",
+    "JOB_INTEL_OUTBOX_PATH",
+    "JOB_INTEL_SLACK_WEBHOOK_URL"
+  ],
+  "live_content_sha256": "bd26b7b07417f068efa14ef223108bf953328ccfa4c278c7e122e8ca994ed450",
+  "live_content_sha256_status": "computed_and_verified_from_installed_raw_bytes",
+  "installation": {
+    "authorized": true,
+    "completed": true,
+    "installed_at": "2026-08-21T09:33:07Z",
+    "actor": "root",
+    "phase": "Task 8 owner-authorized provider contract installation; Task 9 still requires separate explicit approval of the launch-ready checkpoint",
+    "before": "receipt installation and receipt consumption",
+    "requirements": [
+      "use umask 077 and a new temporary regular file in /etc/job-intel",
+      "write the literal HERMES_HOME line first",
+      "copy exactly one non-empty OPENROUTER_API_KEY value from the approved source without logging or printing it",
+      "write exactly one newline-terminated OPENROUTER_API_KEY assignment and no other assignment",
+      "reject a missing, empty, duplicate, multiline, or extra-key source",
+      "redact only the provider value back to the canonical placeholder and require canonical_template_sha256 to match",
+      "compute the raw live file SHA-256 locally without displaying file content",
+      "set root:root 0400, require one regular-file link, then atomically rename to runtime_path",
+      "verify the installed raw SHA-256 and metadata before receipt installation or consumption"
+    ],
+    "requirements_satisfied": true,
+    "observed_metadata": {
+      "owner": "root",
+      "group": "root",
+      "mode": "0400",
+      "regular_file": true,
+      "link_count": 1,
+      "symlink": false,
+      "atomic_rename_completed": true
+    }
+  },
+  "authorization": {
+    "provider_value_access": true,
+    "provider_value_copy": true,
+    "provider_calls": false,
+    "network": false,
+    "task_9": false
+  },
+  "remaining_owner_input": "Explicitly approve the exact launch-ready checkpoint before its effective time. This installed provider contract does not itself authorize Task 9, receipt or unit installation, network, provider calls, or spend."
+}

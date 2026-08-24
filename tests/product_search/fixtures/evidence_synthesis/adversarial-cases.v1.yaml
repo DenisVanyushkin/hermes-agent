@@ -1,0 +1,72 @@
+schema_version: 1.0.0
+cases:
+  - name: unsupported_resume_claim
+    target_claim_id: claim-transferability
+    expected_status: unsupported_claim
+    replacement:
+      claim_id: claim-transferability
+      dimension: transferability
+      status: inferred
+      claim_code: global_launches_in_30_markets
+      statement: Led global launches in 30 markets.
+      citations: [candidate:pnl-ownership]
+  - name: title_based_seniority
+    target_claim_id: claim-mandate
+    expected_status: unsupported_claim
+    replacement:
+      claim_id: claim-mandate
+      dimension: mandate_fit
+      status: inferred
+      claim_code: executive_scope_proven
+      statement: The title proves executive business ownership.
+      citations: [vacancy:title-platform]
+  - name: headquarters_based_feasibility
+    target_claim_id: claim-feasibility-remote
+    expected_status: foreign_citation
+    replacement:
+      claim_id: claim-feasibility-remote
+      dimension: feasibility
+      status: inferred
+      claim_code: relocation_required
+      statement: New York headquarters make the role infeasible.
+      citations: [vacancy:hq-new-york]
+  - name: b2b_prejudice
+    target_claim_id: claim-career-value
+    expected_status: foreign_citation
+    replacement:
+      claim_id: claim-career-value
+      dimension: career_value
+      status: inferred
+      claim_code: b2b_is_low_value
+      statement: A B2B product has low career value.
+      citations: [vacancy:b2b-market]
+  - name: crypto_employer_role_veto
+    target_claim_id: claim-mandate
+    expected_status: foreign_citation
+    replacement:
+      claim_id: claim-mandate
+      dimension: mandate_fit
+      status: inferred
+      claim_code: crypto_role_veto
+      statement: A crypto employer makes the role a mandate mismatch.
+      citations: [vacancy:crypto-product]
+  - name: platform_engineering_confusion
+    target_claim_id: claim-mandate
+    expected_status: unsupported_claim
+    replacement:
+      claim_id: claim-mandate
+      dimension: mandate_fit
+      status: inferred
+      claim_code: internal_infrastructure_without_business_scope
+      statement: Platform Engineering is necessarily internal infrastructure only.
+      citations: [vacancy:title-platform]
+  - name: unknown_to_negative_conversion
+    target_claim_id: claim-confidence
+    expected_status: unsupported_claim
+    replacement:
+      claim_id: claim-confidence
+      dimension: evidence_confidence
+      status: explicit
+      claim_code: reporting_line_is_bad
+      statement: The reporting line is unsuitable.
+      citations: [unknown:reporting-line]

@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0.0",
+  "evidence_kind": "gate_b_task9_one_shot_launch_attempt",
+  "status": "launch_failed_before_exec_start_pre",
+  "attempted_at": "2026-08-21T13:38:18Z",
+  "recorded_at": "2026-08-21T13:41:48Z",
+  "candidate_commit": "8b46e07a2bf3c445eafae5e6684bbdeb52c73bf8",
+  "checkpoint_commit": "e7181561e56abb5bb906bb03cd925f81b4eada3c",
+  "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-352f1f797ebea910629550fdbc0dc59287321af5ada856db6c2663bbf0b57e20",
+  "launch_identity_sha256": "184cfc0516daf53e62af8a8418d6573d2fad8cbff23935ddb69ebebdb0585fd9",
+  "launch_ready_checkpoint_bundle_sha256": "90be50e4ce5d560d54ccf72cb3cf94e4f5b37dca8a595882f96a3597fc5615dc",
+  "owner_checkpoint_sha256": "16effec614ef2bf33eb734eda95a3a21cf2b08b9b9eb137957660b44af4d03f2",
+  "receipt_content_sha256": "1942dbafe8b59e2db605373582738d911d2ba3e03c395aeb1c95e6dfdd138e5e",
+  "window": {
+    "issued_at": "2026-08-21T13:36:00Z",
+    "expires_at": "2026-08-21T14:06:00Z",
+    "active_preflight_passed": true
+  },
+  "start": {
+    "systemctl_start_count_for_checkpoint": 1,
+    "systemd_result": "exit-code",
+    "control_process_pid": 981334,
+    "control_process_status": "226/NAMESPACE",
+    "missing_namespace_path": "/run/job-intel/gate-b-at-most-once",
+    "journal_message": "Failed to set up mount namespacing: /run/job-intel/gate-b-at-most-once: No such file or directory",
+    "exec_start_pre_command_executed": false,
+    "receipt_consumed": false,
+    "exec_start_executed": false,
+    "provider_transport_reached": false,
+    "retry_or_manual_redispatch": false
+  },
+  "root_cause": {
+    "unit_policy": "ReadWritePaths includes the fixed /run/job-intel/gate-b-at-most-once path",
+    "installer_policy": "root installer prepared only the fixed experiment runs parent",
+    "systemd_ordering": "mount namespace is resolved before ExecStartPre",
+    "classification": "deployment_contract_gap_pre_transport"
+  },
+  "provider": {
+    "model_id": "openai/gpt-5-mini",
+    "ordered_call_cap": 48,
+    "calls_attempted": 0,
+    "calls_succeeded": 0,
+    "calls_failed": 0,
+    "unstarted_inputs": 48,
+    "spend_cap_usd": "0.48",
+    "spend_usd": "0.00"
+  },
+  "results": {
+    "terminal_records": 0,
+    "ledger_created": false,
+    "provider_recordings_created": false,
+    "summary_created": false,
+    "offline_replay": "not_run_no_recordings",
+    "decision_v2_comparison": "not_run_no_recordings",
+    "human_audit": "not_run_no_results"
+  },
+  "thresholds": {
+    "minimum_deliverable_or_success": 43,
+    "deliverable_or_success_observed": 0,
+    "deliverable_threshold_status": "not_met_execution_never_began",
+    "maximum_terminal_unknown": 5,
+    "terminal_unknown_status": "not_evaluable_without_run",
+    "minimum_manual_triage_accuracy": "0.80",
+    "manual_triage_accuracy_status": "not_computable",
+    "maximum_spend_usd": "0.48",
+    "spend_status": "within_cap_zero_dispatch"
+  },
+  "teardown": {
+    "unit_removed": true,
+    "unit_state_after": "not-found/inactive/dead",
+    "unconsumed_receipt_removed": true,
+    "consumed_receipt_root_absent": true,
+    "empty_runs_parent_removed": true,
+    "benchmark_process_absent": true,
+    "attempt_lock_absent": true,
+    "package_preserved": true,
+    "runtime_preserved": true,
+    "checkpoint_preserved": true,
+    "provider_env_preserved": true,
+    "recovery_keys_preserved": true
+  },
+  "side_effects": {
+    "production_database_writes": 0,
+    "product_store_writes": 0,
+    "slack_calls": 0,
+    "outbox_writes": 0,
+    "profile_writes": 0,
+    "cache_writes": 0,
+    "task_13_actions": 0,
+    "gate_c_actions": 0
+  },
+  "decision": {
+    "owner_decision": "pending",
+    "recommendation": "request_revision",
+    "task_13_authorized": false,
+    "retry_authorized": false
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0.0",
+  "artifact_id": "vacancy-evidence:redacted-001",
+  "artifact_version": "1.0.0",
+  "redaction_state": "shareable_redacted",
+  "fragments": [
+    {
+      "source_locator": "vacancy:work-format",
+      "text": "Role is remote in Kazakhstan."
+    },
+    {
+      "source_locator": "vacancy:work-format-confirmation",
+      "text": "Role is remote in Kazakhstan."
+    },
+    {
+      "source_locator": "vacancy:office-format",
+      "text": "This position requires local office presence."
+    },
+    {
+      "source_locator": "vacancy:responsibility:pnl",
+      "text": "Own the product and commercial P&L."
+    },
+    {
+      "source_locator": "vacancy:title",
+      "text": "VP Platform Engineering"
+    },
+    {
+      "source_locator": "vacancy:responsibility:new-business",
+      "text": "Build a new digital business line."
+    },
+    {
+      "source_locator": "vacancy:company-hq",
+      "text": "Company headquarters are in New York."
+    },
+    {
+      "source_locator": "vacancy:business-model",
+      "text": "The product serves business customers."
+    },
+    {
+      "source_locator": "vacancy:industry",
+      "text": "Employer operates a crypto product."
+    }
+  ]
+}

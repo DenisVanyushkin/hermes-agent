@@ -1,0 +1,61 @@
+schema_version: 2.0.0
+cases:
+  - id: narrow_monetization_exception
+    mutation: domain_scope_is_rejected_despite_material_revenue_authority_and_strategic_leverage
+    remove_claims: [material_business_ownership_explicit]
+    add_claims:
+      - [mandate_fit, material_revenue_authority_explicit, explicit]
+      - [mandate_fit, strategic_leverage_explicit, explicit]
+    expected: {verdict: Priority, hard_gate_eligible: true}
+  - id: b2b_not_negative
+    mutation: b2b_business_model_is_independently_negative
+    remove_claims: []
+    add_claims:
+      - [company_fit, b2b_model_observed, explicit]
+    expected:
+      verdict: Priority
+      hard_gate_eligible: true
+      warning: b2b_context_requires_scope_review_not_penalty
+  - id: remote_us_not_onsite_gate
+    mutation: remote_us_inherits_onsite_us_sponsorship_gate
+    remove_claims: [feasible_work_arrangement_explicit]
+    add_claims:
+      - [feasibility, remote_us_country_eligible_explicit, explicit]
+    expected: {verdict: Priority, hard_gate_eligible: true}
+  - id: crypto_company_concern_only
+    mutation: crypto_employer_automatically_vetoes_role
+    remove_claims: []
+    add_claims:
+      - [company_fit, crypto_employer_observed, explicit]
+    expected:
+      verdict: Priority
+      hard_gate_eligible: true
+      warning: crypto_employer_company_risk_review
+  - id: platform_engineering_not_platform_business
+    mutation: technical_platform_title_implies_platform_as_business
+    remove_claims: [material_business_ownership_explicit]
+    add_claims:
+      - [mandate_fit, platform_engineering_without_business_ownership, explicit]
+    expected:
+      verdict: Reject
+      hard_gate_eligible: false
+      blocker: internal_tools_infrastructure_or_back_office_without_business_scope
+  - id: adjacent_executive_function_can_pass
+    mutation: gm_cgo_cdo_cco_coo_adjacent_title_is_rejected_despite_business_ownership
+    remove_claims: [material_business_ownership_explicit]
+    add_claims:
+      - [mandate_fit, gm_digital_business_ownership_explicit, explicit]
+    expected: {verdict: Priority, hard_gate_eligible: true}
+  - id: timezone_compensation_not_hard_gates
+    mutation: unknown_timezone_or_compensation_becomes_hard_gate
+    remove_claims: [evidence_complete_explicit]
+    add_claims:
+      - [evidence_confidence, timezone_unknown, unknown]
+      - [evidence_confidence, compensation_unknown, unknown]
+    expected: {verdict: Save, hard_gate_eligible: true}
+  - id: unknown_not_negative
+    mutation: unknown_sponsorship_reporting_line_pnl_team_or_compensation_becomes_negative
+    remove_claims: [evidence_complete_explicit]
+    add_claims:
+      - [evidence_confidence, sponsorship_outside_onsite_us_unknown, unknown]
+    expected: {verdict: Save, hard_gate_eligible: true}
