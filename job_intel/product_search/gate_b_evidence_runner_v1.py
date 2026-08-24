@@ -54,6 +54,7 @@ from job_intel.product_search.evidence_synthesis import (
     EvidenceSynthesisInputV2,
     EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
+    synthesis_input_sha256,
 )
 from job_intel.product_search.company_evidence import CompanyThesisInputV1
 from job_intel.product_search.company_evidence import (
@@ -146,6 +147,22 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+@dataclass(frozen=True)
+class _TransportRecordReceipt:
+    """Immutable in-memory proof of one sealed generic transport record."""
+
+    input_hash: str
+    record_sha256: str
+    record_bytes: bytes
+
+    @property
+    def record(self) -> dict[str, object]:
+        parsed = json.loads(self.record_bytes)
+        if not isinstance(parsed, dict):
+            raise ValueError("transport_receipt_record_invalid")
+        return parsed
 
 
 def _evaluator_contract_sha256(policy: GateBBenchmarkPolicyV3) -> str:
@@ -1209,6 +1226,7 @@ class _LiveGateBProvider:
         if inner_store is None:
             raise ValueError("live_provider_store_missing")
         self.pricing = pricing
+        self._v2_record_verifier: Callable[[dict[str, object]], None] | None = None
         self.authority_identity = {
             "provider_sha256": _sha256(
                 Path(
@@ -1222,13 +1240,20 @@ class _LiveGateBProvider:
             "response_schema_sha256": provider_output_schema_v2_sha256(),
             "pricing_sha256": pricing.identity_sha256,
         }
-        self._semantic_store = _AuthorityRecordingStore(
-            inner_store, self.authority_identity
-        )
-        semantic_provider.store = self._semantic_store
+        # The generic semantic record is its own sealed artifact. Keep the
+        # replay/cache seam on the raw store; authority belongs to the V2
+        # envelope and must not be appended after generic sealing.
+        self._semantic_store = inner_store
+        semantic_provider.store = inner_store
         self.store = SemanticRecordingStore(
             Path(os.environ["GATE_B_PROVIDER_STORE_DIR"]) / "v2"
         )
+
+    def verify_provider_record(self, record: dict[str, object]) -> None:
+        verifier = self._v2_record_verifier
+        if not callable(verifier):
+            raise ValueError("v2_provider_record_verifier_required")
+        verifier(record)
 
     def _publish_v2_provider_record(
         self,
@@ -1243,10 +1268,13 @@ class _LiveGateBProvider:
         call_metadata = dict(getattr(self._adapter, "last_call_metadata", {}) or {})
         post_dispatch_outcome = call_metadata.get("post_dispatch_outcome_v3")
         conservative_cost = call_metadata.get("conservative_cost_usd")
+        transport_record_sha256 = call_metadata.get("transport_record_sha256")
         if not isinstance(post_dispatch_outcome, str) or not post_dispatch_outcome:
             raise ValueError("v2_provider_record_post_dispatch_missing")
         if not isinstance(conservative_cost, str) or not conservative_cost:
             raise ValueError("v2_provider_record_conservative_cost_missing")
+        if not isinstance(transport_record_sha256, str) or not transport_record_sha256:
+            raise ValueError("v2_provider_record_transport_receipt_missing")
         raw_response_payload = getattr(self._adapter, "last_response_payload", None)
         if raw_response_payload is None:
             if result.deliverable:
@@ -1283,6 +1311,7 @@ class _LiveGateBProvider:
             "post_dispatch_outcome_v3": post_dispatch_outcome,
             "status": result.status.value,
             "failure_code": None if result.deliverable else result.failure_reason,
+            "failure_diagnostic": call_metadata.get("failure_diagnostic"),
             "provider_record_kind": "gate-b-evidence-synthesis-v2",
             "provider_sha256": self.authority_identity["provider_sha256"],
             "model_sha256": self.authority_identity["model_sha256"],
@@ -1294,15 +1323,13 @@ class _LiveGateBProvider:
             "pricing": self.pricing.as_record(),
             "pricing_sha256": self.pricing.identity_sha256,
             "max_output_tokens": self.pricing.max_output_tokens,
-            "semantic_transport_record_sha256": call_metadata.get(
-                "sealed_provider_record_sha256"
-            ),
+            "semantic_transport_record_sha256": transport_record_sha256,
         }
         seal_record = getattr(capability, "seal_record", None)
         if not callable(seal_record):
             raise ValueError("v2_provider_record_sealer_required")
         seal_record(v2_record)
-        self.store.save(v2_record)
+        self.store.save_exclusive(v2_record)
         return v2_record
 
     def dispatch(
@@ -1325,6 +1352,15 @@ class _LiveGateBProvider:
             )
         else:
             self._adapter.record_capability = capability
+        verifier = getattr(capability, "verify_record", None)
+        self._v2_record_verifier = verifier if callable(verifier) else None
+        provider_input_sha256 = synthesis_input_sha256(
+            payload, provider=self._adapter
+        )
+        binder = getattr(capability, "bind_record_identity", None)
+        if not callable(binder):
+            raise ValueError("transport_receipt_binder_required")
+        binder(input_hash, provider_input_sha256)
         try:
             from job_intel.product_search.evidence_synthesis import (
                 run_evidence_synthesis_v2,
@@ -2324,6 +2360,11 @@ def _provider_record(provider: GovernedProvider, input_hash: str) -> dict[str, o
     record = loader(input_hash)
     if not isinstance(record, dict):
         raise ValueError("provider_record_invalid")
+    if record.get("provider_record_kind") == "gate-b-evidence-synthesis-v2":
+        verifier = getattr(provider, "verify_provider_record", None)
+        if not callable(verifier):
+            raise ValueError("v2_provider_record_verifier_required")
+        verifier(record)
     return record
 
 
@@ -2484,8 +2525,44 @@ def _issue_collection_capability(
             raise ValueError("reservation_identity_collision")
         reservation_refs[dispatch_key] = ref
     receipts: dict[str, DispatchReceipt] = {}
+    transport_receipts: dict[str, _TransportRecordReceipt] = {}
+    record_identity_bindings: dict[str, str] = {}
+    provider_input_to_dispatch: dict[str, str] = {}
+
+    def capture_record(record: dict[str, object]) -> _TransportRecordReceipt | None:
+        if record.get("provider_record_kind") == "gate-b-evidence-synthesis-v2":
+            return None
+        input_hash = record.get("input_hash")
+        if not isinstance(input_hash, str) or not input_hash:
+            raise ValueError("transport_receipt_input_hash_missing")
+        record_bytes = _canonical_bytes(record)
+        receipt = _TransportRecordReceipt(
+            input_hash=input_hash,
+            record_sha256=_sha256(record_bytes),
+            record_bytes=record_bytes,
+        )
+        previous = transport_receipts.get(input_hash)
+        if previous is not None and previous.record_sha256 != receipt.record_sha256:
+            raise ValueError("transport_receipt_identity_conflict")
+        transport_receipts[input_hash] = receipt
+        return receipt
+
+    def bind_record_identity(
+        dispatch_input_hash: str, provider_input_hash: str
+    ) -> None:
+        if dispatch_input_hash not in reservation_refs:
+            raise ValueError("transport_receipt_dispatch_unknown")
+        previous = record_identity_bindings.get(dispatch_input_hash)
+        if previous is not None and previous != provider_input_hash:
+            raise ValueError("transport_receipt_identity_conflict")
+        record_identity_bindings[dispatch_input_hash] = provider_input_hash
+        previous_dispatch = provider_input_to_dispatch.get(provider_input_hash)
+        if previous_dispatch is not None and previous_dispatch != dispatch_input_hash:
+            raise ValueError("transport_receipt_identity_conflict")
+        provider_input_to_dispatch[provider_input_hash] = dispatch_input_hash
 
     def reserve(dispatch_key: str, _amount: Decimal) -> str:
+        dispatch_key = provider_input_to_dispatch.get(dispatch_key, dispatch_key)
         if dispatch_key not in reservation_refs:
             raise ValueError("reservation_manifest_ref_missing")
         reservation_id = f"gate-b:{dispatch_key}"
@@ -2508,9 +2585,20 @@ def _issue_collection_capability(
         receipt = receipts.get(reservation_id)
         if dispatch_key is None or receipt is None:
             raise ValueError("reservation_unknown")
-        record = _provider_record(provider, dispatch_key)
-        _assert_provider_record_authority(manifest, record)
-        provider_record_sha256 = _sha256(_canonical_bytes(record))
+        provider_input_hash = record_identity_bindings.pop(dispatch_key, None)
+        if provider_input_hash is None:
+            raise ValueError("transport_receipt_binding_missing")
+        transport_receipt = transport_receipts.pop(provider_input_hash, None)
+        if transport_receipt is None:
+            raise ValueError("transport_receipt_missing")
+        if transport_receipt.input_hash != provider_input_hash:
+            raise ValueError("transport_receipt_identity_mismatch")
+        record = transport_receipt.record
+        if record.get("post_dispatch_outcome_v3") != outcome:
+            raise ValueError("transport_receipt_outcome_mismatch")
+        # The final V2 authority check runs after V2 publication. The
+        # pre-reconcile proof is the immutable transport receipt.
+        transport_record_sha256 = transport_receipt.record_sha256
         measured = (
             None
             if record.get("measured_cost_usd") is None
@@ -2520,7 +2608,7 @@ def _issue_collection_capability(
         ledger.commit_terminal(
             receipt,
             TerminalOutcome(outcome),
-            provider_record_sha256,
+            transport_record_sha256,
             measured,
             conservative,
         )
@@ -2537,6 +2625,8 @@ def _issue_collection_capability(
         reserve=reserve,
         mark_dispatching=mark_dispatching,
         reconcile=reconcile,
+        capture_record=capture_record,
+        bind_record_identity=bind_record_identity,
     )
 
 

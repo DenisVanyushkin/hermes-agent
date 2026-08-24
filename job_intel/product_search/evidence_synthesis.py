@@ -1191,7 +1191,11 @@ class RecordedEvidenceSynthesisProvider:
     def _record_call(self, input_hash: str, input_payload: dict[str, Any]) -> object:
         if self.record_capability is None:
             raise LLMProviderError("structured_capability_required")
+        self.last_call_metadata = {}
         self.last_response_payload = None
+        semantic_metadata = getattr(self.semantic_provider, "last_call_metadata", None)
+        if isinstance(semantic_metadata, dict):
+            semantic_metadata.clear()
         try:
             response_validator = None
             if self.input_contract_version == "2.0.0":
@@ -1223,6 +1227,22 @@ class RecordedEvidenceSynthesisProvider:
             )
         finally:
             self.last_call_metadata = dict(self.semantic_provider.last_call_metadata)
+            receipt_getter = getattr(
+                self.record_capability, "receipt_for_input_hash", None
+            )
+            receipt = (
+                receipt_getter(input_hash)
+                if callable(receipt_getter)
+                else None
+            )
+            if receipt is not None:
+                record = receipt.record
+                self.last_call_metadata["transport_record_sha256"] = (
+                    receipt.record_sha256
+                )
+                self.last_call_metadata["failure_diagnostic"] = record.get(
+                    "failure_diagnostic"
+                )
         if isinstance(result, GovernedStructuredTerminalUnknown):
             return result
         try:

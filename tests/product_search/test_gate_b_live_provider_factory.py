@@ -12,6 +12,9 @@ from job_intel.product_search import evidence_synthesis as synthesis
 from job_intel.product_search.decision_v2 import load_decision_policy, run_decision_v2
 from job_intel.product_search import gate_b_evidence_runner_v1 as runner
 from job_intel.product_search.gate_b_evidence_runner_v1 import (
+    EvidenceManifestRow,
+    ForegroundDispatchLedger,
+    ManifestRef,
     build_decision_request_v2,
 )
 from job_intel.product_search.gate_b_spend_record_v1 import SpendRecordStore
@@ -25,8 +28,56 @@ from tests.product_search.test_gate_b_composition import (
     _pricing,
     _projected_fixture,
     _provider_payload,
-    _record_capability,
 )
+
+
+def _production_capability(
+    provider: object, pricing: object, manifest_sha256: str
+) -> tuple[object, object, ManifestRef]:
+    ref = ManifestRef(
+        run_id="gate-b-evidence-v1-0123456789abcdef",
+        manifest_sha256=manifest_sha256,
+        ordinal=0,
+        input_sha256="1" * 64,
+        projection_sha256="2" * 64,
+    )
+    row = EvidenceManifestRow(
+        ordinal=0,
+        corpus_key="northstar/head-of-product",
+        raw_sha256="4" * 64,
+        input_sha256=ref.input_sha256,
+        projection_sha256=ref.projection_sha256,
+    )
+    manifest = SimpleNamespace(
+        manifest_sha256=manifest_sha256,
+        rows=(row,),
+        row_ref=lambda ordinal: ref,
+        authorities=SimpleNamespace(
+            source_authority_sha256s={
+                "provider": provider.authority_identity["provider_sha256"]
+            },
+            model_sha256=provider.authority_identity["model_sha256"],
+            prompt_sha256=provider.authority_identity["prompt_sha256"],
+            response_schema_sha256=provider.authority_identity[
+                "response_schema_sha256"
+            ],
+            pricing_sha256=provider.authority_identity["pricing_sha256"],
+        ),
+        limits=SimpleNamespace(
+            ordered_call_cap=1,
+            per_call_maximum_usd=pricing.reservation_cost_usd,
+            aggregate_maximum_usd=pricing.reservation_cost_usd,
+        ),
+    )
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=lambda _amount: None
+    )
+    capability = runner._issue_collection_capability(
+        manifest=manifest,
+        provider=provider,
+        ledger=ledger,
+    )
+    return capability, ledger, ref
 
 
 def test_live_provider_factory_requires_explicit_approval(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,11 +152,12 @@ def test_live_provider_publishes_v2_record_used_by_decision(
         prompt_version=policy.semantic_prompt_version,
     )
     provider = runner._LiveGateBProvider(semantic_provider)
-    dispatch_input_hash = "d" * 64
+    capability, _ledger, ref = _production_capability(provider, pricing, "2" * 64)
+    dispatch_input_hash = runner._reservation_input_hash(ref)
     response_payload = provider.dispatch(
         projected.provider_payload(),
         input_hash=dispatch_input_hash,
-        capability=_record_capability(pricing),
+        capability=capability,
     )
     provider_record = runner._provider_record(provider, dispatch_input_hash)
 
@@ -137,3 +189,87 @@ def test_live_provider_publishes_v2_record_used_by_decision(
         assert provider_record[authority_name] == authority_value
     assert isinstance(provider_record["metadata_hmac_sha256"], str)
     assert decision.status is decision_v2.DecisionRunStatus.ASSESSED
+
+
+def test_live_provider_with_collection_capability_reaches_decision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    pricing = _pricing()
+    manifest_sha256 = "3" * 64
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
+    semantic_provider = LLMObservationProvider(
+        store=RecordingStore(tmp_path / "provider-records"),
+        mode="record",
+        model_id=policy.model_id,
+        transport=_ProductionShapedSemanticFake(_provider_payload(projected)),
+        prompt_version=policy.semantic_prompt_version,
+    )
+    provider = runner._LiveGateBProvider(semantic_provider)
+    capability, ledger, ref = _production_capability(
+        provider, pricing, manifest_sha256
+    )
+    dispatch_input_hash = runner._reservation_input_hash(ref)
+    published_results: list[object] = []
+    original_publish = provider._publish_v2_provider_record
+
+    def capture_publish(**kwargs: object) -> dict[str, object]:
+        published_results.append(kwargs["result"])
+        return original_publish(**kwargs)
+
+    monkeypatch.setattr(provider, "_publish_v2_provider_record", capture_publish)
+
+    response_payload = provider.dispatch(
+        projected.provider_payload(),
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+    provider_record = runner._provider_record(provider, dispatch_input_hash)
+    provider_input_sha256 = synthesis.synthesis_input_sha256(
+        projected.provider_payload(), provider=provider._adapter
+    )
+    request = build_decision_request_v2(
+        response_payload=response_payload,
+        projected=projected,
+        provider_input_sha256=provider_input_sha256,
+        raw={
+            "company": "Northstar",
+            "title": "Head of Product",
+            "location": "Remote",
+            "posted_at": "2026-08-23T00:00:00Z",
+        },
+        provider_record=provider_record,
+        validation_status=None,
+        decision_policy=load_decision_policy(),
+        decision_clock=datetime(2026, 8, 23, tzinfo=timezone.utc),
+    )
+    decision = run_decision_v2(request, policy=load_decision_policy())
+
+    assert ledger.entries()[0].recording_sha256 == provider_record[
+        "semantic_transport_record_sha256"
+    ]
+    assert decision.status is decision_v2.DecisionRunStatus.ASSESSED
+    with pytest.raises(LLMProviderError, match="recording_exists"):
+        provider._publish_v2_provider_record(
+            dispatch_input_hash=dispatch_input_hash,
+            input_payload=projected.provider_payload(),
+            result=published_results[0],
+            capability=capability,
+        )
+
+    tampered = dict(provider_record)
+    tampered["provider_sha256"] = "f" * 64
+    unsigned = {
+        key: value
+        for key, value in tampered.items()
+        if key not in {"metadata_sha256", "metadata_hmac_sha256"}
+    }
+    tampered["metadata_sha256"] = runner._sha256(runner._canonical_bytes(unsigned))
+    monkeypatch.setattr(provider.store, "load", lambda _input_hash: tampered)
+    with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
+        runner._provider_record(provider, dispatch_input_hash)

@@ -219,6 +219,8 @@ class StructuredCallCapability:
         reserve: Any,
         mark_dispatching: Any,
         reconcile: Any,
+        capture_record: Any = None,
+        bind_record_identity: Any = None,
     ) -> None:
         if issuer is not _CAPABILITY_ISSUER:
             raise LLMProviderError("structured_capability_invalid")
@@ -232,6 +234,9 @@ class StructuredCallCapability:
         self._reserve = reserve
         self._mark_dispatching = mark_dispatching
         self._reconcile = reconcile
+        self._capture_record = capture_record
+        self._bind_record_identity = bind_record_identity
+        self._record_receipts: dict[str, object] = {}
 
     def reserve(self, input_hash: str) -> str:
         return str(self._reserve(input_hash, self.pricing.reservation_cost_usd))
@@ -243,6 +248,15 @@ class StructuredCallCapability:
         self, reservation_id: str, actual_cost: Decimal, outcome: str
     ) -> None:
         self._reconcile(reservation_id, actual_cost, outcome)
+
+    def bind_record_identity(
+        self, dispatch_input_hash: str, provider_input_hash: str
+    ) -> None:
+        if self._bind_record_identity is not None:
+            self._bind_record_identity(dispatch_input_hash, provider_input_hash)
+
+    def receipt_for_input_hash(self, input_hash: str) -> object | None:
+        return self._record_receipts.get(input_hash)
 
     def seal_record(self, record: dict[str, Any]) -> dict[str, Any]:
         unsigned = {
@@ -257,6 +271,13 @@ class StructuredCallCapability:
             metadata_sha256.encode("ascii"),
             hashlib.sha256,
         ).hexdigest()
+        if self._capture_record is not None:
+            receipt = self._capture_record(dict(record))
+            if receipt is not None:
+                input_hash = record.get("input_hash")
+                if not isinstance(input_hash, str) or not input_hash:
+                    raise LLMProviderError("provider_record_input_hash_missing")
+                self._record_receipts[input_hash] = receipt
         return record
 
     def verify_record(self, record: dict[str, Any]) -> None:
@@ -285,6 +306,8 @@ def _issue_structured_call_capability(
     reserve: Any,
     mark_dispatching: Any,
     reconcile: Any,
+    capture_record: Any = None,
+    bind_record_identity: Any = None,
 ) -> StructuredCallCapability:
     """Bridge an already-authorized transactional runner into the runtime."""
     if not re.fullmatch(r"[0-9a-f]{64}", run_identity_sha256):
@@ -301,6 +324,8 @@ def _issue_structured_call_capability(
         reserve=reserve,
         mark_dispatching=mark_dispatching,
         reconcile=reconcile,
+        capture_record=capture_record,
+        bind_record_identity=bind_record_identity,
     )
 
 

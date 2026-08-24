@@ -186,6 +186,18 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
         reservation = capability.reserve(input_hash)
         capability.mark_dispatching(reservation)
         record = {
+            "input_hash": input_hash,
+            "schema_version": "1.0.0",
+            "output_sha256": runner._sha256(
+                runner._canonical_bytes(
+                    {
+                        "schema_version": "1.0.0",
+                        "claims": [],
+                        "conflicts": [],
+                        "question_candidates": [],
+                    }
+                )
+            ),
             "provider_id": "provider",
             "model_id": "model",
             "provider_sha256": "v",
@@ -198,8 +210,10 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
             "conservative_cost_usd": "0.01",
             "pricing_sha256": "q",
         }
+        capability.bind_record_identity(input_hash, input_hash)
+        capability.seal_record(record)
         provider.store.records[input_hash] = record
-        capability.reconcile(reservation, Decimal("0"), "success")
+        capability.reconcile(reservation, Decimal("0"), provider_outcome)
         return SimpleNamespace(record=record)
 
     provider.dispatch.side_effect = dispatch
@@ -340,6 +354,18 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
     reservation = capability.reserve(dispatch_input_hash)
     capability.mark_dispatching(reservation)
     provider.store.record = {
+        "input_hash": dispatch_input_hash,
+        "schema_version": "1.0.0",
+        "output_sha256": runner._sha256(
+            runner._canonical_bytes(
+                {
+                    "schema_version": "1.0.0",
+                    "claims": [],
+                    "conflicts": [],
+                    "question_candidates": [],
+                }
+            )
+        ),
         "provider_id": "provider",
         "model_id": "model",
         "provider_sha256": "v",
@@ -352,6 +378,8 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
         "conservative_cost_usd": "0.01",
         "pricing_sha256": "q",
     }
+    capability.bind_record_identity(dispatch_input_hash, dispatch_input_hash)
+    capability.seal_record(provider.store.record)
     capability.reconcile(reservation, Decimal("0.01"), "terminal_unknown")
 
     args = journal.commit_terminal.call_args.args
@@ -531,6 +559,18 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         reservation = capability.reserve(input_hash)
         capability.mark_dispatching(reservation)
         record = {
+            "input_hash": input_hash,
+            "schema_version": "1.0.0",
+            "output_sha256": runner._sha256(
+                runner._canonical_bytes(
+                    {
+                        "schema_version": "1.0.0",
+                        "claims": [],
+                        "conflicts": [],
+                        "question_candidates": [],
+                    }
+                )
+            ),
             "provider_id": "provider",
             "model_id": "model",
             "provider_sha256": "v",
@@ -543,6 +583,8 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
             "conservative_cost_usd": "0.01",
             "pricing_sha256": "q",
         }
+        capability.bind_record_identity(input_hash, input_hash)
+        capability.seal_record(record)
         provider.store.records[input_hash] = record
         capability.reconcile(reservation, Decimal("0"), "success")
         return SimpleNamespace(record=record)
