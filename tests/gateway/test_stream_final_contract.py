@@ -18,6 +18,8 @@ Three invariants:
 """
 
 import asyncio
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -199,6 +201,124 @@ class TestInterimSendContract:
         sent_ops = [o for o in t.ops if o["op"] == "send"]
         assert len(sent_ops) == 1
         assert "_interim_send" not in (sent_ops[0].get("metadata") or {})
+
+
+@pytest.mark.asyncio
+async def test_real_gateway_runner_suppresses_codex_protocol_before_interim_slack_send(
+    monkeypatch, tmp_path
+):
+    """The production GatewayRunner seam must not publish Codex protocol text.
+
+    The fake agent emits the same completed Codex event shape as the runtime;
+    the call still traverses ``GatewayRunner._run_agent`` and its real
+    interim-assistant callback before reaching the capture Slack adapter.
+    """
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _make_runner
+
+    class _MalformedCodexAgent:
+        def __init__(self, **kwargs):
+            self.interim_assistant_callback = None
+            self.tools = []
+            self.model = kwargs.get("model", "gpt-5-codex")
+            self.provider = "openai-codex"
+            self.session_id = kwargs.get("session_id", "session-1")
+            self.context_compressor = None
+
+        def run_conversation(self, _message, **_kwargs):
+            from agent.codex_runtime import _consume_codex_event_stream
+
+            malformed = (
+                '<|start|>assistant<|channel|>commentary '
+                'to=functions.skill_view<|constrain|>json\n'
+                '{"name":"skill_view","arguments":{"path":"/secret"}}'
+            )
+            item = SimpleNamespace(
+                type="message",
+                phase="commentary",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=malformed)],
+            )
+            _consume_codex_event_stream(
+                [
+                    SimpleNamespace(
+                        type="response.output_item.added",
+                        item=SimpleNamespace(type="message", phase="commentary"),
+                    ),
+                    SimpleNamespace(type="response.output_text.delta", delta=malformed),
+                    SimpleNamespace(type="response.output_item.done", item=item),
+                    SimpleNamespace(
+                        type="response.completed",
+                        response=SimpleNamespace(status="completed"),
+                    ),
+                ],
+                model=self.model,
+                on_commentary_message=self.interim_assistant_callback,
+                valid_tool_names={"skill_view"},
+            )
+            return {
+                "final_response": "safe final answer",
+                "messages": [],
+                "api_calls": 1,
+                "completed": True,
+            }
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _MalformedCodexAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+    (tmp_path / "config.yaml").write_text(
+        "display:\n  interim_assistant_messages: true\n  platforms:\n"
+        "    slack:\n      interim_assistant_messages: true\n",
+        encoding="utf-8",
+    )
+
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "interim_assistant_messages": True,
+                "platforms": {"slack": {"interim_assistant_messages": True}},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
+    runner = _make_runner(adapter)
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-codex-protocol",
+        session_key="agent:main:slack:dm:C123",
+        event_message_id="171717.000001",
+    )
+
+    delivered = [call["content"] for call in adapter.sent + adapter.edits]
+    assert result["final_response"] == "safe final answer"
+    # _run_agent returns the final result to the outer message handler; this
+    # seam owns only interim delivery.  The malformed commentary produced no
+    # Slack send, leaving the normal final-delivery path authoritative.
+    assert delivered == []
+    assert all("<|start|>" not in text for text in delivered)
+    assert all("to=functions." not in text for text in delivered)
 
 
 class TestFinalAdoptionGuards:

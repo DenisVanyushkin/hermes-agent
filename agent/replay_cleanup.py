@@ -186,6 +186,31 @@ def strip_dangling_tool_call_tail(
     return agent_history[:-1]
 
 
+def strip_protocol_invalid_assistant_records(
+    agent_history: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Exclude provider-invalid assistant turns from model replay.
+
+    The invalid row may retain Codex message items and a safe fingerprint for
+    RCA, but it must never be replayed as a successful final answer after a
+    restart.
+    """
+    if not agent_history:
+        return agent_history
+    return [
+        message
+        for message in agent_history
+        if not (
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and (
+                message.get("_protocol_invalid")
+                or message.get("malformed_tool_intent")
+            )
+        )
+    ]
+
+
 def sanitize_replay_history(
     agent_history: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -198,7 +223,11 @@ def sanitize_replay_history(
     """
     if not agent_history:
         return agent_history
-    return strip_dangling_tool_call_tail(strip_interrupted_tool_tails(agent_history))
+    return strip_dangling_tool_call_tail(
+        strip_protocol_invalid_assistant_records(
+            strip_interrupted_tool_tails(agent_history)
+        )
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

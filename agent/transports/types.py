@@ -143,6 +143,11 @@ class NormalizedResponse:
         pd = self.provider_data or {}
         return pd.get("codex_message_items")
 
+    @property
+    def malformed_tool_intent(self):
+        pd = self.provider_data or {}
+        return pd.get("malformed_tool_intent")
+
 
 # ---------------------------------------------------------------------------
 # Factory helpers

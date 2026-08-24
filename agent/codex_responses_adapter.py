@@ -57,23 +57,6 @@ def _classify_responses_issuer(
 _CROSS_ISSUER_WARN_EMITTED = False
 
 
-# Matches Codex/Harmony tool-call serialization that occasionally leaks into
-# assistant-message content when the model fails to emit a structured
-# ``function_call`` item.  Accepts the common forms:
-#
-#   to=functions.exec_command
-#   assistant to=functions.exec_command
-#   <|channel|>commentary to=functions.exec_command
-#
-# ``to=functions.<name>`` is the stable marker — the optional ``assistant`` or
-# Harmony channel prefix varies by degeneration mode.  Case-insensitive to
-# cover lowercase/uppercase ``assistant`` variants.
-_TOOL_CALL_LEAK_PATTERN = re.compile(
-    r"(?:^|[\s>|])to=functions\.[A-Za-z_][\w.]*",
-    re.IGNORECASE,
-)
-
-
 # The ChatGPT Codex backend reserves these Harmony wire tokens. If their
 # literal spellings are replayed anywhere in request text, the backend rejects
 # the request before inference with ``invalid_prompt: Request blocked.``.
@@ -1582,37 +1565,6 @@ def _normalize_codex_response(
         if isinstance(out_text, str):
             final_text = out_text.strip()
 
-    # ── Tool-call leak recovery ──────────────────────────────────
-    # gpt-5.x on the Codex Responses API sometimes degenerates and emits
-    # what should be a structured `function_call` item as plain assistant
-    # text using the Harmony/Codex serialization (``to=functions.foo
-    # {json}`` or ``assistant to=functions.foo {json}``). The model
-    # intended to call a tool, but the intent never made it into
-    # ``response.output`` as a ``function_call`` item, so ``tool_calls``
-    # is empty here. If we pass this through, the parent sees a
-    # confident-looking summary with no audit trail (empty ``tool_trace``)
-    # and no tools actually ran — the Taiwan-embassy-email incident.
-    #
-    # Detection: leaked tokens always contain ``to=functions.<name>`` and
-    # the assistant message has no real tool calls. Treat it as incomplete
-    # so the existing Codex-incomplete continuation path (3 retries,
-    # handled in run_agent.py) gets a chance to re-elicit a proper
-    # ``function_call`` item. The existing loop already handles message
-    # append, dedup, and retry budget.
-    leaked_tool_call_text = False
-    if final_text and not tool_calls and _TOOL_CALL_LEAK_PATTERN.search(final_text):
-        leaked_tool_call_text = True
-        logger.warning(
-            "Codex response contains leaked tool-call text in assistant content "
-            "(no structured function_call items). Treating as incomplete so the "
-            "continuation path can re-elicit a proper tool call. Leaked snippet: %r",
-            final_text[:300],
-        )
-        # Clear the text so downstream code doesn't surface the garbage as
-        # a summary. The encrypted reasoning items (if any) are preserved
-        # so the model keeps its chain-of-thought on the retry.
-        final_text = ""
-
     # ── Reasoning-channel answer salvage (xAI grok) ──────────────
     # grok-4.x on the xAI /v1/responses surface sometimes emits its final
     # answer inside the reasoning item instead of as a ``message`` output
@@ -1660,14 +1612,13 @@ def _normalize_codex_response(
         reasoning_details=None,
         codex_reasoning_items=reasoning_items_raw or None,
         codex_message_items=message_items_raw or None,
+        malformed_tool_intent=getattr(response, "_hermes_malformed_tool_intent", None),
     )
 
     if tool_calls:
         finish_reason = "tool_calls"
     elif response_incomplete_content_filter:
         finish_reason = "content_filter"
-    elif leaked_tool_call_text:
-        finish_reason = "incomplete"
     elif saw_streaming_or_item_incomplete:
         finish_reason = "incomplete"
     elif (has_incomplete_items or saw_commentary_phase) and not saw_final_answer_phase:

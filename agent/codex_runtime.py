@@ -1045,6 +1045,7 @@ def _consume_codex_event_stream(
     on_first_delta=None,
     on_event=None,
     interrupt_check=None,
+    valid_tool_names=None,
 ) -> SimpleNamespace:
     """Consume a Codex Responses SSE event stream and return a final response.
 
@@ -1088,7 +1089,8 @@ def _consume_codex_event_stream(
     has_tool_calls = False
     first_delta_fired = False
     active_message_phase: str | None = None
-    commentary_text_deltas: List[str] = []
+    message_text_deltas: List[str] = []
+    malformed_tool_intent = None
     # Last reasoning summary_index seen. The Responses stream delimits summary
     # parts by this index and gives each part no separator of its own, so a
     # change of index is where the blank line belongs.
@@ -1137,8 +1139,8 @@ def _consume_codex_event_stream(
             if item_type == "message":
                 phase = _item_field(item, "phase", None)
                 active_message_phase = phase.strip().lower() if isinstance(phase, str) else None
-                if active_message_phase == "commentary":
-                    commentary_text_deltas = []
+                if active_message_phase in {"commentary", "analysis"}:
+                    message_text_deltas = []
             else:
                 active_message_phase = None
             if "function_call" in str(item_type):
@@ -1147,21 +1149,12 @@ def _consume_codex_event_stream(
 
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
             delta_text = _event_field(event, "delta", "")
-            if delta_text and active_message_phase == "commentary":
-                commentary_text_deltas.append(delta_text)
-                # Preserve CLI/backward compatibility when no first-class
-                # commentary consumer is installed.
-                if on_commentary_message is None and on_reasoning_delta is not None:
-                    try:
-                        on_reasoning_delta(delta_text)
-                    except Exception:
-                        logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
-            elif delta_text and active_message_phase == "analysis":
-                if on_reasoning_delta is not None:
-                    try:
-                        on_reasoning_delta(delta_text)
-                    except Exception:
-                        logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
+            if delta_text and active_message_phase in {"commentary", "analysis"}:
+                # Hold protocol-bearing message text until the complete item
+                # is available. This prevents a malformed envelope from
+                # escaping through the legacy reasoning callback one delta at
+                # a time.
+                message_text_deltas.append(delta_text)
             elif delta_text:
                 collected_text_deltas.append(delta_text)
                 if not has_tool_calls:
@@ -1209,25 +1202,43 @@ def _consume_codex_event_stream(
                 collected_output_items.append(done_item)
                 done_phase = _item_field(done_item, "phase", None)
                 done_phase = done_phase.strip().lower() if isinstance(done_phase, str) else None
-                if done_phase == "commentary" and on_commentary_message is not None:
-                    commentary_text = "".join(commentary_text_deltas).strip()
-                    if not commentary_text:
+                if done_phase in {"commentary", "analysis"}:
+                    message_text = "".join(message_text_deltas).strip()
+                    if not message_text:
                         content_parts = _item_field(done_item, "content", [])
                         if isinstance(content_parts, list):
-                            commentary_text = "".join(
+                            message_text = "".join(
                                 str(_item_field(part, "text", "") or "")
                                 for part in content_parts
                                 if _item_field(part, "type", "") == "output_text"
                             ).strip()
-                    if commentary_text:
-                        try:
-                            on_commentary_message(commentary_text)
-                        except Exception:
-                            logger.debug(
-                                "Codex stream on_commentary_message raised",
-                                exc_info=True,
-                            )
-                    commentary_text_deltas = []
+                    if message_text:
+                        from agent.malformed_tool_intent import detect_malformed_tool_intent
+
+                        intent = detect_malformed_tool_intent(
+                            message_text,
+                            phase=done_phase,
+                            valid_tool_names=valid_tool_names,
+                        )
+                        if intent is not None:
+                            malformed_tool_intent = intent
+                        elif done_phase == "commentary" and on_commentary_message is not None:
+                            try:
+                                on_commentary_message(message_text)
+                            except Exception:
+                                logger.debug(
+                                    "Codex stream on_commentary_message raised",
+                                    exc_info=True,
+                                )
+                        elif on_reasoning_delta is not None:
+                            try:
+                                on_reasoning_delta(message_text)
+                            except Exception:
+                                logger.debug(
+                                    "Codex stream on_reasoning_delta raised",
+                                    exc_info=True,
+                                )
+                    message_text_deltas = []
             continue
 
         if event_type in _TERMINAL_EVENT_TYPES:
@@ -1301,6 +1312,7 @@ def _consume_codex_event_stream(
         model=model,
         incomplete_details=terminal_incomplete_details,
         error=terminal_error,
+        _hermes_malformed_tool_intent=malformed_tool_intent,
     )
     return final
 
@@ -1431,6 +1443,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             return _consume_codex_event_stream(
                 list(intercepted_events),
                 model=api_kwargs.get("model"),
+                valid_tool_names=getattr(agent, "valid_tool_names", ()),
             )
 
         try:
@@ -1513,6 +1526,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     on_first_delta=on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_or_superseded,
+                    valid_tool_names=getattr(agent, "valid_tool_names", ()),
                 )
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:

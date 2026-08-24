@@ -93,6 +93,23 @@ If a token refresh fails with a terminal error (HTTP 4xx, `invalid_grant`, revok
 Even when using Nous Portal, Codex, or a custom endpoint, some tools (vision, web summarization, MoA) use a separate "auxiliary" model. By default (`auxiliary.*.provider: "auto"`), Hermes routes these tasks to your **main chat model** — the same model you picked in `hermes model`. You can override each task individually to route it to a cheaper/faster model (e.g. Gemini Flash on OpenRouter) — see [Auxiliary Models](/user-guide/configuration#auxiliary-models).
 :::
 
+### Codex text-bound tool-call recovery
+
+The official `openai-codex` / `codex_responses` path treats native structured
+`function_call` items as the only executable tool authority. If a Codex model
+prints a tool request as assistant text (for example, reserved ChatML syntax),
+Hermes treats it as a provider protocol violation: the text is suppressed before
+interim gateway delivery, retained only as bounded audit metadata plus the raw
+Codex item, and Hermes asks once for a native structured call. Hermes never
+parses assistant text, XML, or pseudo-JSON into a tool execution.
+
+This is distinct from a local llama.cpp, vLLM, or SGLang plain-text tool call,
+which is usually a server parser or grammar configuration problem. If Codex
+repeats the text-bound protocol violation, Hermes ends the turn with an
+explicit error and executes zero tools. Check the structured log event
+`malformed_tool_intent` and its `sha256:` fingerprint when investigating; raw
+arguments are deliberately not logged.
+
 :::tip Nous Tool Gateway
 Paid Nous Portal subscribers also get access to the **[Tool Gateway](/user-guide/features/tool-gateway)** — web search, image generation, TTS, and browser automation routed through your subscription. No extra API keys needed. On a fresh install, `hermes setup --portal` logs you in, sets Nous as your provider, and turns the gateway on in one command. Existing users can enable it from `hermes model` or per-tool from `hermes tools`. Inspect routing at any time with `hermes portal info`.
 :::

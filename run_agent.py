@@ -261,6 +261,9 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
     # drive the bounded retry. Persisting them would replay the internal
     # retry instruction as user-authored context on resume.
     "_dropped_toolcall_nudge",
+    # malformed text-bound tool intent recovery prompt is not durable. The
+    # invalid assistant carrier is retained as an auditable non-final record.
+    "_malformed_tool_intent_recovery",
 )
 
 
