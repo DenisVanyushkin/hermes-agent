@@ -304,7 +304,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 ### 2.3 Keyed verify не зависит от поля внутри проверяемой записи
 
-- [ ] Пункт 2.3 выполнен целиком
+- [x] Пункт 2.3 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -315,24 +315,24 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 **Задачи**
 
-- [ ] Сохранить существующий strict-xfail
+- [x] Сохранить существующий strict-xfail
   `test_v2_record_without_discriminator_is_rejected` как RED-контроль до исправления.
-- [ ] Изменить `_provider_record`, чтобы наличие keyed verifier определялось доверенным producer/
+- [x] Изменить `_provider_record`, чтобы наличие keyed verifier определялось доверенным producer/
   store contract, а не `provider_record_kind` или любым другим полем загруженной записи.
-- [ ] Добавить параметризованный тест, который по одному удаляет или изменяет каждое поле
+- [x] Добавить параметризованный тест, который по одному удаляет или изменяет каждое поле
   V2-record, пересчитывает незакрытый `metadata_sha256`, сохраняет старый HMAC и требует
   `LLMProviderError("provider_metadata_mismatch")`; `provider_record_kind`, cost и authority SHA
   входят в набор мутаций явно.
-- [ ] После GREEN удалить `@pytest.mark.xfail` с существующего теста, не меняя его ожидаемое
+- [x] После GREEN удалить `@pytest.mark.xfail` с существующего теста, не меняя его ожидаемое
   fail-closed поведение.
 
 **DoD**
 
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py::test_v2_record_without_discriminator_is_rejected`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py::test_v2_record_without_discriminator_is_rejected`
   возвращает `1 passed`, а не `xfailed` или `xpassed`.
-- [ ] Параметризованный mutation-тест проходит для каждого поля V2-record; контрольная
+- [x] Параметризованный mutation-тест проходит для каждого поля V2-record; контрольная
   немодифицированная запись проходит тот же keyed verifier.
-- [ ] `rg -n 'xfail.*HMAC|HMAC.*xfail' tests/product_search/test_gate_b_full_composition_e2e.py`
+- [x] `rg -n 'xfail.*HMAC|HMAC.*xfail' tests/product_search/test_gate_b_full_composition_e2e.py`
   не находит маркер, маскирующий этот дефект.
 
 ### 2.4 Восстановление после сбоя V2-публикации без повторного provider call

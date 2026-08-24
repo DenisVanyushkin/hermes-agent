@@ -78,6 +78,16 @@ def _bound_request(context: runner.DecisionRequestFactoryContextV1) -> object:
     return SimpleNamespace(references=references, synthesis=SimpleNamespace(metadata=metadata))
 
 
+def test_provider_record_without_keyed_verifier_fails_closed() -> None:
+    class Store:
+        def load(self, _input_hash: str) -> dict[str, object]:
+            return {"provider_record_kind": "gate-b-evidence-synthesis-v2"}
+
+    provider = SimpleNamespace(store=Store())
+    with pytest.raises(ValueError, match="v2_provider_record_verifier_required"):
+        runner._provider_record(provider, "dispatch-input")
+
+
 def test_decision_evidence_store_namespaces_identical_bytes_by_manifest_ref(
     tmp_path: Path,
 ) -> None:
@@ -359,6 +369,7 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
     capability = runner._issue_collection_capability(
         manifest=manifest, provider=provider, ledger=journal
     )
+    provider.verify_provider_record = capability.verify_record
     dispatch_input_hash = runner._reservation_input_hash(ref)
     reservation = capability.reserve(dispatch_input_hash)
     capability.mark_dispatching(reservation)

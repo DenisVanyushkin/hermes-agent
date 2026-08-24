@@ -2356,11 +2356,12 @@ def _provider_record(provider: GovernedProvider, input_hash: str) -> dict[str, o
     record = loader(input_hash)
     if not isinstance(record, dict):
         raise ValueError("provider_record_invalid")
-    if record.get("provider_record_kind") == "gate-b-evidence-synthesis-v2":
-        verifier = getattr(provider, "verify_provider_record", None)
-        if not callable(verifier):
-            raise ValueError("v2_provider_record_verifier_required")
-        verifier(record)
+    # The producer exposes the trusted keyed-verifier contract.  Do not infer
+    # whether to verify from a discriminator inside the untrusted record.
+    verifier = getattr(provider, "verify_provider_record", None)
+    if not callable(verifier):
+        raise ValueError("v2_provider_record_verifier_required")
+    verifier(record)
     return record
 
 

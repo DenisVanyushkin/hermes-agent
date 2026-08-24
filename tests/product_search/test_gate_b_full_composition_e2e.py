@@ -31,6 +31,59 @@ from tests.product_search.test_gate_b_composition import (
 )
 
 
+V2_RECORD_MUTATION_FIELDS = (
+    "recording_format_version",
+    "input_hash",
+    "semantic_input_sha256",
+    "provider_input_sha256",
+    "input",
+    "input_payload_sha256",
+    "provider_id",
+    "provider_version",
+    "model_id",
+    "requested_model",
+    "response_model",
+    "semantic_prompt_version",
+    "prompt_version",
+    "schema_version",
+    "output_sha256",
+    "raw_response_text",
+    "response_hash",
+    "usage",
+    "cost_usd",
+    "measured_cost_usd",
+    "conservative_cost_usd",
+    "latency_ms",
+    "retry_count",
+    "post_dispatch_outcome_v3",
+    "status",
+    "failure_code",
+    "failure_diagnostic",
+    "provider_record_kind",
+    "provider_sha256",
+    "model_sha256",
+    "prompt_sha256",
+    "response_schema_sha256",
+    "provider_authority_identity",
+    "pricing",
+    "pricing_sha256",
+    "max_output_tokens",
+    "semantic_transport_record_sha256",
+)
+
+
+def _mutated_v2_value(value: object) -> object:
+    if isinstance(value, str):
+        return "f" * 64
+    if isinstance(value, dict):
+        return {}
+    if isinstance(value, list):
+        return []
+    if isinstance(value, int):
+        return value + 1
+    return "tampered"
+
+
 def _fixture_manifest(
     *,
     projected: synthesis.EvidenceSynthesisInputV2,
@@ -388,7 +441,6 @@ def test_recording_anchor_uses_semantic_transport_sha_and_keeps_v2_envelope_sha(
     recordings.verify(recording_ref, manifest, dispatch_entry)
 
 
-@pytest.mark.xfail(strict=True, reason="Task 10: V2 HMAC discriminator bypass is not fail-closed")
 def test_v2_record_without_discriminator_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -409,6 +461,56 @@ def test_v2_record_without_discriminator_is_rejected(
         for key, value in tampered.items()
         if key not in {"metadata_sha256", "metadata_hmac_sha256"}
     }
+    tampered["metadata_sha256"] = runner._sha256(runner._canonical_bytes(unsigned))
+    monkeypatch.setattr(provider.store, "load", lambda _input_hash: tampered)
+    with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
+        runner._provider_record(provider, dispatch_input_hash)
+
+
+def test_v2_record_keyed_verifier_control_accepts_untampered_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, capability, _ledger, ref_tuple, request = _live_dispatch_fixture(
+        tmp_path, monkeypatch
+    )
+    dispatch_input_hash = runner._reservation_input_hash(ref_tuple[0])
+    provider.dispatch(
+        request,
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+    record = runner._provider_record(provider, dispatch_input_hash)
+    assert set(record) - {"metadata_sha256", "metadata_hmac_sha256"} == set(
+        V2_RECORD_MUTATION_FIELDS
+    )
+    provider.verify_provider_record(record)
+
+
+@pytest.mark.parametrize("field_name", V2_RECORD_MUTATION_FIELDS)
+def test_v2_record_field_mutation_is_rejected_by_keyed_verifier(
+    field_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, capability, _ledger, ref_tuple, request = _live_dispatch_fixture(
+        tmp_path, monkeypatch
+    )
+    dispatch_input_hash = runner._reservation_input_hash(ref_tuple[0])
+    provider.dispatch(
+        request,
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+    record = runner._provider_record(provider, dispatch_input_hash)
+    tampered = dict(record)
+    if field_name == "provider_record_kind":
+        tampered.pop(field_name)
+    else:
+        tampered[field_name] = _mutated_v2_value(tampered[field_name])
+    unsigned = {
+        key: value
+        for key, value in tampered.items()
+        if key not in {"metadata_sha256", "metadata_hmac_sha256"}
+    }
+    # Recompute the open hash while preserving the original keyed HMAC.
     tampered["metadata_sha256"] = runner._sha256(runner._canonical_bytes(unsigned))
     monkeypatch.setattr(provider.store, "load", lambda _input_hash: tampered)
     with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
