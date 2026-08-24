@@ -31,6 +31,15 @@ from tests.product_search.test_gate_b_composition import (
 )
 
 
+AUTHORITY_FIELDS = (
+    "provider_sha256",
+    "model_sha256",
+    "prompt_sha256",
+    "response_schema_sha256",
+    "pricing_sha256",
+)
+
+
 def _production_capability(
     provider: object, pricing: object, manifest_sha256: str
 ) -> tuple[object, object, ManifestRef]:
@@ -218,20 +227,59 @@ def test_v2_record_has_authority_before_seal(
     ]
     assert len(v2_preseal_records) == 1
     preseal_record = v2_preseal_records[0]
-    authority_fields = (
-        "provider_sha256",
-        "model_sha256",
-        "prompt_sha256",
-        "response_schema_sha256",
-        "pricing_sha256",
-    )
-    assert set(provider.authority_identity) == set(authority_fields)
-    for authority_name in authority_fields:
+    assert set(provider.authority_identity) == set(AUTHORITY_FIELDS)
+    for authority_name in AUTHORITY_FIELDS:
         authority_value = provider.authority_identity[authority_name]
         assert preseal_record[authority_name] == authority_value
     assert "semantic_transport_record_sha256" in preseal_record
     assert "metadata_sha256" not in preseal_record
     assert "metadata_hmac_sha256" not in preseal_record
+
+
+@pytest.mark.parametrize("authority_field", AUTHORITY_FIELDS)
+def test_v2_authority_tampering_after_save_is_detected(
+    authority_field: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    pricing = _pricing()
+    manifest_sha256 = "6" * 64
+    store_dir = tmp_path / "provider-records"
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(store_dir))
+    semantic_provider = LLMObservationProvider(
+        store=RecordingStore(store_dir),
+        mode="record",
+        model_id=policy.model_id,
+        transport=_ProductionShapedSemanticFake(_provider_payload(projected)),
+        prompt_version=policy.semantic_prompt_version,
+    )
+    provider = runner._LiveGateBProvider(semantic_provider)
+    capability, _ledger, ref = _production_capability(
+        provider, pricing, manifest_sha256
+    )
+    dispatch_input_hash = runner._reservation_input_hash(ref)
+
+    provider.dispatch(
+        projected.provider_payload(),
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+
+    # The untouched V2 envelope is the control group and passes the same verifier.
+    untouched = runner._provider_record(provider, dispatch_input_hash)
+    provider.verify_provider_record(untouched)
+    assert untouched[authority_field] == provider.authority_identity[authority_field]
+
+    tampered = dict(untouched)
+    tampered[authority_field] = "f" * 64
+    provider.store.save(tampered)
+
+    with pytest.raises(LLMProviderError, match="recording_corrupt"):
+        runner._provider_record(provider, dispatch_input_hash)
 
 
 def test_live_provider_publishes_v2_record_used_by_decision(
