@@ -503,6 +503,202 @@ Official Slack references: [Socket Mode interactions, reconnects, and multiple-c
 - Update this plan when scope, dependencies, paths, or gate decisions change.
 - A conditional task not required by its gate is marked `[x] N/A` with the gate-record reference; it is never silently skipped.
 
+## Execution status reconciliation (2026-08-24)
+
+This section is a **status index**, not a new authority. The cited immutable,
+machine-readable evidence is authoritative, and a later superseding record wins
+over an earlier one. The `[ ]` / `[x]` ledger below drifted from reality and is
+not authority for gate state.
+
+### Task-number legend — bare `Task N` is ambiguous and is no longer permitted
+
+Three numbering systems coexist in the record:
+
+- **Redesign Task N** — this plan's twenty-eight tasks.
+- **legacy Gate B v3 operational Task N** — the numbering in
+  `docs/evidence/product-search-gate-b/task8-immediate-checkpoint.*` and
+  `task9-launch-attempt.*`. Its source document is not present in the current
+  tree.
+- **Gate B simplification Task N** — the numbering named by commits
+  `761130767e` and `2780543019` in their own messages.
+
+Historical evidence is not rewritten. Every future record must qualify which
+system it uses; a bare `Task N` is forbidden.
+
+### Gate A — closed (Redesign Task 6)
+
+`docs/evidence/product-search-gate-a/gate-closure.json`: `decision: proceed`,
+`gate_state: closed`, `authorized_continuation.task_number: 8`,
+`authorized: true`, `exact_owner_approval: "Одобряю Gate A: proceed"`,
+decision date 2026-08-16. Commits `3a93976a45`, `ca8f39e17d`.
+`owner-decision.md` records an owner override replacing the calendar-duration
+requirement with a snapshot-first evaluation: one complete broad-source run plus
+a manual quality audit may close Gate A. Run `gate-a-20260816T141344Z`;
+2,414 raw / 1,814 corrected canonical / 1,314 minimum-evidence. The 1,314
+denominator is minimum-evidence sufficient, not qualified.
+
+Hold state: `canonical_candidate: dormant`, `product_search_runtime: dormant`,
+`legacy_job_intel: masked`. Restoring legacy Job Intel still requires a separate
+owner approval, which does not exist as of this reconciliation.
+
+### Redesign Task 7 — executed, then superseded
+
+The same `owner-decision.md` records an earlier decision of 2026-08-15,
+`bounded_additive_source`, which required Task 7 and a repeat of Tasks 5–6. The
+browser-native repair and the broadened snapshot were then carried out, and the
+2026-08-16 `proceed` superseded that decision. Task 7 was therefore **required
+and executed**, not skipped; its per-item ledger is unreconciled. It is not
+marked `[x] N/A`.
+
+### Redesign Tasks 8–11 — artifacts landed, ledger unreconciled
+
+Implementation artifacts for the intended Task 8–11 outcomes have landed:
+contracts, company evidence, bounded provider-assisted synthesis, and
+deterministic Decision v2 exist in code and are exercised by the Gate B
+readiness package. The per-item ledger was never reconciled, and **this section
+does not infer completion of any individual checklist item or acceptance
+criterion**. `docs/evidence/product-search-gate-b/README.md` is historical, and
+`traceability-current-v2.md` is explicitly marked pre-deletion and still lists
+partial, broken and unreachable entries. Open issues #9 and #10 show the live
+composition is not confirmed. No box in Tasks 8–11 may be ticked without a
+one-to-one audit against evidence.
+
+### Redesign Task 12 / Gate B — incomplete
+
+Task 12 remains incomplete. The historical Gate B v3 launch attempt of
+2026-08-21T13:38:18Z failed before `ExecStartPre` with `226/NAMESPACE` and
+recorded `recommendation: request_revision` in
+`docs/evidence/product-search-gate-b/owner-decision.md`
+(`owner_decision: pending`, `task_13_authorized: false`). Provider outcome was
+`0/48` calls and `USD 0.00`. **No benchmark result and no current owner verdict
+exist.**
+
+That attempt is not retryable under its own at-most-once policy, but the
+machinery it depended on has since been retired: `2897d401c0` retired the
+at-most-once launch fortress, `1bc639f7c1` retired the unattended machinery, and
+`2780543019` replaced every `ReadWritePaths` entry with `StateDirectory`,
+removing both verified `226/NAMESPACE` causes and deleting receipt plumbing,
+the `EnvironmentFile`, and the approval window with the protocol they served.
+A future run therefore needs a **new reviewed manifest, corpus, runtime and
+spend authorization** — not a resurrected v3 receipt, checkpoint or window.
+
+---
+
+## Current execution order (agreed 2026-08-24)
+
+Three initiatives stand between here and a live Gate B verdict. They are ordered
+by causality, not importance. Nothing below re-opens Gate A.
+
+### Order 1: Restore a trustworthy live Gate B composition
+
+Internal order is causal and may not be permuted.
+
+1. **Seal the authority record after enrichment, not before.**
+   `_AuthorityRecordingStore` (`job_intel/product_search/gate_b_evidence_runner_v1.py`)
+   adds five authority fields after `capability.seal_record(...)`, on both
+   `save`/`save_exclusive` and `load` (`:1414`), so the stored record no longer
+   matches its own seal and `RecordingStore.load` rejects it as corrupt. The
+   authority fields also sit outside the seal and are not covered by HMAC.
+   Tracked as issue #9.
+2. **Carry one row from `dispatch` through `recordings.verify`.**
+   Four independent blockers: the redacted `provider_payload` is validated as a
+   full `EvidenceSynthesisInputV2`; the ledger and the recording require one SHA
+   from two different pieces of evidence; the keyed verifier is disabled by
+   removing the discriminator it is meant to protect; a publish failure after
+   ledger commit leaves a paid outcome with no decision and no resume path.
+   Tracked as issue #10; red test
+   `tests/product_search/test_gate_b_full_composition_e2e.py`.
+3. **Make the built-artifact smoke prove the composition.**
+   `tests/product_search/gate_b_cli_smoke_fixture.py` creates no spend record, so
+   `scripts/gate_b_composition_smoke.py` dies at `spend_record_missing` before any
+   work; timeouts do not account for artifact build time. Tracked as issue #8.
+   **Definition of done includes binding the smoke to the single corpus authority
+   defined in Order 2** — it must read and verify that authority, not a hardcoded
+   SHA, which would go stale again after the Order 2 rebuild.
+
+Rationale for the position: this is the only order that needs neither new data
+nor an owner decision, and until one row completes the live path, no benchmark
+can exist at all. A corpus defect makes a benchmark wrong; this defect makes it
+nonexistent.
+
+### Order 2: Single corpus authority and valid coverage
+
+1. **Name one canonical corpus authority and prove the whole live path consumes
+   it.** The pin is currently split: `5b8e29b0…` in
+   `job_intel/product_search/gate_b.py:124` and
+   `docs/evidence/product-search-gate-b/v3-fragment-allowlist.yaml`, while
+   `b1db802d…` remains in `job_intel/product_search/input_materialization.py:45,54`,
+   in `docs/evidence/product-search-gate-b/benchmark-summary.json`, in the Gate B
+   README and owner-decision front matter, and in
+   `tests/product_search/gate_b_cli_smoke_fixture.py:37` plus six other tests.
+   The fix is a machine-readable authority that consumers read and verify — not
+   one constant replaced by another.
+2. **Record a representativeness contract.** The rebuilt corpus
+   (`715c334cf1`, selection
+   `deterministic-content-eligible-coverage-first-stratified-round-robin-v2`,
+   `eligible 1193 / excluded 121`, min description > 500) removed the SERP and
+   aggregator noise, and with it the geographic coverage. Measured composition:
+   families `greenhouse 28 / ashby 19 / remoteok 1`; lanes `global_ats 47` and
+   `global_remote 1`; eight companies; seven of the eight Search Contract lanes
+   and `chief_product` unrepresented. A product verdict on that sample is not
+   generalisable without an explicit stated limitation. The manifest itself sets
+   `repeat_after_collection_fixes: true`.
+3. **Recover coverage at the collector.** SmartRecruiters evidence stores an
+   empty description although the already-fetched detail response carries
+   `jobAd.sections` (issue #5): 500 unique records, currently the exact
+   difference between `canonical_current 1814` and
+   `minimum_evidence_sufficient 1314`. A fix therefore *potentially* restores up
+   to 500 rows, up to +38 % of the selection denominator, **after revalidation** —
+   the arithmetic bounds the ceiling and does not prove that every repaired row
+   passes the remaining eligibility predicates. LinkedIn evidence stores the
+   title as the description (issue #4): only 7 unique records after
+   canonicalisation, so its value is independent non-ATS coverage rather than
+   volume, and the effort must stay proportional to seven rows.
+   **Both fixes must be additive, outside the protected scraper files.** Neither
+   issue authorizes relaxing global constraint 4 or the protected-path freeze; if
+   the evidence cannot be recovered additively, stop and obtain a separately
+   approved protected-path or SoT amendment.
+4. **Rebuild the corpus and repeat the smoke on the final authority.**
+
+Rationale for the position: strictly between Order 1 and Order 3. The pipe must
+be able to execute for a benchmark to happen; the sample must be valid for its
+result to mean anything.
+
+### Order 3: Benchmark Decision v2 and take the owner decision
+
+Run the live benchmark on the corpus from Order 2, produce the six-dimension
+audit, deterministic replay, provider-failure behaviour, and cost/latency
+evidence, complete the human audit, and record an explicit
+`approve` / `revise` / `stop`. Only `approve` authorizes Redesign Task 13.
+
+This is not a rerun of the 2026-08-21 attempt, which its own at-most-once policy
+forbids retrying. The current supervised path requires a **new reviewed
+manifest, corpus, runtime and spend authorization**; the receipt, checkpoint and
+approval-window protocol that attempt used no longer exists, and the two
+`226/NAMESPACE` causes were removed by `2780543019` rather than patched.
+
+Rationale for the position: it consumes the output of Orders 1 and 2 and cannot
+physically precede them. Launched early, it returns a verdict on an input that
+is either unexecutable or unrepresentative.
+
+### Discovered work
+
+➕ **Corpus authority is split and corpus representativeness is unrecorded.**
+Found 2026-08-24 during this reconciliation; no issue exists for it yet. Both
+are folded into Order 2 above. If Order 2 is deferred, this finding must be
+filed separately rather than carried in this plan alone.
+
+### Out of scope of these three, tracked separately
+
+- Publication of canonical work to `origin` — reconciled 2026-08-24, pushed
+  `0250564db6..e06e3aceeb`; `local/customizations...origin` is now `0 0`.
+- Restoring legacy Job Intel from its recorded `masked` hold — owner decision,
+  still absent.
+- Issues #2, #3, #6 — not blockers for the current Gate B execution order. #6
+  arose in company-evidence tests and is topically related, but it does not
+  block the live composition.
+
+
 ## Phase gates
 
 | Gate | Required evidence | Owner decision |
