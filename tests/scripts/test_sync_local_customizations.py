@@ -197,12 +197,18 @@ def test_both_gate_runs_receive_the_fetched_upstream_sha(world):
 
     boundaries, worktrees = set(), set()
     for call in calls:
+        # Длина проверяется явно: без неё вызов вида `--boundary SHA`, вовсе без
+        # worktree, прошёл бы всё остальное — call[-1] оказался бы тем же SHA,
+        # оба множества стали бы размера один, и second-parent тоже сошёлся бы.
+        # Тест доказывал бы идентичность границы, но не форму вызова.
+        assert len(call) == 3, f"expected `--boundary <sha> <worktree>`: {call}"
         assert call[0] == "--boundary", f"the boundary was not passed: {call}"
         assert re.fullmatch(r"[0-9a-f]{40}", call[1]), (
             f"the boundary is not a full immutable SHA: {call}"
         )
+        assert call[2] != call[1], f"the worktree is the boundary again: {call}"
         boundaries.add(call[1])
-        worktrees.add(call[-1])
+        worktrees.add(call[2])
 
     assert len(boundaries) == 1, f"the two runs measured from different commits: {calls}"
     assert len(worktrees) == 1, f"the two runs used different worktrees: {calls}"
