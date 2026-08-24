@@ -207,6 +207,15 @@ def _node_run(
     }
 
 
+def _manifest(*entries: tuple[str, bool, bool]) -> dict:
+    return {
+        "tests": [
+            {"path": path, "exists_pre": exists_pre, "exists_post": exists_post}
+            for path, exists_pre, exists_post in entries
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("case", "expected"),
     [
@@ -221,7 +230,7 @@ def _node_run(
                     collected={"tests/test_common.py::test_added_upstream"},
                     failed={"tests/test_common.py::test_added_upstream"},
                 ),
-                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+                "manifest": _manifest(("tests/test_common.py", True, True)),
             },
             {
                 "common_path": [
@@ -232,6 +241,7 @@ def _node_run(
                     }
                 ],
                 "post_only_path": [],
+                "pre_existing": [],
                 "unknown": [],
             },
             id="upstream-node-pass-merged-node-fail",
@@ -247,7 +257,7 @@ def _node_run(
                     collected={"tests/test_common.py::test_red_upstream"},
                     failed={"tests/test_common.py::test_red_upstream"},
                 ),
-                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+                "manifest": _manifest(("tests/test_common.py", True, True)),
             },
             {
                 "common_path": [
@@ -258,6 +268,7 @@ def _node_run(
                     }
                 ],
                 "post_only_path": [],
+                "pre_existing": [],
                 "unknown": [],
             },
             id="upstream-node-fail-merged-node-fail",
@@ -270,9 +281,7 @@ def _node_run(
                     collected={"tests/test_post_only.py::test_local_node"},
                     failed={"tests/test_post_only.py::test_local_node"},
                 ),
-                "path_presence": {
-                    "tests/test_post_only.py": {"pre": False, "post": True}
-                },
+                "manifest": _manifest(("tests/test_post_only.py", False, True)),
             },
             {
                 "common_path": [],
@@ -283,6 +292,7 @@ def _node_run(
                         "classification": "merge_resolution_or_local_introduced",
                     }
                 ],
+                "pre_existing": [],
                 "unknown": [],
             },
             id="node-absent-from-baseline-and-upstream",
@@ -293,13 +303,24 @@ def _node_run(
                 "upstream_parent": _node_run(
                     collected=set(), failed=set(), collect_ok=False
                 ),
-                "merged": _node_run(collected=set(), failed=set()),
-                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+                "merged": _node_run(
+                    collected={"tests/test_common.py::test_collect_unknown"},
+                    failed={"tests/test_common.py::test_collect_unknown"},
+                ),
+                "manifest": _manifest(("tests/test_common.py", True, True)),
             },
             {
                 "common_path": [],
                 "post_only_path": [],
-                "unknown": [{"source": "upstream_parent", "stage": "collect"}],
+                "pre_existing": [],
+                "unknown": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_collect_unknown",
+                        "source": "upstream_parent",
+                        "stage": "collect",
+                    }
+                ],
             },
             id="upstream-collect-unreadable",
         ),
@@ -315,14 +336,150 @@ def _node_run(
                     collected={"tests/test_common.py::test_probe"},
                     failed={"tests/test_common.py::test_probe"},
                 ),
-                "path_presence": {"tests/test_common.py": {"pre": True, "post": True}},
+                "manifest": _manifest(("tests/test_common.py", True, True)),
             },
             {
                 "common_path": [],
                 "post_only_path": [],
-                "unknown": [{"source": "upstream_parent", "stage": "probe"}],
+                "pre_existing": [],
+                "unknown": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_probe",
+                        "source": "upstream_parent",
+                        "stage": "probe",
+                    }
+                ],
             },
             id="upstream-probe-unreadable",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(
+                    collected={"tests/test_common.py::test_regression"},
+                    failed=set(),
+                ),
+                "upstream_parent": _node_run(
+                    collected={"tests/test_common.py::test_regression"},
+                    failed=set(),
+                ),
+                "merged": _node_run(
+                    collected={"tests/test_common.py::test_regression"},
+                    failed={"tests/test_common.py::test_regression"},
+                ),
+                "manifest": _manifest(("tests/test_common.py", True, True)),
+            },
+            {
+                "common_path": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_regression",
+                        "classification": "fork_regression",
+                    }
+                ],
+                "post_only_path": [],
+                "pre_existing": [],
+                "unknown": [],
+            },
+            id="baseline-pass-merged-fail",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(
+                    collected={"tests/test_common.py::test_preexisting"},
+                    failed={"tests/test_common.py::test_preexisting"},
+                ),
+                "upstream_parent": _node_run(
+                    collected={"tests/test_common.py::test_preexisting"},
+                    failed=set(),
+                ),
+                "merged": _node_run(
+                    collected={"tests/test_common.py::test_preexisting"},
+                    failed={"tests/test_common.py::test_preexisting"},
+                ),
+                "manifest": _manifest(("tests/test_common.py", True, True)),
+            },
+            {
+                "common_path": [],
+                "post_only_path": [],
+                "pre_existing": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_preexisting",
+                        "classification": "pre_existing_failure",
+                    }
+                ],
+                "unknown": [],
+            },
+            id="baseline-fail-merged-fail-is-preexisting",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(
+                    collected={
+                        "tests/z.py::test_z",
+                        "tests/a.py::test_a",
+                    },
+                    failed=set(),
+                ),
+                "merged": _node_run(
+                    collected={
+                        "tests/z.py::test_z",
+                        "tests/a.py::test_a",
+                    },
+                    failed={
+                        "tests/z.py::test_z",
+                        "tests/a.py::test_a",
+                    },
+                ),
+                "manifest": _manifest(
+                    ("tests/z.py", True, True), ("tests/a.py", True, True)
+                ),
+            },
+            {
+                "common_path": [
+                    {
+                        "path": "tests/a.py",
+                        "nodeid": "tests/a.py::test_a",
+                        "classification": "fork_compatibility_failure",
+                    },
+                    {
+                        "path": "tests/z.py",
+                        "nodeid": "tests/z.py::test_z",
+                        "classification": "fork_compatibility_failure",
+                    },
+                ],
+                "post_only_path": [],
+                "pre_existing": [],
+                "unknown": [],
+            },
+            id="classification-output-is-sorted",
+        ),
+        pytest.param(
+            {
+                "baseline": _node_run(collected=set(), failed=set()),
+                "upstream_parent": _node_run(collected=set(), failed=set()),
+                "merged": _node_run(
+                    collected=set(),
+                    failed={"tests/test_common.py::test_not_collected"},
+                ),
+                "manifest": _manifest(("tests/test_common.py", True, True)),
+            },
+            {
+                "common_path": [],
+                "post_only_path": [],
+                "pre_existing": [],
+                "unknown": [
+                    {
+                        "path": "tests/test_common.py",
+                        "nodeid": "tests/test_common.py::test_not_collected",
+                        "source": "merged",
+                        "stage": "outcome",
+                    }
+                ],
+            },
+            id="failed-node-not-collected-is-unknown",
         ),
     ],
 )
@@ -332,7 +489,12 @@ def test_classification_matrix(case, expected):
         "node-aware classifier is not implemented; classification matrix "
         f"case={case!r}"
     )
-    assert classifier(**case) == expected
+    assert classifier(
+        baseline=case["baseline"],
+        upstream_parent=case["upstream_parent"],
+        merged=case["merged"],
+        manifest=case["manifest"],
+    ) == expected
 
 
 def test_same_failures_before_and_after_mean_no_regression():
