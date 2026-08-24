@@ -16,6 +16,7 @@ Three defects from the 2026-07-20 sync incident:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -977,6 +978,81 @@ class TestApplyMergeIsGatedOnForkTests:
         assert res["status"] == "failed", proc.stderr
         assert res["failed_stage"] == "test-gate"
         assert _git(repo, "rev-parse", "HEAD") == local_head
+
+
+class TestRunnerFinalizeReceiptSeam:
+    def test_real_runner_receipt_matches_finalize_contract(self, tmp_path):
+        """The production runner and finalize receipt protocol share one seam."""
+        repo = tmp_path / "receipt-repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "local/customizations")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "README.md").write_text("base\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base")
+        before = _git(repo, "rev-parse", "HEAD")
+        tests = repo / "tests"
+        tests.mkdir()
+        (tests / "test_receipt.py").write_text("def test_receipt(): pass\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "add test")
+        after = _git(repo, "rev-parse", "HEAD")
+
+        state = tmp_path / "state"
+        report = upstream_sync_gate.prepare_selection_attempt(
+            state,
+            before=before,
+            after=after,
+            boundary=before,
+            before_paths=[],
+            after_paths=["tests/test_receipt.py"],
+            boundary_paths=[],
+            changed_paths=[],
+        )
+        manifest = Path(report["attempt_dir"]) / "gate-selection.json"
+        stderr_log = tmp_path / "runner.stderr"
+        env = {
+            **os.environ,
+            "HERMES_PYTHON": sys.executable,
+            "HERMES_CONTROL_PYTHON": sys.executable,
+            "HERMES_UPSTREAM_SYNC_GATE": str(
+                REPO_ROOT / "scripts" / "upstream_sync_gate.py"
+            ),
+        }
+        proc = subprocess.run(
+            [
+                "bash",
+                str(REPO_ROOT / "scripts" / "run-fork-tests.sh"),
+                "--print-selection",
+                "--boundary",
+                before,
+                "--selection-from",
+                str(manifest),
+                "--attempt-root",
+                str(state / "attempts"),
+                str(repo),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        stderr_log.write_text(proc.stderr)
+
+        expected = (
+            "fork test receipt: contract=v1 source=manifest manifest_sha256="
+            f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}"
+        )
+        receipt_check = subprocess.run(
+            ["grep", "-Fqx", expected, str(stderr_log)],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert receipt_check.returncode == 0, proc.stderr
+        assert proc.stdout == "tests/test_receipt.py\n"
 
 
 class TestGateSelectionManifest:
