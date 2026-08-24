@@ -92,6 +92,60 @@ def test_manifest_universe_is_union():
     }
 
 
+def test_manifest_builder_owns_test_path_filtering():
+    """Raw git listings are filtered once, inside the pure builder."""
+    builder = getattr(upstream_sync_gate, "build_selection_manifest", None)
+    assert callable(builder), "selection-manifest builder is not implemented"
+
+    manifest = builder(
+        before="1" * 40,
+        after="2" * 40,
+        boundary="3" * 40,
+        before_paths=[
+            "tests/test_kept.py",
+            "tests/__init__.py",
+            "tests/fixtures/helper.py",
+            "tests/._generated.py",
+            "tests/README.md",
+        ],
+        after_paths=[
+            "tests/test_kept.py",
+            "tests/__init__.py",
+            "tests/fixtures/helper.py",
+            "tests/._generated.py",
+            "tests/README.md",
+        ],
+        boundary_paths=[],
+        changed_paths=[
+            "tests/test_kept.py",
+            "tests/__init__.py",
+            "tests/fixtures/helper.py",
+            "tests/._generated.py",
+            "tests/README.md",
+        ],
+    )
+
+    assert [item["path"] for item in manifest["tests"]] == ["tests/test_kept.py"]
+
+
+def test_manifest_rejects_changed_path_absent_from_both_trees():
+    """A correctly bound before..after diff cannot name a path in neither tree."""
+    builder = getattr(upstream_sync_gate, "build_selection_manifest", None)
+    assert callable(builder), "selection-manifest builder is not implemented"
+    poisoned = "tests/test_from_another_candidate.py"
+
+    with pytest.raises(ValueError, match=poisoned):
+        builder(
+            before="1" * 40,
+            after="2" * 40,
+            boundary="3" * 40,
+            before_paths=[],
+            after_paths=[],
+            boundary_paths=[],
+            changed_paths=[poisoned],
+        )
+
+
 def test_clean_merge_reports_no_conflicts():
     report = parse_merge_tree(CLEAN)
     assert report.tree_oid == "fa64e4b20356cb615af29bad8ffc5ed5f4e95221"

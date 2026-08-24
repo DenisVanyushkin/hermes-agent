@@ -327,19 +327,61 @@ merge_passes_fork_tests() {
   [ -f "$gate" ] || gate="$REPO/scripts/upstream_sync_gate.py"
   local py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  local wt baseline post rc new_failures
+  local wt baseline post rc new_failures listing_dir
+  local before_paths after_paths boundary_paths changed_paths
+  local selection_report attempt_dir
+  listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
+  before_paths="$listing_dir/before.paths"
+  after_paths="$listing_dir/after.paths"
+  boundary_paths="$listing_dir/boundary.paths"
+  changed_paths="$listing_dir/changed.paths"
+  if ! git -C "$REPO" ls-tree -rz --name-only "$before" -- tests/ >"$before_paths" 2>>"$DETAIL_LOG" ||
+     ! git -C "$REPO" ls-tree -rz --name-only "$after" -- tests/ >"$after_paths" 2>>"$DETAIL_LOG" ||
+     ! git -C "$REPO" ls-tree -rz --name-only "$boundary" -- tests/ >"$boundary_paths" 2>>"$DETAIL_LOG" ||
+     ! git -C "$REPO" diff -z --name-only "$before" "$after" -- tests/ >"$changed_paths" 2>>"$DETAIL_LOG"; then
+    rm -f "$before_paths" "$after_paths" "$boundary_paths" "$changed_paths"
+    rmdir "$listing_dir" 2>/dev/null || true
+    echo "could not list the trees for the test selection manifest" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! selection_report="$(
+    "$py" "$gate" prepare-selection \
+      --state-dir "$STATE_DIR" \
+      --before "$before" \
+      --after "$after" \
+      --boundary "$boundary" \
+      --before-paths "$before_paths" \
+      --after-paths "$after_paths" \
+      --boundary-paths "$boundary_paths" \
+      --changed-paths "$changed_paths" 2>>"$DETAIL_LOG"
+  )"; then
+    rm -f "$before_paths" "$after_paths" "$boundary_paths" "$changed_paths"
+    rmdir "$listing_dir" 2>/dev/null || true
+    echo "could not build the test selection manifest" >>"$DETAIL_LOG"
+    return 1
+  fi
+  rm -f "$before_paths" "$after_paths" "$boundary_paths" "$changed_paths"
+  rmdir "$listing_dir" 2>/dev/null || true
+  if ! attempt_dir="$(
+    printf '%s' "$selection_report" | "$py" -c \
+      'import json,sys; print(json.load(sys.stdin)["attempt_dir"])'
+  )"; then
+    echo "could not read the attempt namespace from the selection report" >>"$DETAIL_LOG"
+    return 1
+  fi
+  printf 'gate selection report: %s\n' "$selection_report" >>"$DETAIL_LOG"
   wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
-  baseline="$(mktemp)"
-  post="$(mktemp)"
+  baseline="$attempt_dir/gate-baseline.log"
+  post="$attempt_dir/gate-post.log"
   if ! git -C "$REPO" worktree add --detach "$wt" "$before" >>"$DETAIL_LOG" 2>&1; then
-    rm -rf "$wt" "$baseline" "$post"
+    rm -rf "$wt"
     echo "could not create a worktree for the test gate" >>"$DETAIL_LOG"
     return 1
   fi
   "$test_cmd" --boundary "$boundary" "$wt" >"$baseline" 2>&1 || true
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
-    rm -rf "$wt" "$baseline" "$post"
+    rm -rf "$wt"
     echo "could not check out the merge in the test-gate worktree" >>"$DETAIL_LOG"
     return 1
   fi
@@ -364,10 +406,8 @@ merge_passes_fork_tests() {
       echo "baseline tail:"; tail -n 5 "$baseline"
       echo "post-merge tail:"; tail -n 5 "$post"
     } >>"$DETAIL_LOG"
-    rm -f "$baseline" "$post"
     return 1
   fi
-  rm -f "$baseline" "$post"
   if [ -n "$new_failures" ]; then
     {
       echo "the merge introduces test failures:"
@@ -379,7 +419,7 @@ merge_passes_fork_tests() {
     local failures_file
     failures_file="$(mktemp)"
     printf '%s\n' "$new_failures" >"$failures_file"
-    python3 - "$STATE_DIR/gate-failures.json" "$after" "$before" "$failures_file" <<'PY' || true
+    "$py" - "$attempt_dir/gate-failures.json" "$after" "$before" "$failures_file" <<'PY' || true
 import datetime, json, sys
 path, merge_sha, before, failures_path = sys.argv[1:5]
 with open(failures_path, encoding="utf-8") as fh:
@@ -389,6 +429,7 @@ json.dump({"merge_sha": merge_sha, "before": before, "new_failures": failures,
           open(path, "w"), ensure_ascii=False, indent=1)
 PY
     rm -f "$failures_file"
+    cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
     return 1
   fi
   rm -f "$STATE_DIR/gate-failures.json"

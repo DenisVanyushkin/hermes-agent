@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import upstream_sync_gate
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
 SYNC = REPO_ROOT / "scripts" / "sync-local-customizations.sh"
@@ -570,6 +572,37 @@ def _make_divergent_repo(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, local_head, upstream_head
 
 
+def _make_repo_with_deleted_upstream_test(tmp_path: Path) -> tuple[Path, str, str]:
+    """Local fork plus an upstream tip that deletes one test and adds another."""
+    repo = tmp_path / "manifest-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "local/customizations")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "test_upstream_kept.py").write_text("def test_kept(): pass\n")
+    deleted = tests / "test_upstream_deleted.py"
+    deleted.write_text("def test_deleted(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "upstream base")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    (tests / "test_fork_only.py").write_text("def test_fork_only(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fork test")
+    local_head = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "-qb", "up", base)
+    deleted.unlink()
+    (tests / "test_upstream_added.py").write_text("def test_added(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "upstream replaces test")
+    upstream_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "local/customizations")
+    return repo, local_head, upstream_head
+
+
 def _scratch_merge(repo: Path, state: Path, base: str, other: str, name="scratch") -> str:
     """Clone *repo* into the state dir, merge *other* into *base*, return the SHA."""
     scratch = state / name
@@ -868,6 +901,76 @@ class TestApplyMergeIsGatedOnForkTests:
         assert res["status"] == "failed", proc.stderr
         assert res["failed_stage"] == "test-gate"
         assert _git(repo, "rev-parse", "HEAD") == local_head
+
+
+class TestGateSelectionManifest:
+    def test_interrupted_manifest_write_leaves_no_partial_file(
+        self, tmp_path, monkeypatch
+    ):
+        writer = getattr(upstream_sync_gate, "write_json_atomic", None)
+        assert callable(writer), "atomic selection-manifest writer is not implemented"
+        attempt = tmp_path / "attempts" / "candidate" / "1"
+        attempt.mkdir(parents=True)
+        target = attempt / "gate-selection.txt"
+
+        def interrupt_replace(source, destination):
+            assert Path(source).parent == target.parent
+            assert Path(destination) == target
+            raise OSError("simulated interruption before rename")
+
+        monkeypatch.setattr(upstream_sync_gate.os, "replace", interrupt_replace)
+        with pytest.raises(OSError, match="simulated interruption"):
+            writer(target, {"schema_version": "test"})
+
+        assert not target.exists()
+        assert list(attempt.iterdir()) == []
+
+    def test_manifest_reports_deleted_path_as_pre_only(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(
+            tmp_path
+        )
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        attempts = sorted(
+            path
+            for path in (state / "attempts").glob("*/*")
+            if path.is_dir()
+        )
+        assert len(attempts) == 1, proc.stderr + (state / "finalize-detail.log").read_text()
+        attempt = attempts[0]
+        manifest = json.loads((attempt / "gate-selection.txt").read_text())
+        deleted = "tests/test_upstream_deleted.py"
+        assert {item["path"]: item for item in manifest["tests"]}[deleted] == {
+            "path": deleted,
+            "exists_pre": True,
+            "exists_post": False,
+        }
+
+        metadata = json.loads((attempt / "attempt.json").read_text())
+        assert metadata["schema_version"] == "upstream-sync-gate-attempt/v1"
+        assert metadata["before"] == local_head
+        assert metadata["after"] == merge_sha
+        assert metadata["boundary"] == upstream_head
+        assert metadata["generation"] == 1
+        assert metadata["run_id"] == f"{metadata['candidate_id']}:1"
+        assert attempt.parent.name == metadata["candidate_id"]
+        assert attempt.name == str(metadata["generation"])
+        assert (attempt / "gate-baseline.log").exists()
+        assert (attempt / "gate-post.log").exists()
+
+        detail = (state / "finalize-detail.log").read_text()
+        report_line = next(
+            line.removeprefix("gate selection report: ")
+            for line in detail.splitlines()
+            if line.startswith("gate selection report: ")
+        )
+        report = json.loads(report_line)
+        assert report["pre_only_paths"] == [deleted]
+        assert report["pre_only_path_count"] == 1
 
 
 class TestHostRecordsDecisionsIntoMemory:
