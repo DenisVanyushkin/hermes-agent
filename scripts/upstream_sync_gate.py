@@ -520,6 +520,19 @@ def classify_node_failures(
     for nodeid in sorted(failed["merged"]):
         path = nodeid.split("::", 1)[0]
         path_presence = presence.get(path)
+        # A failure already present in baseline is informational even when it
+        # came from a caller's broader legacy sensor and therefore has no
+        # entry in the bound manifest. It must never become an admission
+        # failure merely because the new manifest does not describe it.
+        if nodeid in failed["baseline"] and path_presence is None:
+            result["pre_existing"].append(
+                {
+                    "path": path,
+                    "nodeid": nodeid,
+                    "classification": "pre_existing_failure",
+                }
+            )
+            continue
         if path_presence is None or not path_presence[1]:
             result["unknown"].append(
                 {
@@ -588,6 +601,46 @@ def classify_node_failures(
     return result
 
 
+def build_upstream_probe_request(
+    *,
+    baseline: dict[str, Any],
+    merged: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Select the exact merged failures that need an upstream-parent probe.
+
+    Presence is path-level, but the probe is node-level: probing a whole file
+    can hide the fact that only one newly-added node needs comparison.  The
+    request is therefore deliberately derived from the merged failure set and
+    contains no path that is not present in the post-merge tree.
+    """
+    baseline_collected = _node_ids(baseline, "collected_nodeids")
+    baseline_failed = _node_ids(baseline, "failed_nodeids")
+    merged_collected = _node_ids(merged, "collected_nodeids")
+    merged_failed = _node_ids(merged, "failed_nodeids")
+    if baseline_failed - baseline_collected:
+        raise ValueError("baseline failed nodeids are not a subset of collected nodeids")
+    if merged_failed - merged_collected:
+        raise ValueError("merged failed nodeids are not a subset of collected nodeids")
+    if baseline.get("collect_ok") is not True or merged.get("collect_ok") is not True:
+        raise ValueError("cannot build an upstream probe request from an unreadable collect")
+    if baseline.get("probe_ok") is not True or merged.get("probe_ok") is not True:
+        raise ValueError("cannot build an upstream probe request from an unreadable probe")
+
+    presence = _manifest_presence(manifest)
+    newly_seen = merged_failed - baseline_failed
+    paths: set[str] = set()
+    for nodeid in newly_seen:
+        path = nodeid.split("::", 1)[0]
+        path_presence = presence.get(path)
+        if path_presence is None or not path_presence[1]:
+            raise ValueError(
+                f"newly failed nodeid {nodeid} has no post-merge test path in the manifest"
+            )
+        paths.add(path)
+    return {"nodeids": sorted(newly_seen), "paths": sorted(paths)}
+
+
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
 _SUMMARY_LINE = re.compile(
     r"^=*\s*\d+\s+(?:failed|passed|error)\b.*\bin\s+[\d.]+s", re.MULTILINE
@@ -629,6 +682,27 @@ def _main(argv: list[str] | None = None) -> int:
     p_nf.add_argument("--baseline", required=True)
     p_nf.add_argument("--post", required=True)
 
+    p_probe = sub.add_parser(
+        "probe-request", help="select exact newly failing nodeids for the upstream probe"
+    )
+    p_probe.add_argument("--baseline", required=True)
+    p_probe.add_argument("--merged", required=True)
+    p_probe.add_argument("--manifest", required=True)
+
+    p_classify = sub.add_parser(
+        "classify-node-failures", help="classify structured baseline, probe and merged outcomes"
+    )
+    p_classify.add_argument("--baseline", required=True)
+    p_classify.add_argument("--upstream-parent", required=True)
+    p_classify.add_argument("--merged", required=True)
+    p_classify.add_argument("--manifest", required=True)
+
+    p_outcome = sub.add_parser(
+        "node-outcome", help="turn one pytest log into a minimal structured node outcome"
+    )
+    p_outcome.add_argument("--log", required=True)
+    p_outcome.add_argument("--expected-nodeids")
+
     p_selection = sub.add_parser(
         "prepare-selection", help="build and persist one gate selection manifest"
     )
@@ -667,6 +741,56 @@ def _main(argv: list[str] | None = None) -> int:
                 Path(args.baseline).read_text(encoding="utf-8"),
                 Path(args.post).read_text(encoding="utf-8"),
             )
+        elif args.cmd == "probe-request":
+            baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+            merged = json.loads(Path(args.merged).read_text(encoding="utf-8"))
+            manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+            print(json.dumps(
+                build_upstream_probe_request(
+                    baseline=baseline, merged=merged, manifest=manifest
+                ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ))
+            return 0
+        elif args.cmd == "classify-node-failures":
+            classification = classify_node_failures(
+                baseline=json.loads(Path(args.baseline).read_text(encoding="utf-8")),
+                upstream_parent=json.loads(
+                    Path(args.upstream_parent).read_text(encoding="utf-8")
+                ),
+                merged=json.loads(Path(args.merged).read_text(encoding="utf-8")),
+                manifest=json.loads(Path(args.manifest).read_text(encoding="utf-8")),
+            )
+            blocking = []
+            for key in ("common_path", "post_only_path"):
+                blocking.extend(classification[key])
+            classification["blocking_failures"] = sorted(
+                blocking, key=lambda item: (item["path"], item["nodeid"])
+            )
+            print(json.dumps(classification, ensure_ascii=False, sort_keys=True))
+            return 0
+        elif args.cmd == "node-outcome":
+            log = Path(args.log).read_text(encoding="utf-8")
+            failed = sorted(_failures(log))
+            expected = None
+            if args.expected_nodeids:
+                expected = json.loads(
+                    Path(args.expected_nodeids).read_text(encoding="utf-8")
+                )
+                if not isinstance(expected, list) or not all(
+                    isinstance(item, str) for item in expected
+                ):
+                    raise ValueError("expected nodeids must be a JSON string list")
+            collected = sorted(set(expected if expected is not None else failed))
+            unexpected = sorted(set(failed) - set(collected))
+            print(json.dumps({
+                "collect_ok": not unexpected,
+                "probe_ok": not unexpected,
+                "collected_nodeids": collected,
+                "failed_nodeids": sorted(set(failed) & set(collected)),
+            }, ensure_ascii=False, sort_keys=True))
+            return 0
         elif args.cmd == "prepare-selection":
             report = prepare_selection_attempt(
                 Path(args.state_dir),

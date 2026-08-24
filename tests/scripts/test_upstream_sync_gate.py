@@ -497,6 +497,43 @@ def test_classification_matrix(case, expected):
     ) == expected
 
 
+def test_node_probe_scope_selects_exact_newly_seen_failing_nodeids():
+    selector = getattr(upstream_sync_gate, "build_upstream_probe_request", None)
+    assert callable(selector), "node probe request builder is not implemented"
+    post_only_node = (
+        "tests/hermes_cli/test_linux_desktop_entry.py::"
+        "test_exec_prefixes_interpreter_for_env_shebang_python_script"
+    )
+    common_node = "tests/tests.py::test_common_new_failure"
+    baseline = _node_run(
+        collected={"tests/tests.py::test_existing"},
+        failed=set(),
+    )
+    merged = _node_run(
+        collected={
+            "tests/tests.py::test_existing",
+            common_node,
+            post_only_node,
+        },
+        failed={common_node, post_only_node},
+    )
+    request = selector(
+        baseline=baseline,
+        merged=merged,
+        manifest=_manifest(
+            ("tests/hermes_cli/test_linux_desktop_entry.py", False, True),
+            ("tests/tests.py", True, True),
+        ),
+    )
+    assert request == {
+        "nodeids": [post_only_node, common_node],
+        "paths": [
+            "tests/hermes_cli/test_linux_desktop_entry.py",
+            "tests/tests.py",
+        ],
+    }
+
+
 def test_same_failures_before_and_after_mean_no_regression():
     log = _log(["tests/a.py::test_one", "tests/b.py::test_two"])
     assert new_failures(log, log) == []

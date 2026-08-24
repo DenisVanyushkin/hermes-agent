@@ -15,10 +15,12 @@ PRINT_SELECTION=0
 BOUNDARY="${HERMES_UPSTREAM_BOUNDARY:-}"
 SELECTION_FROM=""
 ATTEMPT_ROOT=""
+PROBE_NODEIDS_FROM=""
 LEGACY_SELECTION=0
 BOUNDARY_ARG_SEEN=0
 SELECTION_FROM_ARG_SEEN=0
 ATTEMPT_ROOT_ARG_SEEN=0
+PROBE_NODEIDS_ARG_SEEN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print-selection) PRINT_SELECTION=1; shift ;;
@@ -71,6 +73,22 @@ while [ "$#" -gt 0 ]; do
       fi
       ATTEMPT_ROOT_ARG_SEEN=1
       ATTEMPT_ROOT="${1#--attempt-root=}"; shift ;;
+    --probe-nodeids-from)
+      if [ "$PROBE_NODEIDS_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --probe-nodeids-from option" >&2
+        exit 2
+      fi
+      PROBE_NODEIDS_ARG_SEEN=1
+      shift
+      [ "$#" -gt 0 ] || { echo "FAILED: --probe-nodeids-from needs a value" >&2; exit 2; }
+      PROBE_NODEIDS_FROM="$1"; shift ;;
+    --probe-nodeids-from=*)
+      if [ "$PROBE_NODEIDS_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --probe-nodeids-from option" >&2
+        exit 2
+      fi
+      PROBE_NODEIDS_ARG_SEEN=1
+      PROBE_NODEIDS_FROM="${1#--probe-nodeids-from=}"; shift ;;
     --) shift; break ;;
     -*) echo "FAILED: unknown option $1" >&2; exit 2 ;;
     *) break ;;
@@ -93,11 +111,15 @@ if [ -z "$BOUNDARY" ]; then
   echo "FAILED: no upstream boundary given; pass --boundary <ref|sha> (or HERMES_UPSTREAM_BOUNDARY). Refusing to guess it from a remote-tracking ref that may lag the commit under test." >&2
   exit 2
 fi
+if [ -n "$PROBE_NODEIDS_FROM" ] && { [ "$LEGACY_SELECTION" -eq 1 ] || [ -n "$SELECTION_FROM" ]; }; then
+  echo "FAILED: probe node selection is ambiguous with another selection mode" >&2
+  exit 2
+fi
 if [ "$LEGACY_SELECTION" -eq 1 ] && [ -n "$SELECTION_FROM" ]; then
   echo "FAILED: selection mode is ambiguous; choose exactly one of --legacy-selection or --selection-from" >&2
   exit 2
 fi
-if [ "$LEGACY_SELECTION" -eq 0 ] && [ -z "$SELECTION_FROM" ]; then
+if [ "$LEGACY_SELECTION" -eq 0 ] && [ -z "$SELECTION_FROM" ] && [ -z "$PROBE_NODEIDS_FROM" ]; then
   echo "FAILED: no selection mode given; choose --legacy-selection or --selection-from" >&2
   exit 2
 fi
@@ -159,6 +181,22 @@ if [ -n "$SELECTION_FROM" ]; then
   fi
   if [ -n "$selection_output" ]; then
     mapfile -t TESTS <<<"$selection_output"
+  fi
+elif [ -n "$PROBE_NODEIDS_FROM" ]; then
+  if ! mapfile -t TESTS < <(
+    "$CONTROL_PYTHON" - "$PROBE_NODEIDS_FROM" <<'PY'
+import json, sys
+from pathlib import Path
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+nodeids = payload.get("nodeids")
+if not isinstance(nodeids, list) or not nodeids or not all(isinstance(item, str) and item for item in nodeids):
+    raise SystemExit("probe request must contain a non-empty nodeids list")
+for nodeid in nodeids:
+    print(nodeid)
+PY
+  ); then
+    echo "FAILED: probe request is invalid" >&2
+    exit 2
   fi
 else
   mapfile -t OURS < <(

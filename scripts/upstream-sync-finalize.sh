@@ -328,6 +328,8 @@ merge_passes_fork_tests() {
   local py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
   local wt baseline post rc new_failures listing_dir
+  local baseline_nodes merged_nodes upstream_nodes probe_request probe_nodeids
+  local probe_log probe_wt classification_json blocking_count unknown_count
   local before_paths after_paths boundary_paths changed_paths
   local selection_report attempt_dir selection_manifest selection_digest receipt_line
   listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
@@ -418,44 +420,117 @@ merge_passes_fork_tests() {
   # whole thing by hand. The triage reads these.
   cp -f "$baseline" "$STATE_DIR/gate-baseline.log" 2>/dev/null || true
   cp -f "$post" "$STATE_DIR/gate-post.log" 2>/dev/null || true
-  # set +e, not `|| true`: rc 2 (could not compare) must stay distinct from
-  # "no new failures" — the same idiom the sync script uses for this gate.
-  set +e
-  new_failures="$("$py" "$gate" new-failures --baseline "$baseline" --post "$post")"
-  rc=$?
-  set -e
-  if [ "$rc" -eq 2 ]; then
-    {
-      echo "could not compare the two test runs; refusing to land the merge."
-      echo "baseline tail:"; tail -n 5 "$baseline"
-      echo "post-merge tail:"; tail -n 5 "$post"
-    } >>"$DETAIL_LOG"
+  # Node-aware cutover. The old log-difference block below is unreachable
+  # compatibility code until T13 removes its evidence projection; it is not
+  # consulted for this gate verdict.
+  baseline_nodes="$attempt_dir/gate-baseline.nodes.json"
+  merged_nodes="$attempt_dir/gate-merged.nodes.json"
+  upstream_nodes="$attempt_dir/gate-upstream-parent.nodes.json"
+  if ! "$py" "$gate" node-outcome --log "$baseline" >"$baseline_nodes" 2>>"$DETAIL_LOG" ||
+     ! "$py" "$gate" node-outcome --log "$post" >"$merged_nodes" 2>>"$DETAIL_LOG"; then
+    echo "could not parse structured node outcomes; refusing to land the merge" >>"$DETAIL_LOG"
     return 1
   fi
-  if [ -n "$new_failures" ]; then
-    {
-      echo "the merge introduces test failures:"
-      printf '%s\n' "$new_failures" | sed 's/^/  /'
-    } >>"$DETAIL_LOG"
-    # The list travels in a FILE, not a pipe: `python3 - <<PY` already claims
-    # stdin for the script itself, so a piped payload arrives empty and the
-    # evidence file records zero failures for a gate that just blocked.
-    local failures_file
-    failures_file="$(mktemp)"
-    printf '%s\n' "$new_failures" >"$failures_file"
-    "$py" - "$attempt_dir/gate-failures.json" "$after" "$before" "$failures_file" <<'PY' || true
-import datetime, json, sys
-path, merge_sha, before, failures_path = sys.argv[1:5]
-with open(failures_path, encoding="utf-8") as fh:
-    failures = [l.strip() for l in fh.read().splitlines() if l.strip()]
-json.dump({"merge_sha": merge_sha, "before": before, "new_failures": failures,
-           "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-          open(path, "w"), ensure_ascii=False, indent=1)
+
+  probe_request="$attempt_dir/gate-upstream-probe.request.json"
+  if ! "$py" "$gate" probe-request \
+    --baseline "$baseline_nodes" --merged "$merged_nodes" \
+    --manifest "$selection_manifest" >"$probe_request" 2>>"$DETAIL_LOG"; then
+    echo "could not build the narrow upstream-parent probe request; refusing to land the merge" >>"$DETAIL_LOG"
+    return 1
+  fi
+  probe_nodeids="$attempt_dir/gate-upstream-probe.nodeids.json"
+  "$py" - "$probe_request" "$probe_nodeids" <<'PY'
+import json, sys
+from pathlib import Path
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(sys.argv[2]).write_text(json.dumps(request.get("nodeids", [])), encoding="utf-8")
 PY
-    rm -f "$failures_file"
+
+  probe_log="$attempt_dir/gate-upstream-probe.log"
+  if ! "$py" - "$probe_nodeids" <<'PY' >/dev/null
+import json, sys
+from pathlib import Path
+raise SystemExit(0 if json.loads(Path(sys.argv[1]).read_text()) else 1)
+PY
+  then
+    printf '%s\n' '{"collect_ok":true,"probe_ok":true,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
+    : >"$probe_log"
+  else
+    if ! probe_wt="$(mktemp -d -t hermes-upstream-probe-XXXXXX)" ||
+       ! git -C "$REPO" worktree add --detach "$probe_wt" "$boundary" >>"$DETAIL_LOG" 2>&1; then
+      rm -rf "$probe_wt"
+      echo "could not create the upstream-parent probe worktree" >>"$DETAIL_LOG"
+      return 1
+    fi
+    "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_request" "$probe_wt" >"$probe_log" 2>&1 || true
+    if ! "$py" "$gate" node-outcome --log "$probe_log" \
+      --expected-nodeids "$probe_nodeids" >"$upstream_nodes" 2>>"$DETAIL_LOG"; then
+      printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
+    fi
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+  fi
+
+  classification_json="$attempt_dir/gate-classification.json"
+  if ! "$py" "$gate" classify-node-failures \
+    --baseline "$baseline_nodes" --upstream-parent "$upstream_nodes" \
+    --merged "$merged_nodes" --manifest "$selection_manifest" \
+    >"$classification_json" 2>>"$DETAIL_LOG"; then
+    echo "could not classify structured node outcomes; refusing to land the merge" >>"$DETAIL_LOG"
+    return 1
+  fi
+  printf 'node-aware gate classification: %s\n' "$(cat "$classification_json")" >>"$DETAIL_LOG"
+
+  local t11_failures_file
+  t11_failures_file="$(mktemp)"
+  "$py" - "$baseline_nodes" "$merged_nodes" "$t11_failures_file" <<'PY'
+import json, sys
+from pathlib import Path
+baseline = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+merged = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+legacy = sorted(set(merged.get("failed_nodeids", [])) - set(baseline.get("failed_nodeids", [])))
+Path(sys.argv[3]).write_text("\n".join(legacy) + ("\n" if legacy else ""), encoding="utf-8")
+PY
+  blocking_count="$("$py" - "$classification_json" <<'PY'
+import json, sys
+from pathlib import Path
+print(len(json.loads(Path(sys.argv[1]).read_text()).get("blocking_failures", [])))
+PY
+  )"
+  unknown_count="$("$py" - "$classification_json" <<'PY'
+import json, sys
+from pathlib import Path
+print(len(json.loads(Path(sys.argv[1]).read_text()).get("unknown", [])))
+PY
+  )"
+  if [ "$blocking_count" -ne 0 ] || [ "$unknown_count" -ne 0 ]; then
+    {
+      echo "node-aware gate refused to land the merge."
+      echo "blocking_failures=$blocking_count unknown=$unknown_count"
+      echo "classification:"
+      cat "$classification_json"
+    } >>"$DETAIL_LOG"
+    "$py" - "$classification_json" "$attempt_dir/gate-failures.json" "$after" "$before" "$t11_failures_file" <<'PY' || true
+import datetime, json, sys
+from pathlib import Path
+classification = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+legacy = [line.strip() for line in Path(sys.argv[5]).read_text(encoding="utf-8").splitlines() if line.strip()]
+payload = {
+    "schema_version": "upstream-sync-gate-failures/v2",
+    "merge_sha": sys.argv[3],
+    "before": sys.argv[4],
+    **{key: classification.get(key, []) for key in ("common_path", "post_only_path", "pre_existing", "unknown", "blocking_failures")},
+    "new_failures": legacy,
+    "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+Path(sys.argv[2]).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+PY
+    rm -f "$t11_failures_file"
     cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
     return 1
   fi
+  rm -f "$t11_failures_file"
   rm -f "$STATE_DIR/gate-failures.json"
   return 0
 }

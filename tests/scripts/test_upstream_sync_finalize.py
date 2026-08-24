@@ -83,8 +83,7 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
         '  *) shift ;;\n'
         'esac; done\n'
         'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
-        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
-        "echo '1 failed, 5 passed in 2.00s'\n"
+        "echo '0 failed, 5 passed in 2.00s'\n"
     )
     tests_stub.chmod(0o755)
     # Copied by pattern, not by name: a hand-kept list silently omits every new
@@ -873,6 +872,45 @@ class TestApplyMergeIsGatedOnForkTests:
             "both consumers must be confined to the finalizer's attempt root; "
             f"recorded {roots}"
         )
+
+    def test_node_probe_scope_finalizer_replaces_legacy_log_difference(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_tests_stub(scripts)
+
+        gate_calls = tmp_path / "gate-helper-calls.log"
+        real_gate = REPO_ROOT / "scripts" / "upstream_sync_gate.py"
+        (scripts / "upstream_sync_gate.py").write_text(
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            f"log = Path({str(gate_calls)!r})\n"
+            f"real = {str(real_gate)!r}\n"
+            "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+            "with log.open('a', encoding='utf-8') as stream:\n"
+            "    stream.write(command + '\\n')\n"
+            "if command == 'probe-request':\n"
+            "    print(json.dumps({'nodeids': [], 'paths': []}))\n"
+            "    raise SystemExit(0)\n"
+            "if command == 'classify-node-failures':\n"
+            "    print(json.dumps({'common_path': [], 'post_only_path': [], 'pre_existing': [], 'unknown': [], 'blocking_failures': []}))\n"
+            "    raise SystemExit(0)\n"
+            "os.execv(sys.executable, [sys.executable, real, *sys.argv[1:]])\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        commands = gate_calls.read_text().splitlines()
+        assert "classify-node-failures" in commands, commands
+        assert "new-failures" not in commands, commands
 
     def test_missing_runner_receipt_blocks_landing(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
