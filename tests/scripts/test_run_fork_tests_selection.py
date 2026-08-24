@@ -428,13 +428,18 @@ def test_boundary_is_explicit(
         f"so it cannot prove anything: {sorted(stale)}"
     )
 
+    # Окружение чистим явно: раннер принимает HERMES_UPSTREAM_BOUNDARY, и если
+    # она окажется в окружении pytest, «запуск без границы» границу получит,
+    # а тест позеленеет, ничего не проверив.
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+    }
+    env.pop("HERMES_UPSTREAM_BOUNDARY", None)
     result = subprocess.run(
         ["bash", str(RUNNER), "--print-selection", str(repo)],
-        env={
-            **os.environ,
-            "HERMES_PYTHON": str(interpreter),
-            "FAKE_ARGV_FILE": str(argv_file),
-        },
+        env=env,
         capture_output=True,
         text=True,
     )

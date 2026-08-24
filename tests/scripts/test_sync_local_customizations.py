@@ -7,6 +7,7 @@ bare-репозитории в tmp_path, токена нет, гейтвея н�
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -155,6 +156,62 @@ def test_upstream_commits_arrive_as_a_merge_not_a_replay(world):
     assert (fork / "local_feature.py").exists(), "локальная правка обязана уцелеть"
     merges = _git(fork, "rev-list", "--merges", "--count", "origin/main..HEAD")
     assert merges == "1", "обновление должно приезжать merge-коммитом"
+
+
+def _boundary_recording_test_cmd(world) -> tuple[Path, Path]:
+    """Как ``_inert_test_cmd``, но записывает свой argv.
+
+    Обманка обязана остаться идентичной до и после слияния, иначе гейт увидит
+    разные множества падений и упрётся в них вместо проверяемого здесь.
+    """
+    log = world["fork"].parent / "boundary-calls.log"
+    script = world["fork"].parent / "boundary-recording-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> ' + str(log) + "\n"
+        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+        "echo '1 failed, 5 passed in 2.00s'\n"
+    )
+    script.chmod(0o755)
+    return script, log
+
+
+def test_both_gate_runs_receive_the_fetched_upstream_sha(world):
+    """Оба прогона меряют от одного полного SHA — того, который и слили.
+
+    Граница решает, что считается тестом форка. Если один прогон получит ref, а
+    другой полный SHA, или два разных SHA, сравнение «до и после» перестанет
+    быть сравнением: разойдётся сенсор, а не поведение мержа. Ref к тому же
+    может уехать между двумя прогонами, и тогда проверен будет один кандидат, а
+    слит другой — поэтому здесь требуется именно 40-значный SHA и совпадение со
+    вторым родителем получившегося merge-коммита.
+    """
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    cmd, log = _boundary_recording_test_cmd(world)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+    assert result.returncode == 0, result.stderr
+
+    calls = [line.split() for line in log.read_text().splitlines() if line.strip()]
+    assert len(calls) == 2, f"expected one gate run before and one after: {calls}"
+
+    boundaries, worktrees = set(), set()
+    for call in calls:
+        assert call[0] == "--boundary", f"the boundary was not passed: {call}"
+        assert re.fullmatch(r"[0-9a-f]{40}", call[1]), (
+            f"the boundary is not a full immutable SHA: {call}"
+        )
+        boundaries.add(call[1])
+        worktrees.add(call[-1])
+
+    assert len(boundaries) == 1, f"the two runs measured from different commits: {calls}"
+    assert len(worktrees) == 1, f"the two runs used different worktrees: {calls}"
+
+    fork = world["fork"]
+    merge = _git(fork, "rev-list", "--merges", "-n1", "HEAD")
+    assert _git(fork, "rev-parse", merge + "^2") == boundaries.pop(), (
+        "the commit that was gated is not the commit that was merged"
+    )
 
 
 def test_no_upstream_changes_is_a_noop(world):
