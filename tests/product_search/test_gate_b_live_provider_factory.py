@@ -131,6 +131,109 @@ def test_zero_remaining_budget_refuses_before_provider_construction(
         runner._build_committed_budget_reserver(manifest)
 
 
+def test_generic_transport_record_stays_raw_and_round_trips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    pricing = _pricing()
+    manifest_sha256 = "4" * 64
+    store = RecordingStore(tmp_path / "provider-records")
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
+    semantic_provider = LLMObservationProvider(
+        store=store,
+        mode="record",
+        model_id=policy.model_id,
+        transport=_ProductionShapedSemanticFake(_provider_payload(projected)),
+        prompt_version=policy.semantic_prompt_version,
+    )
+    provider = runner._LiveGateBProvider(semantic_provider)
+    capability, _ledger, ref = _production_capability(
+        provider, pricing, manifest_sha256
+    )
+    dispatch_input_hash = runner._reservation_input_hash(ref)
+
+    provider.dispatch(
+        projected.provider_payload(),
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+
+    provider_input_hash = provider._adapter.last_call_metadata["input_hash"]
+    transport_record = store.load(provider_input_hash)
+    assert transport_record["input"] == projected.provider_payload()
+    # response_schema_sha256 and pricing_sha256 are generic semantic metadata;
+    # the V2-only authority projection must not enter the transport artifact.
+    for authority_name in ("provider_sha256", "model_sha256", "prompt_sha256"):
+        assert authority_name not in transport_record
+    assert "provider_authority_identity" not in transport_record
+    assert "semantic_transport_record_sha256" not in transport_record
+
+
+def test_v2_record_has_authority_before_seal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    pricing = _pricing()
+    manifest_sha256 = "5" * 64
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
+    semantic_provider = LLMObservationProvider(
+        store=RecordingStore(tmp_path / "provider-records"),
+        mode="record",
+        model_id=policy.model_id,
+        transport=_ProductionShapedSemanticFake(_provider_payload(projected)),
+        prompt_version=policy.semantic_prompt_version,
+    )
+    provider = runner._LiveGateBProvider(semantic_provider)
+    capability, _ledger, ref = _production_capability(
+        provider, pricing, manifest_sha256
+    )
+    preseal_records: list[dict[str, object]] = []
+    original_seal = capability.seal_record
+
+    def observe_before_seal(record: dict[str, object]) -> dict[str, object]:
+        preseal_records.append(dict(record))
+        return original_seal(record)
+
+    monkeypatch.setattr(capability, "seal_record", observe_before_seal)
+    provider.dispatch(
+        projected.provider_payload(),
+        input_hash=runner._reservation_input_hash(ref),
+        capability=capability,
+    )
+
+    v2_preseal_records = [
+        record
+        for record in preseal_records
+        if record.get("provider_record_kind") == "gate-b-evidence-synthesis-v2"
+    ]
+    assert len(v2_preseal_records) == 1
+    preseal_record = v2_preseal_records[0]
+    authority_fields = (
+        "provider_sha256",
+        "model_sha256",
+        "prompt_sha256",
+        "response_schema_sha256",
+        "pricing_sha256",
+    )
+    assert set(provider.authority_identity) == set(authority_fields)
+    for authority_name in authority_fields:
+        authority_value = provider.authority_identity[authority_name]
+        assert preseal_record[authority_name] == authority_value
+    assert "semantic_transport_record_sha256" in preseal_record
+    assert "metadata_sha256" not in preseal_record
+    assert "metadata_hmac_sha256" not in preseal_record
+
+
 def test_live_provider_publishes_v2_record_used_by_decision(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

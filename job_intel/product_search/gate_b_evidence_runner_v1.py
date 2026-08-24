@@ -1392,34 +1392,6 @@ class _LiveGateBProvider:
             self._adapter.record_capability = None
 
 
-class _AuthorityRecordingStore:
-    """Persist provider authority fields alongside every canonical record."""
-
-    def __init__(self, inner: object, identity: Mapping[str, str]) -> None:
-        self._inner = inner
-        self._identity = dict(identity)
-
-    def _with_identity(self, record: dict[str, object]) -> dict[str, object]:
-        enriched = dict(record)
-        enriched.update(self._identity)
-        return enriched
-
-    def save(self, record: dict[str, object]) -> object:
-        return self._inner.save(self._with_identity(record))
-
-    def save_exclusive(self, record: dict[str, object]) -> object:
-        return self._inner.save_exclusive(self._with_identity(record))
-
-    def load(self, input_hash: str) -> dict[str, object]:
-        return self._with_identity(self._inner.load(input_hash))
-
-    def exists(self, input_hash: str) -> bool:
-        return bool(self._inner.exists(input_hash))
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self._inner, name)
-
-
 def build_live_provider_factory() -> GovernedProvider:
     """Build the real provider only through the explicit approval gate."""
     if os.environ.get("JOB_INTEL_LLM_LIVE_APPROVED") != "1":
