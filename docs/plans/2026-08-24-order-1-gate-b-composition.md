@@ -227,7 +227,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 ### 2.1 Typed V2 dispatch seam: полная проекция локально, редактированный payload в transport
 
-- [ ] Пункт 2.1 выполнен целиком
+- [x] Пункт 2.1 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -238,32 +238,32 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 **Задачи**
 
-- [ ] В `tests/product_search/test_gate_b_full_composition_e2e.py` добавить RED-контроль
+- [x] В `tests/product_search/test_gate_b_full_composition_e2e.py` добавить RED-контроль
   `test_live_dispatch_keeps_full_projection_local_and_sends_only_redacted_payload`: producer
   получает полный `EvidenceSynthesisInputV2`, а fake transport не видит `vacancy_evidence` и
   `prohibited_company_claim_text_sha256s` и получает byte-identical `provider_payload()`.
-- [ ] В `job_intel/product_search/gate_b_evidence_runner_v1.py` ввести typed immutable request
+- [x] В `job_intel/product_search/gate_b_evidence_runner_v1.py` ввести typed immutable request
   `GateBDispatchRequestV2` с полями `synthesis_input: EvidenceSynthesisInputV2` и
   `provider_payload: Mapping[str, object]`; конструктор отвергает payload, не совпадающий с
   `synthesis_input.provider_payload()` по каноническим байтам.
-- [ ] Изменить `GovernedProvider.dispatch`, `GovernedStructuredProviderAdapter.dispatch`,
+- [x] Изменить `GovernedProvider.dispatch`, `GovernedStructuredProviderAdapter.dispatch`,
   `_LiveGateBProvider.dispatch` и тестовые providers так, чтобы они принимали
   `GateBDispatchRequestV2`, а не неразличимый `dict`.
-- [ ] В `run_collection` передавать `projected` как полную `synthesis_input`, а результат
+- [x] В `run_collection` передавать `projected` как полную `synthesis_input`, а результат
   `projected.provider_payload()` — как отдельный redacted `provider_payload`; manifest-bound
   `row.input_sha256` продолжает считаться только по provider-visible payload.
-- [ ] В `_LiveGateBProvider` передавать полную проекцию в `run_evidence_synthesis_v2`, оставляя
+- [x] В `_LiveGateBProvider` передавать полную проекцию в `run_evidence_synthesis_v2`, оставляя
   transport-вызов и V2-публикацию внутри producer; не добавлять скрытые поля в provider payload.
 
 **DoD**
 
-- [ ] До реализации команда
+- [x] До реализации команда
   `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py::test_live_dispatch_keeps_full_projection_local_and_sends_only_redacted_payload`
   падает на отсутствии typed seam; после реализации возвращает `1 passed`.
-- [ ] Команда
+- [x] Команда
   `rg -n 'EvidenceSynthesisInputV2\.model_validate\(payload\)' job_intel/product_search/gate_b_evidence_runner_v1.py`
   не находит прежнюю попытку восстановить полный V2-вход из редактированного payload.
-- [ ] В тесте явно проверены оба отрицательных утверждения: provider-visible mapping не содержит
+- [x] В тесте явно проверены оба отрицательных утверждения: provider-visible mapping не содержит
   `vacancy_evidence` и `prohibited_company_claim_text_sha256s`; добавление любого из них меняет
   canonical payload и отклоняется typed seam до dispatch.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,6 +102,7 @@ def test_full_run_collection_reaches_recording_provider_anchor(
     policy = synthesis.load_evidence_synthesis_policy()
     provider_payload = _provider_payload(projected)
     manifest_sha256 = "a" * 64
+    (tmp_path / "provider-records").mkdir()
 
     # These are the only transport substitutions: the governed provider and
     # both persistence paths below remain production implementations.
@@ -159,18 +161,109 @@ def test_full_run_collection_reaches_recording_provider_anchor(
     )
 
 
+def test_live_dispatch_keeps_full_projection_local_and_sends_only_redacted_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    manifest_sha256 = "d" * 64
+    (tmp_path / "provider-records").mkdir()
+    semantic_fake = _ProductionShapedSemanticFake(_provider_payload(projected))
+    semantic_provider = LLMObservationProvider(
+        store=SemanticRecordingStore(tmp_path / "semantic-records"),
+        mode="record",
+        model_id=policy.model_id,
+        transport=semantic_fake,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
+    provider = runner._LiveGateBProvider(semantic_provider)
+    runner_manifest, _corpus_row = _fixture_manifest(
+        projected=projected_v3,
+        provider=provider,
+        manifest_sha256=manifest_sha256,
+    )
+    runner_manifest.decision_clock = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    ledger = ForegroundDispatchLedger(
+        runner_manifest,
+        committed_budget_reserver=runner.NoDurableAccounting(),
+    )
+    capability = runner._issue_collection_capability(
+        manifest=runner_manifest,
+        provider=provider,
+        ledger=ledger,
+    )
+    provider_payload = projected_v3.provider_payload()
+    full_payload = projected.model_dump(mode="json")
+    assert "vacancy_evidence" in full_payload
+    assert "prohibited_company_claim_text_sha256s" in full_payload
+    assert "vacancy_evidence" not in provider_payload
+    assert "prohibited_company_claim_text_sha256s" not in provider_payload
+
+    for hidden_field in (
+        "vacancy_evidence",
+        "prohibited_company_claim_text_sha256s",
+    ):
+        invalid_payload = dict(provider_payload)
+        invalid_payload[hidden_field] = full_payload[hidden_field]
+        with pytest.raises(ValueError, match="provider_payload_mismatch"):
+            runner.GateBDispatchRequestV2(
+                synthesis_input=projected_v3,
+                provider_payload=invalid_payload,
+            )
+    assert semantic_fake.chat.completions.calls == []
+
+    request = runner.GateBDispatchRequestV2(
+        synthesis_input=projected_v3,
+        provider_payload=provider_payload,
+    )
+    dispatch_input_hash = runner._reservation_input_hash(runner_manifest.row_ref(0))
+    provider.dispatch(
+        request,
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+    sent_payload = json.loads(
+        semantic_fake.chat.completions.calls[0]["messages"][1]["content"]
+    )
+    assert runner._canonical_bytes(sent_payload) == runner._canonical_bytes(provider_payload)
+
+
+def test_dispatch_request_rejects_unredacted_v2_input_before_dispatch() -> None:
+    projected_v3 = _projected_fixture()
+    projected_v2 = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    with pytest.raises(ValueError, match="v3_synthesis_input_required"):
+        runner.GateBDispatchRequestV2(
+            synthesis_input=projected_v2,
+            provider_payload=projected_v2.provider_payload(),
+        )
+
+
 def _live_dispatch_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     row_count: int = 1,
-) -> tuple[object, object, ForegroundDispatchLedger, tuple[ManifestRef, ...], dict[str, object]]:
+) -> tuple[
+    object,
+    object,
+    ForegroundDispatchLedger,
+    tuple[ManifestRef, ...],
+    runner.GateBDispatchRequestV2,
+]:
     projected_v3 = _projected_fixture()
     projected = synthesis.EvidenceSynthesisInputV2.model_validate(
         projected_v3.model_dump(mode="json")
     )
     policy = synthesis.load_evidence_synthesis_policy()
     manifest_sha256 = "c" * 64
+    (tmp_path / "provider-records").mkdir()
     monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
     monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
     semantic_provider = LLMObservationProvider(
@@ -181,7 +274,7 @@ def _live_dispatch_fixture(
         prompt_version=policy.semantic_prompt_version,
     )
     provider = runner._LiveGateBProvider(semantic_provider)
-    payload = projected.provider_payload()
+    payload = projected_v3.provider_payload()
     input_sha256 = runner._sha256(runner._canonical_bytes(payload))
     refs = tuple(
         ManifestRef(
@@ -234,18 +327,31 @@ def _live_dispatch_fixture(
         provider=provider,
         ledger=ledger,
     )
-    return provider, capability, ledger, refs, payload
+    return (
+        provider,
+        capability,
+        ledger,
+        refs,
+        runner.GateBDispatchRequestV2(
+            synthesis_input=projected_v3,
+            provider_payload=payload,
+        ),
+    )
 
 
 @pytest.mark.xfail(strict=True, reason="Task 10: V2 HMAC discriminator bypass is not fail-closed")
 def test_v2_record_without_discriminator_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider, capability, _ledger, ref_tuple, payload = _live_dispatch_fixture(
+    provider, capability, _ledger, ref_tuple, request = _live_dispatch_fixture(
         tmp_path, monkeypatch
     )
     dispatch_input_hash = runner._reservation_input_hash(ref_tuple[0])
-    provider.dispatch(payload, input_hash=dispatch_input_hash, capability=capability)
+    provider.dispatch(
+        request,
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
     record = runner._provider_record(provider, dispatch_input_hash)
     tampered = dict(record)
     tampered.pop("provider_record_kind", None)
@@ -267,7 +373,7 @@ def test_v2_record_without_discriminator_is_rejected(
 def test_v2_publication_failure_does_not_leave_paid_terminal_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider, capability, ledger, ref_tuple, payload = _live_dispatch_fixture(
+    provider, capability, ledger, ref_tuple, request = _live_dispatch_fixture(
         tmp_path, monkeypatch
     )
     dispatch_input_hash = runner._reservation_input_hash(ref_tuple[0])
@@ -277,14 +383,18 @@ def test_v2_publication_failure_does_not_leave_paid_terminal_dispatch(
 
     monkeypatch.setattr(provider.store, "save_exclusive", fail_publication)
     with pytest.raises(RuntimeError, match="v2 publication failure"):
-        provider.dispatch(payload, input_hash=dispatch_input_hash, capability=capability)
+        provider.dispatch(
+            request,
+            input_hash=dispatch_input_hash,
+            capability=capability,
+        )
     assert ledger.entries()[0].state is JournalState.DISPATCHED
 
 
 def test_duplicate_provider_input_cannot_bind_to_two_dispatches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _provider, capability, _ledger, refs, _payload = _live_dispatch_fixture(
+    _provider, capability, _ledger, refs, _request = _live_dispatch_fixture(
         tmp_path, monkeypatch, row_count=2
     )
     first_dispatch = runner._reservation_input_hash(refs[0])

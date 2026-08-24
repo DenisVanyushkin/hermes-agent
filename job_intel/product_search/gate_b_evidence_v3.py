@@ -1049,7 +1049,7 @@ def project_vacancy_evidence_v3(
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
     *,
     company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
-) -> EvidenceSynthesisInputV2:
+) -> EvidenceSynthesisInputV3:
     company_authority = (
         resolve_company_authority_v3(raw, company_evidence_catalog)
         if company_evidence_catalog is not None

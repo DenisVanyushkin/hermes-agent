@@ -314,9 +314,11 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     class FakeGovernedProvider:
         provider_record_sha256 = "a" * 64
 
-        def dispatch(self, payload: dict[str, object]) -> dict[str, object]:
+        def dispatch(
+            self, request: runner.GateBDispatchRequestV2
+        ) -> dict[str, object]:
             assert ledger.state(0).value == "dispatched"
-            calls.append(payload)
+            calls.append(dict(request.provider_payload))
             return _provider_payload(projected)
 
     result = run_one_row(

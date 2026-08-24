@@ -875,19 +875,31 @@ class RecordedEvidenceSynthesisProvider:
         self.last_call_metadata: dict[str, Any] = {}
         self.last_response_payload: object | None = None
 
-    def synthesize_evidence(self, *, input_payload: dict[str, Any]) -> object:
-        input_hash = synthesis_input_sha256(input_payload, provider=self)
+    def synthesize_evidence(
+        self,
+        *,
+        input_payload: dict[str, Any],
+        provider_payload: Mapping[str, Any] | None = None,
+    ) -> object:
+        transport_payload = (
+            dict(provider_payload) if provider_payload is not None else input_payload
+        )
+        input_hash = synthesis_input_sha256(transport_payload, provider=self)
         if self.semantic_provider.mode == "record":
             try:
                 record = self.store.load(input_hash)
             except LLMProviderError as exc:
                 if exc.reason != "recording_missing":
                     raise
-                return self._record_call(input_hash, input_payload)
+                return self._record_call(
+                    input_hash,
+                    transport_payload,
+                    synthesis_input_payload=input_payload,
+                )
         else:
             record = self.store.load(input_hash)
         return self._replay_record(
-            record, expected_input_hash=input_hash, input_payload=input_payload
+            record, expected_input_hash=input_hash, input_payload=transport_payload
         )
 
     def build_charge_unknown_reconciliation_record(
@@ -1188,7 +1200,13 @@ class RecordedEvidenceSynthesisProvider:
             return cost == self.pricing.reservation_cost_usd
         return cost > Decimal("0.000000")
 
-    def _record_call(self, input_hash: str, input_payload: dict[str, Any]) -> object:
+    def _record_call(
+        self,
+        input_hash: str,
+        input_payload: dict[str, Any],
+        *,
+        synthesis_input_payload: dict[str, Any] | None = None,
+    ) -> object:
         if self.record_capability is None:
             raise LLMProviderError("structured_capability_required")
         self.last_call_metadata = {}
@@ -1199,7 +1217,11 @@ class RecordedEvidenceSynthesisProvider:
         try:
             response_validator = None
             if self.input_contract_version == "2.0.0":
-                synthesis_input = EvidenceSynthesisInputV2.model_validate(input_payload)
+                synthesis_input = EvidenceSynthesisInputV2.model_validate(
+                    synthesis_input_payload
+                    if synthesis_input_payload is not None
+                    else input_payload
+                )
 
                 def response_validator(payload: object) -> str | None:
                     failure = validate_provider_payload_v2(
@@ -1844,12 +1866,18 @@ def run_evidence_synthesis_v2(
     synthesis_input: EvidenceSynthesisInputV2,
     provider: RecordedEvidenceSynthesisProviderV2,
     policy: EvidenceSynthesisPolicyV1 | None = None,
+    provider_payload: Mapping[str, Any] | None = None,
 ) -> EvidenceSynthesisResultV2:
     policy = policy or load_evidence_synthesis_policy()
     if not isinstance(provider, RecordedEvidenceSynthesisProviderV2):
         raise TypeError("Task 10 v2 requires its governed Semantic v2 adapter")
-    input_payload = synthesis_input.provider_payload()
-    input_hash = synthesis_input_sha256(input_payload, provider=provider)
+    input_payload = synthesis_input.model_dump(mode="json")
+    transport_payload = (
+        dict(provider_payload)
+        if provider_payload is not None
+        else synthesis_input.provider_payload()
+    )
+    input_hash = synthesis_input_sha256(transport_payload, provider=provider)
     started = time.monotonic()
     if (
         provider.provider_id != policy.provider_runtime
@@ -1868,7 +1896,10 @@ def run_evidence_synthesis_v2(
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
     try:
-        raw_payload = provider.synthesize_evidence(input_payload=input_payload)
+        raw_payload = provider.synthesize_evidence(
+            input_payload=input_payload,
+            provider_payload=transport_payload,
+        )
     except Exception as error:
         return _failure_v2(
             _status_for_provider_error(error),

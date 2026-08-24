@@ -40,6 +40,13 @@ AUTHORITY_FIELDS = (
 )
 
 
+def _dispatch_request(projected: runner.EvidenceSynthesisInputV3) -> runner.GateBDispatchRequestV2:
+    return runner.GateBDispatchRequestV2(
+        synthesis_input=projected,
+        provider_payload=projected.provider_payload(),
+    )
+
+
 def _production_capability(
     provider: object, pricing: object, manifest_sha256: str
 ) -> tuple[object, object, ManifestRef]:
@@ -167,14 +174,14 @@ def test_generic_transport_record_stays_raw_and_round_trips(
     dispatch_input_hash = runner._reservation_input_hash(ref)
 
     provider.dispatch(
-        projected.provider_payload(),
+        _dispatch_request(projected_v3),
         input_hash=dispatch_input_hash,
         capability=capability,
     )
 
     provider_input_hash = provider._adapter.last_call_metadata["input_hash"]
     transport_record = store.load(provider_input_hash)
-    assert transport_record["input"] == projected.provider_payload()
+    assert transport_record["input"] == projected_v3.provider_payload()
     # response_schema_sha256 and pricing_sha256 are generic semantic metadata;
     # the V2-only authority projection must not enter the transport artifact.
     for authority_name in ("provider_sha256", "model_sha256", "prompt_sha256"):
@@ -215,7 +222,7 @@ def test_v2_record_has_authority_before_seal(
 
     monkeypatch.setattr(capability, "seal_record", observe_before_seal)
     provider.dispatch(
-        projected.provider_payload(),
+        _dispatch_request(projected_v3),
         input_hash=runner._reservation_input_hash(ref),
         capability=capability,
     )
@@ -264,7 +271,7 @@ def test_v2_authority_tampering_after_save_is_detected(
     dispatch_input_hash = runner._reservation_input_hash(ref)
 
     provider.dispatch(
-        projected.provider_payload(),
+        _dispatch_request(projected_v3),
         input_hash=dispatch_input_hash,
         capability=capability,
     )
@@ -306,7 +313,7 @@ def test_live_provider_publishes_v2_record_used_by_decision(
     capability, _ledger, ref = _production_capability(provider, pricing, "2" * 64)
     dispatch_input_hash = runner._reservation_input_hash(ref)
     response_payload = provider.dispatch(
-        projected.provider_payload(),
+        _dispatch_request(projected_v3),
         input_hash=dispatch_input_hash,
         capability=capability,
     )
@@ -376,7 +383,7 @@ def test_live_provider_with_collection_capability_reaches_decision(
     monkeypatch.setattr(provider, "_publish_v2_provider_record", capture_publish)
 
     response_payload = provider.dispatch(
-        projected.provider_payload(),
+        _dispatch_request(projected_v3),
         input_hash=dispatch_input_hash,
         capability=capability,
     )

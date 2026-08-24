@@ -66,6 +66,7 @@ from job_intel.product_search.gate_b_benchmark_policy_v3 import (
 )
 from job_intel.product_search.gate_b_evidence_v3 import (
     CompanyEvidenceCatalogV3,
+    EvidenceSynthesisInputV3,
     ReviewedFragmentAllowlistV3,
     load_reviewed_fragment_allowlist_v3,
     project_vacancy_evidence_v3,
@@ -1152,6 +1153,23 @@ class GateEvaluator:
         )
 
 
+@dataclass(frozen=True)
+class GateBDispatchRequestV2:
+    """Immutable seam carrying the full local projection and redacted payload."""
+
+    synthesis_input: EvidenceSynthesisInputV2
+    provider_payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.synthesis_input, EvidenceSynthesisInputV3):
+            raise ValueError("v3_synthesis_input_required")
+        expected_payload = self.synthesis_input.provider_payload()
+        actual_payload = dict(self.provider_payload)
+        if _canonical_bytes(actual_payload) != _canonical_bytes(expected_payload):
+            raise ValueError("provider_payload_mismatch")
+        object.__setattr__(self, "provider_payload", actual_payload)
+
+
 class GovernedProvider(Protocol):
     """One production-shaped dispatch seam shared by real and fake providers."""
 
@@ -1160,7 +1178,7 @@ class GovernedProvider(Protocol):
 
     def dispatch(
         self,
-        payload: dict[str, object],
+        request: GateBDispatchRequestV2,
         *,
         input_hash: str,
         capability: object,
@@ -1190,14 +1208,15 @@ class GovernedStructuredProviderAdapter:
 
     def dispatch(
         self,
-        payload: dict[str, object],
+        request: GateBDispatchRequestV2,
         *,
         input_hash: str,
         capability: object,
     ) -> object:
-        request = self._request_factory(payload, input_hash)
+        provider_payload = dict(request.provider_payload)
+        governed_request = self._request_factory(provider_payload, input_hash)
         return self._provider.governed_structured_call(
-            request=request,
+            request=governed_request,
             capability=capability,
         )
 
@@ -1334,11 +1353,12 @@ class _LiveGateBProvider:
 
     def dispatch(
         self,
-        payload: dict[str, object],
+        request: GateBDispatchRequestV2,
         *,
         input_hash: str,
         capability: object,
     ) -> object:
+        provider_payload = dict(request.provider_payload)
         if self._adapter is None:
             from job_intel.product_search.evidence_synthesis import (
                 RecordedEvidenceSynthesisProviderV2,
@@ -1355,7 +1375,7 @@ class _LiveGateBProvider:
         verifier = getattr(capability, "verify_record", None)
         self._v2_record_verifier = verifier if callable(verifier) else None
         provider_input_sha256 = synthesis_input_sha256(
-            payload, provider=self._adapter
+            provider_payload, provider=self._adapter
         )
         binder = getattr(capability, "bind_record_identity", None)
         if not callable(binder):
@@ -1366,13 +1386,14 @@ class _LiveGateBProvider:
                 run_evidence_synthesis_v2,
             )
             result = run_evidence_synthesis_v2(
-                synthesis_input=EvidenceSynthesisInputV2.model_validate(payload),
+                synthesis_input=request.synthesis_input,
                 provider=self._adapter,
                 policy=self._policy,
+                provider_payload=provider_payload,
             )
             v2_record = self._publish_v2_provider_record(
                 dispatch_input_hash=input_hash,
-                input_payload=payload,
+                input_payload=request.synthesis_input.model_dump(mode="json"),
                 result=result,
                 capability=capability,
             )
@@ -2692,7 +2713,10 @@ def run_collection(
         dispatch_input_hash = _reservation_input_hash(ref)
         try:
             dispatch_result = provider.dispatch(
-                request_payload,
+                GateBDispatchRequestV2(
+                    synthesis_input=projected,
+                    provider_payload=request_payload,
+                ),
                 input_hash=dispatch_input_hash,
                 capability=capability,
             )
@@ -2872,7 +2896,14 @@ def run_one_row(
 
     # This append/fsync is intentionally before the fake transport call.
     receipt = ledger.append_pre_dispatch(ref)
-    response_payload = dict(provider.dispatch(request_payload))
+    response_payload = dict(
+        provider.dispatch(
+            GateBDispatchRequestV2(
+                synthesis_input=projected,
+                provider_payload=request_payload,
+            )
+        )
+    )
     response_bytes = _canonical_bytes(response_payload)
     validation_status = validate_provider_payload_v3(
         response_payload,

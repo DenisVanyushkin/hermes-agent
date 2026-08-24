@@ -23,6 +23,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     AuthorityIdentity,
     EvidenceManifest,
     EvidenceManifestRow,
+    GateBDispatchRequestV2,
     Limits,
     RuntimeIdentity,
 )
@@ -174,7 +175,7 @@ class FakeProvider:
 
     def dispatch(
         self,
-        payload: dict[str, object],
+        request: GateBDispatchRequestV2,
         *,
         input_hash: str,
         capability: object,
@@ -190,7 +191,7 @@ class FakeProvider:
         elif ordinal % 2 == 0:
             outcome = "success"
             raw_response_text = json.dumps(
-                _provider_payload_from_serialized(payload),
+                _provider_payload_from_serialized(dict(request.provider_payload)),
                 sort_keys=True,
                 separators=(",", ":"),
             )

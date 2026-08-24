@@ -27,6 +27,7 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     run_collection,
 )
 from job_intel.product_search.decision_v2 import DecisionResultV2, DecisionRunStatus
+from tests.product_search.test_gate_b_composition import _projected_fixture
 
 
 def test_authority_paths_follow_manifest_source_authorities(tmp_path: Path) -> None:
@@ -124,8 +125,13 @@ def test_decision_evidence_missing_ref_fails_with_named_error(tmp_path: Path) ->
 def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     tmp_path: Path, monkeypatch: object, provider_outcome: str,
 ) -> None:
-    input_hash = hashlib.sha256(runner._canonical_bytes({})).hexdigest()
-    projection_hash = input_hash
+    projection = _projected_fixture()
+    input_hash = hashlib.sha256(
+        runner._canonical_bytes(projection.provider_payload())
+    ).hexdigest()
+    projection_hash = hashlib.sha256(
+        runner._canonical_bytes(projection.model_dump(mode="json"))
+    ).hexdigest()
     raw_hash = input_hash
     row = EvidenceManifestRow(
         ordinal=0,
@@ -182,7 +188,12 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
         "pricing_sha256": "q",
     }
 
-    def dispatch(payload: dict[str, object], *, input_hash: str, capability: object) -> object:
+    def dispatch(
+        request: runner.GateBDispatchRequestV2,
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object:
         reservation = capability.reserve(input_hash)
         capability.mark_dispatching(reservation)
         record = {
@@ -237,9 +248,6 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     recordings.save_exclusive.return_value = recording_ref
     recordings.bytes_for.return_value = b"recording"
     decision_store = DecisionEvidenceStore(tmp_path / "decisions")
-    projection = Mock()
-    projection.model_dump.return_value = {}
-    projection.provider_payload.return_value = {}
     monkeypatch.setattr(runner, "project_vacancy_evidence_v3", lambda *args: projection)
     monkeypatch.setattr(runner, "validate_provider_payload_v3", lambda *args, **kwargs: None)
     decision = DecisionResultV2(
@@ -490,8 +498,13 @@ def test_reservation_callbacks_bind_duplicate_inputs_to_their_ordinal() -> None:
 def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
     tmp_path: Path, monkeypatch: object
 ) -> None:
-    input_hash = runner._sha256(runner._canonical_bytes({}))
-    projection_hash = input_hash
+    projection = _projected_fixture()
+    input_hash = runner._sha256(
+        runner._canonical_bytes(projection.provider_payload())
+    )
+    projection_hash = runner._sha256(
+        runner._canonical_bytes(projection.model_dump(mode="json"))
+    )
     rows = tuple(
         EvidenceManifestRow(
             ordinal=ordinal,
@@ -554,7 +567,10 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
     }
 
     def dispatch(
-        payload: dict[str, object], *, input_hash: str, capability: object
+        request: runner.GateBDispatchRequestV2,
+        *,
+        input_hash: str,
+        capability: object,
     ) -> object:
         reservation = capability.reserve(input_hash)
         capability.mark_dispatching(reservation)
@@ -620,9 +636,6 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         )
     )
     decision_store.bytes_for.side_effect = lambda ref: b"decision"
-    projection = Mock()
-    projection.model_dump.return_value = {}
-    projection.provider_payload.return_value = {}
     monkeypatch.setattr(
         runner, "project_vacancy_evidence_v3", lambda *args: projection
     )
@@ -696,6 +709,8 @@ def test_provider_authority_drift_fails_before_dispatch() -> None:
 
 
 def test_governed_adapter_forwards_to_real_structured_call_boundary() -> None:
+    projected = _projected_fixture()
+    provider_payload = projected.provider_payload()
     provider = Mock()
     provider.store = object()
     expected = object()
@@ -714,10 +729,15 @@ def test_governed_adapter_forwards_to_real_structured_call_boundary() -> None:
     )
 
     result = adapter.dispatch(
-        {"title": "x"}, input_hash="1" * 64, capability=expected
+        runner.GateBDispatchRequestV2(
+            synthesis_input=projected,
+            provider_payload=provider_payload,
+        ),
+        input_hash="1" * 64,
+        capability=expected,
     )
 
     assert result is expected
     provider.governed_structured_call.assert_called_once_with(
-        request=({"title": "x"}, "1" * 64), capability=expected
+        request=(provider_payload, "1" * 64), capability=expected
     )
