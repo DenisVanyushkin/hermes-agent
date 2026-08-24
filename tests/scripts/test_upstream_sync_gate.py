@@ -525,6 +525,23 @@ def test_unreadable_merged_run_with_no_failures_is_not_clean():
     assert result["unreadable_runs"] == [{"source": "merged", "stage": "collect"}]
 
 
+def test_classifier_leaves_blocking_aggregate_to_persistence():
+    result = upstream_sync_gate.classify_node_failures(
+        baseline=_node_run(collected=set(), failed=set()),
+        upstream_parent=_node_run(
+            collected={"tests/test_post_only.py::test_new"}, failed=set()
+        ),
+        merged=_node_run(
+            collected={"tests/test_post_only.py::test_new"},
+            failed={"tests/test_post_only.py::test_new"},
+        ),
+        manifest=_manifest(("tests/test_post_only.py", False, True)),
+    )
+
+    assert result["post_only_path"]
+    assert "blocking_failures" not in result
+
+
 def test_node_probe_scope_selects_exact_newly_seen_failing_nodeids():
     selector = getattr(upstream_sync_gate, "build_upstream_probe_request", None)
     assert callable(selector), "node probe request builder is not implemented"

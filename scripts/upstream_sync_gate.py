@@ -886,12 +886,6 @@ def _main(argv: list[str] | None = None) -> int:
                 merged=json.loads(Path(args.merged).read_text(encoding="utf-8")),
                 manifest=json.loads(Path(args.manifest).read_text(encoding="utf-8")),
             )
-            blocking = []
-            for key in ("common_path", "post_only_path"):
-                blocking.extend(classification[key])
-            classification["blocking_failures"] = sorted(
-                blocking, key=lambda item: (item["path"], item["nodeid"])
-            )
             print(json.dumps(classification, ensure_ascii=False, sort_keys=True))
             return 0
         elif args.cmd == "node-outcome":

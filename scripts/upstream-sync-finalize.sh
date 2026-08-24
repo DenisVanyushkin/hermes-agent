@@ -492,17 +492,27 @@ merged = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
 legacy = sorted(set(merged.get("failed_nodeids", [])) - set(baseline.get("failed_nodeids", [])))
 Path(sys.argv[3]).write_text("\n".join(legacy) + ("\n" if legacy else ""), encoding="utf-8")
 PY
-  blocking_count="$("$py" - "$classification_json" <<'PY'
+  if ! "$py" "$gate" persist-gate-failures \
+    --classification "$classification_json" \
+    --merge-sha "$after" \
+    --before "$before" \
+    --legacy-failures "$t11_failures_file" \
+    --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
+    echo "could not persist normalized gate-failures.json" >>"$DETAIL_LOG"
+    rm -f "$t11_failures_file"
+    return 1
+  fi
+  blocking_count="$("$py" - "$attempt_dir/gate-failures.json" <<'PY'
 import json, sys
 from pathlib import Path
 print(len(json.loads(Path(sys.argv[1]).read_text()).get("blocking_failures", [])))
 PY
   )"
-  unknown_count="$("$py" - "$classification_json" <<'PY'
+  unknown_count="$("$py" - "$attempt_dir/gate-failures.json" <<'PY'
 import json, sys
 from pathlib import Path
-classification = json.loads(Path(sys.argv[1]).read_text())
-print(len(classification.get("unknown", [])) + len(classification.get("unreadable_runs", [])))
+failures = json.loads(Path(sys.argv[1]).read_text())
+print(len(failures.get("unknown", [])) + len(failures.get("unreadable_runs", [])))
 PY
   )"
   if [ "$blocking_count" -ne 0 ] || [ "$unknown_count" -ne 0 ]; then
@@ -512,21 +522,12 @@ PY
       echo "classification:"
       cat "$classification_json"
     } >>"$DETAIL_LOG"
-    if ! "$py" "$gate" persist-gate-failures \
-      --classification "$classification_json" \
-      --merge-sha "$after" \
-      --before "$before" \
-      --legacy-failures "$t11_failures_file" \
-      --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
-      echo "could not persist normalized gate-failures.json" >>"$DETAIL_LOG"
-      rm -f "$t11_failures_file"
-      return 1
-    fi
     rm -f "$t11_failures_file"
     cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
     return 1
   fi
   rm -f "$t11_failures_file"
+  rm -f "$attempt_dir/gate-failures.json"
   rm -f "$STATE_DIR/gate-failures.json"
   return 0
 }
