@@ -387,6 +387,13 @@ parser и comparator для failed nodeids и collection errors, сохрани�
 `2 errors in 0.05s` как читаемый исход, оставила `no tests ran in 0.01s`
 нечитаемым, и подключила этот результат к `node-outcome`, чтобы collection
 error давал `collect_ok=false`, а не пустой «успешный» outcome.
+Формат collection error перепроверен на настоящем выводе pytest: раннер
+теперь вызывает `-rEf`, parser читает строку `ERROR <path> - ...`, а
+регрессия покрыта одновременно прямым subprocess pytest и существующим
+runner seam-тестом. Follow-up исправление зафиксировано коммитом
+`f4567e7496` (`parse real pytest collection error summaries`); оно заменяет
+синтетический `ERROR collecting ...`, который pytest в этом режиме не
+печатает, и довозит имя сломавшегося модуля до outcome.
 
 **Зависимости.** T8. **Сложность.** M.
 
