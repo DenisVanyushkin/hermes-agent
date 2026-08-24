@@ -229,7 +229,8 @@ state.
 удалённых мержем; это **не** корзина падений. Артефакты пишутся в attempt
 namespace. Persisted manifest — самодостаточный JSON
 `gate-selection.json`: он содержит схему, тройку SHA и `exists_pre`/
-`exists_post`, без которых T7 не может fail-closed проверить потребление.
+`exists_post`, а после выделения generation — также `candidate_id`, `generation`
+и `run_id`, без которых T7 не может fail-closed проверить потребление.
 Построчный stdout `--print-selection` остаётся отдельным shell-протоколом и не
 является форматом persisted manifest.
 
@@ -245,11 +246,19 @@ namespace. Persisted manifest — самодостаточный JSON
 **Что сделать.** Отказ при неизвестной `schema_version`; отказ, если HEAD
 чекаута не равен ни `before`, ни `after`. Если манифест объявляет
 `exists_pre=true`, а путь в чекауте `before` отсутствует — это **порча,
-rc 2**, а не тихий пропуск. Пропуск допустим только при объявленном `exists=false`.
+rc 2**, а не тихий пропуск. Пропуск допустим только при объявленном
+`exists=false`. Consumer получает один самодостаточный `--selection-from` и:
+
+- требует присутствия соседнего `attempt.json` как commit marker завершённой
+  generation, но его содержимое не читает и второго data-контракта не заводит;
+- сверяет `candidate_id`, `generation` и `run_id` внутри манифеста с тройкой SHA
+  и каталогом `$STATE_DIR/attempts/<candidate_id>/<generation>/`, откуда файл
+  загружен; скопированный в чужую generation манифест — порча, rc 2.
 
 **DoD.** `pytest tests/scripts/test_run_fork_tests_selection.py -k manifest_consumer`
 зелёный; среди случаев все три: unknown schema, foreign HEAD, declared-exists
-mismatch.
+mismatch; плюс отсутствующий commit marker и manifest, перемещённый в чужую
+candidate/generation или несущий чужой `run_id`.
 
 **Зависимости.** T6. **Сложность.** M.
 

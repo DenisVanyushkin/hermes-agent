@@ -806,12 +806,14 @@ class TestApplyMergeIsGatedOnForkTests:
             # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
             # worktree больше не $1. Заодно записываем полученную границу —
             # оба прогона гейта обязаны увидеть один и тот же полный SHA.
-            'WT=""; BND=""\n'
+            'WT=""; BND=""; SEL=""\n'
             'while [ $# -gt 0 ]; do case "$1" in\n'
             '  --boundary) BND="$2"; shift 2 ;;\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
+            'printf "%s\\n" "$SEL" >> "$(dirname "$0")/selection-calls.log"\n'
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
             'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
@@ -847,6 +849,15 @@ class TestApplyMergeIsGatedOnForkTests:
             "the two gate runs did not measure from the approved upstream head; "
             f"expected {upstream_head}, recorded {recorded}"
         )
+        selections = (scripts / "selection-calls.log").read_text().splitlines()
+        assert len(selections) == 2
+        assert len(set(selections)) == 1 and selections[0], (
+            "both gate runs must consume the same persisted manifest; "
+            f"recorded {selections}"
+        )
+        selection = Path(selections[0])
+        assert selection.name == "gate-selection.json"
+        assert selection.parent.parent.parent == state / "attempts"
 
     def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
@@ -990,6 +1001,9 @@ class TestGateSelectionManifest:
         assert metadata["boundary"] == upstream_head
         assert metadata["generation"] == 1
         assert metadata["run_id"] == f"{metadata['candidate_id']}:1"
+        assert manifest["candidate_id"] == metadata["candidate_id"]
+        assert manifest["generation"] == metadata["generation"]
+        assert manifest["run_id"] == metadata["run_id"]
         assert attempt.parent.name == metadata["candidate_id"]
         assert attempt.name == str(metadata["generation"])
         assert (attempt / "gate-baseline.log").exists()

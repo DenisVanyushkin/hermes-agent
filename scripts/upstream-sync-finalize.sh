@@ -329,7 +329,7 @@ merge_passes_fork_tests() {
   [ -x "$py" ] || py="$(command -v python3)"
   local wt baseline post rc new_failures listing_dir
   local before_paths after_paths boundary_paths changed_paths
-  local selection_report attempt_dir
+  local selection_report attempt_dir selection_manifest
   listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
   before_paths="$listing_dir/before.paths"
   after_paths="$listing_dir/after.paths"
@@ -369,6 +369,7 @@ merge_passes_fork_tests() {
     echo "could not read the attempt namespace from the selection report" >>"$DETAIL_LOG"
     return 1
   fi
+  selection_manifest="$attempt_dir/gate-selection.json"
   printf 'gate selection report: %s\n' "$selection_report" >>"$DETAIL_LOG"
   wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
   baseline="$attempt_dir/gate-baseline.log"
@@ -378,14 +379,14 @@ merge_passes_fork_tests() {
     echo "could not create a worktree for the test gate" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" --boundary "$boundary" "$wt" >"$baseline" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" "$wt" >"$baseline" 2>&1 || true
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
     echo "could not check out the merge in the test-gate worktree" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" --boundary "$boundary" "$wt" >"$post" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" "$wt" >"$post" 2>&1 || true
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
   rm -rf "$wt"
   # Keep both runs. They used to be mktemp'd and deleted, which left a blocked

@@ -13,6 +13,7 @@ set -uo pipefail
 # которое стоит иметь в такой позиции.
 PRINT_SELECTION=0
 BOUNDARY="${HERMES_UPSTREAM_BOUNDARY:-}"
+SELECTION_FROM=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print-selection) PRINT_SELECTION=1; shift ;;
@@ -21,6 +22,11 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 0 ] || { echo "FAILED: --boundary needs a value" >&2; exit 2; }
       BOUNDARY="$1"; shift ;;
     --boundary=*) BOUNDARY="${1#--boundary=}"; shift ;;
+    --selection-from)
+      shift
+      [ "$#" -gt 0 ] || { echo "FAILED: --selection-from needs a value" >&2; exit 2; }
+      SELECTION_FROM="$1"; shift ;;
+    --selection-from=*) SELECTION_FROM="${1#--selection-from=}"; shift ;;
     --) shift; break ;;
     -*) echo "FAILED: unknown option $1" >&2; exit 2 ;;
     *) break ;;
@@ -28,7 +34,7 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$#" -ne 1 ]; then
   echo "FAILED: expected exactly one worktree path, got $#${*:+ ($*)}" >&2
-  echo "usage: run-fork-tests.sh [--print-selection] --boundary <ref|sha> [--] <worktree>" >&2
+  echo "usage: run-fork-tests.sh [--print-selection] --boundary <ref|sha> [--selection-from <manifest.json>] [--] <worktree>" >&2
   exit 2
 fi
 WT="$1"
@@ -62,40 +68,66 @@ filter_tests() {
     | grep -v '/[.]_' | grep -v '^[.]_' || true
 }
 
-mapfile -t OURS < <(
-  comm -23 \
-    <(git -C "$WT" ls-tree -r --name-only HEAD tests/ | sort) \
-    <(git -C "$WT" ls-tree -r --name-only "$BOUNDARY_SHA" tests/ | sort) \
-  | filter_tests
-)
-
-# A merge can change a test that already exists upstream. Include those files
-# as well; otherwise the merge's own test change is outside the sensor set.
-#
-# --diff-filter=d исключает УДАЛЁННЫЕ пути. Без него сюда попадает файл,
-# который мерж удалил: в diff он есть по определению (diff описывает переход
-# между деревьями), а в дереве, против которого мы запускаем, его нет. pytest
-# такой путь не пропускает, а обрушивает весь прогон — «no tests ran» вместо
-# итоговой строки, и гейт возвращает «несравнимо» на непроверенном мерже.
-mapfile -t MERGE_CHANGED < <(
-  if FIRST_PARENT=$(git -C "$WT" rev-parse --verify HEAD^1 2>/dev/null); then
-    git -C "$WT" diff --name-only --diff-filter=d "$FIRST_PARENT" HEAD -- tests/ | filter_tests
-  fi
-)
-mapfile -t CANDIDATES < <(printf '%s\n' "${OURS[@]}" "${MERGE_CHANGED[@]}" | sed '/^$/d' | sort -u)
-
-# Фильтр существования поверх --diff-filter: он ловит не только удаления, но и
-# переименования и всё, что придумает следующий апстрим. Отброшенное считаем и
-# называем вслух — молча уменьшившийся сенсор это гейт, который «всё прошёл».
-TESTS=()
+OURS=()
+MERGE_CHANGED=()
 DROPPED=()
-for path in "${CANDIDATES[@]}"; do
-  if [ -f "$WT/$path" ]; then
-    TESTS+=("$path")
-  else
-    DROPPED+=("$path")
+TESTS=()
+if [ -n "$SELECTION_FROM" ]; then
+  RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  GATE_HELPER="${HERMES_UPSTREAM_SYNC_GATE:-$RUNNER_DIR/upstream_sync_gate.py}"
+  CONTROL_PYTHON="${HERMES_CONTROL_PYTHON:-$(command -v python3)}"
+  if [ ! -f "$GATE_HELPER" ] || [ ! -x "$CONTROL_PYTHON" ]; then
+    echo "FAILED: manifest consumer helper or Python is unavailable" >&2
+    exit 2
   fi
-done
+  if ! HEAD_SHA="$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)"; then
+    echo "FAILED: cannot resolve checkout HEAD for manifest consumption" >&2
+    exit 2
+  fi
+  selection_output="$(
+    "$CONTROL_PYTHON" "$GATE_HELPER" selection-paths \
+      --manifest "$SELECTION_FROM" \
+      --worktree "$WT" \
+      --head "$HEAD_SHA" \
+      --boundary "$BOUNDARY_SHA"
+  )"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAILED: selection manifest is invalid for this checkout" >&2
+    exit 2
+  fi
+  if [ -n "$selection_output" ]; then
+    mapfile -t TESTS <<<"$selection_output"
+  fi
+else
+  mapfile -t OURS < <(
+    comm -23 \
+      <(git -C "$WT" ls-tree -r --name-only HEAD tests/ | sort) \
+      <(git -C "$WT" ls-tree -r --name-only "$BOUNDARY_SHA" tests/ | sort) \
+    | filter_tests
+  )
+
+  # A merge can change a test that already exists upstream. Include those
+  # files as well; otherwise the merge's own test change is outside the sensor.
+  # Deleted paths stay out of this legacy single-tree mode. The bound manifest
+  # keeps them as exists_post=false and is the authoritative two-tree mode.
+  mapfile -t MERGE_CHANGED < <(
+    if FIRST_PARENT=$(git -C "$WT" rev-parse --verify HEAD^1 2>/dev/null); then
+      git -C "$WT" diff --name-only --diff-filter=d "$FIRST_PARENT" HEAD -- tests/ | filter_tests
+    fi
+  )
+  mapfile -t CANDIDATES < <(printf '%s\n' "${OURS[@]}" "${MERGE_CHANGED[@]}" | sed '/^$/d' | sort -u)
+
+  # A path selected from HEAD but absent on disk means the checkout is dirty
+  # or incomplete. Logging and continuing would silently shrink the sensor.
+  for path in "${CANDIDATES[@]}"; do
+    if [ -f "$WT/$path" ]; then
+      TESTS+=("$path")
+    else
+      DROPPED+=("$path")
+    fi
+  done
+fi
 
 MAX_FILES="${HERMES_FORK_TEST_MAX_FILES:-800}"
 if [ "${#TESTS[@]}" -gt "$MAX_FILES" ]; then
@@ -106,8 +138,9 @@ fi
 # Диагностика идёт в stderr, а не в stdout: stdout — это протокол, по нему
 # отдаётся только набор. Иначе `--print-selection > manifest` записал бы эту
 # строку в манифест как ещё один «путь».
-printf 'fork test selection: boundary=%s files=%s fork_only=%s merge_changed=%s dropped_missing=%s\n' \
-  "$BOUNDARY_SHA" "${#TESTS[@]}" "${#OURS[@]}" "${#MERGE_CHANGED[@]}" "${#DROPPED[@]}" >&2
+printf 'fork test selection: boundary=%s files=%s fork_only=%s merge_changed=%s dropped_missing=%s source=%s\n' \
+  "$BOUNDARY_SHA" "${#TESTS[@]}" "${#OURS[@]}" "${#MERGE_CHANGED[@]}" "${#DROPPED[@]}" \
+  "$([ -n "$SELECTION_FROM" ] && printf manifest || printf computed)" >&2
 # Отброшенное — не «мелочь, о которой мы сообщили», а признак, что дерево не
 # соответствует своему HEAD: кандидаты берутся из ls-tree HEAD и из diff без
 # удалений, поэтому отсутствие пути на диске означает неполный или разошедшийся

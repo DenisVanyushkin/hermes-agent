@@ -195,6 +195,13 @@ def prepare_selection_attempt(
     attempt_dir, metadata = _allocate_attempt(
         Path(state_dir), before=before, after=after, boundary=boundary
     )
+    manifest.update(
+        {
+            "candidate_id": metadata["candidate_id"],
+            "generation": metadata["generation"],
+            "run_id": metadata["run_id"],
+        }
+    )
     write_json_atomic(attempt_dir / "gate-selection.json", manifest)
     # Commit marker last: readers treat a generation without attempt.json as
     # incomplete, never as a bound manifest that is safe to consume.
@@ -210,6 +217,130 @@ def prepare_selection_attempt(
 
 def _read_nul_paths(path: str) -> list[str]:
     return [os.fsdecode(item) for item in Path(path).read_bytes().split(b"\0") if item]
+
+
+def selection_paths_from_manifest(
+    manifest_path: Path,
+    *,
+    worktree: Path,
+    checkout_head: str,
+    expected_boundary: str,
+) -> list[str]:
+    """Validate one committed attempt manifest and select this checkout's paths."""
+    manifest_path = Path(manifest_path).resolve(strict=True)
+    if manifest_path.name != "gate-selection.json":
+        raise ValueError(
+            f"selection manifest must be named gate-selection.json: {manifest_path}"
+        )
+    attempt_dir = manifest_path.parent
+    candidate_dir = attempt_dir.parent
+    if candidate_dir.parent.name != "attempts":
+        raise ValueError(
+            "selection manifest is outside attempts/<candidate_id>/<generation>: "
+            f"{manifest_path}"
+        )
+    commit_marker = attempt_dir / "attempt.json"
+    if not commit_marker.is_file():
+        raise ValueError(
+            f"selection generation is incomplete: missing commit marker {commit_marker}"
+        )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("selection manifest must be a JSON object")
+    schema = payload.get("schema_version")
+    if schema != SELECTION_MANIFEST_SCHEMA:
+        raise ValueError(
+            f"unknown selection manifest schema {schema!r}; "
+            f"expected {SELECTION_MANIFEST_SCHEMA!r}"
+        )
+
+    before = payload.get("before")
+    after = payload.get("after")
+    boundary = payload.get("boundary")
+    candidate_id = payload.get("candidate_id")
+    generation = payload.get("generation")
+    run_id = payload.get("run_id")
+    for name, value in (
+        ("before", before),
+        ("after", after),
+        ("boundary", boundary),
+        ("candidate_id", candidate_id),
+        ("run_id", run_id),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"selection manifest field {name} must be a string")
+    if type(generation) is not int or generation < 1:
+        raise ValueError("selection manifest generation must be a positive integer")
+
+    derived_candidate_id = _candidate_id(before, after, boundary)
+    if candidate_id != derived_candidate_id:
+        raise ValueError(
+            "selection manifest candidate_id does not match before/after/boundary: "
+            f"declared {candidate_id}, derived {derived_candidate_id}"
+        )
+    if candidate_dir.name != candidate_id:
+        raise ValueError(
+            "selection manifest candidate_id does not match its path: "
+            f"declared {candidate_id}, path {candidate_dir.name}"
+        )
+    if attempt_dir.name != str(generation):
+        raise ValueError(
+            "selection manifest generation does not match its path: "
+            f"declared {generation}, path {attempt_dir.name}"
+        )
+    expected_run_id = f"{candidate_id}:{generation}"
+    if run_id != expected_run_id:
+        raise ValueError(
+            f"selection manifest run_id {run_id!r} does not match {expected_run_id!r}"
+        )
+    if boundary != expected_boundary:
+        raise ValueError(
+            "selection manifest boundary does not match the runner boundary: "
+            f"manifest {boundary}, runner {expected_boundary}"
+        )
+    if checkout_head not in (before, after):
+        raise ValueError(
+            f"checkout HEAD {checkout_head} is neither manifest before {before} "
+            f"nor after {after}"
+        )
+
+    entries = payload.get("tests")
+    if not isinstance(entries, list):
+        raise ValueError("selection manifest tests must be a list")
+    exists_key = "exists_pre" if checkout_head == before else "exists_post"
+    worktree = Path(worktree).resolve(strict=True)
+    selected: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(entries):
+        if not isinstance(item, dict):
+            raise ValueError(f"selection manifest tests[{index}] must be an object")
+        path = item.get("path")
+        if (
+            not isinstance(path, str)
+            or not _is_test_path(path)
+            or any(part in ("", ".", "..") for part in path.split("/"))
+        ):
+            raise ValueError(f"selection manifest has invalid test path {path!r}")
+        if path in seen:
+            raise ValueError(f"selection manifest repeats test path {path}")
+        seen.add(path)
+        exists_pre = item.get("exists_pre")
+        exists_post = item.get("exists_post")
+        if type(exists_pre) is not bool or type(exists_post) is not bool:
+            raise ValueError(
+                f"selection manifest existence flags must be booleans for {path}"
+            )
+        declared_exists = item[exists_key]
+        actual_exists = (worktree / path).is_file()
+        if actual_exists != declared_exists:
+            raise ValueError(
+                f"selection manifest declares {path} {exists_key}={declared_exists}, "
+                f"but checkout presence is {actual_exists}"
+            )
+        if declared_exists:
+            selected.append(path)
+    return selected
 
 
 @dataclass(frozen=True)
@@ -295,6 +426,14 @@ def _main(argv: list[str] | None = None) -> int:
     p_selection.add_argument("--boundary-paths", required=True)
     p_selection.add_argument("--changed-paths", required=True)
 
+    p_consume = sub.add_parser(
+        "selection-paths", help="validate a bound manifest and list checkout paths"
+    )
+    p_consume.add_argument("--manifest", required=True)
+    p_consume.add_argument("--worktree", required=True)
+    p_consume.add_argument("--head", required=True)
+    p_consume.add_argument("--boundary", required=True)
+
     args = parser.parse_args(argv)
 
     try:
@@ -306,7 +445,7 @@ def _main(argv: list[str] | None = None) -> int:
                 Path(args.baseline).read_text(encoding="utf-8"),
                 Path(args.post).read_text(encoding="utf-8"),
             )
-        else:
+        elif args.cmd == "prepare-selection":
             report = prepare_selection_attempt(
                 Path(args.state_dir),
                 before=args.before,
@@ -318,6 +457,16 @@ def _main(argv: list[str] | None = None) -> int:
                 changed_paths=_read_nul_paths(args.changed_paths),
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0
+        else:
+            items = selection_paths_from_manifest(
+                Path(args.manifest),
+                worktree=Path(args.worktree),
+                checkout_head=args.head,
+                expected_boundary=args.boundary,
+            )
+            for item in items:
+                print(item)
             return 0
     except (ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)

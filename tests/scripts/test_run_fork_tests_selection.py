@@ -20,6 +20,7 @@ pytest, получив несуществующий путь, не пропус�
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import os
@@ -242,6 +243,188 @@ def _print_selection(
         capture_output=True,
         text=True,
     )
+
+
+def _manifest_attempt(world: Path, root: Path) -> Path:
+    """Write one hand-checked, self-contained manifest for the fixture merge."""
+    before = _git(world, "rev-parse", "HEAD^1")
+    after = _git(world, "rev-parse", "HEAD")
+    boundary = _git(world, "rev-parse", UPSTREAM_REF)
+    identity = json.dumps(
+        {"after": after, "before": before, "boundary": boundary},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    candidate_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    generation = 1
+    attempt = root / "attempts" / candidate_id / str(generation)
+    attempt.mkdir(parents=True)
+    manifest = attempt / "gate-selection.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "upstream-sync-test-selection/v1",
+                "before": before,
+                "after": after,
+                "boundary": boundary,
+                "candidate_id": candidate_id,
+                "generation": generation,
+                "run_id": f"{candidate_id}:{generation}",
+                "tests": [
+                    {
+                        "path": "tests/test_fork_only.py",
+                        "exists_pre": True,
+                        "exists_post": True,
+                    },
+                    {
+                        "path": "tests/test_upstream_dropped.py",
+                        "exists_pre": True,
+                        "exists_post": False,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (attempt / "attempt.json").write_text("{}\n", encoding="utf-8")
+    return manifest
+
+
+def _consume_manifest(world: Path, manifest: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--selection-from",
+            str(manifest),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _rewrite_manifest(manifest: Path, **updates) -> None:
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload.update(updates)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_manifest_consumer_selects_only_paths_declared_present(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert result.stdout.splitlines() == ["tests/test_fork_only.py"]
+
+
+def test_manifest_consumer_selects_pre_only_path_on_before(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _git(world, "checkout", "-q", "--detach", "HEAD^1")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert result.stdout.splitlines() == [
+        "tests/test_fork_only.py",
+        "tests/test_upstream_dropped.py",
+    ]
+
+
+def test_manifest_consumer_rejects_unknown_schema(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _rewrite_manifest(manifest, schema_version="upstream-sync-test-selection/v999")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "schema" in result.stderr.lower()
+
+
+def test_manifest_consumer_rejects_foreign_head(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _write(world, "foreign.txt", "different candidate\n")
+    foreign_head = _commit(world, "move checkout past the candidate")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert foreign_head in result.stderr
+
+
+def test_manifest_consumer_rejects_declared_exists_mismatch(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _git(world, "checkout", "-q", "--detach", "HEAD^1")
+    missing = "tests/test_upstream_dropped.py"
+    (world / missing).unlink()
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert missing in result.stderr
+
+
+def test_manifest_consumer_requires_attempt_commit_marker(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    (manifest.parent / "attempt.json").unlink()
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "attempt.json" in result.stderr
+
+
+def test_manifest_consumer_rejects_manifest_moved_to_foreign_generation(
+    world: Path, tmp_path
+):
+    manifest = _manifest_attempt(world, tmp_path)
+    foreign_attempt = manifest.parent.parent / "2"
+    foreign_attempt.mkdir()
+    foreign_manifest = foreign_attempt / manifest.name
+    foreign_manifest.write_bytes(manifest.read_bytes())
+    (foreign_attempt / "attempt.json").write_text("{}\n", encoding="utf-8")
+
+    result = _consume_manifest(world, foreign_manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "generation" in result.stderr.lower()
+
+
+def test_manifest_consumer_rejects_manifest_moved_to_foreign_candidate(
+    world: Path, tmp_path
+):
+    manifest = _manifest_attempt(world, tmp_path)
+    foreign_attempt = manifest.parent.parent.parent / ("0" * 64) / "1"
+    foreign_attempt.mkdir(parents=True)
+    foreign_manifest = foreign_attempt / manifest.name
+    foreign_manifest.write_bytes(manifest.read_bytes())
+    (foreign_attempt / "attempt.json").write_text("{}\n", encoding="utf-8")
+
+    result = _consume_manifest(world, foreign_manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "candidate_id" in result.stderr
+
+
+def test_manifest_consumer_rejects_run_id_mismatch(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _rewrite_manifest(manifest, run_id="different-run")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "run_id" in result.stderr
 
 
 def test_print_selection_emits_only_paths_on_stdout(
