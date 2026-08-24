@@ -196,4 +196,4 @@ fi
 
 cd "$WT"
 nice -n 19 "$PYTHON_BIN" -m pytest "${TESTS[@]}" \
-  -q -p no:cacheprovider --timeout=90 -rf
+  -q -p no:cacheprovider --timeout=90 -rf --continue-on-collection-errors

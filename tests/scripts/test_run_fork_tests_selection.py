@@ -24,8 +24,10 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -562,6 +564,47 @@ def test_manifest_selection_requires_attempt_root(world: Path, tmp_path) -> None
     assert result.returncode == 2
     assert result.stdout == ""
     assert "manifest selection needs --attempt-root" in result.stderr.lower()
+
+
+def test_collection_error_does_not_abort_run(world: Path) -> None:
+    """One broken import stays visible without preventing runnable tests."""
+    _write(
+        world,
+        "tests/test_collection_bomb.py",
+        "raise RuntimeError('collection boom')\n",
+    )
+    _write(
+        world,
+        "tests/test_after_collection_error.py",
+        "def test_still_runs():\n    assert True\n",
+    )
+    _commit(world, "fork adds one broken and one runnable test module")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env={**os.environ, "HERMES_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, "the collection error must remain a failing outcome"
+    assert "collection boom" in output, "the collection error disappeared from evidence"
+    assert "Interrupted" not in output, (
+        "pytest aborted after collection instead of running the modules it could collect"
+    )
+    assert re.search(r"2 passed, 1 error in ", output), (
+        "the runnable fork tests did not execute to a terminal pytest summary; "
+        f"output={output!r}"
+    )
 
 
 def test_print_selection_emits_only_paths_on_stdout(

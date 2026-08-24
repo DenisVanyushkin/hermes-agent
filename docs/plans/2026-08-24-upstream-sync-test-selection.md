@@ -264,6 +264,13 @@ rc 2**, а не тихий пропуск. Пропуск допустим то�
 - отвергает `before == after` и при построении, и при потреблении: у такого
   кандидата нельзя однозначно выбрать сторону `exists_pre`/`exists_post`.
 
+Точное равенство expected attempts root ограничивает consumer текущим
+`$STATE_DIR/attempts`, но **не** разделяет apply и gate-only: оба режима по
+этому контракту живут под одним корнем, а изоляция репетиции обеспечивается
+запретами data-plane в T19. Если позже репетициям понадобится отдельный корень,
+consumer сейчас принимает ровно один expected root, и этот контракт придётся
+явно изменить — текущая проверка не должна читаться как такая изоляция.
+
 **DoD.** `scripts/run_tests.sh tests/scripts/test_run_fork_tests_selection.py tests/scripts/test_upstream_sync_gate.py`
 зелёный; среди случаев все три: unknown schema, foreign HEAD, declared-exists
 mismatch; плюс отсутствующий commit marker и manifest, перемещённый в чужую
@@ -278,7 +285,7 @@ candidate/generation или attempts root, несущий чужой `run_id`, �
 «недостаточно», и ни одна задача его не добавляла — то есть исходное обрушение
 сбора осталось бы неисправленным. Новому парсеру (T12) без флага нечего парсить.
 
-**DoD.** `pytest tests/scripts/test_run_fork_tests_selection.py::test_collection_error_does_not_abort_run`
+**DoD.** `scripts/run_tests.sh tests/scripts/test_run_fork_tests_selection.py::test_collection_error_does_not_abort_run`
 зелёный: набор с модулем, кидающим на импорте, даёт итоговую строку, а не
 `Interrupted`.
 
@@ -291,6 +298,9 @@ candidate/generation или attempts root, несущий чужой `run_id`, �
 
 **Что сделать.** Раннер печатает в stderr строку с версией контракта и
 дайджестом манифеста, который **реально** потребил.
+В этой же задаче parser отвергает повтор value-bearing singleton-опций вместо
+молчаливого last-value-wins; отдельный поведенческий случай
+`--boundary AAA --boundary BBB` обязан дать rc 2 до запуска тестов.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k runner_receipt`
 зелёный; среди случаев — стаб старой сигнатуры, на котором caller падает громко
