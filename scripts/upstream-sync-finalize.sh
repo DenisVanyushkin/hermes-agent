@@ -329,7 +329,7 @@ merge_passes_fork_tests() {
   [ -x "$py" ] || py="$(command -v python3)"
   local wt baseline post rc new_failures listing_dir
   local before_paths after_paths boundary_paths changed_paths
-  local selection_report attempt_dir selection_manifest
+  local selection_report attempt_dir selection_manifest selection_digest receipt_line
   listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
   before_paths="$listing_dir/before.paths"
   after_paths="$listing_dir/after.paths"
@@ -370,6 +370,11 @@ merge_passes_fork_tests() {
     return 1
   fi
   selection_manifest="$attempt_dir/gate-selection.json"
+  if ! selection_digest="$(sha256sum "$selection_manifest" | awk '{print $1}')" || [ -z "$selection_digest" ]; then
+    echo "could not hash the selection manifest for the runner receipt" >>"$DETAIL_LOG"
+    return 1
+  fi
+  receipt_line="fork test receipt: contract=v1 source=manifest manifest_sha256=$selection_digest"
   printf 'gate selection report: %s\n' "$selection_report" >>"$DETAIL_LOG"
   wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
   baseline="$attempt_dir/gate-baseline.log"
@@ -381,6 +386,12 @@ merge_passes_fork_tests() {
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$baseline" 2>&1 || true
+  if ! grep -Fqx "$receipt_line" "$baseline"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    echo "runner receipt missing or mismatched in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
@@ -389,6 +400,12 @@ merge_passes_fork_tests() {
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$post" 2>&1 || true
+  if ! grep -Fqx "$receipt_line" "$post"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    echo "runner receipt missing or mismatched in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
   rm -rf "$wt"
   # Keep both runs. They used to be mktemp'd and deleted, which left a blocked

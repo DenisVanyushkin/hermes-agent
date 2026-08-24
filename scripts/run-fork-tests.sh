@@ -16,25 +16,61 @@ BOUNDARY="${HERMES_UPSTREAM_BOUNDARY:-}"
 SELECTION_FROM=""
 ATTEMPT_ROOT=""
 LEGACY_SELECTION=0
+BOUNDARY_ARG_SEEN=0
+SELECTION_FROM_ARG_SEEN=0
+ATTEMPT_ROOT_ARG_SEEN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print-selection) PRINT_SELECTION=1; shift ;;
     --legacy-selection) LEGACY_SELECTION=1; shift ;;
     --boundary)
+      if [ "$BOUNDARY_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --boundary option" >&2
+        exit 2
+      fi
+      BOUNDARY_ARG_SEEN=1
       shift
       [ "$#" -gt 0 ] || { echo "FAILED: --boundary needs a value" >&2; exit 2; }
       BOUNDARY="$1"; shift ;;
-    --boundary=*) BOUNDARY="${1#--boundary=}"; shift ;;
+    --boundary=*)
+      if [ "$BOUNDARY_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --boundary option" >&2
+        exit 2
+      fi
+      BOUNDARY_ARG_SEEN=1
+      BOUNDARY="${1#--boundary=}"; shift ;;
     --selection-from)
+      if [ "$SELECTION_FROM_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --selection-from option" >&2
+        exit 2
+      fi
+      SELECTION_FROM_ARG_SEEN=1
       shift
       [ "$#" -gt 0 ] || { echo "FAILED: --selection-from needs a value" >&2; exit 2; }
       SELECTION_FROM="$1"; shift ;;
-    --selection-from=*) SELECTION_FROM="${1#--selection-from=}"; shift ;;
+    --selection-from=*)
+      if [ "$SELECTION_FROM_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --selection-from option" >&2
+        exit 2
+      fi
+      SELECTION_FROM_ARG_SEEN=1
+      SELECTION_FROM="${1#--selection-from=}"; shift ;;
     --attempt-root)
+      if [ "$ATTEMPT_ROOT_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --attempt-root option" >&2
+        exit 2
+      fi
+      ATTEMPT_ROOT_ARG_SEEN=1
       shift
       [ "$#" -gt 0 ] || { echo "FAILED: --attempt-root needs a value" >&2; exit 2; }
       ATTEMPT_ROOT="$1"; shift ;;
-    --attempt-root=*) ATTEMPT_ROOT="${1#--attempt-root=}"; shift ;;
+    --attempt-root=*)
+      if [ "$ATTEMPT_ROOT_ARG_SEEN" -eq 1 ]; then
+        echo "FAILED: duplicate --attempt-root option" >&2
+        exit 2
+      fi
+      ATTEMPT_ROOT_ARG_SEEN=1
+      ATTEMPT_ROOT="${1#--attempt-root=}"; shift ;;
     --) shift; break ;;
     -*) echo "FAILED: unknown option $1" >&2; exit 2 ;;
     *) break ;;
@@ -187,6 +223,22 @@ fi
 if [ "${#TESTS[@]}" -eq 0 ]; then
   echo "FAILED: computed an empty fork test set; refusing to report a clean run." >&2
   exit 2
+fi
+
+if [ -n "$SELECTION_FROM" ]; then
+  if ! SELECTION_DIGEST="$(sha256sum "$SELECTION_FROM" | awk '{print $1}')" || [ -z "$SELECTION_DIGEST" ]; then
+    echo "FAILED: could not hash the consumed selection manifest" >&2
+    exit 2
+  fi
+  printf 'fork test receipt: contract=v1 source=manifest manifest_sha256=%s\n' \
+    "$SELECTION_DIGEST" >&2
+else
+  if ! SELECTION_DIGEST="$(printf '%s\n' "${TESTS[@]}" | sha256sum | awk '{print $1}')" || [ -z "$SELECTION_DIGEST" ]; then
+    echo "FAILED: could not hash the computed test selection" >&2
+    exit 2
+  fi
+  printf 'fork test receipt: contract=v1 source=legacy selection_sha256=%s\n' \
+    "$SELECTION_DIGEST" >&2
 fi
 
 if [ "$PRINT_SELECTION" -eq 1 ]; then

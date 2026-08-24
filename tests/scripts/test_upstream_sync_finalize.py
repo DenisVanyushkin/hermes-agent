@@ -76,6 +76,12 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     tests_stub = scripts / "run-fork-tests.sh"
     tests_stub.write_text(
         "#!/usr/bin/env bash\n"
+        'SEL=""\n'
+        'while [ $# -gt 0 ]; do case "$1" in\n'
+        '  --selection-from) SEL="$2"; shift 2 ;;\n'
+        '  *) shift ;;\n'
+        'esac; done\n'
+        'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
         "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
         "echo '1 failed, 5 passed in 2.00s'\n"
     )
@@ -816,6 +822,7 @@ class TestApplyMergeIsGatedOnForkTests:
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
             'printf "%s\\n" "$SEL" >> "$(dirname "$0")/selection-calls.log"\n'
             'printf "%s\\n" "$ROOT" >> "$(dirname "$0")/attempt-root-calls.log"\n'
+            'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
             'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
@@ -865,6 +872,57 @@ class TestApplyMergeIsGatedOnForkTests:
             "both consumers must be confined to the finalizer's attempt root; "
             f"recorded {roots}"
         )
+
+    def test_missing_runner_receipt_blocks_landing(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            "echo '1 failed, 5 passed in 2.00s'\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = (proc.stderr + proc.stdout + res.get("detail", "")).lower()
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate"
+        assert "receipt" in evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_mismatched_runner_receipt_blocks_landing(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'fork test receipt: contract=v1 source=manifest manifest_sha256=wrong'\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            "echo '1 failed, 5 passed in 2.00s'\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = (proc.stderr + proc.stdout + res.get("detail", "")).lower()
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate"
+        assert "receipt" in evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
@@ -1796,12 +1854,14 @@ class TestRedGateIsTriagedAndProposedToTheOperator:
             # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
             # worktree больше не $1. Заодно записываем полученную границу —
             # оба прогона гейта обязаны увидеть один и тот же полный SHA.
-            'WT=""; BND=""\n'
+            'WT=""; BND=""; SEL=""\n'
             'while [ $# -gt 0 ]; do case "$1" in\n'
             '  --boundary) BND="$2"; shift 2 ;;\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
+            'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
             'if [ -f "$WT/g.txt" ] && grep -q "f() ==" "$WT/tests/new.py"; then\n'
             "  echo '____ test_broken_by_merge ____'\n"

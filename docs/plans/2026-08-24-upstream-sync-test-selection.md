@@ -302,7 +302,7 @@ candidate/generation или attempts root, несущий чужой `run_id`, �
 молчаливого last-value-wins; отдельный поведенческий случай
 `--boundary AAA --boundary BBB` обязан дать rc 2 до запуска тестов.
 
-**DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k runner_receipt`
+**DoD.** `scripts/run_tests.sh tests/scripts/test_upstream_sync_finalize.py -k runner_receipt`
 зелёный; среди случаев — стаб старой сигнатуры, на котором caller падает громко
 с сообщением об отсутствующей квитанции.
 
@@ -347,9 +347,13 @@ newly-seen failing nodeids (попытка прогнать путь целик�
 
 ### T12. Общий parser outcomes: FAILED и ERROR (D4)
 
-**DoD.** `pytest tests/scripts/test_upstream_sync_gate.py -k outcomes` зелёный;
+**DoD.** `scripts/run_tests.sh tests/scripts/test_upstream_sync_gate.py -k outcomes` зелёный;
 среди случаев — прогон, где между baseline и post **появилась** ошибка сбора, и
-компаратор возвращает её находкой, а не rc 2.
+компаратор возвращает её находкой, а не rc 2. Приёмочные golden inputs должны
+включать дословно `2 errors in 0.05s` (множественное `errors` не должно
+потеряться из-за `error\b`) и `no tests ran in 0.01s` (нечитаемый прогон,
+rc 2), рядом с рабочими формами `2 passed, 1 error in 0.12s` и боевой строкой
+`76 failed, 6259 passed, 2 skipped, 6 warnings in 679.63s`.
 
 **Зависимости.** T8. **Сложность.** M.
 

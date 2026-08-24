@@ -566,6 +566,46 @@ def test_manifest_selection_requires_attempt_root(world: Path, tmp_path) -> None
     assert "manifest selection needs --attempt-root" in result.stderr.lower()
 
 
+def test_manifest_selection_emits_receipt_for_consumed_file(
+    world: Path, tmp_path
+) -> None:
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = _consume_manifest(world, manifest)
+
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    expected = (
+        "fork test receipt: contract=v1 source=manifest "
+        f"manifest_sha256={digest}"
+    )
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert expected in result.stderr
+
+
+def test_duplicate_boundary_option_is_refused(world: Path) -> None:
+    other_boundary = _git(world, "rev-parse", "HEAD^1")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--boundary",
+            other_boundary,
+            "--print-selection",
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "duplicate --boundary" in result.stderr.lower()
+
+
 def test_collection_error_does_not_abort_run(world: Path) -> None:
     """One broken import stays visible without preventing runnable tests."""
     _write(
