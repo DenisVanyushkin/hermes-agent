@@ -144,6 +144,9 @@ def _allocate_attempt(
     candidate_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     existing_generations: list[int] = []
     for child in candidate_dir.iterdir():
+        # Foreign entries mean the evidence namespace is corrupt. Never skip
+        # or remove them automatically: preserving unexplained evidence is
+        # safer than making later generations appear trustworthy around it.
         if not child.is_dir() or not child.name.isdecimal():
             raise ValueError(f"invalid attempt generation entry: {child}")
         existing_generations.append(int(child.name))
@@ -192,8 +195,10 @@ def prepare_selection_attempt(
     attempt_dir, metadata = _allocate_attempt(
         Path(state_dir), before=before, after=after, boundary=boundary
     )
+    write_json_atomic(attempt_dir / "gate-selection.json", manifest)
+    # Commit marker last: readers treat a generation without attempt.json as
+    # incomplete, never as a bound manifest that is safe to consume.
     write_json_atomic(attempt_dir / "attempt.json", metadata)
-    write_json_atomic(attempt_dir / "gate-selection.txt", manifest)
     return {
         **selection_manifest_report(manifest),
         "attempt_dir": str(attempt_dir),

@@ -58,7 +58,7 @@ if ! BOUNDARY_SHA="$(git -C "$WT" rev-parse --verify "$BOUNDARY^{commit}" 2>/dev
 fi
 
 filter_tests() {
-  grep -E '\.py$' | grep -v '/fixtures/' | grep -v '__init__\.py$' \
+  grep -E '\.py$' | grep -v '/fixtures/' | grep -v -E '(^|/)__init__\.py$' \
     | grep -v '/[.]_' | grep -v '^[.]_' || true
 }
 

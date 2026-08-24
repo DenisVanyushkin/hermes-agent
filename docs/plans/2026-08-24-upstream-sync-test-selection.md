@@ -84,7 +84,7 @@ v3 — последняя редакция прозы. После неё — bou
   `scratch/`, `finalize-result.json`, `last-synced.json`, накопленные
   `gate-*` улики.
 - *Attempt namespace* — `$STATE_DIR/attempts/<candidate_id>/<generation>/`.
-  Внутри: `gate-selection.txt`, `gate-baseline.log`, `gate-post.log`,
+  Внутри: `gate-selection.json`, `gate-baseline.log`, `gate-post.log`,
   `gate-upstream-probe.log`, `gate-failures.json`, `attempt-result.json`,
   `attempt.json`.
 
@@ -120,6 +120,9 @@ state.
 **Привязка.** `attempt.json` несёт `schema_version`, `before`, `after`,
 `boundary`, `candidate_id`, `generation`, `run_id`. Потребитель обязан отказать,
 если тройка или generation не совпадают с тем, что он видит.
+`attempt.json` пишется **последним** и служит commit marker поколения: каталог
+без него означает оборванную или ещё не завершённую запись и потреблению не
+подлежит, даже если `gate-selection.json` уже появился атомарно.
 
 **Два независимых поля исхода.**
 
@@ -224,11 +227,15 @@ state.
 том же каталоге + `rename`), несёт поля из контракта изоляции. В отчёт
 возвращается **`pre_only_paths`** — informational список и счётчик путей,
 удалённых мержем; это **не** корзина падений. Артефакты пишутся в attempt
-namespace.
+namespace. Persisted manifest — самодостаточный JSON
+`gate-selection.json`: он содержит схему, тройку SHA и `exists_pre`/
+`exists_post`, без которых T7 не может fail-closed проверить потребление.
+Построчный stdout `--print-selection` остаётся отдельным shell-протоколом и не
+является форматом persisted manifest.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k manifest`
 зелёный; среди случаев — обрыв записи, после которого частичного
-`gate-selection.txt` в каталоге нет, и случай, где удалённый путь попадает
+`gate-selection.json` в каталоге нет, и случай, где удалённый путь попадает
 именно в `pre_only_paths`.
 
 **Зависимости.** T5. **Сложность.** M.
@@ -397,6 +404,13 @@ post; из-за нечитаемого collect; из-за нечитаемого
 **Зависимости.** T11. **Сложность.** M.
 
 ### T19. `gate-only` с изоляцией попытки (D9, контракт)
+
+**Что сделать.** Legacy-публикация улик в production state условна по режиму.
+Только `apply` вправе копировать `gate-baseline.log`/`gate-post.log`, копировать
+`gate-failures.json` и удалять production `gate-failures.json` при успехе.
+`gate-only` не выполняет ни одну из этих операций: все его улики и итог
+остаются только в новой generation. Эти три места в нынешнем финализаторе
+нельзя оставить общими после выделения shared `run_gate`.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k gate_only_isolation`
 зелёный: тест побайтово сравнивает **весь** `$STATE_DIR` до и после, исключая

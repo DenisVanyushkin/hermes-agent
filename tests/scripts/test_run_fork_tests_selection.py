@@ -210,6 +210,23 @@ def test_fork_own_test_is_selected(world: Path, fake_python: tuple[Path, Path]) 
     )
 
 
+def test_filename_ending_in_dunder_init_is_not_a_package_initializer(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """Only the exact basename __init__.py is infrastructure, not a test."""
+    path = "tests/my__init__.py"
+    _write(world, path, "def test_suffix_is_still_a_test():\n    pass\n")
+    _commit(world, "fork adds a test whose basename ends in dunder init")
+
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert path in result.stdout.splitlines(), (
+        "the shell filter disagrees with the manifest builder and drops a real "
+        f"test merely because its basename ends with __init__.py: {result.stdout!r}"
+    )
+
+
 def _print_selection(
     world: Path, fake_python: tuple[Path, Path]
 ) -> subprocess.CompletedProcess[str]:

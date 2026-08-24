@@ -904,6 +904,39 @@ class TestApplyMergeIsGatedOnForkTests:
 
 
 class TestGateSelectionManifest:
+    def test_attempt_json_is_the_generation_commit_marker(self, tmp_path, monkeypatch):
+        """A generation is complete only after its binding metadata appears."""
+        real_replace = upstream_sync_gate.os.replace
+
+        def interrupt_commit_marker(source, destination):
+            if Path(destination).name == "attempt.json":
+                raise OSError("simulated interruption before generation commit")
+            real_replace(source, destination)
+
+        monkeypatch.setattr(
+            upstream_sync_gate.os, "replace", interrupt_commit_marker
+        )
+        with pytest.raises(OSError, match="before generation commit"):
+            upstream_sync_gate.prepare_selection_attempt(
+                tmp_path,
+                before="1" * 40,
+                after="2" * 40,
+                boundary="3" * 40,
+                before_paths=["tests/test_before.py"],
+                after_paths=["tests/test_after.py"],
+                boundary_paths=[],
+                changed_paths=[
+                    "tests/test_before.py",
+                    "tests/test_after.py",
+                ],
+            )
+
+        attempts = list((tmp_path / "attempts").glob("*/*"))
+        assert len(attempts) == 1
+        attempt = attempts[0]
+        assert (attempt / "gate-selection.json").exists()
+        assert not (attempt / "attempt.json").exists()
+
     def test_interrupted_manifest_write_leaves_no_partial_file(
         self, tmp_path, monkeypatch
     ):
@@ -911,7 +944,7 @@ class TestGateSelectionManifest:
         assert callable(writer), "atomic selection-manifest writer is not implemented"
         attempt = tmp_path / "attempts" / "candidate" / "1"
         attempt.mkdir(parents=True)
-        target = attempt / "gate-selection.txt"
+        target = attempt / "gate-selection.json"
 
         def interrupt_replace(source, destination):
             assert Path(source).parent == target.parent
@@ -942,7 +975,7 @@ class TestGateSelectionManifest:
         )
         assert len(attempts) == 1, proc.stderr + (state / "finalize-detail.log").read_text()
         attempt = attempts[0]
-        manifest = json.loads((attempt / "gate-selection.txt").read_text())
+        manifest = json.loads((attempt / "gate-selection.json").read_text())
         deleted = "tests/test_upstream_deleted.py"
         assert {item["path"]: item for item in manifest["tests"]}[deleted] == {
             "path": deleted,
