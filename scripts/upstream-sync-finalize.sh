@@ -374,7 +374,11 @@ merge_passes_fork_tests() {
     echo "could not hash the selection manifest for the runner receipt" >>"$DETAIL_LOG"
     return 1
   fi
-  receipt_line="fork test receipt: contract=v1 source=manifest manifest_sha256=$selection_digest"
+  if ! receipt_line="$("$py" "$gate" receipt \
+    --source manifest --digest "$selection_digest" 2>>"$DETAIL_LOG")"; then
+    echo "could not format the expected runner receipt" >>"$DETAIL_LOG"
+    return 1
+  fi
   printf 'gate selection report: %s\n' "$selection_report" >>"$DETAIL_LOG"
   wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
   baseline="$attempt_dir/gate-baseline.log"

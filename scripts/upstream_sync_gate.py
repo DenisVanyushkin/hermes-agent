@@ -21,6 +21,25 @@ from typing import Any
 
 SELECTION_MANIFEST_SCHEMA = "upstream-sync-test-selection/v1"
 ATTEMPT_SCHEMA = "upstream-sync-gate-attempt/v1"
+RECEIPT_CONTRACT = "v1"
+_RECEIPT_FIELDS = {
+    "manifest": "manifest_sha256",
+    "legacy": "selection_sha256",
+}
+
+
+def fork_test_receipt(*, source: str, digest: str) -> str:
+    """Format the receipt shared by the runner and its enforcing caller."""
+    try:
+        field = _RECEIPT_FIELDS[source]
+    except KeyError as exc:
+        raise ValueError(f"unknown fork-test receipt source {source!r}") from exc
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("fork-test receipt digest must be a lowercase SHA-256")
+    return (
+        f"fork test receipt: contract={RECEIPT_CONTRACT} source={source} "
+        f"{field}={digest}"
+    )
 
 
 def _is_test_path(path: str) -> bool:
@@ -445,6 +464,12 @@ def _main(argv: list[str] | None = None) -> int:
     p_consume.add_argument("--head", required=True)
     p_consume.add_argument("--boundary", required=True)
 
+    p_receipt = sub.add_parser(
+        "receipt", help="format the runner receipt for a computed digest"
+    )
+    p_receipt.add_argument("--source", choices=sorted(_RECEIPT_FIELDS), required=True)
+    p_receipt.add_argument("--digest", required=True)
+
     args = parser.parse_args(argv)
 
     try:
@@ -469,7 +494,7 @@ def _main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0
-        else:
+        elif args.cmd == "selection-paths":
             items = selection_paths_from_manifest(
                 Path(args.manifest),
                 expected_attempts_root=Path(args.attempt_root),
@@ -479,6 +504,9 @@ def _main(argv: list[str] | None = None) -> int:
             )
             for item in items:
                 print(item)
+            return 0
+        else:
+            print(fork_test_receipt(source=args.source, digest=args.digest))
             return 0
     except (ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)

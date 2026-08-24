@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import upstream_sync_gate
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "scripts" / "run-fork-tests.sh"
 
@@ -574,9 +576,9 @@ def test_manifest_selection_emits_receipt_for_consumed_file(
     result = _consume_manifest(world, manifest)
 
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    expected = (
-        "fork test receipt: contract=v1 source=manifest "
-        f"manifest_sha256={digest}"
+    expected = upstream_sync_gate.fork_test_receipt(
+        source="manifest",
+        digest=digest,
     )
     assert result.returncode == 0, f"stderr={result.stderr!r}"
     assert expected in result.stderr

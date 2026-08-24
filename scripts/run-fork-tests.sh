@@ -109,6 +109,13 @@ if [ "$LEGACY_SELECTION" -eq 1 ] && [ -n "$ATTEMPT_ROOT" ]; then
   echo "FAILED: --attempt-root is only valid with --selection-from" >&2
   exit 2
 fi
+RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GATE_HELPER="${HERMES_UPSTREAM_SYNC_GATE:-$RUNNER_DIR/upstream_sync_gate.py}"
+CONTROL_PYTHON="${HERMES_CONTROL_PYTHON:-$(command -v python3)}"
+if [ ! -f "$GATE_HELPER" ] || [ ! -x "$CONTROL_PYTHON" ]; then
+  echo "FAILED: receipt/manifest helper or Python is unavailable" >&2
+  exit 2
+fi
 # Интерпретатор берём из ГЛАВНОГО чекаута, а не из worktree: venv лежит в
 # основном рабочем дереве и в worktree не копируется. Взять оттуда python3 без
 # зависимостей проекта — значит получить два одинаково рассыпавшихся прогона,
@@ -133,13 +140,6 @@ MERGE_CHANGED=()
 DROPPED=()
 TESTS=()
 if [ -n "$SELECTION_FROM" ]; then
-  RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  GATE_HELPER="${HERMES_UPSTREAM_SYNC_GATE:-$RUNNER_DIR/upstream_sync_gate.py}"
-  CONTROL_PYTHON="${HERMES_CONTROL_PYTHON:-$(command -v python3)}"
-  if [ ! -f "$GATE_HELPER" ] || [ ! -x "$CONTROL_PYTHON" ]; then
-    echo "FAILED: manifest consumer helper or Python is unavailable" >&2
-    exit 2
-  fi
   if ! HEAD_SHA="$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)"; then
     echo "FAILED: cannot resolve checkout HEAD for manifest consumption" >&2
     exit 2
@@ -230,16 +230,22 @@ if [ -n "$SELECTION_FROM" ]; then
     echo "FAILED: could not hash the consumed selection manifest" >&2
     exit 2
   fi
-  printf 'fork test receipt: contract=v1 source=manifest manifest_sha256=%s\n' \
-    "$SELECTION_DIGEST" >&2
+  RECEIPT_SOURCE=manifest
 else
   if ! SELECTION_DIGEST="$(printf '%s\n' "${TESTS[@]}" | sha256sum | awk '{print $1}')" || [ -z "$SELECTION_DIGEST" ]; then
     echo "FAILED: could not hash the computed test selection" >&2
     exit 2
   fi
-  printf 'fork test receipt: contract=v1 source=legacy selection_sha256=%s\n' \
-    "$SELECTION_DIGEST" >&2
+  RECEIPT_SOURCE=legacy
 fi
+if ! RECEIPT_LINE="$(
+  "$CONTROL_PYTHON" "$GATE_HELPER" receipt \
+    --source "$RECEIPT_SOURCE" --digest "$SELECTION_DIGEST"
+)"; then
+  echo "FAILED: could not format the fork test receipt" >&2
+  exit 2
+fi
+printf '%s\n' "$RECEIPT_LINE" >&2
 
 if [ "$PRINT_SELECTION" -eq 1 ]; then
   printf '%s\n' "${TESTS[@]}"

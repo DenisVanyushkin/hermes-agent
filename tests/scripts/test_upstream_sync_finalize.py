@@ -1041,9 +1041,9 @@ class TestRunnerFinalizeReceiptSeam:
         )
         stderr_log.write_text(proc.stderr)
 
-        expected = (
-            "fork test receipt: contract=v1 source=manifest manifest_sha256="
-            f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}"
+        expected = upstream_sync_gate.fork_test_receipt(
+            source="manifest",
+            digest=hashlib.sha256(manifest.read_bytes()).hexdigest(),
         )
         receipt_check = subprocess.run(
             ["grep", "-Fqx", expected, str(stderr_log)],
