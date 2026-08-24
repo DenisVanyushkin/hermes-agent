@@ -883,6 +883,39 @@ def test_consume_codex_stream_separates_commentary_from_analysis(monkeypatch):
     assert response.output == [commentary_item]
 
 
+def test_consume_codex_stream_preserves_analysis_delta_streaming():
+    """Ordinary analysis remains incremental after the prefix is disproven."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    analysis_item = SimpleNamespace(
+        type="message",
+        phase="analysis",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="Need to inspect files.")],
+    )
+    reasoning_streamed = []
+
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="analysis"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="Need to "),
+            SimpleNamespace(type="response.output_text.delta", delta="inspect files."),
+            SimpleNamespace(type="response.output_item.done", item=analysis_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5-codex",
+        on_reasoning_delta=reasoning_streamed.append,
+    )
+
+    assert reasoning_streamed == ["Need to ", "inspect files."]
+
+
 MALFORMED_SKILL_VIEW_COMMENTARY = (
     '<|start|>assistant<|channel|>commentary '
     'to=functions.skill_view<|constrain|>json\n'

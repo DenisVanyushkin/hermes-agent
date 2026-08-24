@@ -321,6 +321,187 @@ async def test_real_gateway_runner_suppresses_codex_protocol_before_interim_slac
     assert all("to=functions." not in text for text in delivered)
 
 
+@pytest.mark.asyncio
+async def test_gateway_runner_uses_real_codex_recovery_composition(monkeypatch, tmp_path):
+    """GatewayRunner drives the actual Codex runtime, loop, and Slack seam."""
+    from unittest.mock import MagicMock
+
+    import run_agent as run_agent_module
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _make_runner
+    from tests.run_agent.test_run_agent_codex_responses import _FakeCreateStream
+
+    tool_definition = {
+        "type": "function",
+        "function": {
+            "name": "skill_view",
+            "description": "Read a skill file.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    monkeypatch.setattr(
+        run_agent_module,
+        "get_tool_definitions",
+        lambda **_kwargs: [tool_definition],
+    )
+    monkeypatch.setattr(run_agent_module, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(run_agent_module, "OpenAI", MagicMock())
+
+    malformed = (
+        '<|start|>assistant<|channel|>commentary '
+        'to=functions.skill_view<|constrain|>json\n'
+        '{"name":"skill_view","arguments":{}}'
+    )
+    streams = iter([
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta=malformed),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="message",
+                    phase="commentary",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text=malformed)],
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="function_call"),
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc_1",
+                    call_id="call_1",
+                    name="skill_view",
+                    arguments="{}",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="final_answer"),
+            ),
+            SimpleNamespace(
+                type="response.output_text.delta",
+                delta="Recovered through native call.",
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="message",
+                    phase="final_answer",
+                    status="completed",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text", text="Recovered through native call."
+                        )
+                    ],
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+    ])
+    execution_calls = []
+
+    def _real_interruptible_call(self, api_kwargs):
+        stream = next(streams)
+        self.client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **_kwargs: stream)
+        )
+        return self._run_codex_stream(api_kwargs)
+
+    def _execute_native_call(self, assistant_message, messages, effective_task_id, api_call_count=0):
+        execution_calls.append(assistant_message.tool_calls)
+
+    monkeypatch.setattr(
+        run_agent_module.AIAgent,
+        "_interruptible_api_call",
+        _real_interruptible_call,
+    )
+    monkeypatch.setattr(
+        run_agent_module.AIAgent,
+        "_execute_tool_calls",
+        _execute_native_call,
+    )
+
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"display": {"interim_assistant_messages": True}},
+    )
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"api_key": "***"},
+    )
+    adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
+    runner = _make_runner(adapter)
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "gpt-5-codex",
+        {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "test-token",
+        },
+    )
+    runner._resolve_turn_agent_config = lambda _message, _model, _runtime: {
+        "model": "gpt-5-codex",
+        "runtime": {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "test-token",
+        },
+    }
+    runner._resolve_enabled_toolsets_for_source = lambda *_args: []
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="inspect the skill",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-real-codex-recovery",
+        session_key="agent:main:slack:dm:C123",
+        event_message_id="171717.000002",
+    )
+
+    visible_interim = [call["content"] for call in adapter.sent + adapter.edits]
+    assert result["final_response"] == "Recovered through native call."
+    assert len(execution_calls) == 1
+    assert visible_interim == []
+    assert all("to=functions.skill_view" not in text for text in visible_interim)
+
+
 class TestFinalAdoptionGuards:
     @pytest.mark.asyncio
     async def test_no_stream_turn_does_not_adopt_final(self):

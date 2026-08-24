@@ -93,6 +93,14 @@ def _malformed_normalized_response():
     )
 
 
+def _clean_incomplete_normalized_response():
+    return NormalizedResponse(
+        content="I am still working.",
+        tool_calls=None,
+        finish_reason="incomplete",
+    )
+
+
 class _FakeCodexTransport:
     def __init__(self, normalized):
         self._normalized = iter(normalized)
@@ -111,6 +119,120 @@ class _FakeCodexTransport:
 
 
 class TestDroppedToolCallRecovery:
+    def test_real_codex_stream_normalization_recovery_executes_native_call_once(
+        self, loop_agent
+    ):
+        """Exercise raw Codex SSE -> runtime -> transport -> loop composition."""
+        from tests.run_agent.test_run_agent_codex_responses import _FakeCreateStream
+
+        malformed = (
+            '<|start|>assistant<|channel|>commentary '
+            'to=functions.skill_view<|constrain|>json\n'
+            '{"name":"skill_view","arguments":{}}'
+        )
+        streams = iter([
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="commentary"),
+                ),
+                SimpleNamespace(type="response.output_text.delta", delta=malformed),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    item=SimpleNamespace(
+                        type="message",
+                        phase="commentary",
+                        status="completed",
+                        content=[SimpleNamespace(type="output_text", text=malformed)],
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="function_call"),
+                ),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    item=SimpleNamespace(
+                        type="function_call",
+                        id="fc_1",
+                        call_id="call_1",
+                        name="skill_view",
+                        arguments="{}",
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="final_answer"),
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="Recovered through native call.",
+                ),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    item=SimpleNamespace(
+                        type="message",
+                        phase="final_answer",
+                        status="completed",
+                        content=[
+                            SimpleNamespace(
+                                type="output_text", text="Recovered through native call."
+                            )
+                        ],
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+        ])
+
+        loop_agent.api_mode = "codex_responses"
+        loop_agent.provider = "openai-codex"
+        loop_agent.model = "gpt-5-codex"
+        loop_agent.valid_tool_names = {"skill_view"}
+
+        def _real_codex_call(api_kwargs):
+            stream = next(streams)
+            loop_agent.client = SimpleNamespace(
+                responses=SimpleNamespace(create=lambda **_kwargs: stream)
+            )
+            return loop_agent._run_codex_stream(api_kwargs)
+
+        loop_agent._interruptible_api_call = MagicMock(side_effect=_real_codex_call)
+        loop_agent._execute_tool_calls = MagicMock()
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("inspect the skill")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered through native call."
+        assert loop_agent._interruptible_api_call.call_count == 3
+        loop_agent._execute_tool_calls.assert_called_once()
+        visible_text = " ".join(
+            str(message.get("content") or "")
+            for message in result["messages"]
+            if isinstance(message, dict)
+        )
+        assert "to=functions.skill_view" not in visible_text
+
     def test_malformed_text_intent_recovers_once_to_native_call(self, loop_agent):
         native_call = ToolCall("call_1", "skill_view", "{}")
         transport = _FakeCodexTransport([
@@ -177,6 +299,40 @@ class TestDroppedToolCallRecovery:
             for message in result["messages"]
             if isinstance(message, dict)
         )
+
+    def test_malformed_recovery_budget_survives_clean_incomplete(self, loop_agent):
+        """An ordinary incomplete continuation cannot reopen the 1/1 window."""
+        transport = _FakeCodexTransport([
+            _malformed_normalized_response(),
+            _clean_incomplete_normalized_response(),
+            _malformed_normalized_response(),
+            NormalizedResponse("Bug reopened recovery.", None, "stop"),
+        ])
+        loop_agent.api_mode = "codex_responses"
+        loop_agent.provider = "openai-codex"
+        loop_agent.valid_tool_names = {"skill_view"}
+        loop_agent._interruptible_api_call = MagicMock(
+            side_effect=[
+                _codex_response(),
+                _codex_response(),
+                _codex_response(),
+                _codex_response(),
+            ]
+        )
+        loop_agent._get_transport = MagicMock(return_value=transport)
+        loop_agent._execute_tool_calls = MagicMock()
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("inspect the skill")
+
+        assert loop_agent._interruptible_api_call.call_count == 3
+        loop_agent._execute_tool_calls.assert_not_called()
+        assert result["completed"] is False
+        assert result["error"] == "MALFORMED_TOOL_INTENT_REPEATED"
 
     def test_dropped_tool_call_reprompts_instead_of_exiting(self, loop_agent):
         """finish_reason=tool_calls with an empty tool_calls array must

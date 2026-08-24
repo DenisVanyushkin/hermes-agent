@@ -2216,7 +2216,10 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
-    malformed_tool_intent_retries = 0
+    # This gate is scoped to the whole user turn, including ordinary
+    # incomplete continuations.  A clean non-native response must not reopen
+    # the bounded malformed-intent recovery window.
+    malformed_tool_intent_recovery_used = False
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -7241,9 +7244,10 @@ def run_conversation(
             if assistant_message.tool_calls:
                 # Native structured calls remain authoritative even if the
                 # same response also contained harmless commentary evidence.
-                malformed_tool_intent_retries = 0
+                malformed_tool_intent_recovery_used = False
             if malformed_intent is not None and not assistant_message.tool_calls:
-                malformed_tool_intent_retries += 1
+                recovery_attempt = 2 if malformed_tool_intent_recovery_used else 1
+                malformed_tool_intent_recovery_used = True
                 if isinstance(malformed_intent, dict):
                     _intent_field = malformed_intent.get
                 else:
@@ -7261,9 +7265,9 @@ def run_conversation(
                     _intent_field("source_phase", "unknown"),
                     _intent_field("format", "unknown"),
                     _intent_field("fingerprint", "unknown"),
-                    malformed_tool_intent_retries,
+                    recovery_attempt,
                 )
-                if malformed_tool_intent_retries == 1:
+                if recovery_attempt == 1:
                     # Keep the provider's opaque Codex item sidecar available
                     # to the retry.  Retain the invalid assistant carrier as
                     # an auditable non-final row and make only the recovery
@@ -7312,9 +7316,6 @@ def run_conversation(
                     "error": error_code,
                     "turn_exit_reason": "malformed_tool_intent_repeated",
                 }
-            elif malformed_intent is None:
-                malformed_tool_intent_retries = 0
-
             try:
                 from hermes_cli.lifecycle import (
                     has_hook,
