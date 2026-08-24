@@ -44,7 +44,13 @@ def _message_protocol_prefix_state(
     candidate = text.lstrip()
     if not candidate:
         return "candidate"
-    if candidate.startswith("<tool_call>"):
+    candidate_folded = candidate.casefold()
+    xml_prefix = "<tool_call>"
+    xml_prefix_folded = xml_prefix.casefold()
+    if (
+        xml_prefix_folded.startswith(candidate_folded)
+        or candidate_folded.startswith(xml_prefix_folded)
+    ):
         return "candidate"
 
     header_prefix = (
@@ -52,10 +58,13 @@ def _message_protocol_prefix_state(
         f"{phase} to=functions."
     )
     envelope_prefixes = {
-        f"{header_prefix}{name}<|constrain|>json"
+        f"{header_prefix}{name}<|constrain|>json".casefold()
         for name in valid_tool_names
     }
-    if any(prefix.startswith(candidate) for prefix in envelope_prefixes):
+    if any(
+        prefix.startswith(candidate_folded) or candidate_folded.startswith(prefix)
+        for prefix in envelope_prefixes
+    ):
         return "candidate"
     return "ordinary"
 
@@ -1226,10 +1235,8 @@ def _consume_codex_event_stream(
                     if message_protocol_state == "candidate" and message_candidate_chars >= MAX_INSPECTED_TEXT_CHARS:
                         message_protocol_state = "ordinary"
                     if message_protocol_state == "candidate":
-                        # Commentary keeps its legacy one-message delivery;
-                        # analysis remains held only while it can be protocol.
-                        if active_message_phase == "commentary":
-                            message_text_deltas.append(delta_text)
+                        # Both phases keep candidate text in exactly one buffer
+                        # until the protocol possibility is disproven.
                         continue
 
                     if active_message_phase == "analysis":

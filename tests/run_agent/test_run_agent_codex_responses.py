@@ -916,6 +916,90 @@ def test_consume_codex_stream_preserves_analysis_delta_streaming():
     assert reasoning_streamed == ["Need to ", "inspect files."]
 
 
+@pytest.mark.parametrize(
+    "xml_text",
+    [
+        "<tool_call><name>skill_view</name></tool_call>",
+        "<TOOL_CALL><NAME>skill_view</NAME></TOOL_CALL>",
+    ],
+)
+def test_consume_codex_stream_suppresses_fragmented_xml_protocol_prefixes(xml_text):
+    """Every split inside the XML prefix remains fail-closed and case-insensitive."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    prefix_length = len("<tool_call>")
+    for split_at in range(1, prefix_length):
+        analysis_item = SimpleNamespace(
+            type="message",
+            phase="analysis",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text=xml_text)],
+        )
+        visible = []
+        response = _consume_codex_event_stream(
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="analysis"),
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta=xml_text[:split_at],
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta=xml_text[split_at:],
+                ),
+                SimpleNamespace(type="response.output_item.done", item=analysis_item),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+            model="gpt-5-codex",
+            on_reasoning_delta=visible.append,
+            valid_tool_names={"skill_view"},
+        )
+
+        assert visible == [], f"XML leaked for split {split_at}: {xml_text!r}"
+        assert response._hermes_malformed_tool_intent.tool_name == "skill_view"
+
+
+def test_consume_codex_stream_does_not_duplicate_commentary_candidate_on_transition():
+    """A disproven protocol prefix moves from candidate to commentary once."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    commentary_text = "<not protocol"
+    commentary_item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text=commentary_text)],
+    )
+    delivered = []
+
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="<"),
+            SimpleNamespace(type="response.output_text.delta", delta="not protocol"),
+            SimpleNamespace(type="response.output_item.done", item=commentary_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5-codex",
+        on_commentary_message=delivered.append,
+        valid_tool_names={"skill_view"},
+    )
+
+    assert delivered == [commentary_text]
+
+
 MALFORMED_SKILL_VIEW_COMMENTARY = (
     '<|start|>assistant<|channel|>commentary '
     'to=functions.skill_view<|constrain|>json\n'
