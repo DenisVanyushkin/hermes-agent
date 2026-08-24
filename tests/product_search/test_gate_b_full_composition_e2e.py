@@ -25,9 +25,51 @@ from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
 )
 from tests.product_search.test_gate_b_composition import (
     _ProductionShapedSemanticFake,
+    _pricing,
+    _record_capability,
     _projected_fixture,
     _provider_payload,
 )
+
+
+def test_authority_recording_store_round_trip_differs_from_direct_store(
+    tmp_path: Path,
+) -> None:
+    """RED: post-seal authority enrichment corrupts the generic record."""
+    # This test is the only decorator instantiator; no production path uses it
+    # after 802dd48698.
+    input_hash = "a" * 64
+    raw_response_text = '{"observations": []}'
+    record = {
+        "recording_format_version": "1.0",
+        "input_hash": input_hash,
+        "raw_response_text": raw_response_text,
+        "response_hash": runner._sha256(raw_response_text.encode()),
+        "status": "success",
+    }
+    capability = _record_capability(_pricing())
+    sealed_record = capability.seal_record(record)
+    identity = {
+        "provider_sha256": "provider-authority",
+        "model_sha256": "model-authority",
+        "prompt_sha256": "prompt-authority",
+        "response_schema_sha256": "schema-authority",
+        "pricing_sha256": "pricing-authority",
+    }
+
+    direct_store = SemanticRecordingStore(tmp_path / "direct")
+    direct_store.save(sealed_record)
+    assert direct_store.load(input_hash) == sealed_record
+    print("CONTROL_GROUP_DIRECT_RECORDING_STORE: PASS")
+
+    decorated_store = runner._AuthorityRecordingStore(
+        SemanticRecordingStore(tmp_path / "decorated"), identity
+    )
+    decorated_store.save(sealed_record)
+    # The control group above has already proved that the sealed record itself
+    # is readable. This direct call is the intentionally red reproduction:
+    # post-seal authority enrichment makes the decorator's record corrupt.
+    decorated_store.load(input_hash)
 
 
 def _fixture_manifest(
