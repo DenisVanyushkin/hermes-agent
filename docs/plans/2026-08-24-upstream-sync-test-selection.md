@@ -416,6 +416,17 @@ gate вошли в T11 (`4e51de4d1d`). T13 всё ещё владеет мигр
 остаточной legacy-проекции; эти части не считать выполненными по факту ранней
 реализации поля.
 
+**Фактическое выполнение.** Остаток T13 выполнен коммитом `37a18b750a`
+(`make triage consume v2 blocking failures`). Gate-owned builder теперь
+единственным местом формирует `upstream-sync-gate-failures/v2`: он сортирует
+и дедуплицирует union `common_path`/`post_only_path`, не включает
+`pre_existing`, `unknown` или `unreadable_runs`, и пишет результат атомарно.
+Finalizer вызывает этот builder вместо второго inline-формата. Triage для v2
+читает только `blocking_failures`, а для legacy сохраняет `new_failures`, и
+schema-тест доказывает одинаковый набор findings в обоих форматах. Старый
+finalize stub обновлён для точного `--probe-nodeids-from`, чтобы интеграция
+проверяла новый node-aware контракт, а не искусственно создавала `unknown`.
+
 **DoD.** `pytest tests/scripts/test_upstream_sync_triage.py -k schema` зелёный;
 среди случаев — проверка самого инварианта, а не только совпадения счётчика.
 
