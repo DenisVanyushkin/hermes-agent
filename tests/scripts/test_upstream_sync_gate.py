@@ -593,7 +593,7 @@ def test_outcomes_parser_preserves_plural_collection_errors():
     assert callable(parser), "outcomes parser is not implemented"
 
     outcome = parser(
-        "ERROR collecting tests/broken.py\n"
+        "ERROR tests/broken.py - RuntimeError: boom\n"
         "2 errors in 0.05s\n"
     )
 
@@ -602,6 +602,35 @@ def test_outcomes_parser_preserves_plural_collection_errors():
         "error_count": 2,
         "collection_error_paths": ["tests/broken.py"],
     }
+
+
+def test_outcomes_parser_reads_real_pytest_collection_summary(tmp_path):
+    """The parser consumes pytest's real short summary, not its banner."""
+    broken = tmp_path / "test_broken.py"
+    broken.write_text('raise RuntimeError("boom")\n')
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(broken),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rEf",
+            "--continue-on-collection-errors",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode != 0
+    outcome = upstream_sync_gate.parse_test_outcomes(proc.stdout + proc.stderr)
+    assert outcome["error_count"] == 1
+    assert outcome["collection_error_paths"] == ["test_broken.py"]
 
 
 @pytest.mark.parametrize(
@@ -622,7 +651,7 @@ def test_outcomes_comparator_reports_new_collection_error():
 
     result = comparator(
         "0 failed, 2 passed in 0.05s\n",
-        "ERROR collecting tests/broken.py\n2 errors in 0.05s\n",
+        "ERROR tests/broken.py - RuntimeError: boom\n2 errors in 0.05s\n",
     )
 
     assert result == {
@@ -641,7 +670,7 @@ def test_outcomes_no_tests_ran_is_unreadable_not_clean():
 
 def test_outcomes_node_run_marks_collection_error_unreadable(tmp_path):
     log = tmp_path / "collection-error.log"
-    log.write_text("ERROR collecting tests/broken.py\n2 errors in 0.05s\n")
+    log.write_text("ERROR tests/broken.py - RuntimeError: boom\n2 errors in 0.05s\n")
 
     result = _cli("node-outcome", "--log", str(log))
 

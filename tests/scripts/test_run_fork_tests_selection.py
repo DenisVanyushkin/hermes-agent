@@ -647,6 +647,11 @@ def test_collection_error_does_not_abort_run(world: Path) -> None:
         "the runnable fork tests did not execute to a terminal pytest summary; "
         f"output={output!r}"
     )
+    assert re.search(
+        r"^ERROR tests/test_collection_bomb\.py(?:\s+-|\s*$)",
+        output,
+        re.MULTILINE,
+    ), "pytest did not emit the parseable collection-error path"
 
 
 def test_print_selection_emits_only_paths_on_stdout(

@@ -638,7 +638,9 @@ def build_upstream_probe_request(
 
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
-_COLLECTION_ERROR_LINE = re.compile(r"^ERROR collecting\s+(\S+)")
+_COLLECTION_ERROR_LINE = re.compile(
+    r"^ERROR\s+(?!collecting\b)(\S+)(?:\s+-.*)?$"
+)
 _NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
     r"^=*\s*(?P<counts>(?:\d+\s+(?:failed|passed|skipped|warnings?|errors?|error)\b"
