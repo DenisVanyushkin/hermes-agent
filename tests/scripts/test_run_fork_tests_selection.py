@@ -20,6 +20,7 @@ pytest, получив несуществующий путь, не пропус�
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -105,14 +106,19 @@ def world(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def fake_python(tmp_path: Path) -> tuple[Path, Path]:
-    """Интерпретатор, который ничего не исполняет, а записывает свой argv."""
-    argv_file = tmp_path / "argv.json"
+    """Интерпретатор, который ничего не исполняет, а записывает свой argv.
+
+    Пишет строкой на вызов, а не перезаписывает файл: так тест видит, что
+    раннер позвал интерпретатор **ровно один раз**, и красный результат не
+    может оказаться следствием двух прогонов, наложившихся друг на друга.
+    """
+    argv_file = tmp_path / "argv.jsonl"
     interpreter = tmp_path / "fake-python"
     interpreter.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        "with open(os.environ['FAKE_ARGV_FILE'], 'w', encoding='utf-8') as fh:\n"
-        "    json.dump(sys.argv[1:], fh)\n",
+        "with open(os.environ['FAKE_ARGV_FILE'], 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n",
         encoding="utf-8",
     )
     interpreter.chmod(0o755)
@@ -120,11 +126,22 @@ def fake_python(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
+    """Набор, который раннер реально передал pytest.
+
+    Извлекается срезом по контракту вызова — аргументы между парой ``-m pytest``
+    и первой опцией раннера, — а не фильтром «похоже на путь к тесту». Срез
+    доказывает саму форму вызова: если раннер начнёт передавать пути иначе,
+    тест это заметит, а фильтр по внешнему виду промолчал бы.
+    """
     interpreter, argv_file = fake_python
     env = {
         **os.environ,
         "HERMES_PYTHON": str(interpreter),
         "FAKE_ARGV_FILE": str(argv_file),
+        # Границу называем явно: иначе отказ по недостижимому upstream-ref
+        # завершил бы раннер до pytest и затмил проверяемый ассерт.
+        "HERMES_UPSTREAM_REMOTE": "upstream",
+        "HERMES_UPSTREAM_BRANCH": "main",
     }
     result = subprocess.run(
         ["bash", str(RUNNER), str(world)],
@@ -132,13 +149,36 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
         capture_output=True,
         text=True,
     )
-    assert argv_file.exists(), (
-        "the runner never reached the interpreter, so there is no selection to "
-        f"inspect; rc={result.returncode} stdout={result.stdout!r} "
-        f"stderr={result.stderr!r}"
+    assert result.returncode == 0, (
+        "the runner failed before or during the interpreter call, so the "
+        f"selection under test is not the one it would really use; rc="
+        f"{result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
     )
-    argv = json.loads(argv_file.read_text(encoding="utf-8"))
-    return [arg for arg in argv if arg.startswith("tests/") and arg.endswith(".py")]
+    assert argv_file.exists(), (
+        "the runner never reached the interpreter — the fake was not used, so "
+        f"there is no selection to inspect; stderr={result.stderr!r}"
+    )
+    invocations = [
+        json.loads(line)
+        for line in argv_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(invocations) == 1, (
+        "expected exactly one interpreter call; more than one means the "
+        f"selection below is a mix of runs: {invocations}"
+    )
+
+    argv = invocations[0]
+    assert argv[:2] == ["-m", "pytest"], (
+        f"the runner no longer invokes pytest as a module; argv={argv}"
+    )
+    rest = argv[2:]
+    selection = list(itertools.takewhile(lambda arg: not arg.startswith("-"), rest))
+    assert len(selection) < len(rest), (
+        "no runner-owned pytest option follows the paths, so the slice cannot "
+        f"be trusted to end where the selection ends; argv={argv}"
+    )
+    return selection
 
 
 def test_deleted_path_not_selected(world: Path, fake_python: tuple[Path, Path]) -> None:
@@ -150,8 +190,14 @@ def test_deleted_path_not_selected(world: Path, fake_python: tuple[Path, Path]) 
     """
     selection = _selection(world, fake_python)
 
+    # Прежде чем требовать отсутствия лишнего, убеждаемся, что нужное есть:
+    # красный список ниже не должен оказаться следствием пустой фикстуры.
+    assert "tests/test_fork_only.py" in selection, (
+        f"the fixture produced no fork-owned selection at all: {selection}"
+    )
+
     missing = sorted(path for path in selection if not (world / path).exists())
-    assert not missing, (
+    assert missing == [], (
         "the selection names paths that do not exist in the tree under test; "
         "pytest aborts the whole run on the first of them instead of skipping "
         f"it: {missing}"
