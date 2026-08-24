@@ -778,7 +778,10 @@ class RecordingStore:
             raise ValueError("recording dispatch entry is not terminal")
         if dispatch_entry.recording_sha256 is None:
             raise ValueError("recording provider anchor missing")
-        if metadata.get("provider_record_sha256") != dispatch_entry.recording_sha256:
+        if (
+            metadata.get("semantic_transport_record_sha256")
+            != dispatch_entry.recording_sha256
+        ):
             raise ValueError("recording provider anchor mismatch")
 
     def verify(
@@ -2738,6 +2741,14 @@ def run_collection(
             conservative_cost,
         ) = _provider_dispatch_result(provider, dispatch_input_hash, dispatch_result)
         _assert_provider_record_authority(manifest, provider_record)
+        semantic_transport_record_sha256 = provider_record.get(
+            "semantic_transport_record_sha256"
+        )
+        if (
+            not isinstance(semantic_transport_record_sha256, str)
+            or not semantic_transport_record_sha256
+        ):
+            raise ValueError("provider_record_transport_receipt_missing")
         outcome = TerminalOutcome(provider_outcome)
         response_payload = json.loads(response_bytes) if response_bytes else {}
         canonical_response_bytes = _canonical_bytes(response_payload)
@@ -2786,6 +2797,7 @@ def run_collection(
                     "input_sha256": row.input_sha256,
                     "projection_sha256": row.projection_sha256,
                     "response_sha256": _sha256(sealed_response_bytes),
+                    "semantic_transport_record_sha256": semantic_transport_record_sha256,
                     "provider_record_sha256": provider_record_sha256,
                     "provider_id": str(provider_record.get("provider_id", "")),
                     "model_id": str(provider_record.get("model_id", "")),
@@ -2917,6 +2929,16 @@ def run_one_row(
     provider_record_sha256 = getattr(provider, "provider_record_sha256", None)
     if not isinstance(provider_record_sha256, str):
         raise ValueError("provider record anchor required")
+    semantic_transport_record_sha256 = (
+        provider_record.get("semantic_transport_record_sha256")
+        if provider_record is not None
+        else getattr(provider, "semantic_transport_record_sha256", None)
+    )
+    if (
+        not isinstance(semantic_transport_record_sha256, str)
+        or not semantic_transport_record_sha256
+    ):
+        raise ValueError("provider record transport anchor required")
     recording_ref = recordings.save_exclusive(
         SealedRecording(
             manifest_ref=ref,
@@ -2927,6 +2949,7 @@ def run_one_row(
                 "input_sha256": row.input_sha256,
                 "projection_sha256": row.projection_sha256,
                 "response_sha256": _sha256(response_bytes),
+                "semantic_transport_record_sha256": semantic_transport_record_sha256,
                 "provider_record_sha256": provider_record_sha256,
                 "validator": "gate_b_evidence_v3",
             },
@@ -2935,7 +2958,7 @@ def run_one_row(
     ledger.commit_terminal(
         receipt,
         outcome,
-        provider_record_sha256,
+        semantic_transport_record_sha256,
         Decimal("0"),
         Decimal("0"),
     )

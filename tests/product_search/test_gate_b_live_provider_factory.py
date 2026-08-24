@@ -431,3 +431,18 @@ def test_live_provider_with_collection_capability_reaches_decision(
     monkeypatch.setattr(provider.store, "load", lambda _input_hash: tampered)
     with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
         runner._provider_record(provider, dispatch_input_hash)
+
+    # Changing a V2-envelope field changes its own hash and is rejected by the
+    # V2/evidence verifier, rather than by the transport ledger anchor.
+    original_provider_record_sha256 = runner._sha256(
+        runner._canonical_bytes(provider_record)
+    )
+    tampered_envelope = dict(provider_record)
+    tampered_envelope["semantic_transport_record_sha256"] = "e" * 64
+    tampered_provider_record_sha256 = runner._sha256(
+        runner._canonical_bytes(tampered_envelope)
+    )
+    assert tampered_provider_record_sha256 != original_provider_record_sha256
+    monkeypatch.setattr(provider.store, "load", lambda _input_hash: tampered_envelope)
+    with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
+        runner._provider_record(provider, dispatch_input_hash)

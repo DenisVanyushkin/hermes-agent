@@ -269,7 +269,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 ### 2.2 Разделить transport anchor и SHA V2-envelope
 
-- [ ] Пункт 2.2 выполнен целиком
+- [x] Пункт 2.2 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -279,27 +279,27 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 **Задачи**
 
-- [ ] Добавить RED-тест
+- [x] Добавить RED-тест
   `test_recording_anchor_uses_semantic_transport_sha_and_keeps_v2_envelope_sha`, который создаёт
   разные SHA для generic semantic transport record и V2-envelope и воспроизводит текущий
   `recording provider anchor mismatch`.
-- [ ] При создании `SealedRecording.metadata` сохранять оба значения:
+- [x] При создании `SealedRecording.metadata` сохранять оба значения:
   `semantic_transport_record_sha256` из проверенной V2 metadata и отдельный
   `provider_record_sha256` по каноническим байтам V2-envelope.
-- [ ] Изменить `RecordingStore._verify_dispatch_anchor`: сравнивать
+- [x] Изменить `RecordingStore._verify_dispatch_anchor`: сравнивать
   `dispatch_entry.recording_sha256` только с `metadata.semantic_transport_record_sha256`; не
   сравнивать ledger anchor с `provider_record_sha256`.
-- [ ] Оставить `provider_record_sha256` в evidence/decision lineage и добавить отрицательные
+- [x] Оставить `provider_record_sha256` в evidence/decision lineage и добавить отрицательные
   тесты на подмену каждого из двух SHA независимо.
 
 **DoD**
 
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py::test_recording_anchor_uses_semantic_transport_sha_and_keeps_v2_envelope_sha`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py::test_recording_anchor_uses_semantic_transport_sha_and_keeps_v2_envelope_sha`
   возвращает `1 passed` и доказывает, что оба SHA различны.
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_recording_replay.py`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_recording_replay.py`
   проходит целиком; подмена transport SHA даёт `recording provider anchor mismatch`, а подмена
   V2-envelope SHA отклоняется собственной V2/evidence-проверкой, не ledger-сравнением.
-- [ ] `test_full_run_collection_reaches_recording_provider_anchor` доходит до
+- [x] `test_full_run_collection_reaches_recording_provider_anchor` доходит до
   `recordings.verify` и проходит его.
 
 ### 2.3 Keyed verify не зависит от поля внутри проверяемой записи

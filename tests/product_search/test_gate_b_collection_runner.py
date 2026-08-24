@@ -219,6 +219,7 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
             "post_dispatch_outcome_v3": provider_outcome,
             "measured_cost_usd": "0" if provider_outcome == "success" else None,
             "conservative_cost_usd": "0.01",
+            "semantic_transport_record_sha256": "a" * 64,
             "pricing_sha256": "q",
         }
         capability.bind_record_identity(input_hash, input_hash)
@@ -384,6 +385,7 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
         "post_dispatch_outcome_v3": "terminal_unknown",
         "measured_cost_usd": None,
         "conservative_cost_usd": "0.01",
+        "semantic_transport_record_sha256": "a" * 64,
         "pricing_sha256": "q",
     }
     capability.bind_record_identity(dispatch_input_hash, dispatch_input_hash)
@@ -597,6 +599,7 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
             "post_dispatch_outcome_v3": "success",
             "measured_cost_usd": "0",
             "conservative_cost_usd": "0.01",
+            "semantic_transport_record_sha256": "a" * 64,
             "pricing_sha256": "q",
         }
         capability.bind_record_identity(input_hash, input_hash)

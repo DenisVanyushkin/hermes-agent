@@ -313,6 +313,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
 
     class FakeGovernedProvider:
         provider_record_sha256 = "a" * 64
+        semantic_transport_record_sha256 = "a" * 64
 
         def dispatch(
             self, request: runner.GateBDispatchRequestV2

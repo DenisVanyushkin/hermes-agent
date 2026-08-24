@@ -62,7 +62,8 @@ def test_terminal_unknown_replays_cost_and_manifest_bound_metadata(tmp_path: Pat
                 "input_sha256": ref.input_sha256,
                 "projection_sha256": ref.projection_sha256,
                 "response_sha256": sha256(b"").hexdigest(),
-                "provider_record_sha256": "a" * 64,
+                "semantic_transport_record_sha256": "a" * 64,
+                "provider_record_sha256": "b" * 64,
                 "conservative_cost_usd": "0.010000",
             },
         )
@@ -95,7 +96,8 @@ def test_mutated_recording_fails_closed_against_manifest_and_internal_hashes(
                 "input_sha256": ref.input_sha256,
                 "projection_sha256": ref.projection_sha256,
                 "response_sha256": sha256(b"response").hexdigest(),
-                "provider_record_sha256": "a" * 64,
+                "semantic_transport_record_sha256": "a" * 64,
+                "provider_record_sha256": "b" * 64,
             },
         )
     )
@@ -127,7 +129,8 @@ def test_rehashed_refiled_recording_is_refused_by_replay_manifest_binding(
                 "input_sha256": ref.input_sha256,
                 "projection_sha256": ref.projection_sha256,
                 "response_sha256": sha256(b"response").hexdigest(),
-                "provider_record_sha256": "a" * 64,
+                "semantic_transport_record_sha256": "a" * 64,
+                "provider_record_sha256": "b" * 64,
             },
         )
     )
@@ -165,7 +168,8 @@ def test_recording_anchor_requires_terminal_dispatch_entry(tmp_path: Path) -> No
                 "input_sha256": ref.input_sha256,
                 "projection_sha256": ref.projection_sha256,
                 "response_sha256": sha256(b"response").hexdigest(),
-                "provider_record_sha256": "a" * 64,
+                "semantic_transport_record_sha256": "a" * 64,
+                "provider_record_sha256": "b" * 64,
             },
         )
     )
@@ -178,7 +182,7 @@ def test_recording_anchor_requires_terminal_dispatch_entry(tmp_path: Path) -> No
 
     terminal_entry = _terminal_entry(manifest, TerminalOutcome.SUCCESS)
     payload = json.loads(store._path(recording_ref.recording_sha256).read_bytes())
-    payload["metadata"]["provider_record_sha256"] = "b" * 64
+    payload["metadata"]["semantic_transport_record_sha256"] = "c" * 64
     mutated = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     mutated_hash = sha256(mutated).hexdigest()
     store._path(recording_ref.recording_sha256).unlink()

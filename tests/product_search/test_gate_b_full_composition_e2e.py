@@ -339,6 +339,55 @@ def _live_dispatch_fixture(
     )
 
 
+def test_recording_anchor_uses_semantic_transport_sha_and_keeps_v2_envelope_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, capability, ledger, refs, request = _live_dispatch_fixture(
+        tmp_path, monkeypatch
+    )
+    dispatch_input_hash = runner._reservation_input_hash(refs[0])
+    provider.dispatch(
+        request,
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+    (
+        provider_record,
+        provider_record_sha256,
+        outcome,
+        response_bytes,
+        _measured_cost,
+        conservative_cost,
+    ) = runner._provider_dispatch_result(provider, dispatch_input_hash, None)
+    semantic_transport_sha256 = provider_record["semantic_transport_record_sha256"]
+    assert isinstance(semantic_transport_sha256, str)
+    assert semantic_transport_sha256 != provider_record_sha256
+
+    ref = refs[0]
+    recordings = RecordingStore(tmp_path / "recordings")
+    recording_ref = recordings.save_exclusive(
+        runner.SealedRecording(
+            manifest_ref=ref,
+            request_bytes=runner._canonical_bytes(request.provider_payload),
+            response_bytes=response_bytes,
+            outcome=runner.TerminalOutcome(outcome),
+            metadata={
+                "input_sha256": ref.input_sha256,
+                "projection_sha256": ref.projection_sha256,
+                "response_sha256": runner._sha256(response_bytes),
+                "semantic_transport_record_sha256": semantic_transport_sha256,
+                "provider_record_sha256": provider_record_sha256,
+                "conservative_cost_usd": str(conservative_cost),
+            },
+        )
+    )
+    dispatch_entry = ledger.entries()[0]
+    manifest = SimpleNamespace(row_ref=lambda _ordinal: ref)
+    assert dispatch_entry.recording_sha256 == semantic_transport_sha256
+    assert dispatch_entry.recording_sha256 != provider_record_sha256
+    recordings.verify(recording_ref, manifest, dispatch_entry)
+
+
 @pytest.mark.xfail(strict=True, reason="Task 10: V2 HMAC discriminator bypass is not fail-closed")
 def test_v2_record_without_discriminator_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
