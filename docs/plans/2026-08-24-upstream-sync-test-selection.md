@@ -381,6 +381,13 @@ node-aware classifier. Это было намеренное расширение
 rc 2), рядом с рабочими формами `2 passed, 1 error in 0.12s` и боевой строкой
 `76 failed, 6259 passed, 2 skipped, 6 warnings in 679.63s`.
 
+**Фактическое выполнение.** T12 выполнен коммитом `aff19e73b5`
+(`parse pytest collection errors as gate outcomes`). Реализация добавила общий
+parser и comparator для failed nodeids и collection errors, сохранила
+`2 errors in 0.05s` как читаемый исход, оставила `no tests ran in 0.01s`
+нечитаемым, и подключила этот результат к `node-outcome`, чтобы collection
+error давал `collect_ok=false`, а не пустой «успешный» outcome.
+
 **Зависимости.** T8. **Сложность.** M.
 
 ### T13. Миграция схемы `gate-failures.json` (D2)
