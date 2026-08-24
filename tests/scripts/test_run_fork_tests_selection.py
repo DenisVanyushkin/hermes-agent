@@ -138,13 +138,9 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
         **os.environ,
         "HERMES_PYTHON": str(interpreter),
         "FAKE_ARGV_FILE": str(argv_file),
-        # Границу называем явно: иначе отказ по недостижимому upstream-ref
-        # завершил бы раннер до pytest и затмил проверяемый ассерт.
-        "HERMES_UPSTREAM_REMOTE": "upstream",
-        "HERMES_UPSTREAM_BRANCH": "main",
     }
     result = subprocess.run(
-        ["bash", str(RUNNER), str(world)],
+        ["bash", str(RUNNER), "--boundary", UPSTREAM_REF, str(world)],
         env=env,
         capture_output=True,
         text=True,
@@ -222,11 +218,9 @@ def _print_selection(
         **os.environ,
         "HERMES_PYTHON": str(interpreter),
         "FAKE_ARGV_FILE": str(argv_file),
-        "HERMES_UPSTREAM_REMOTE": "upstream",
-        "HERMES_UPSTREAM_BRANCH": "main",
     }
     return subprocess.run(
-        ["bash", str(RUNNER), "--print-selection", str(world)],
+        ["bash", str(RUNNER), "--print-selection", "--boundary", UPSTREAM_REF, str(world)],
         env=env,
         capture_output=True,
         text=True,
@@ -321,7 +315,7 @@ def test_double_dash_separator_still_yields_the_worktree(
         "HERMES_UPSTREAM_BRANCH": "main",
     }
     result = subprocess.run(
-        ["bash", str(RUNNER), "--print-selection", "--", str(world)],
+        ["bash", str(RUNNER), "--print-selection", "--boundary", UPSTREAM_REF, "--", str(world)],
         env=env,
         capture_output=True,
         text=True,
@@ -352,7 +346,9 @@ def test_ambiguous_argv_is_refused(world: Path, argv: list[str]) -> None:
     concrete = [str(world / "elsewhere") if arg == "SECOND" else arg for arg in concrete]
 
     result = subprocess.run(
-        ["bash", str(RUNNER), *concrete], capture_output=True, text=True
+        ["bash", str(RUNNER), "--boundary", UPSTREAM_REF, *concrete],
+        capture_output=True,
+        text=True,
     )
 
     assert result.returncode == 2, (
@@ -438,8 +434,6 @@ def test_boundary_is_explicit(
             **os.environ,
             "HERMES_PYTHON": str(interpreter),
             "FAKE_ARGV_FILE": str(argv_file),
-            "HERMES_UPSTREAM_REMOTE": "upstream",
-            "HERMES_UPSTREAM_BRANCH": "main",
         },
         capture_output=True,
         text=True,
@@ -453,4 +447,46 @@ def test_boundary_is_explicit(
     )
     assert result.stdout.strip() == "", (
         f"a refused run still emitted a selection: {result.stdout!r}"
+    )
+
+
+def test_explicit_boundary_selects_from_that_commit(
+    drifted_world: tuple[Path, str], fake_python: tuple[Path, Path]
+) -> None:
+    """Положительная половина: значение границы действительно ею управляет.
+
+    Отказ без опции доказывает, что она обязательна, но не доказывает, что её
+    значение на что-то влияет. Здесь отставший ``upstream/main`` по-прежнему
+    существует и по-прежнему дал бы лишний файл — и всё же набор считается от
+    переданного коммита.
+    """
+    repo, merged_upstream = drifted_world
+    interpreter, argv_file = fake_python
+
+    result = subprocess.run(
+        ["bash", str(RUNNER), "--print-selection", "--boundary", merged_upstream, str(repo)],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": str(interpreter),
+            "FAKE_ARGV_FILE": str(argv_file),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+
+    # Граница управляет тем, что считается НАШИМ, — то есть fork_only.
+    # Апстримовый test_upstream_new.py остаётся в наборе и здесь, но приходит
+    # через merge_changed: мерж его изменил, значит собственное изменение мержа
+    # обязано быть внутри сенсора. Спутать эти два слагаемых — то же самое, что
+    # спутать «чей тест» с «что тронул мерж».
+    assert "fork_only=1" in result.stderr, (
+        "the boundary did not decide what counts as ours; the stale ref would "
+        f"have said fork_only=2: {result.stderr!r}"
+    )
+    assert "tests/test_fork_only.py" in result.stdout.splitlines()
+    assert _tests_in(repo, UPSTREAM_REF) != _tests_in(repo, merged_upstream), (
+        "the stale ref stopped differing from the merged commit, so this test "
+        "no longer proves that the boundary value is what decided the set"
     )

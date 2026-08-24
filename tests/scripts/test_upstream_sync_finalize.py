@@ -770,9 +770,49 @@ class TestApplyMergeIsGatedOnForkTests:
         # (it contains g.txt, which only the upstream side adds).
         (scripts / "run-fork-tests.sh").write_text(
             "#!/usr/bin/env bash\n"
+            # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
+            # worktree больше не $1. Заодно записываем полученную границу —
+            # оба прогона гейта обязаны увидеть один и тот же полный SHA.
+            'WT=""; BND=""\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --boundary) BND="$2"; shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            'esac; done\n'
+            'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
-            'if [ -f "$1/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
+            'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
+        )
+
+    def test_both_gate_runs_receive_the_same_upstream_boundary(self, tmp_path, state):
+        """Обе половины гейта меряют от одной и той же границы.
+
+        Граница решает, что считается тестом форка. Если два прогона получат
+        разные значения — например, один полный SHA, а другой remote-tracking
+        ref, который успел уехать, — сравнение «до и после» перестанет быть
+        сравнением: разойдётся сам сенсор, а не поведение мержа. Поэтому
+        проверяется не наличие опции, а совпадение значений и то, что это
+        именно утверждённый upstream_head, а не что-то выведенное заново.
+        """
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_tests_stub(scripts)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        recorded = (scripts / "boundary-calls.log").read_text().split()
+        assert len(recorded) == 2, (
+            f"expected one boundary per gate run, got {recorded}; stderr={proc.stderr}"
+        )
+        assert set(recorded) == {upstream_head}, (
+            "the two gate runs did not measure from the approved upstream head; "
+            f"expected {upstream_head}, recorded {recorded}"
         )
 
     def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
@@ -1596,8 +1636,17 @@ class TestRedGateIsTriagedAndProposedToTheOperator:
         for a sentinel we planted."""
         (scripts / "run-fork-tests.sh").write_text(
             "#!/usr/bin/env bash\n"
+            # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
+            # worktree больше не $1. Заодно записываем полученную границу —
+            # оба прогона гейта обязаны увидеть один и тот же полный SHA.
+            'WT=""; BND=""\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --boundary) BND="$2"; shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            'esac; done\n'
+            'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
-            'if [ -f "$1/g.txt" ] && grep -q "f() ==" "$1/tests/new.py"; then\n'
+            'if [ -f "$WT/g.txt" ] && grep -q "f() ==" "$WT/tests/new.py"; then\n'
             "  echo '____ test_broken_by_merge ____'\n"
             "  echo 'E   TypeError: f() missing 1 required positional argument'\n"
             "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"

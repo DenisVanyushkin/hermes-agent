@@ -316,7 +316,11 @@ adopt_scratch_clone() {
 # automatic merge. Baseline is our HEAD, post is the merge; only NEW failures
 # block, and an unreadable run (killed, no summary line) blocks too.
 merge_passes_fork_tests() {
-  local before="$1" after="$2"
+  # Граница приходит третьим аргументом от вызывающего, который её уже сверил
+  # (UPSTREAM_FULL из pending.json, до проверки родителей). Выводить её здесь
+  # заново из after^2 значило бы завести второй источник истины, способный
+  # разойтись с уже пройденной проверкой.
+  local before="$1" after="$2" boundary="$3"
   local test_cmd="${HERMES_SYNC_TEST_CMD:-$SCRIPTS_DIR/run-fork-tests.sh}"
   [ -x "$test_cmd" ] || test_cmd="$REPO/scripts/run-fork-tests.sh"
   local gate="$SCRIPTS_DIR/upstream_sync_gate.py"
@@ -332,14 +336,14 @@ merge_passes_fork_tests() {
     echo "could not create a worktree for the test gate" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" "$wt" >"$baseline" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" "$wt" >"$baseline" 2>&1 || true
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt" "$baseline" "$post"
     echo "could not check out the merge in the test-gate worktree" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" "$wt" >"$post" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" "$wt" >"$post" 2>&1 || true
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
   rm -rf "$wt"
   # Keep both runs. They used to be mktemp'd and deleted, which left a blocked
@@ -490,7 +494,7 @@ land_merge() {
       write_result failed "merge_sha parent mismatch: parents ($MERGE_PARENTS) are not (HEAD $HEAD_SHA, approved upstream $UPSTREAM_FULL) — refusing; repo untouched, no rollback."
       exit 0
     fi
-    if ! merge_passes_fork_tests "$HEAD_SHA" "$MERGE_SHA"; then
+    if ! merge_passes_fork_tests "$HEAD_SHA" "$MERGE_SHA" "$UPSTREAM_FULL"; then
       FAILED_STAGE=test-gate
       # Before the report, not after: the operator's message IS the triage.
       run_gate_triage

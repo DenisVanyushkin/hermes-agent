@@ -12,9 +12,15 @@ set -uo pipefail
 # в прод, и «взяли последний путь, остальные молча выбросили» — не то поведение,
 # которое стоит иметь в такой позиции.
 PRINT_SELECTION=0
+BOUNDARY="${HERMES_UPSTREAM_BOUNDARY:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --print-selection) PRINT_SELECTION=1; shift ;;
+    --boundary)
+      shift
+      [ "$#" -gt 0 ] || { echo "FAILED: --boundary needs a value" >&2; exit 2; }
+      BOUNDARY="$1"; shift ;;
+    --boundary=*) BOUNDARY="${1#--boundary=}"; shift ;;
     --) shift; break ;;
     -*) echo "FAILED: unknown option $1" >&2; exit 2 ;;
     *) break ;;
@@ -22,12 +28,21 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$#" -ne 1 ]; then
   echo "FAILED: expected exactly one worktree path, got $#${*:+ ($*)}" >&2
-  echo "usage: run-fork-tests.sh [--print-selection] [--] <worktree>" >&2
+  echo "usage: run-fork-tests.sh [--print-selection] --boundary <ref|sha> [--] <worktree>" >&2
   exit 2
 fi
 WT="$1"
 
-UPSTREAM_REF="${HERMES_UPSTREAM_REMOTE:-upstream}/${HERMES_UPSTREAM_BRANCH:-main}"
+# Граница задаётся вызывающим и только им. Прежде здесь стояло умолчание
+# upstream/main, и это молчаливо подставляло remote-tracking ref, который может
+# сколько угодно отставать от коммита, который мы на самом деле сливаем: в бою
+# он отстал на 752 коммита, и около 105 апстримовых тестовых файлов пошли в
+# набор как «свои». Раннер не знает и не должен знать, мерж перед ним или нет —
+# он исполнитель. Отказ принадлежит тому, кто не может предъявить границу.
+if [ -z "$BOUNDARY" ]; then
+  echo "FAILED: no upstream boundary given; pass --boundary <ref|sha> (or HERMES_UPSTREAM_BOUNDARY). Refusing to guess it from a remote-tracking ref that may lag the commit under test." >&2
+  exit 2
+fi
 # Интерпретатор берём из ГЛАВНОГО чекаута, а не из worktree: venv лежит в
 # основном рабочем дереве и в worktree не копируется. Взять оттуда python3 без
 # зависимостей проекта — значит получить два одинаково рассыпавшихся прогона,
@@ -37,8 +52,8 @@ PYTHON_BIN="${HERMES_PYTHON:-$MAIN_CHECKOUT/venv/bin/python}"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$WT/venv/bin/python"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"
 
-if ! git -C "$WT" rev-parse --verify "$UPSTREAM_REF^{commit}" >/dev/null 2>&1; then
-  echo "FAILED: upstream boundary $UPSTREAM_REF is unavailable; refusing to run a fork gate against a stale or missing ref." >&2
+if ! BOUNDARY_SHA="$(git -C "$WT" rev-parse --verify "$BOUNDARY^{commit}" 2>/dev/null)"; then
+  echo "FAILED: upstream boundary $BOUNDARY is unreachable in $WT; refusing to run a fork gate against a boundary we cannot resolve." >&2
   exit 2
 fi
 
@@ -50,7 +65,7 @@ filter_tests() {
 mapfile -t OURS < <(
   comm -23 \
     <(git -C "$WT" ls-tree -r --name-only HEAD tests/ | sort) \
-    <(git -C "$WT" ls-tree -r --name-only "$UPSTREAM_REF" tests/ | sort) \
+    <(git -C "$WT" ls-tree -r --name-only "$BOUNDARY_SHA" tests/ | sort) \
   | filter_tests
 )
 
@@ -92,7 +107,7 @@ fi
 # отдаётся только набор. Иначе `--print-selection > manifest` записал бы эту
 # строку в манифест как ещё один «путь».
 printf 'fork test selection: boundary=%s files=%s fork_only=%s merge_changed=%s dropped_missing=%s\n' \
-  "$UPSTREAM_REF" "${#TESTS[@]}" "${#OURS[@]}" "${#MERGE_CHANGED[@]}" "${#DROPPED[@]}" >&2
+  "$BOUNDARY_SHA" "${#TESTS[@]}" "${#OURS[@]}" "${#MERGE_CHANGED[@]}" "${#DROPPED[@]}" >&2
 # Отброшенное — не «мелочь, о которой мы сообщили», а признак, что дерево не
 # соответствует своему HEAD: кандидаты берутся из ls-tree HEAD и из diff без
 # удалений, поэтому отсутствие пути на диске означает неполный или разошедшийся

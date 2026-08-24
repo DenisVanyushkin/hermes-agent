@@ -537,7 +537,13 @@ BASE_BEFORE="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF" 2>/dev/null || t
 git_fetch_retry "$REPO" "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
 BASE_AFTER="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF")"
-if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" HEAD; then
+# Полный неизменяемый SHA разрешается ОДИН раз сразу после fetch и дальше
+# используется везде: merge-tree, сам merge и граница обоих прогонов. Если
+# граница будет полным SHA, а слияние останется по ref, остаётся гонка —
+# проверили одного кандидата, слили другого. BASE_AFTER короткий и годится
+# только для сообщения, идентичностью он быть не может.
+UPSTREAM_FULL="$(git -C "$REPO" rev-parse --verify "$UPSTREAM_REF^{commit}")"
+if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_FULL" HEAD; then
   push_personal_branch
   report_noop "$BEFORE_HEAD"
   exit 0
@@ -554,7 +560,7 @@ PYTHON_BIN="${HERMES_PYTHON:-$REPO/venv/bin/python}"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"
 
 MERGE_TREE_OUT="$(mktemp)"
-git -C "$REPO" merge-tree --write-tree --name-only HEAD "$UPSTREAM_REF" >"$MERGE_TREE_OUT" 2>&1 || true
+git -C "$REPO" merge-tree --write-tree --name-only HEAD "$UPSTREAM_FULL" >"$MERGE_TREE_OUT" 2>&1 || true
 
 # set +e, а не `|| true`: подстановка с `|| true` возвращает код самого
 # присваивания, то есть всегда 0, и код 2 (не смогли разобрать вывод)
@@ -606,7 +612,7 @@ BASELINE_LOG_FILE="$(mktemp)"
 POST_LOG_FILE="$(mktemp)"
 
 # Ненулевой код прогона здесь нормален: падения и есть предмет измерения.
-if ! "$TEST_CMD" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
+if ! "$TEST_CMD" --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
   :
 fi
 
@@ -616,7 +622,7 @@ MERGE_LOG="$(mktemp)"
 # where "ours"/"theirs" are inverted relative to a merge — replaying them here
 # resolves conflicts backwards, and silently. The worktree shares .git with the
 # live repo, so it inherits both the setting and the recordings.
-if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
+if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_FULL" >"$MERGE_LOG" 2>&1; then
   # Не всякая неудача merge — расхождение с merge-tree. Отсутствующая
   # git-identity, нехватка места, битый индекс дают тот же ненулевой код, и
   # обвинять в них merge-tree значит отправить расследование не туда.
@@ -634,7 +640,7 @@ if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_REF" >
 fi
 rm -f "$MERGE_LOG"
 
-if ! "$TEST_CMD" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
+if ! "$TEST_CMD" --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
   :
 fi
 
