@@ -360,6 +360,15 @@ T11 — единственная точка перехода для node-aware g
 `post_only_node`, и spy фиксирует, что probe запросил **ровно** множество
 newly-seen failing nodeids (попытка прогнать путь целиком роняет тест).
 
+**Фактическое выполнение.** T11 выполнен коммитами `4e51de4d1d`
+(`make upstream gate classify exact failing nodes`) и `24c7a135af`
+(`fail closed when a gate run is unreadable`). В реализацию вошли также
+`--probe-nodeids-from`, `node-outcome`, третий checkout на `boundary`,
+`gate-upstream-probe.log` в attempt namespace и переключение live verdict на
+node-aware classifier. Это было намеренное расширение до согласованной точки
+перехода T11; в сообщении о результате эти изменения должны быть перечислены,
+а не подразумеваться по SHA.
+
 **Зависимости.** T10. **Сложность.** M.
 
 ### T12. Общий parser outcomes: FAILED и ERROR (D4)
@@ -385,6 +394,13 @@ rc 2), рядом с рабочими формами `2 passed, 1 error in 0.12s
 `pre_existing` и `unknown`. Для node-aware gate это единственный список,
 по которому caller блокирует мерж; `new_failures` не подмешивается и остаётся
 только legacy-проекцией там, где node-aware путь ещё не используется.
+
+**Уже реализовано досрочно.** Поле и вычисление `blocking_failures`, а также
+его использование как единственного источника live verdict для node-aware
+gate вошли в T11 (`4e51de4d1d`). T13 всё ещё владеет миграцией persisted
+`gate-failures.json`, потребителя triage, schema-golden тестами и удалением
+остаточной legacy-проекции; эти части не считать выполненными по факту ранней
+реализации поля.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_triage.py -k schema` зелёный;
 среди случаев — проверка самого инварианта, а не только совпадения счётчика.
