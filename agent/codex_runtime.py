@@ -24,7 +24,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
-from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS, detect_malformed_tool_intent
+from agent.malformed_tool_intent import (
+    MAX_INSPECTED_TEXT_CHARS,
+    MalformedToolIntent,
+    detect_malformed_tool_intent,
+)
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 
 
@@ -1205,7 +1209,7 @@ def _consume_codex_event_stream(
             delta_text = _event_field(event, "delta", "")
             if delta_text and active_message_phase in {"commentary", "analysis"}:
                 message_text_hash.update(delta_text.encode("utf-8"))
-                if message_protocol_state == "malformed":
+                if message_protocol_state in {"malformed", "oversized"}:
                     # Keep hashing the opaque text for the bounded RCA
                     # fingerprint, but never retain or emit protocol text.
                     continue
@@ -1213,6 +1217,7 @@ def _consume_codex_event_stream(
                 transitioned_to_ordinary = False
                 if message_protocol_state == "candidate":
                     remaining = MAX_INSPECTED_TEXT_CHARS - message_candidate_chars
+                    candidate_remainder = delta_text[remaining:] if remaining > 0 else delta_text
                     if remaining > 0:
                         candidate_delta = delta_text[:remaining]
                         message_candidate_deltas.append(candidate_delta)
@@ -1233,7 +1238,14 @@ def _consume_codex_event_stream(
                         valid_tool_names={str(name) for name in (valid_tool_names or ())},
                     )
                     if message_protocol_state == "candidate" and message_candidate_chars >= MAX_INSPECTED_TEXT_CHARS:
-                        message_protocol_state = "ordinary"
+                        message_protocol_state = "oversized"
+                        detected_malformed_intent = MalformedToolIntent(
+                            tool_name="unknown",
+                            source_phase=active_message_phase,
+                            format="oversized_protocol_candidate",
+                            fingerprint="sha256:" + message_text_hash.hexdigest(),
+                        )
+                        continue
                     if message_protocol_state == "candidate":
                         # Both phases keep candidate text in exactly one buffer
                         # until the protocol possibility is disproven.
@@ -1246,10 +1258,17 @@ def _consume_codex_event_stream(
                                     on_reasoning_delta(buffered_delta)
                                 except Exception:
                                     logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
+                            if candidate_remainder and on_reasoning_delta is not None:
+                                try:
+                                    on_reasoning_delta(candidate_remainder)
+                                except Exception:
+                                    logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
                         message_candidate_deltas = []
                         transitioned_to_ordinary = True
                     else:
                         message_text_deltas.extend(message_candidate_deltas)
+                        if candidate_remainder:
+                            message_text_deltas.append(candidate_remainder)
                         transitioned_to_ordinary = True
                     message_candidate_deltas = []
 

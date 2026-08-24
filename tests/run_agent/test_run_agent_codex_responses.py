@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import types
 from types import SimpleNamespace
@@ -998,6 +999,129 @@ def test_consume_codex_stream_does_not_duplicate_commentary_candidate_on_transit
     )
 
     assert delivered == [commentary_text]
+
+
+def _consume_message_stream(
+    text,
+    *,
+    phase,
+    deltas,
+    on_reasoning_delta=None,
+    on_commentary_message=None,
+):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase=phase,
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text=text)],
+    )
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", phase=phase),
+        ),
+        *[
+            SimpleNamespace(type="response.output_text.delta", delta=delta)
+            for delta in deltas
+        ],
+        SimpleNamespace(type="response.output_item.done", item=item),
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(status="completed"),
+        ),
+    ]
+    return _consume_codex_event_stream(
+        _FakeCreateStream(events),
+        model="gpt-5-codex",
+        on_reasoning_delta=on_reasoning_delta,
+        on_commentary_message=on_commentary_message,
+        valid_tool_names={"skill_view"},
+    )
+
+
+def test_consume_codex_stream_suppresses_oversized_xml_candidate(caplog):
+    """An ambiguous XML candidate at the bound remains suppressed with safe evidence."""
+    from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS
+
+    sentinel = "OVERSIZED_ARGUMENT_SENTINEL"
+    xml_text = (
+        "<tool_call><name>skill_view</name><arguments>"
+        + sentinel
+        + "x" * (MAX_INSPECTED_TEXT_CHARS + 100)
+        + "</arguments></tool_call>"
+    )
+    visible = []
+
+    response = _consume_message_stream(
+        xml_text,
+        phase="analysis",
+        deltas=[xml_text],
+        on_reasoning_delta=visible.append,
+    )
+
+    assert visible == []
+    evidence = response._hermes_malformed_tool_intent
+    assert evidence is not None
+    assert evidence.tool_name == "unknown"
+    assert evidence.format == "oversized_protocol_candidate"
+    assert evidence.fingerprint == "sha256:" + hashlib.sha256(xml_text.encode()).hexdigest()
+    assert set(vars(evidence)) == {"tool_name", "source_phase", "format", "fingerprint"}
+    assert sentinel not in repr(evidence)
+    assert sentinel not in caplog.text
+    assert not any(getattr(item, "type", None) == "function_call" for item in response.output)
+
+
+def test_consume_codex_stream_preserves_remainder_after_large_ordinary_analysis_delta():
+    """A single ordinary delta crossing the bound is fully delivered in order."""
+    from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS
+
+    text = "<not protocol " + "a" * (MAX_INSPECTED_TEXT_CHARS + 100)
+    visible = []
+
+    _consume_message_stream(
+        text,
+        phase="analysis",
+        deltas=[text],
+        on_reasoning_delta=visible.append,
+    )
+
+    assert "".join(visible) == text
+    assert visible[0] == text[:MAX_INSPECTED_TEXT_CHARS]
+    assert visible[1] == text[MAX_INSPECTED_TEXT_CHARS:]
+
+
+def test_consume_codex_stream_preserves_long_ordinary_analysis_delta_order():
+    """Long ordinary analysis keeps every original delta exactly once."""
+    deltas = ["<not", " protocol", " analysis: ", "b" * 20_000, " tail"]
+    visible = []
+
+    _consume_message_stream(
+        "".join(deltas),
+        phase="analysis",
+        deltas=deltas,
+        on_reasoning_delta=visible.append,
+    )
+
+    assert visible == deltas
+
+
+def test_consume_codex_stream_delivers_long_ordinary_commentary_once():
+    """Long ordinary commentary crossing the bound is delivered byte-for-byte once."""
+    from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS
+
+    text = "<not protocol " + "c" * (MAX_INSPECTED_TEXT_CHARS + 100)
+    delivered = []
+
+    _consume_message_stream(
+        text,
+        phase="commentary",
+        deltas=[text],
+        on_commentary_message=delivered.append,
+    )
+
+    assert delivered == [text]
 
 
 MALFORMED_SKILL_VIEW_COMMENTARY = (

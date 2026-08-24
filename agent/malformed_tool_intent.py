@@ -34,7 +34,7 @@ _JSON_NAME_RE = re.compile(
 
 @dataclass(frozen=True)
 class MalformedToolIntent:
-    """Evidence that text contained a registered tool protocol envelope.
+    """Evidence that text contained or could be a tool protocol envelope.
 
     This type intentionally has no arguments field.  It is a diagnostic signal,
     never an intermediate representation for tool execution.
@@ -42,7 +42,11 @@ class MalformedToolIntent:
 
     tool_name: str
     source_phase: str
-    format: Literal["codex_chatml", "tool_call_xml"]
+    format: Literal[
+        "codex_chatml",
+        "tool_call_xml",
+        "oversized_protocol_candidate",
+    ]
     fingerprint: str
 
 
