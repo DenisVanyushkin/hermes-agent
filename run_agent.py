@@ -2265,6 +2265,8 @@ class AIAgent:
             # at the end of the scan (see append_messages_batch).
             _batch_rows: List[Dict[str, Any]] = []
             _batch_msgs: List[Dict] = []
+            from agent.replay_cleanup import project_protocol_invalid_persistence
+
             for _msg_idx in range(_scan_start, len(messages)):
                 msg = messages[_msg_idx]
                 if not isinstance(msg, dict):
@@ -2288,6 +2290,8 @@ class AIAgent:
                 if id(msg) in history_ids or id(msg) in seed_ids:
                     msg[_DB_PERSISTED_MARKER] = True
                     continue
+                live_msg = msg
+                msg = project_protocol_invalid_persistence(msg)
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
                 # api_content sidecar: the exact bytes sent to the API when
@@ -2423,7 +2427,7 @@ class AIAgent:
                     ),
                     "display_metadata": msg.get("display_metadata"),
                 })
-                _batch_msgs.append(msg)
+                _batch_msgs.append(live_msg)
             # One transaction for the whole turn's new rows (typically 3-8
             # messages): one BEGIN IMMEDIATE / commit — and, off WAL, one
             # fsync — instead of one per row. All-or-nothing pairs exactly

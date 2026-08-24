@@ -9314,6 +9314,35 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         from every outgoing payload anyway, so the scrubbed form IS the
         wire bytes).
         """
+        if role == "assistant" and (
+            display_kind == "protocol_invalid"
+            or (
+                isinstance(display_metadata, dict)
+                and (
+                    display_metadata.get("protocol_invalid") is True
+                    or isinstance(display_metadata.get("malformed_tool_intent"), dict)
+                )
+            )
+        ):
+            content = ""
+            reasoning = None
+            reasoning_content = None
+            reasoning_details = None
+            codex_reasoning_items = None
+            api_content = None
+            display_kind = "protocol_invalid"
+            bounded = {}
+            if isinstance(display_metadata, dict):
+                evidence = display_metadata.get("malformed_tool_intent")
+                if isinstance(evidence, dict):
+                    bounded = {
+                        key: evidence[key]
+                        for key in ("tool_name", "source_phase", "format", "fingerprint")
+                        if isinstance(evidence.get(key), str)
+                    }
+            display_metadata = {"protocol_invalid": True}
+            if bounded:
+                display_metadata["malformed_tool_intent"] = bounded
         # Display metadata is presentation-only and never changes the model
         # context role/content replayed to providers.
         display_metadata_json = self._encode_display_metadata(display_metadata)
@@ -9747,7 +9776,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         now_ts = time.time()
         inserted = 0
         tool_calls_total = 0
+        from agent.replay_cleanup import project_protocol_invalid_persistence
+
         for msg in messages:
+            original_msg = msg
+            msg = project_protocol_invalid_persistence(msg)
             role = msg.get("role", "unknown")
             tool_calls = msg.get("tool_calls")
             message_timestamp = now_ts
@@ -9818,8 +9851,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     self._encode_display_metadata(msg.get("display_metadata")),
                 ),
             )
-            if isinstance(msg, dict) and cur.lastrowid is not None:
-                msg["_row_id"] = cur.lastrowid
+            if isinstance(original_msg, dict) and cur.lastrowid is not None:
+                original_msg["_row_id"] = cur.lastrowid
             inserted += 1
             if tool_calls is not None:
                 tool_calls_total += (
