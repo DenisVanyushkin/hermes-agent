@@ -1968,14 +1968,20 @@ class TestRedGateIsTriagedAndProposedToTheOperator:
             # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
             # worktree больше не $1. Заодно записываем полученную границу —
             # оба прогона гейта обязаны увидеть один и тот же полный SHA.
-            'WT=""; BND=""; SEL=""\n'
+            'WT=""; BND=""; SEL=""; PROBE=0\n'
             'while [ $# -gt 0 ]; do case "$1" in\n'
             '  --boundary) BND="$2"; shift 2 ;;\n'
             '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --probe-nodeids-from) PROBE=1; shift 2 ;;\n'
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
             'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
+            'if [ "$PROBE" -eq 1 ]; then\n'
+            "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"
+            "  echo '1 failed, 5 passed in 2.00s'\n"
+            "  exit 0\n"
+            "fi\n"
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
             'if [ -f "$WT/g.txt" ] && grep -q "f() ==" "$WT/tests/new.py"; then\n'
             "  echo '____ test_broken_by_merge ____'\n"

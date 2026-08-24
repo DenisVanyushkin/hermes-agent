@@ -400,6 +400,24 @@ def _triage_one(repo: Path, evidence: dict, merge_sha: str) -> dict:
     return proposal
 
 
+GATE_FAILURES_V2 = "upstream-sync-gate-failures/v2"
+
+
+def _failure_nodeids_for_triage(failures: dict) -> list[str]:
+    """Read the authoritative failure list for either persisted schema."""
+    if failures.get("schema_version") == GATE_FAILURES_V2:
+        blocking = failures.get("blocking_failures")
+        if not isinstance(blocking, list):
+            raise ValueError("v2 gate-failures has no blocking_failures list")
+        nodeids = []
+        for item in blocking:
+            if not isinstance(item, dict) or not isinstance(item.get("nodeid"), str):
+                raise ValueError("v2 blocking_failures contains an invalid entry")
+            nodeids.append(item["nodeid"])
+        return sorted(set(nodeids))
+    return sorted({item for item in (failures.get("new_failures") or []) if item})
+
+
 def run_triage(*, state: Path | str, repo: Path | str) -> int:
     """Diagnose every new failure the gate recorded; write gate-triage.json.
 
@@ -409,7 +427,7 @@ def run_triage(*, state: Path | str, repo: Path | str) -> int:
     """
     state, repo = Path(state), Path(repo)
     failures = _read_json(state / "gate-failures.json")
-    new_failures = [f for f in (failures.get("new_failures") or []) if f]
+    new_failures = _failure_nodeids_for_triage(failures)
     if not new_failures:
         return 0
     merge_sha = failures.get("merge_sha") or ""

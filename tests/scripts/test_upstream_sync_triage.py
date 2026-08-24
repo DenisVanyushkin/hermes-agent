@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import upstream_sync_triage as triage  # noqa: E402
+import upstream_sync_gate as gate  # noqa: E402
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -302,3 +303,111 @@ class TestRunTriage:
             {"merge_sha": sha, "before": sha, "new_failures": []}))
         assert triage.run_triage(state=state, repo=repo) == 0
         assert not (state / "gate-triage.json").exists()
+
+    def test_v2_blocking_failures_preserve_legacy_triage_count(
+        self, tmp_path, monkeypatch
+    ):
+        """The v2 blocking list must drive the same findings as v1 new_failures."""
+        repo, sha = _patch_repo(tmp_path)
+        test_id = "tests/test_mod.py::test_f"
+        post_log = (
+            "FAILED tests/test_mod.py::test_f - TypeError\n"
+            "1 failed in 1.00s\n"
+        )
+        prepare = {
+            "schema": "upstream-sync-apply/v1",
+            "status": "ready",
+            "local_base": sha,
+            "upstream_head": sha,
+            "merge_sha": sha,
+            "conflicts": ["mod.py"],
+        }
+        item = {
+            "path": "tests/test_mod.py",
+            "nodeid": test_id,
+            "classification": "fork_regression",
+        }
+        monkeypatch.setenv(
+            "HERMES_SYNC_TRIAGE_CMD",
+            _model_cmd(tmp_path, {
+                "verdict": "test_outdated",
+                "explanation": "upstream changed the contract",
+                "assertion_delta": "none",
+                "patch": NEW_TEST,
+            }),
+        )
+        monkeypatch.setenv("HERMES_SYNC_TRIAGE_PYTEST_CMD", _pytest_cmd(tmp_path, ok=True))
+
+        def run(payload: dict, name: str) -> dict:
+            state = tmp_path / name
+            state.mkdir()
+            (state / "gate-post.log").write_text(post_log)
+            (state / "apply-prepare.json").write_text(json.dumps(prepare))
+            (state / "gate-failures.json").write_text(json.dumps(payload))
+            assert triage.run_triage(state=state, repo=repo) == 0
+            return json.loads((state / "gate-triage.json").read_text())
+
+        legacy = run(
+            {
+                "schema_version": "upstream-sync-gate-failures/v1",
+                "merge_sha": sha,
+                "before": sha,
+                "new_failures": [test_id],
+            },
+            "legacy",
+        )
+        v2 = run(
+            {
+                "schema_version": "upstream-sync-gate-failures/v2",
+                "merge_sha": sha,
+                "before": sha,
+                "common_path": [item],
+                "post_only_path": [],
+                "pre_existing": [],
+                "unknown": [],
+                "unreadable_runs": [],
+                "blocking_failures": [item],
+                "new_failures": [],
+            },
+            "v2",
+        )
+
+        assert len(v2["proposals"]) == len(legacy["proposals"]) == 1
+        assert v2["proposals"][0]["test_ids"] == legacy["proposals"][0]["test_ids"]
+
+    def test_v2_persistence_is_sorted_unique_blocking_union(self):
+        common = {
+            "path": "tests/a.py",
+            "nodeid": "tests/a.py::test_a",
+            "classification": "fork_regression",
+        }
+        duplicate = {**common, "classification": "duplicate_must_not_win"}
+        post_only = {
+            "path": "tests/b.py",
+            "nodeid": "tests/b.py::test_b",
+            "classification": "merge_resolution_or_local_introduced",
+        }
+        payload = gate.build_gate_failures_payload(
+            classification={
+                "common_path": [post_only, common, duplicate],
+                "post_only_path": [post_only],
+                "pre_existing": [{"path": "tests/c.py", "nodeid": "tests/c.py::test_c"}],
+                "unknown": [{"path": "tests/d.py", "nodeid": "tests/d.py::test_d"}],
+                "unreadable_runs": [{"source": "merged", "stage": "collect"}],
+            },
+            merge_sha="a" * 40,
+            before="b" * 40,
+            legacy_failures=["tests/b.py::test_b", "tests/b.py::test_b"],
+            created_at="2026-08-24T00:00:00+00:00",
+        )
+
+        assert payload["schema_version"] == "upstream-sync-gate-failures/v2"
+        assert [item["nodeid"] for item in payload["blocking_failures"]] == [
+            "tests/a.py::test_a",
+            "tests/b.py::test_b",
+        ]
+        assert payload["blocking_failures"][0]["classification"] == "fork_regression"
+        assert payload["pre_existing"]
+        assert payload["unknown"]
+        assert payload["unreadable_runs"]
+        assert payload["new_failures"] == ["tests/b.py::test_b"]

@@ -512,21 +512,16 @@ PY
       echo "classification:"
       cat "$classification_json"
     } >>"$DETAIL_LOG"
-    "$py" - "$classification_json" "$attempt_dir/gate-failures.json" "$after" "$before" "$t11_failures_file" <<'PY' || true
-import datetime, json, sys
-from pathlib import Path
-classification = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-legacy = [line.strip() for line in Path(sys.argv[5]).read_text(encoding="utf-8").splitlines() if line.strip()]
-payload = {
-    "schema_version": "upstream-sync-gate-failures/v2",
-    "merge_sha": sys.argv[3],
-    "before": sys.argv[4],
-    **{key: classification.get(key, []) for key in ("common_path", "post_only_path", "pre_existing", "unknown", "unreadable_runs", "blocking_failures")},
-    "new_failures": legacy,
-    "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-}
-Path(sys.argv[2]).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-PY
+    if ! "$py" "$gate" persist-gate-failures \
+      --classification "$classification_json" \
+      --merge-sha "$after" \
+      --before "$before" \
+      --legacy-failures "$t11_failures_file" \
+      --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
+      echo "could not persist normalized gate-failures.json" >>"$DETAIL_LOG"
+      rm -f "$t11_failures_file"
+      return 1
+    fi
     rm -f "$t11_failures_file"
     cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
     return 1

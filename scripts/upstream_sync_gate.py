@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from typing import Any
 
 SELECTION_MANIFEST_SCHEMA = "upstream-sync-test-selection/v1"
 ATTEMPT_SCHEMA = "upstream-sync-gate-attempt/v1"
+GATE_FAILURES_SCHEMA = "upstream-sync-gate-failures/v2"
 RECEIPT_CONTRACT = "v1"
 _RECEIPT_FIELDS = {
     "manifest": "manifest_sha256",
@@ -597,6 +599,59 @@ def classify_node_failures(
     return result
 
 
+def build_gate_failures_payload(
+    *,
+    classification: dict[str, Any],
+    merge_sha: str,
+    before: str,
+    legacy_failures: list[str],
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Build the persisted v2 gate result from one classifier output.
+
+    ``blocking_failures`` is deliberately derived here, at the persistence
+    boundary, rather than trusted as a separately supplied list.  Its identity
+    is the ``(path, nodeid)`` pair; the output is sorted and unique, while
+    informational and unknown buckets never enter it.
+    """
+    buckets = ("common_path", "post_only_path")
+    blocking: dict[tuple[str, str], dict[str, Any]] = {}
+    for bucket in buckets:
+        entries = classification.get(bucket, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"classification bucket {bucket} must be a list")
+        for item in entries:
+            if not isinstance(item, dict):
+                raise ValueError(f"classification bucket {bucket} contains a non-object")
+            path = item.get("path")
+            nodeid = item.get("nodeid")
+            if not isinstance(path, str) or not path or not isinstance(nodeid, str) or not nodeid:
+                raise ValueError(f"classification bucket {bucket} contains an invalid failure")
+            blocking.setdefault((path, nodeid), dict(item))
+
+    payload: dict[str, Any] = {
+        "schema_version": GATE_FAILURES_SCHEMA,
+        "merge_sha": merge_sha,
+        "before": before,
+        **{
+            key: classification.get(key, [])
+            for key in (
+                "common_path",
+                "post_only_path",
+                "pre_existing",
+                "unknown",
+                "unreadable_runs",
+            )
+        },
+        "blocking_failures": [
+            blocking[key] for key in sorted(blocking)
+        ],
+        "new_failures": sorted({item for item in legacy_failures if item}),
+        "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+    }
+    return payload
+
+
 def build_upstream_probe_request(
     *,
     baseline: dict[str, Any],
@@ -790,6 +845,15 @@ def _main(argv: list[str] | None = None) -> int:
     p_receipt.add_argument("--source", choices=sorted(_RECEIPT_FIELDS), required=True)
     p_receipt.add_argument("--digest", required=True)
 
+    p_failures = sub.add_parser(
+        "persist-gate-failures", help="persist one normalized v2 gate outcome"
+    )
+    p_failures.add_argument("--classification", required=True)
+    p_failures.add_argument("--merge-sha", required=True)
+    p_failures.add_argument("--before", required=True)
+    p_failures.add_argument("--legacy-failures", required=True)
+    p_failures.add_argument("--output", required=True)
+
     args = parser.parse_args(argv)
 
     try:
@@ -877,6 +941,27 @@ def _main(argv: list[str] | None = None) -> int:
             )
             for item in items:
                 print(item)
+            return 0
+        elif args.cmd == "persist-gate-failures":
+            classification = json.loads(
+                Path(args.classification).read_text(encoding="utf-8")
+            )
+            legacy = [
+                line.strip()
+                for line in Path(args.legacy_failures)
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line.strip()
+            ]
+            write_json_atomic(
+                Path(args.output),
+                build_gate_failures_payload(
+                    classification=classification,
+                    merge_sha=args.merge_sha,
+                    before=args.before,
+                    legacy_failures=legacy,
+                ),
+            )
             return 0
         else:
             print(fork_test_receipt(source=args.source, digest=args.digest))
