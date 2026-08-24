@@ -426,6 +426,13 @@ Finalizer вызывает этот builder вместо второго inline-�
 schema-тест доказывает одинаковый набор findings в обоих форматах. Старый
 finalize stub обновлён для точного `--probe-nodeids-from`, чтобы интеграция
 проверяла новый node-aware контракт, а не искусственно создавала `unknown`.
+Follow-up исправление зафиксировано коммитом `bbcd849236`
+(`use persisted gate failures as the single verdict`): classifier CLI больше
+не производит вторую копию `blocking_failures`, finalizer сначала создаёт
+persisted v2 payload, а затем считает `blocking_failures` и `unknown` только
+из него. Поэтому решение о блокировке и triage используют буквально один
+объект; regression-тест отдельно требует, чтобы classifier не эмитил
+aggregate, а union не мог молча сузиться.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_triage.py -k schema` зелёный;
 среди случаев — проверка самого инварианта, а не только совпадения счётчика.
