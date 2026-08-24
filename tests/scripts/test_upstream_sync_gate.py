@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 import sys
 from pathlib import Path
 
@@ -585,6 +586,70 @@ def test_trailing_detail_after_the_dash_is_stripped_from_the_id():
         "2 passed, 1 failed in 1.00s\n"
     )
     assert new_failures(before, after) == ["tests/b.py::test_two"]
+
+
+def test_outcomes_parser_preserves_plural_collection_errors():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    assert callable(parser), "outcomes parser is not implemented"
+
+    outcome = parser(
+        "ERROR collecting tests/broken.py\n"
+        "2 errors in 0.05s\n"
+    )
+
+    assert outcome == {
+        "failed_nodeids": [],
+        "error_count": 2,
+        "collection_error_paths": ["tests/broken.py"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("summary", "error_count"),
+    [
+        ("2 passed, 1 error in 0.12s\n", 1),
+        ("76 failed, 6259 passed, 2 skipped, 6 warnings in 679.63s\n", 0),
+    ],
+)
+def test_outcomes_parser_accepts_known_pytest_summary_forms(summary, error_count):
+    outcome = upstream_sync_gate.parse_test_outcomes(summary)
+    assert outcome["error_count"] == error_count
+
+
+def test_outcomes_comparator_reports_new_collection_error():
+    comparator = getattr(upstream_sync_gate, "compare_test_outcomes", None)
+    assert callable(comparator), "outcomes comparator is not implemented"
+
+    result = comparator(
+        "0 failed, 2 passed in 0.05s\n",
+        "ERROR collecting tests/broken.py\n2 errors in 0.05s\n",
+    )
+
+    assert result == {
+        "new_failures": [],
+        "new_collection_errors": ["tests/broken.py"],
+    }
+
+
+def test_outcomes_no_tests_ran_is_unreadable_not_clean():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    assert callable(parser), "outcomes parser is not implemented"
+
+    with pytest.raises(ValueError, match="no tests ran"):
+        parser("no tests ran in 0.01s\n")
+
+
+def test_outcomes_node_run_marks_collection_error_unreadable(tmp_path):
+    log = tmp_path / "collection-error.log"
+    log.write_text("ERROR collecting tests/broken.py\n2 errors in 0.05s\n")
+
+    result = _cli("node-outcome", "--log", str(log))
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome["collect_ok"] is False
+    assert outcome["probe_ok"] is False
+    assert outcome["error_count"] == 2
 
 
 def test_a_log_without_a_summary_line_is_a_killed_run_not_a_clean_one():

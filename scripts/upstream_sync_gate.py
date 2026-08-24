@@ -638,22 +638,81 @@ def build_upstream_probe_request(
 
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
+_COLLECTION_ERROR_LINE = re.compile(r"^ERROR collecting\s+(\S+)")
+_NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
-    r"^=*\s*\d+\s+(?:failed|passed|error)\b.*\bin\s+[\d.]+s", re.MULTILINE
+    r"^=*\s*(?P<counts>(?:\d+\s+(?:failed|passed|skipped|warnings?|errors?|error)\b"
+    r"(?:,\s*)?)+)\s+in\s+[\d.]+s\s*$",
+    re.MULTILINE,
+)
+_COUNT_TOKEN = re.compile(
+    r"(?P<count>\d+)\s+(?P<label>failed|passed|skipped|warnings?|errors?|error)\b"
 )
 
 
-def _failures(log: str) -> set[str]:
-    if not _SUMMARY_LINE.search(log):
+def parse_test_outcomes(log: str) -> dict[str, Any]:
+    """Parse pytest's failure and collection-error outcomes together.
+
+    A summary containing only collection errors is still readable. The special
+    ``no tests ran`` line is deliberately rejected: it is an unreadable gate
+    run, not evidence that the selected tests passed.
+    """
+    if _NO_TESTS_RAN.search(log):
+        raise ValueError("pytest run is unreadable: no tests ran")
+    summary = _SUMMARY_LINE.search(log)
+    if not summary:
         raise ValueError(
             "pytest log has no summary line: the run was killed, not clean"
         )
-    found: set[str] = set()
-    for line in log.split("\n"):
-        m = _FAILED_LINE.match(line)
-        if m:
-            found.add(m.group(1))
-    return found
+    counts: dict[str, int] = {}
+    for match in _COUNT_TOKEN.finditer(summary.group("counts")):
+        label = match.group("label")
+        if label == "warnings":
+            label = "warning"
+        elif label == "errors":
+            label = "error"
+        counts[label] = counts.get(label, 0) + int(match.group("count"))
+    failed_nodeids = sorted(
+        match.group(1)
+        for line in log.splitlines()
+        if (match := _FAILED_LINE.match(line))
+    )
+    collection_error_paths = sorted(
+        {
+            match.group(1)
+            for line in log.splitlines()
+            if (match := _COLLECTION_ERROR_LINE.match(line))
+        }
+    )
+    return {
+        "failed_nodeids": failed_nodeids,
+        "error_count": counts.get("error", 0),
+        "collection_error_paths": collection_error_paths,
+    }
+
+
+def compare_test_outcomes(baseline_log: str, post_log: str) -> dict[str, list[str]]:
+    baseline = parse_test_outcomes(baseline_log)
+    post = parse_test_outcomes(post_log)
+    new_collection_errors = sorted(
+        set(post["collection_error_paths"]) - set(baseline["collection_error_paths"])
+    )
+    unidentified = max(0, post["error_count"] - baseline["error_count"])
+    if new_collection_errors:
+        unidentified = 0
+    new_collection_errors.extend(
+        f"<unidentified-{index}>" for index in range(1, unidentified + 1)
+    )
+    return {
+        "new_failures": sorted(
+            set(post["failed_nodeids"]) - set(baseline["failed_nodeids"])
+        ),
+        "new_collection_errors": new_collection_errors,
+    }
+
+
+def _failures(log: str) -> set[str]:
+    return set(parse_test_outcomes(log)["failed_nodeids"])
 
 
 def new_failures(baseline_log: str, post_log: str) -> list[str]:
@@ -662,7 +721,10 @@ def new_failures(baseline_log: str, post_log: str) -> list[str]:
     Пропавшие падения не возвращаются: слияние, которое что-то починило, —
     не повод его блокировать.
     """
-    return sorted(_failures(post_log) - _failures(baseline_log))
+    compared = compare_test_outcomes(baseline_log, post_log)
+    return compared["new_failures"] + [
+        f"COLLECTION_ERROR {path}" for path in compared["new_collection_errors"]
+    ]
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -768,7 +830,8 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         elif args.cmd == "node-outcome":
             log = Path(args.log).read_text(encoding="utf-8")
-            failed = sorted(_failures(log))
+            parsed = parse_test_outcomes(log)
+            failed = parsed["failed_nodeids"]
             expected = None
             if args.expected_nodeids:
                 expected = json.loads(
@@ -781,10 +844,12 @@ def _main(argv: list[str] | None = None) -> int:
             collected = sorted(set(expected if expected is not None else failed))
             unexpected = sorted(set(failed) - set(collected))
             print(json.dumps({
-                "collect_ok": not unexpected,
-                "probe_ok": not unexpected,
+                "collect_ok": not unexpected and parsed["error_count"] == 0,
+                "probe_ok": not unexpected and parsed["error_count"] == 0,
                 "collected_nodeids": collected,
                 "failed_nodeids": sorted(set(failed) & set(collected)),
+                "error_count": parsed["error_count"],
+                "collection_error_paths": parsed["collection_error_paths"],
             }, ensure_ascii=False, sort_keys=True))
             return 0
         elif args.cmd == "prepare-selection":
