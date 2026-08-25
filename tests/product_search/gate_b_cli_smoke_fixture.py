@@ -502,17 +502,7 @@ exec {sys.executable!s} "$@"
     )
     authority_path = configured_authority or (root / "corpus-authority.json")
     if not authority_path.exists():
-        if configured_authority is not None:
-            raise ValueError("corpus_authority_unavailable")
-        authority_path.parent.mkdir(parents=True, exist_ok=True)
-        authority_path.write_bytes(
-            _canonical(
-                {
-                    "schema_version": CORPUS_AUTHORITY_SCHEMA,
-                    "corpus_sha256": computed_corpus_sha256,
-                }
-            )
-        )
+        raise ValueError("corpus_authority_unavailable")
     corpus_sha256 = _load_corpus_authority(
         authority_path,
         expected_corpus_sha256=computed_corpus_sha256,

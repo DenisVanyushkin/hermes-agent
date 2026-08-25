@@ -538,6 +538,27 @@ def test_v2_publication_failure_does_not_leave_paid_terminal_dispatch(
     assert ledger.entries()[0].state is JournalState.DISPATCHED
 
 
+def test_published_v2_record_authority_checks_persisted_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, capability, _ledger, refs, request = _live_dispatch_fixture(
+        tmp_path, monkeypatch
+    )
+    dispatch_input_hash = runner._reservation_input_hash(refs[0])
+    provider.dispatch(
+        request,
+        input_hash=dispatch_input_hash,
+        capability=capability,
+    )
+    published = runner._provider_record(provider, dispatch_input_hash)
+    persisted_tampered = dict(published)
+    persisted_tampered["model_sha256"] = "f" * 64
+    monkeypatch.setattr(provider.store, "load", lambda _input_hash: persisted_tampered)
+    monkeypatch.setattr(provider, "verify_provider_record", lambda _record: None)
+    with pytest.raises(ValueError, match="provider_record_authority_mismatch"):
+        provider._verify_published_v2_record(published)
+
+
 def test_v2_publication_resume_uses_stored_transport_without_redispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

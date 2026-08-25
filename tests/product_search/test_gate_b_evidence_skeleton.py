@@ -412,53 +412,23 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     )
 
 
-def test_run_one_row_rejects_unverified_caller_provider_record(
+def test_run_one_row_rejects_unverified_store_record_before_decision_factory(
     tmp_path: Path,
 ) -> None:
-    record = _record()
-    raw = _raw()
-    candidates = evidence.build_vacancy_projection_candidates_v3(record, raw)
-    allowlist = _allowlist(candidates)
-    projected = evidence.project_vacancy_evidence_v3(record, raw, allowlist)
-    input_sha256 = _sha256_bytes(_canonical_bytes(projected.provider_payload()))
-    projection_sha256 = _sha256_bytes(_canonical_bytes(projected.model_dump(mode="json")))
-    manifest = _manifest(
-        input_sha256=input_sha256,
-        projection_sha256=projection_sha256,
-        raw_sha256=candidates.vacancy_artifact_sha256,
-    )
+    decision_calls = 0
 
-    class FakeGovernedProvider:
-        provider_record_sha256 = "a" * 64
-        semantic_transport_record_sha256 = "a" * 64
+    def unexpected_decision_factory(_context: object) -> object:
+        nonlocal decision_calls
+        decision_calls += 1
+        raise AssertionError("decision factory must not run for an unverified record")
 
-        def dispatch(
-            self, request: runner.GateBDispatchRequestV2
-        ) -> dict[str, object]:
-            return _provider_payload(projected)
-
-    with pytest.raises(TypeError, match="provider_record"):
-        run_one_row(
-            manifest=manifest,
-            ordinal=0,
-            record=record,
-            raw=raw,
-            reviewed_allowlist=allowlist,
-            provider=FakeGovernedProvider(),
-            ledger=ForegroundDispatchLedger(
-                manifest, committed_budget_reserver=NoDurableAccounting()
-            ),
-            recordings=RecordingStore(tmp_path / "recordings"),
-            decision_evidence=DecisionEvidenceStore(tmp_path / "decisions"),
-            decision_request_factory=lambda context: _decision_result(
-                context.response_payload, context.manifest_ref.input_sha256
-            ),
-            decision_policy=load_decision_policy(),
-            decision_clock=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
-            provider_record={
-                "semantic_transport_record_sha256": "a" * 64,
-            },
+    with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
+        _run_one_row_with_keyed_record(
+            tmp_path,
+            mutation="tampered_hmac",
+            decision_request_factory=unexpected_decision_factory,
         )
+    assert decision_calls == 0
 
 
 def _run_one_row_with_keyed_record(
@@ -466,6 +436,7 @@ def _run_one_row_with_keyed_record(
     *,
     verifier: bool = True,
     mutation: str | None = None,
+    decision_request_factory: object | None = None,
 ) -> object:
     record = _record()
     raw = _raw()
@@ -550,6 +521,11 @@ def _run_one_row_with_keyed_record(
     if verifier:
         provider.verify_provider_record = capability.verify_record
 
+    factory = decision_request_factory or (
+        lambda context: _decision_result(
+            context.response_payload, context.manifest_ref.input_sha256
+        )
+    )
     return run_one_row(
         manifest=manifest,
         ordinal=0,
@@ -560,9 +536,7 @@ def _run_one_row_with_keyed_record(
         ledger=ledger,
         recordings=RecordingStore(tmp_path / "recordings"),
         decision_evidence=DecisionEvidenceStore(tmp_path / "decisions"),
-        decision_request_factory=lambda context: _decision_result(
-            context.response_payload, context.manifest_ref.input_sha256
-        ),
+        decision_request_factory=factory,
         decision_policy=load_decision_policy(),
         decision_clock=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
     )

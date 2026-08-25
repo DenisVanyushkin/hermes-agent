@@ -214,6 +214,10 @@ def main() -> int:
             artifact_root=fixture_artifact,
             repo_root=REPO,
             runtime_manifest_path=install_root / "runtime-manifest.json",
+            corpus_authority_path=(
+                REPO
+                / "tests/product_search/fixtures/gate-b-corpus-authority.json"
+            ),
         )
         manifest_payload = json.loads(manifest_path.read_bytes())
         spend_record_path = (

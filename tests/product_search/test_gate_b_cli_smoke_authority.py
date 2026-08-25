@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -18,19 +19,37 @@ def _authority_bytes(corpus_sha256: str) -> bytes:
     ).encode("utf-8")
 
 
-def test_corpus_authority_file_is_consumed_and_tampering_fails_closed(tmp_path):
-    authority = tmp_path / "corpus-authority.json"
-    expected = "1" * 64
-    authority.write_bytes(_authority_bytes(expected))
+def _computed_corpus_sha256() -> str:
+    rows = [
+        {"ordinal": index, "record": record, "raw": raw}
+        for index in range(48)
+        for record, raw in (fixture._make_record(index),)
+    ]
+    return fixture._sha(fixture._canonical(rows))
 
-    assert fixture._load_corpus_authority(
-        authority,
-        expected_corpus_sha256=expected,
-    ) == expected
+
+def test_prepare_consumes_configured_authority_and_fails_closed_on_tampering(
+    tmp_path: Path,
+) -> None:
+    authority = tmp_path / "corpus-authority.json"
+    expected = _computed_corpus_sha256()
+    authority.write_bytes(_authority_bytes(expected))
+    repo_root = Path(__file__).resolve().parents[2]
+
+    manifest_path, _, _ = fixture.prepare(
+        root=tmp_path / "first-fixture",
+        artifact_root=tmp_path / ("a" * 64),
+        repo_root=repo_root,
+        corpus_authority_path=authority,
+    )
+    manifest = json.loads(manifest_path.read_bytes())
+    assert manifest["corpus_sha256"] == expected
 
     authority.write_bytes(_authority_bytes("2" * 64))
     with pytest.raises(ValueError, match="corpus_authority_mismatch"):
-        fixture._load_corpus_authority(
-            authority,
-            expected_corpus_sha256=expected,
+        fixture.prepare(
+            root=tmp_path / "tampered-fixture",
+            artifact_root=tmp_path / ("b" * 64),
+            repo_root=repo_root,
+            corpus_authority_path=authority,
         )

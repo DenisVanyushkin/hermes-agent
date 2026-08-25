@@ -1447,9 +1447,15 @@ class _LiveGateBProvider:
         return provider_input_sha256
 
     def _verify_published_v2_record(self, record: dict[str, object]) -> None:
-        self.verify_provider_record(record)
+        input_hash = record.get("input_hash")
+        if not isinstance(input_hash, str) or not input_hash:
+            raise ValueError("provider_record_input_hash_missing")
+        persisted = self.store.load(input_hash)
+        if not isinstance(persisted, dict):
+            raise ValueError("provider_record_invalid")
+        self.verify_provider_record(persisted)
         for name, expected in self.authority_identity.items():
-            if record.get(name) != expected:
+            if persisted.get(name) != expected:
                 raise ValueError("provider_record_authority_mismatch")
 
     @staticmethod
