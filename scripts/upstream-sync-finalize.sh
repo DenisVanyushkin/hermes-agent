@@ -95,6 +95,12 @@ BACKUP_REF="$(json_field backup_ref)"
 FAILED_STAGE=""
 BREAK_GLASS_NOTICE=""
 GATE_OUTCOME="unknown"
+GATE_MODE="apply"
+GATE_ATTEMPT_DIR=""
+GATE_ATTEMPT_ID=""
+GATE_BEFORE=""
+GATE_AFTER=""
+GATE_BOUNDARY=""
 
 write_result() {
   # Statuses: ok | failed | awaiting_decision (apply-decisions stopped to ask
@@ -326,6 +332,12 @@ adopt_scratch_clone() {
 # block, and an unreadable run (killed, no summary line) blocks too.
 run_gate() {
   local before="$1" after="$2" boundary="$3" attempt_id="$4" mode="$5"
+  GATE_MODE="$mode"
+  GATE_ATTEMPT_DIR=""
+  GATE_ATTEMPT_ID="$attempt_id"
+  GATE_BEFORE="$before"
+  GATE_AFTER="$after"
+  GATE_BOUNDARY="$boundary"
   GATE_OUTCOME="unknown"
   printf 'run_gate seam: mode=%s before=%s after=%s boundary=%s attempt_id=%s\n' \
     "$mode" "$before" "$after" "$boundary" "$attempt_id" >>"$DETAIL_LOG"
@@ -399,6 +411,7 @@ merge_passes_fork_tests() {
     echo "could not read the attempt namespace from the selection report" >>"$DETAIL_LOG"
     return 1
   fi
+  GATE_ATTEMPT_DIR="$attempt_dir"
   selection_manifest="$attempt_dir/gate-selection.json"
   if ! selection_digest="$(sha256sum "$selection_manifest" | awk '{print $1}')" || [ -z "$selection_digest" ]; then
     echo "could not hash the selection manifest for the runner receipt" >>"$DETAIL_LOG"
@@ -448,8 +461,10 @@ merge_passes_fork_tests() {
   # merge with no evidence beyond a truncated log tail in the result JSON —
   # and no way to diagnose WHICH change broke WHICH test without redoing the
   # whole thing by hand. The triage reads these.
-  cp -f "$baseline" "$STATE_DIR/gate-baseline.log" 2>/dev/null || true
-  cp -f "$post" "$STATE_DIR/gate-post.log" 2>/dev/null || true
+  if [ "$GATE_MODE" = apply ]; then
+    cp -f "$baseline" "$STATE_DIR/gate-baseline.log" 2>/dev/null || true
+    cp -f "$post" "$STATE_DIR/gate-post.log" 2>/dev/null || true
+  fi
   # Node-aware cutover. The old log-difference block below is unreachable
   # compatibility code until T13 removes its evidence projection; it is not
   # consulted for this gate verdict.
@@ -558,12 +573,16 @@ PY
       GATE_OUTCOME="block"
     fi
     rm -f "$t11_failures_file"
-    cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
+    if [ "$GATE_MODE" = apply ]; then
+      cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
+    fi
     return 1
   fi
   rm -f "$t11_failures_file"
-  cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json"
-  rm -f "$attempt_dir/gate-failures.json"
+  if [ "$GATE_MODE" = apply ]; then
+    cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json"
+    rm -f "$attempt_dir/gate-failures.json"
+  fi
   return 0
 }
 
@@ -576,13 +595,22 @@ PY
 run_gate_triage() {
   [ "$ACTION" = apply-triage-fixes ] && return 0
   [ -f "$STATE_DIR/gate-failures.json" ] || return 0
-  local triage py
+  local triage py expected_merge expected_before
+  expected_merge="${1:-}"
+  expected_before="${2:-}"
   triage="$SCRIPTS_DIR/upstream_sync_triage.py"
   [ -f "$triage" ] || triage="$REPO/scripts/upstream_sync_triage.py"
   [ -f "$triage" ] || { echo "warning: upstream_sync_triage.py not found; no triage" >>"$DETAIL_LOG"; return 0; }
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  "$py" "$triage" --state "$STATE_DIR" --repo "$REPO" >>"$DETAIL_LOG" 2>&1 || \
+  local -a triage_args=("$py" "$triage" --state "$STATE_DIR" --repo "$REPO")
+  if [ -n "$expected_merge" ]; then
+    triage_args+=(--expected-merge-sha "$expected_merge")
+  fi
+  if [ -n "$expected_before" ]; then
+    triage_args+=(--expected-before "$expected_before")
+  fi
+  "${triage_args[@]}" >>"$DETAIL_LOG" 2>&1 || \
     echo "warning: gate triage failed (see above); the gate outcome stands" >>"$DETAIL_LOG"
   return 0
 }
@@ -669,7 +697,7 @@ land_merge() {
     if ! run_gate "$HEAD_SHA" "$MERGE_SHA" "$UPSTREAM_FULL" "apply-merge:$MERGE_SHA" apply; then
       FAILED_STAGE=test-gate
       # Before the report, not after: the operator's message IS the triage.
-      run_gate_triage
+      run_gate_triage "$MERGE_SHA" "$HEAD_SHA"
       write_result failed "the agent merge does not pass the fork's tests — not landed; repo untouched, no rollback, decision kept for a rework. $(cat "$DETAIL_LOG")"
       exit 0
     fi
@@ -698,9 +726,48 @@ land_merge() {
     fi
 }
 
-# gate-only — run the same gate composition without changing live HEAD. The
-# stricter attempt-state write boundary is completed by T19; this entrypoint
-# already refuses a request whose baseline is not the current live HEAD.
+# gate-only — run the same gate composition without changing live HEAD. Its
+# result is evidence inside the generation, not the apply control plane.
+write_gate_only_result() {
+  local status="$1" verdict="$2"
+  [ -n "$GATE_ATTEMPT_DIR" ] || return 1
+  python3 - "$GATE_ATTEMPT_DIR/attempt-result.json" "$status" "$verdict" "$DETAIL_LOG" <<'PY'
+import datetime, json, os, sys, tempfile
+from pathlib import Path
+
+target, status, verdict, detail_path = sys.argv[1:]
+try:
+    detail = Path(detail_path).read_text(encoding="utf-8", errors="replace")
+except OSError:
+    detail = ""
+payload = {
+    "schema_version": "upstream-sync-gate-attempt-result/v1",
+    "action": "gate-only",
+    "status": status,
+    "gate_verdict": verdict,
+    "attempt_id": os.environ.get("GATE_ATTEMPT_ID", ""),
+    "before": os.environ.get("GATE_BEFORE", ""),
+    "after": os.environ.get("GATE_AFTER", ""),
+    "boundary": os.environ.get("GATE_BOUNDARY", ""),
+    "detail": detail[-4000:],
+    "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+destination = Path(target)
+fd, temporary = tempfile.mkstemp(prefix=".attempt-result.", dir=destination.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=1)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, destination)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
 gate_only() {
   local before after boundary attempt_id current
   before="$(json_field before)"
@@ -708,19 +775,25 @@ gate_only() {
   boundary="$(json_field boundary)"
   attempt_id="$(json_field attempt_id)"
   if [ -z "$before" ] || [ -z "$after" ] || [ -z "$boundary" ] || [ -z "$attempt_id" ]; then
-    write_result failed "gate-only needs before, after, boundary, and attempt_id; live repo untouched."
-    return
+    echo "gate-only needs before, after, boundary, and attempt_id; live repo untouched." >&2
+    rm -f "$PROCESSING"
+    return 1
   fi
   if ! current="$(git -C "$REPO" rev-parse HEAD 2>>"$DETAIL_LOG")" || [ "$current" != "$before" ]; then
-    write_result failed "gate-only before $before is not the live HEAD ${current:-unknown}; refusing to run."
-    return
+    echo "gate-only before $before is not the live HEAD ${current:-unknown}; refusing to run." >&2
+    rm -f "$PROCESSING"
+    return 1
   fi
   if run_gate "$before" "$after" "$boundary" "$attempt_id" gate-only; then
-    write_result ok "gate-only completed with gate_verdict=pass. $(cat "$DETAIL_LOG")"
+    export GATE_ATTEMPT_ID GATE_BEFORE GATE_AFTER GATE_BOUNDARY
+    printf 'gate-only completed with gate_verdict=pass; live repo untouched.\n' >>"$DETAIL_LOG"
+    write_gate_only_result ok pass
   else
-    FAILED_STAGE=test-gate
-    write_result failed "gate-only completed with gate_verdict=$GATE_OUTCOME; live repo untouched. $(cat "$DETAIL_LOG")"
+    export GATE_ATTEMPT_ID GATE_BEFORE GATE_AFTER GATE_BOUNDARY
+    printf 'gate-only completed with gate_verdict=%s; live repo untouched.\n' "$GATE_OUTCOME" >>"$DETAIL_LOG"
+    write_gate_only_result failed "$GATE_OUTCOME"
   fi
+  rm -f "$PROCESSING"
 }
 
 # apply-decisions — the host-owned path. pending.json carries every decision

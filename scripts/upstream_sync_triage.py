@@ -418,7 +418,13 @@ def _failure_nodeids_for_triage(failures: dict) -> list[str]:
     return sorted({item for item in (failures.get("new_failures") or []) if item})
 
 
-def run_triage(*, state: Path | str, repo: Path | str) -> int:
+def run_triage(
+    *,
+    state: Path | str,
+    repo: Path | str,
+    expected_merge_sha: str | None = None,
+    expected_before: str | None = None,
+) -> int:
     """Diagnose every new failure the gate recorded; write gate-triage.json.
 
     Always returns 0 unless the state is unusable: the gate has already decided
@@ -427,6 +433,27 @@ def run_triage(*, state: Path | str, repo: Path | str) -> int:
     """
     state, repo = Path(state), Path(repo)
     failures = _read_json(state / "gate-failures.json")
+    mismatches = []
+    if expected_merge_sha and failures.get("merge_sha") != expected_merge_sha:
+        mismatches.append(
+            f"merge_sha payload={failures.get('merge_sha', '')!r} expected={expected_merge_sha!r}"
+        )
+    if expected_before and failures.get("before") != expected_before:
+        mismatches.append(
+            f"before payload={failures.get('before', '')!r} expected={expected_before!r}"
+        )
+    if mismatches:
+        _write_json(state / "gate-triage.json", {
+            "schema": SCHEMA,
+            "status": "stale_evidence",
+            "merge_sha": failures.get("merge_sha") or "",
+            "before": failures.get("before") or "",
+            "reason": "no applicable triage evidence: " + "; ".join(mismatches),
+            "proposals": [],
+            "created_at": _now(),
+            "slack_ts": None,
+        })
+        return 0
     new_failures = _failure_nodeids_for_triage(failures)
     if not new_failures:
         return 0
@@ -462,9 +489,16 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="triage a red upstream-sync fork-test gate")
     parser.add_argument("--state", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--expected-merge-sha")
+    parser.add_argument("--expected-before")
     args = parser.parse_args(argv)
     try:
-        return run_triage(state=args.state, repo=args.repo)
+        return run_triage(
+            state=args.state,
+            repo=args.repo,
+            expected_merge_sha=args.expected_merge_sha,
+            expected_before=args.expected_before,
+        )
     except Exception as exc:  # never fail the caller: the gate outcome stands
         print(f"triage failed: {exc}", file=sys.stderr)
         return 0

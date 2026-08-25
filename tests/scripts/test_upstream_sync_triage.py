@@ -411,3 +411,43 @@ class TestRunTriage:
         assert payload["unknown"]
         assert payload["unreadable_runs"]
         assert payload["new_failures"] == ["tests/b.py::test_b"]
+
+    def test_stale_payload_is_not_proposed_for_a_different_merge(
+        self, tmp_path, monkeypatch
+    ):
+        repo, current_sha = _patch_repo(tmp_path)
+        state = tmp_path / "stale-state"
+        state.mkdir()
+        stale_sha = "f" * 40
+        (state / "gate-failures.json").write_text(json.dumps({
+            "schema_version": "upstream-sync-gate-failures/v2",
+            "merge_sha": stale_sha,
+            "before": "e" * 40,
+            "blocking_failures": [{
+                "path": "tests/test_mod.py",
+                "nodeid": "tests/test_mod.py::test_f",
+                "classification": "fork_regression",
+            }],
+        }))
+        (state / "gate-post.log").write_text(
+            "FAILED tests/test_mod.py::test_f - TypeError\n"
+            "1 failed in 1.00s\n"
+        )
+        monkeypatch.setenv("HERMES_SYNC_TRIAGE_CMD", _model_cmd(tmp_path, {
+            "verdict": "test_outdated",
+            "explanation": "must not be called for stale evidence",
+            "patch": NEW_TEST,
+        }))
+
+        rc = triage.run_triage(
+            state=state,
+            repo=repo,
+            expected_merge_sha=current_sha,
+            expected_before=current_sha,
+        )
+
+        assert rc == 0
+        out = json.loads((state / "gate-triage.json").read_text())
+        assert out["status"] == "stale_evidence"
+        assert out["proposals"] == []
+        assert "merge_sha" in out["reason"]

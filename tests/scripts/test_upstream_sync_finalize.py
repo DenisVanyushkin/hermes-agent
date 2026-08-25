@@ -167,6 +167,14 @@ def _result(state: Path) -> dict:
     return json.loads((state / "finalize-result.json").read_text())
 
 
+def _latest_attempt(state: Path) -> Path:
+    attempts = sorted(
+        path for path in (state / "attempts").glob("*/*") if path.is_dir()
+    )
+    assert attempts
+    return attempts[-1]
+
+
 class TestFinalizeRequiresRebasedHead:
     def test_finalize_with_unrebased_head_fails_without_rollback(self, tmp_path, state):
         repo = _make_repo(tmp_path)
@@ -232,7 +240,7 @@ class TestFinalizeNotifiesSlack:
             path_prepend=str(bin_dir),
         )
 
-        assert _result(state)["status"] == "ok", proc.stderr
+        assert proc.returncode == 0, proc.stderr
         logged = curl_log.read_text()
         assert "chat.postMessage" in logged
         assert "ok" in logged
@@ -871,17 +879,91 @@ class TestSharedGateSeam:
         )
         proc = _run_finalize(repo, state, scripts)
 
-        res = _result(state)
+        res = json.loads((_latest_attempt(state) / "attempt-result.json").read_text())
         expected_status = "ok" if outcome == "pass" else "failed"
         assert res["status"] == expected_status, proc.stderr + res.get("detail", "")
+        assert res["gate_verdict"] == outcome
         assert _git(repo, "rev-parse", "HEAD") == local_head
-        detail = (state / "finalize-detail.log").read_text()
+        detail = res["detail"]
         assert f"run_gate seam: mode=gate-only before={local_head} after={merge_sha} boundary={upstream_head}" in detail
         assert f"run_gate outcome: mode=gate-only outcome={outcome}" in detail
         generations = list((state / "attempts").glob("*/*"))
         assert len(generations) == 1
         assert (generations[0] / "gate-selection.json").exists()
         assert (generations[0] / "attempt.json").exists()
+
+
+class TestGateOnlyIsolation:
+    def test_gate_only_preserves_all_production_state_and_writes_only_generation(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        _git(repo, "fetch", str(state / "scratch"), "HEAD")
+        scripts, _ = _stub_scripts(tmp_path)
+
+        # Seed every production-plane artifact so the assertion is about the
+        # whole state directory, not only the three files named in T19.
+        for name, content in {
+            "apply-prepare.json": '{"old":"prepare"}\n',
+            "pending.json": '{"old":"pending"}\n',
+            "finalize-result.json": '{"old":"result"}\n',
+            "finalize-detail.log": "old detail\n",
+            "gate-baseline.log": "old baseline\n",
+            "gate-post.log": "old post\n",
+            "gate-failures.json": '{"merge_sha":"old","before":"old","blocking_failures":[]}\n',
+            "gate-triage.json": '{"old":"triage"}\n',
+        }.items():
+            (state / name).write_text(content)
+
+        def snapshot():
+            out = {}
+            for path in state.rglob("*"):
+                rel = path.relative_to(state)
+                if rel.parts[0] == "attempts" or path.name in {
+                    "finalize-request.json",
+                    "finalize-request.processing.json",
+                    "finalize.lock",
+                }:
+                    continue
+                out[str(rel)] = path.read_bytes() if path.is_file() else None
+            return out
+
+        before_state = snapshot()
+        _gate_only_request(
+            state, before=local_head, after=merge_sha, boundary=upstream_head
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        assert proc.returncode == 0, proc.stderr
+        assert snapshot() == before_state
+        attempt = _latest_attempt(state)
+        result = json.loads((attempt / "attempt-result.json").read_text())
+        assert result["action"] == "gate-only"
+        assert result["status"] == "ok"
+        assert result["gate_verdict"] == "pass"
+
+    def test_gate_only_retries_create_append_only_generations(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        _git(repo, "fetch", str(state / "scratch"), "HEAD")
+        scripts, _ = _stub_scripts(tmp_path)
+
+        for _ in range(2):
+            _gate_only_request(
+                state, before=local_head, after=merge_sha, boundary=upstream_head
+            )
+            proc = _run_finalize(repo, state, scripts)
+            assert _latest_attempt(state).joinpath("attempt-result.json").exists(), proc.stderr
+
+        attempts = sorted(
+            path for path in (state / "attempts").glob("*/*") if path.is_dir()
+        )
+        assert len(attempts) == 2
+        assert attempts[0].name == "1"
+        assert attempts[1].name == "2"
+        assert (attempts[0] / "gate-selection.json").read_bytes()
+        assert (attempts[1] / "gate-selection.json").read_bytes()
 
 
 class TestApplyMergeIsGatedOnForkTests:
