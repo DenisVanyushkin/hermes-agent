@@ -598,9 +598,13 @@ rm -f "$MERGE_TREE_OUT"
 # приземляется. Живая ветка не должна ни на секунду оказаться в состоянии,
 # которое мы ещё не проверили: гейтвей работает на этом же дереве.
 SYNC_WT="$(mktemp -d -t hermes-upstream-sync-XXXXXX)"
+SELECTION_STATE_DIR="$(mktemp -d -t hermes-upstream-selection-XXXXXX)"
+SELECTION_MANIFEST=""
+SELECTION_ATTEMPT_ROOT="$SELECTION_STATE_DIR/attempts"
 cleanup_sync_worktree() {
   git -C "$REPO" worktree remove --force "$SYNC_WT" >/dev/null 2>&1 || true
   rm -rf "$SYNC_WT"
+  rm -rf "$SELECTION_STATE_DIR"
 }
 trap cleanup_sync_worktree EXIT
 
@@ -610,11 +614,7 @@ TEST_CMD="${HERMES_SYNC_TEST_CMD:-$SCRIPT_DIR/run-fork-tests.sh}"
 [ -x "$TEST_CMD" ] || TEST_CMD="$REPO/scripts/run-fork-tests.sh"
 BASELINE_LOG_FILE="$(mktemp)"
 POST_LOG_FILE="$(mktemp)"
-
-# Ненулевой код прогона здесь нормален: падения и есть предмет измерения.
-if ! "$TEST_CMD" --legacy-selection --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
-  :
-fi
+BEFORE_FULL="$(git -C "$REPO" rev-parse HEAD)"
 
 MERGE_LOG="$(mktemp)"
 # rerere is OFF for this merge on purpose. It is enabled in this repo's config
@@ -640,7 +640,52 @@ if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_FULL" 
 fi
 rm -f "$MERGE_LOG"
 
-if ! "$TEST_CMD" --legacy-selection --boundary "$UPSTREAM_FULL" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
+# The manifest is built only after the candidate merge exists. It is the one
+# persisted selection for both trees: changing the checkout changes only which
+# exists_pre/exists_post side the runner consumes, never the selected universe.
+SELECTION_BEFORE_PATHS="$(mktemp)"
+SELECTION_AFTER_PATHS="$(mktemp)"
+SELECTION_BOUNDARY_PATHS="$(mktemp)"
+SELECTION_CHANGED_PATHS="$(mktemp)"
+SELECTION_REPORT_FILE="$(mktemp)"
+git -C "$REPO" ls-tree -r -z --name-only "$BEFORE_FULL" -- tests/ >"$SELECTION_BEFORE_PATHS"
+MERGED_HEAD="$(git -C "$SYNC_WT" rev-parse HEAD)"
+git -C "$REPO" ls-tree -r -z --name-only "$MERGED_HEAD" -- tests/ >"$SELECTION_AFTER_PATHS"
+git -C "$REPO" ls-tree -r -z --name-only "$UPSTREAM_FULL" -- tests/ >"$SELECTION_BOUNDARY_PATHS"
+git -C "$REPO" diff --no-renames --name-only -z "$BEFORE_FULL" "$MERGED_HEAD" -- tests/ >"$SELECTION_CHANGED_PATHS"
+if ! "$PYTHON_BIN" "$GATE" prepare-selection \
+  --state-dir "$SELECTION_STATE_DIR" \
+  --before "$BEFORE_FULL" --after "$MERGED_HEAD" --boundary "$UPSTREAM_FULL" \
+  --before-paths "$SELECTION_BEFORE_PATHS" --after-paths "$SELECTION_AFTER_PATHS" \
+  --boundary-paths "$SELECTION_BOUNDARY_PATHS" --changed-paths "$SELECTION_CHANGED_PATHS" \
+  >"$SELECTION_REPORT_FILE"; then
+  echo "FAILED: could not build the bound test-selection manifest." >&2
+  exit 1
+fi
+SELECTION_MANIFEST="$("$PYTHON_BIN" - "$SELECTION_REPORT_FILE" <<'PY'
+import json, sys
+from pathlib import Path
+report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+attempt_dir = report.get("attempt_dir")
+if not isinstance(attempt_dir, str) or not attempt_dir:
+    raise SystemExit("prepare-selection returned no attempt_dir")
+print(Path(attempt_dir) / "gate-selection.json")
+PY
+)"
+rm -f "$SELECTION_BEFORE_PATHS" "$SELECTION_AFTER_PATHS" "$SELECTION_BOUNDARY_PATHS" \
+  "$SELECTION_CHANGED_PATHS" "$SELECTION_REPORT_FILE"
+
+# Nonnzero test-run codes are expected: failures are the measured outcome.
+git -C "$SYNC_WT" checkout --detach "$BEFORE_FULL" >/dev/null 2>&1
+if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
+  --attempt-root "$SELECTION_ATTEMPT_ROOT" --boundary "$UPSTREAM_FULL" "$SYNC_WT" \
+  >"$BASELINE_LOG_FILE" 2>&1; then
+  :
+fi
+git -C "$SYNC_WT" checkout --detach "$MERGED_HEAD" >/dev/null 2>&1
+if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
+  --attempt-root "$SELECTION_ATTEMPT_ROOT" --boundary "$UPSTREAM_FULL" "$SYNC_WT" \
+  >"$POST_LOG_FILE" 2>&1; then
   :
 fi
 
@@ -674,7 +719,6 @@ if [ -n "$NEW_FAILURES" ]; then
 fi
 rm -f "$BASELINE_LOG_FILE" "$POST_LOG_FILE"
 
-MERGED_HEAD="$(git -C "$SYNC_WT" rev-parse HEAD)"
 git -C "$REPO" branch "backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)" HEAD >/dev/null 2>&1 || true
 
 if ! git -C "$REPO" merge --ff-only "$MERGED_HEAD" >/dev/null 2>&1; then

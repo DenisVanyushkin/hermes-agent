@@ -197,22 +197,25 @@ def test_both_gate_runs_receive_the_fetched_upstream_sha(world):
 
     boundaries, worktrees = set(), set()
     for call in calls:
-        # Длина проверяется явно: без неё вызов вида `--boundary SHA`, вовсе без
-        # worktree, прошёл бы всё остальное — call[-1] оказался бы тем же SHA,
-        # оба множества стали бы размера один, и second-parent тоже сошёлся бы.
-        # Тест доказывал бы идентичность границы, но не форму вызова.
-        assert len(call) == 4, (
-            f"expected `--legacy-selection --boundary <sha> <worktree>`: {call}"
+        assert len(call) == 7, (
+            f"expected `--selection-from <manifest> --attempt-root <root> --boundary <sha> <worktree>`: {call}"
         )
-        assert call[:2] == ["--legacy-selection", "--boundary"], (
-            f"the legacy selection mode or boundary was not explicit: {call}"
+        assert call[0] == "--selection-from" and call[2] == "--attempt-root", (
+            f"the manifest selection mode was not explicit: {call}"
         )
-        assert re.fullmatch(r"[0-9a-f]{40}", call[2]), (
+        assert call[4] == "--boundary", f"the boundary option moved unexpectedly: {call}"
+        assert re.fullmatch(r"[0-9a-f]{40}", call[5]), (
             f"the boundary is not a full immutable SHA: {call}"
         )
-        assert call[3] != call[2], f"the worktree is the boundary again: {call}"
-        boundaries.add(call[2])
-        worktrees.add(call[3])
+        assert call[6] != call[5], f"the worktree is the boundary again: {call}"
+        assert Path(call[1]).name == "gate-selection.json", call
+        assert Path(call[3]).name == "attempts", call
+        boundaries.add(call[5])
+        worktrees.add(call[6])
+
+    assert calls[0] == calls[1], f"the two runs did not receive identical argv: {calls}"
+    assert len({call[1] for call in calls}) == 1, f"the two runs received different manifests: {calls}"
+    assert len({call[3] for call in calls}) == 1, f"the two runs received different attempt roots: {calls}"
 
     assert len(boundaries) == 1, f"the two runs measured from different commits: {calls}"
     assert len(worktrees) == 1, f"the two runs used different worktrees: {calls}"
