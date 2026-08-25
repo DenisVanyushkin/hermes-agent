@@ -433,6 +433,12 @@ persisted v2 payload, а затем считает `blocking_failures` и `unkno
 из него. Поэтому решение о блокировке и triage используют буквально один
 объект; regression-тест отдельно требует, чтобы classifier не эмитил
 aggregate, а union не мог молча сузиться.
+Проверка сначала выявила дефект самой фикстуры: один и тот же post-only
+nodeid был одновременно помещён в `common_path`, поэтому удаление
+`post_only_path` не меняло union. Коммит `5f6a9a4e42`
+(`cover both blocking buckets in schema test`) разделил источники. После
+этого точная mutation-проверка удаления `post_only_path` падает с пропавшим
+`tests/b.py::test_b`; на исправленном коде полный набор снова даёт 115 passed.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_triage.py -k schema` зелёный;
 среди случаев — проверка самого инварианта, а не только совпадения счётчика.
