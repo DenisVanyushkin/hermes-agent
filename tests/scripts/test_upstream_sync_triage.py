@@ -389,7 +389,7 @@ class TestRunTriage:
         }
         payload = gate.build_gate_failures_payload(
             classification={
-                "common_path": [post_only, common, duplicate],
+                "common_path": [common, duplicate],
                 "post_only_path": [post_only],
                 "pre_existing": [{"path": "tests/c.py", "nodeid": "tests/c.py::test_c"}],
                 "unknown": [{"path": "tests/d.py", "nodeid": "tests/d.py::test_d"}],
