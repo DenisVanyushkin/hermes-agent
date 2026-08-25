@@ -644,6 +644,16 @@ pre-existing failure.
 `upstream`; интеграционный случай стартует со stale resumable scratch и
 заканчивается согласованной парой.
 
+**Реализация и проверка.** Выполнено коммитом `cb7f5cf547`: `prepare-or-resume`
+стал единственным владельцем проверки пары, append-only архива старых
+`pending`/`apply-prepare`/`scratch` и свежего `prepare`; финализатор больше не
+содержит отдельного resume guard. Пара обязана иметь
+`prep.local_base == pending.local_head == live HEAD` и равные upstream SHA;
+устаревшая попытка ротируется, а новый `pending.local_head` фиксируется
+атомарно перед prepare. `pytest tests/scripts/test_upstream_sync_finalize.py
+-k attempt_invariant` — 2 passed; полный scope из finalize/apply — 95 passed и
+одно известное средовое падение `TestRepoLock`.
+
 **Зависимости.** T19. **Сложность.** M.
 
 ---
