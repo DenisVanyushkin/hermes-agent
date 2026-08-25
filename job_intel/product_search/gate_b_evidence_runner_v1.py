@@ -3068,7 +3068,6 @@ def run_one_row(
     ],
     decision_policy: LoadedDecisionPolicyV2 | None = None,
     decision_clock: datetime,
-    provider_record: Mapping[str, object] | None = None,
 ) -> OneRowResult:
     """Task 3 compatibility skeleton with per-row Decision v2 evidence only."""
     row = manifest.row(ordinal)
@@ -3100,6 +3099,9 @@ def run_one_row(
             )
         )
     )
+    dispatch_input_hash = _reservation_input_hash(ref)
+    provider_record = _provider_record(provider, dispatch_input_hash)
+    _assert_provider_record_authority(manifest, provider_record)
     response_bytes = _canonical_bytes(response_payload)
     validation_status = validate_provider_payload_v3(
         response_payload,
@@ -3110,13 +3112,9 @@ def run_one_row(
         outcome = TerminalOutcome.TERMINAL_FAILURE
     else:
         outcome = TerminalOutcome.SUCCESS
-    provider_record_sha256 = getattr(provider, "provider_record_sha256", None)
-    if not isinstance(provider_record_sha256, str):
-        raise ValueError("provider record anchor required")
-    semantic_transport_record_sha256 = (
-        provider_record.get("semantic_transport_record_sha256")
-        if provider_record is not None
-        else getattr(provider, "semantic_transport_record_sha256", None)
+    provider_record_sha256 = _sha256(_canonical_bytes(provider_record))
+    semantic_transport_record_sha256 = provider_record.get(
+        "semantic_transport_record_sha256"
     )
     if (
         not isinstance(semantic_transport_record_sha256, str)
@@ -3155,7 +3153,7 @@ def run_one_row(
             projected=projected,
             manifest_ref=ref,
             raw=dict(raw),
-            provider_record=dict(provider_record or {}),
+            provider_record=dict(provider_record),
             validation_status=validation_status,
             decision_policy=decision_policy
             if decision_policy is not None

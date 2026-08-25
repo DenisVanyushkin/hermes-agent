@@ -477,7 +477,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 ### 2.7 `run_one_row` не принимает непроверенный caller-supplied provider record
 
-- [ ] Пункт 2.7 выполнен целиком
+- [x] Пункт 2.7 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -486,23 +486,23 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 **Задачи**
 
-- [ ] В `tests/product_search/test_gate_b_evidence_skeleton.py` добавить RED-тест
+- [x] В `tests/product_search/test_gate_b_evidence_skeleton.py` добавить RED-тест
   `test_run_one_row_rejects_unverified_caller_provider_record`, который передаёт tampered mapping и
   показывает, что текущий compatibility seam принимает его в Decision request.
-- [ ] Удалить параметр `provider_record` из публичной сигнатуры `run_one_row`; загружать record по
+- [x] Удалить параметр `provider_record` из публичной сигнатуры `run_one_row`; загружать record по
   dispatch identity через `_provider_record(provider, input_hash)`, затем выполнять keyed verify и
   `_assert_provider_record_authority` до построения Decision request.
-- [ ] Обновить callers/fixtures так, чтобы fake provider предоставлял store + явный verifier; не
+- [x] Обновить callers/fixtures так, чтобы fake provider предоставлял store + явный verifier; не
   добавлять test-only bypass в production signature.
-- [ ] Добавить отрицательные тесты для отсутствующего verifier, tampered HMAC и authority mismatch.
+- [x] Добавить отрицательные тесты для отсутствующего verifier, tampered HMAC и authority mismatch.
 
 **DoD**
 
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_evidence_skeleton.py`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_evidence_skeleton.py`
   проходит целиком, включая новый fail-closed тест.
-- [ ] `rg -n 'provider_record: Mapping\[str, object\].*= None' job_intel/product_search/gate_b_evidence_runner_v1.py`
+- [x] `rg -n 'provider_record: Mapping\[str, object\].*= None' job_intel/product_search/gate_b_evidence_runner_v1.py`
   не находит caller-supplied provider-record параметр `run_one_row`.
-- [ ] Непроверенная, HMAC-tampered или authority-mismatched запись отклоняется до
+- [x] Непроверенная, HMAC-tampered или authority-mismatched запись отклоняется до
   `decision_request_factory`; контрольная keyed-verified запись доходит до Decision v2.
 
 ### 2.8 Интеграционный acceptance gate раздела 2

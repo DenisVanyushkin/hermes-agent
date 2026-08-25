@@ -3,13 +3,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import socket
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
+import job_intel.product_search.gate_b_evidence_runner_v1 as runner
 from job_intel.product_search import gate_b_evidence_v3 as evidence
 from job_intel.product_search.decision_v2 import (
     canonical_decision_bytes,
@@ -21,6 +24,9 @@ from job_intel.product_search.evidence_synthesis import (
     EvidenceSynthesisMetadataV2,
     EvidenceSynthesisResultV2,
     EvidenceSynthesisStatus,
+)
+from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
+    LLMProviderError,
 )
 from job_intel.product_search.gate_b_benchmark_policy_v3 import (
     load_gate_b_benchmark_policy_v3,
@@ -311,16 +317,56 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     decision_evidence = DecisionEvidenceStore(tmp_path / "decisions")
     calls: list[dict[str, object]] = []
 
+    class ProviderStore:
+        def __init__(self) -> None:
+            self.records: dict[str, dict[str, object]] = {}
+
+        def load(self, input_hash: str) -> dict[str, object]:
+            return self.records[input_hash]
+
     class FakeGovernedProvider:
-        provider_record_sha256 = "a" * 64
-        semantic_transport_record_sha256 = "a" * 64
+        pricing = SimpleNamespace(
+            identity_sha256=manifest.authorities.pricing_sha256,
+            reservation_cost_usd=manifest.limits.per_call_maximum_usd,
+        )
+
+        def __init__(self) -> None:
+            self.store = ProviderStore()
+            self.capability: object | None = None
 
         def dispatch(
             self, request: runner.GateBDispatchRequestV2
         ) -> dict[str, object]:
             assert ledger.state(0).value == "dispatched"
             calls.append(dict(request.provider_payload))
+            dispatch_input_hash = runner._reservation_input_hash(manifest.row_ref(0))
+            provider_record = {
+                "input_hash": dispatch_input_hash,
+                "provider_record_kind": "gate-b-evidence-synthesis-v2",
+                "output_sha256": _sha256_bytes(
+                    _canonical_bytes(_provider_payload(projected))
+                ),
+                "model_sha256": manifest.authorities.model_sha256,
+                "prompt_sha256": manifest.authorities.prompt_sha256,
+                "response_schema_sha256": manifest.authorities.response_schema_sha256,
+                "pricing_sha256": manifest.authorities.pricing_sha256,
+                "raw_response_text": "{}",
+                "post_dispatch_outcome_v3": "success",
+                "measured_cost_usd": "0.01",
+                "conservative_cost_usd": "0.01",
+                "semantic_transport_record_sha256": "a" * 64,
+            }
+            assert self.capability is not None
+            self.capability.seal_record(provider_record)
+            self.store.records[dispatch_input_hash] = provider_record
             return _provider_payload(projected)
+
+    provider = FakeGovernedProvider()
+    capability = runner._issue_collection_capability(
+        manifest=manifest, provider=provider, ledger=ledger
+    )
+    provider.capability = capability
+    provider.verify_provider_record = capability.verify_record
 
     result = run_one_row(
         manifest=manifest,
@@ -328,7 +374,7 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
         record=record,
         raw=raw,
         reviewed_allowlist=allowlist,
-        provider=FakeGovernedProvider(),
+        provider=provider,
         ledger=ledger,
         recordings=recordings,
         decision_evidence=decision_evidence,
@@ -364,6 +410,182 @@ def test_one_row_skeleton_is_offline_replayable_and_never_opens_live_db(
     assert canonical_decision_bytes(replayed_decision) == canonical_decision_bytes(
         result.decision
     )
+
+
+def test_run_one_row_rejects_unverified_caller_provider_record(
+    tmp_path: Path,
+) -> None:
+    record = _record()
+    raw = _raw()
+    candidates = evidence.build_vacancy_projection_candidates_v3(record, raw)
+    allowlist = _allowlist(candidates)
+    projected = evidence.project_vacancy_evidence_v3(record, raw, allowlist)
+    input_sha256 = _sha256_bytes(_canonical_bytes(projected.provider_payload()))
+    projection_sha256 = _sha256_bytes(_canonical_bytes(projected.model_dump(mode="json")))
+    manifest = _manifest(
+        input_sha256=input_sha256,
+        projection_sha256=projection_sha256,
+        raw_sha256=candidates.vacancy_artifact_sha256,
+    )
+
+    class FakeGovernedProvider:
+        provider_record_sha256 = "a" * 64
+        semantic_transport_record_sha256 = "a" * 64
+
+        def dispatch(
+            self, request: runner.GateBDispatchRequestV2
+        ) -> dict[str, object]:
+            return _provider_payload(projected)
+
+    with pytest.raises(TypeError, match="provider_record"):
+        run_one_row(
+            manifest=manifest,
+            ordinal=0,
+            record=record,
+            raw=raw,
+            reviewed_allowlist=allowlist,
+            provider=FakeGovernedProvider(),
+            ledger=ForegroundDispatchLedger(
+                manifest, committed_budget_reserver=NoDurableAccounting()
+            ),
+            recordings=RecordingStore(tmp_path / "recordings"),
+            decision_evidence=DecisionEvidenceStore(tmp_path / "decisions"),
+            decision_request_factory=lambda context: _decision_result(
+                context.response_payload, context.manifest_ref.input_sha256
+            ),
+            decision_policy=load_decision_policy(),
+            decision_clock=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
+            provider_record={
+                "semantic_transport_record_sha256": "a" * 64,
+            },
+        )
+
+
+def _run_one_row_with_keyed_record(
+    tmp_path: Path,
+    *,
+    verifier: bool = True,
+    mutation: str | None = None,
+) -> object:
+    record = _record()
+    raw = _raw()
+    candidates = evidence.build_vacancy_projection_candidates_v3(record, raw)
+    allowlist = _allowlist(candidates)
+    projected = evidence.project_vacancy_evidence_v3(record, raw, allowlist)
+    input_sha256 = _sha256_bytes(_canonical_bytes(projected.provider_payload()))
+    projection_sha256 = _sha256_bytes(_canonical_bytes(projected.model_dump(mode="json")))
+    manifest = _manifest(
+        input_sha256=input_sha256,
+        projection_sha256=projection_sha256,
+        raw_sha256=candidates.vacancy_artifact_sha256,
+    )
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=NoDurableAccounting()
+    )
+
+    class ProviderStore:
+        def __init__(self) -> None:
+            self.records: dict[str, dict[str, object]] = {}
+
+        def load(self, input_hash: str) -> dict[str, object]:
+            return self.records[input_hash]
+
+    class FakeGovernedProvider:
+        pricing = SimpleNamespace(
+            identity_sha256=manifest.authorities.pricing_sha256,
+            reservation_cost_usd=manifest.limits.per_call_maximum_usd,
+        )
+
+        def __init__(self) -> None:
+            self.store = ProviderStore()
+            self.capability: object | None = None
+
+        def dispatch(
+            self, request: runner.GateBDispatchRequestV2
+        ) -> dict[str, object]:
+            del request
+            dispatch_input_hash = runner._reservation_input_hash(manifest.row_ref(0))
+            provider_record: dict[str, object] = {
+                "input_hash": dispatch_input_hash,
+                "provider_record_kind": "gate-b-evidence-synthesis-v2",
+                "output_sha256": _sha256_bytes(
+                    _canonical_bytes(_provider_payload(projected))
+                ),
+                "model_sha256": manifest.authorities.model_sha256,
+                "prompt_sha256": manifest.authorities.prompt_sha256,
+                "response_schema_sha256": manifest.authorities.response_schema_sha256,
+                "pricing_sha256": manifest.authorities.pricing_sha256,
+                "raw_response_text": "{}",
+                "post_dispatch_outcome_v3": "success",
+                "measured_cost_usd": "0.01",
+                "conservative_cost_usd": "0.01",
+                "semantic_transport_record_sha256": "a" * 64,
+            }
+            assert self.capability is not None
+            self.capability.seal_record(provider_record)
+            if mutation == "tampered_hmac":
+                provider_record["metadata_hmac_sha256"] = "f" * 64
+            elif mutation == "authority":
+                provider_record["model_sha256"] = "f" * 64
+                unsigned = {
+                    key: value
+                    for key, value in provider_record.items()
+                    if key not in {"metadata_sha256", "metadata_hmac_sha256"}
+                }
+                metadata_sha256 = runner._sha256(runner._canonical_bytes(unsigned))
+                provider_record["metadata_sha256"] = metadata_sha256
+                provider_record["metadata_hmac_sha256"] = hmac.new(
+                    self.capability._metadata_seal_key,
+                    metadata_sha256.encode("ascii"),
+                    hashlib.sha256,
+                ).hexdigest()
+            self.store.records[dispatch_input_hash] = provider_record
+            return _provider_payload(projected)
+
+    provider = FakeGovernedProvider()
+    capability = runner._issue_collection_capability(
+        manifest=manifest, provider=provider, ledger=ledger
+    )
+    provider.capability = capability
+    if verifier:
+        provider.verify_provider_record = capability.verify_record
+
+    return run_one_row(
+        manifest=manifest,
+        ordinal=0,
+        record=record,
+        raw=raw,
+        reviewed_allowlist=allowlist,
+        provider=provider,
+        ledger=ledger,
+        recordings=RecordingStore(tmp_path / "recordings"),
+        decision_evidence=DecisionEvidenceStore(tmp_path / "decisions"),
+        decision_request_factory=lambda context: _decision_result(
+            context.response_payload, context.manifest_ref.input_sha256
+        ),
+        decision_policy=load_decision_policy(),
+        decision_clock=datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_run_one_row_rejects_missing_verifier(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="v2_provider_record_verifier_required"):
+        _run_one_row_with_keyed_record(tmp_path, verifier=False)
+
+
+def test_run_one_row_rejects_tampered_hmac(tmp_path: Path) -> None:
+    with pytest.raises(LLMProviderError, match="provider_metadata_mismatch"):
+        _run_one_row_with_keyed_record(tmp_path, mutation="tampered_hmac")
+
+
+def test_run_one_row_rejects_authority_mismatch(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="provider_record_authority_mismatch"):
+        _run_one_row_with_keyed_record(tmp_path, mutation="authority")
+
+
+def test_run_one_row_accepts_keyed_verified_provider_record(tmp_path: Path) -> None:
+    result = _run_one_row_with_keyed_record(tmp_path)
+    assert result.decision.status.value == "assessed"
 
 
 def test_gate_evaluator_distinguishes_complete_negative_from_incomplete() -> None:
