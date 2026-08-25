@@ -623,6 +623,11 @@ suite — 22 passed; полный `scripts/run_tests.sh tests/scripts/` заве
 654 passed и тремя известными pre-existing failure: два footgun-сканера и
 средовой `TestRepoLock`.
 
+**Follow-up.** По ревью identity guard усилен коммитом `ba88d28242`:
+`run_triage` и CLI требуют одновременно `merge_sha` и `before`, финализатор
+передаёт их без условного legacy-пропуска, а вызов API без identity
+отвергается. Полный triage suite после миграции — 23 passed.
+
 **Зависимости.** T18. **Сложность.** M.
 
 ### T20. Единый инвариант `prepare`/`scratch` (D8)
