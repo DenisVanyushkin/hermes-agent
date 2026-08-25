@@ -530,6 +530,14 @@ legacy-режим и его filter_tests остаются совместимым
 удаление сейчас смешало бы миграцию с удалением поддерживаемого прямого
 runner-контракта и его тестов.
 
+**Full-scope acceptance.** Focused-прогоны используются для итерации, но задача
+не считается принятой без `scripts/run_tests.sh tests/scripts/`. После миграции
+e2e-stub этот прогон дал 646 passed и три известных pre-existing failure:
+`test_footgun_subprocess_encoding`, `test_windows_footguns_full_repo_scan` и
+средовой `TestRepoLock`. Первые два также воспроизводятся без ветки правок;
+совпадения в `upstream_sync_replay.py` и `upstream_sync_triage.py` появились в
+более ранних коммитах `159c71d0cf` и `a5ea514bf0`, а не в T15/T16.
+
 **Зависимости.** T15. **Сложность.** S.
 
 ### T17. Строгий приоритет `HERMES_REPO` в дочерних скриптах (D7, D11)
