@@ -1,0 +1,157 @@
+schema_version: 2.0.0
+profile_id: career-profile-v2
+product_authority_id: PS-SOT-2026-08-10-v1
+
+authorities:
+  product_sot_ref:
+    artifact_id: PS-SOT-2026-08-10-v1
+    version: 1.0.0
+    sha256: 430340de2613ee733926d73ce276c93676fe64b1841bb2f68f3f9303b61fc3a8
+  candidate_facts_ref:
+    artifact_id: candidate-facts-structured-resume-v1.1.0
+    version: 1.1.0
+    sha256: 7219eea2fbf04c92291254f83a76b8d2d1ef53e6004ac64ff4601c726eb9fac9
+  preference_model_ref:
+    artifact_id: career-preference-model-v1
+    version: 1.0.0
+    sha256: d9cab661eb5b492f1566c661ecf6b4038cd5332793c37349089c3f0fb3585aeb
+  search_contract_ref:
+    artifact_id: product-search-contract-v1
+    version: 1.0.0
+    sha256: faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1
+
+core_positioning: >-
+  Executive product and digital-business leader who combines product strategy,
+  business ownership, monetization, growth, organization building, and
+  transformation in complex B2C and B2B2C environments.
+short_positioning: >-
+  Executive product and digital-business leader for growth, monetization, and
+  transformation at scale.
+
+candidate_fact_policy:
+  broadening: prohibited
+  derived_fields: must_remain_labeled_derived
+  conflict_resolution: candidate_facts_win_or_fail_closed
+
+candidate_fact_claims:
+  - claim_id: leadership_scope
+    statement: Leadership of product and business organizations of approximately 50-90 FTE, with broader commercial organizational responsibility of 170+ employees.
+    candidate_fact_pointers:
+      - /metrics_index/0
+      - /metrics_index/1
+      - /metrics_index/2
+      - /metrics_index/4
+    candidate_fact_value_sha256s:
+      - 1103ce7daf204b5d642944cddca6515f933da1c93ab2fd6d0d70d216e5fd8684
+      - 491c053f190a8df661d0e20c5861d2c7b9d1c7e7b7a3230ec7089e14d469a009
+      - e1252e96447158fc92e55d1420a22715274b2d423d9bec068e7837714efe72c0
+      - f2f30263e9c18c5e5d895b032a523303f927834f81937ed7053fa7cc0ea8ac5a
+  - claim_id: direct_and_matrix_leadership
+    statement: Direct management of 10 reports in the SuperApp tribe and matrix leadership across product organizations.
+    candidate_fact_pointers:
+      - /experience/0/roles/0/team_scope/direct_reports
+      - /experience/1/roles/0/team_scope/matrix_leadership_across_product_tribes
+    candidate_fact_value_sha256s:
+      - 4a44dc15364204a80fe80e9039455cc1608281820fe2b24f1e5233ade6af1dd5
+      - ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d
+  - claim_id: pnl_and_business_ownership
+    statement: Explicit P&L and business-unit responsibility.
+    candidate_fact_pointers:
+      - /professional_summary/positioning_tags/7
+      - /core_competencies/2
+    candidate_fact_value_sha256s:
+      - 9b052a5c99d37c7f7d4bfe782ce0a263f09ba71c1ce0fb9cc092ad34dcf4d98c
+      - 3f205c26656922497d86935a7e5986a6f71ff6cd94991bb2a5fe3463abcf80b3
+  - claim_id: growth_and_monetization
+    statement: Acquisition, retention, customer lifecycle, pricing, and monetization experience.
+    candidate_fact_pointers:
+      - /core_competencies/1
+      - /core_competencies/7
+      - /metrics_index/6
+      - /experience/5/roles/0/responsibilities/1
+    candidate_fact_value_sha256s:
+      - 55fe188c35718da2296ba48f75973e2ce8aad4d2e34eceb402e011fb4865cbe0
+      - 33e32cb404d4c368fa6f7179a59719a4baa78559a3adfb67b3c365d032f22c3b
+      - 4521bb6d470608376231947cffb8256866f6ec74698318bbb877f18d1f4fd760
+      - c7a618c60b8857c201d1405390199d18864150ff53b5d53d35d5cbcac7e0f7e0
+  - claim_id: portfolio_and_transformation
+    statement: Product portfolio, go-to-market, organization design, operating-model transformation, and turnaround experience.
+    candidate_fact_pointers:
+      - /experience/0/roles/1/function
+      - /core_competencies/6
+      - /experience/0/roles/1/achievements/2/statement
+      - /core_competencies/4
+      - /experience/0/roles/1/achievements/0/statement
+    candidate_fact_value_sha256s:
+      - 8d0004245bf03cdaa4b3514fb28b72dbe75510e5dbd222b6e54a9cf3ee7fa3fc
+      - ed7e90d4fc06378ff09c22e27eaa66a27c2e0fa2daff69beca6c56c00ea74c1e
+      - 26249ffccab9fe05821640fd4f29181730858afc6c2c00f692944011e0439fe4
+      - 6468e7afbca233f934e85a3e666d9caad2d7e88e2291d8ab4f223ba09641f2a0
+      - d39af877b05206ed6e97b239868ff36d72dcdc794d756b50dc2cfe3dff6a7215
+  - claim_id: launch_pivot_stop
+    statement: New-product and new-business-line launches, strategic pivots, and decisions to stop non-viable initiatives.
+    candidate_fact_pointers:
+      - /experience/2/roles/0/responsibilities/0
+      - /experience/0/roles/0/achievements/4
+      - /experience/2/roles/0/achievements/4
+    candidate_fact_value_sha256s:
+      - fa361921688d9db72400a0d912bafb4495b27b3a87972e74d450bfcfb8812114
+      - 1e9d0f91ffadcbc20212150c970234ac834a1bc4ea1ed93324d94de1394f9e73
+      - eb06d39d2445f72c16765ebe831a38ac03aee57e0ec282268ce40ec309fa4ec4
+  - claim_id: executive_context
+    statement: Executive and board-level stakeholder work in B2C digital products and telecom/banking partner environments.
+    candidate_fact_pointers:
+      - /experience/3/roles/0/responsibilities/2
+      - /candidate/headline
+      - /experience/1/roles/0/achievements/1/statement
+    candidate_fact_value_sha256s:
+      - 3780748a3d9e4cc390bddc4909c86d19ba7380ad28d7be0c53c8effc098adfc4
+      - f503ef7c1f9fd3340b5c4bce7a82785bc64a754c207a8163ccc859189dacc3bf
+      - 2a2753c1f35866a9696fa653ab92ccc19c4c05f58fc9cab1ff55d870cbe6b269
+
+mandate_role_families:
+  - executive_product
+  - digital_business
+  - customer_growth_commercial_hybrid
+  - product_business_unit
+  - general_management
+  - growth_monetization
+  - transformation_builder
+  - hybrid_executive_exploration
+
+transferable_patterns:
+  - business_and_pnl_ownership
+  - monetization_and_growth
+  - portfolio_and_go_to_market
+  - organization_building
+  - operating_model_transformation
+  - turnaround
+  - new_business_launch
+  - executive_stakeholder_leadership
+
+hard_gates:
+  - sanctioned_or_clearly_unstable_environment
+  - africa_as_proactive_search_region
+  - us_onsite_or_hybrid_without_explicit_sponsorship
+  - onsite_or_hybrid_with_explicitly_no_viable_work_authorization_path
+  - below_minimum_executive_scope
+  - non_product_function_without_real_digital_business_ownership
+  - non_transferable_required_domain_or_language
+  - pure_delivery_project_or_program_ownership
+  - internal_tools_infrastructure_or_back_office_without_business_scope
+
+feasibility_unknowns:
+  - sponsorship_outside_onsite_us
+  - reporting_line
+  - compensation
+  - timezone
+
+geography_policy:
+  kazakhstan:
+    eligible_market: true
+    fallback: false
+    minimum_delivery: null
+    lowered_bar: false
+  other_central_asia:
+    independent_by_country: true
+    inherits_kazakhstan_policy: false

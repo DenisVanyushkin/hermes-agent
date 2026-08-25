@@ -1,0 +1,86 @@
+{
+  "schema_version": "1.0.0",
+  "claims": [
+    {
+      "claim_id": "claim-feasibility-remote",
+      "dimension": "feasibility",
+      "status": "explicit",
+      "claim_code": "remote_kazakhstan_explicit",
+      "statement": "Role is remote in Kazakhstan.",
+      "citations": ["vacancy:remote-format"]
+    },
+    {
+      "claim_id": "claim-feasibility-office",
+      "dimension": "feasibility",
+      "status": "explicit",
+      "claim_code": "office_presence_explicit",
+      "statement": "This position requires local office presence.",
+      "citations": ["vacancy:office-format"]
+    },
+    {
+      "claim_id": "claim-mandate",
+      "dimension": "mandate_fit",
+      "status": "explicit",
+      "claim_code": "role_pnl_ownership_explicit",
+      "statement": "Own the product and commercial P&L.",
+      "citations": ["vacancy:mandate-pnl"]
+    },
+    {
+      "claim_id": "claim-company",
+      "dimension": "company_fit",
+      "status": "inferred",
+      "claim_code": "operating_model_need_inferred",
+      "statement": "Multi-market expansion supports a bounded inference of operating-model need.",
+      "citations": ["company:operating-model-need"]
+    },
+    {
+      "claim_id": "claim-transferability",
+      "dimension": "transferability",
+      "status": "inferred",
+      "claim_code": "candidate_pnl_transferable",
+      "statement": "Explicit P&L and business-unit responsibility.",
+      "citations": ["candidate:pnl-ownership"]
+    },
+    {
+      "claim_id": "claim-career-value",
+      "dimension": "career_value",
+      "status": "inferred",
+      "claim_code": "new_business_builder_inferred",
+      "statement": "Build a new digital business line.",
+      "citations": ["vacancy:new-business-line"]
+    },
+    {
+      "claim_id": "claim-confidence",
+      "dimension": "evidence_confidence",
+      "status": "unknown",
+      "claim_code": "reporting_line_unknown",
+      "statement": "Reporting line is not stated.",
+      "citations": ["unknown:reporting-line"]
+    }
+  ],
+  "conflicts": [
+    {
+      "conflict_id": "conflict-work-format",
+      "dimension": "feasibility",
+      "conflict_code": "input_evidence_conflict",
+      "claim_ids": ["claim-feasibility-remote", "claim-feasibility-office"],
+      "citations": ["vacancy:remote-format", "vacancy:office-format"]
+    }
+  ],
+  "question_candidates": [
+    {
+      "question_id": "question-reporting-line",
+      "dimension": "evidence_confidence",
+      "question_code": "clarify_reporting_line",
+      "question": "What is the role's reporting line?",
+      "citations": ["unknown:reporting-line"]
+    },
+    {
+      "question_id": "question-work-format",
+      "dimension": "feasibility",
+      "question_code": "clarify_work_format",
+      "question": "Is the role remote or office-based?",
+      "citations": ["vacancy:remote-format", "vacancy:office-format"]
+    }
+  ]
+}

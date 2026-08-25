@@ -807,6 +807,14 @@ class ResponsesApiTransport(ProviderTransport):
             provider_data["codex_reasoning_items"] = msg.codex_reasoning_items
         if msg and hasattr(msg, "codex_message_items") and msg.codex_message_items:
             provider_data["codex_message_items"] = msg.codex_message_items
+        malformed_intent = getattr(msg, "malformed_tool_intent", None) if msg else None
+        if malformed_intent is not None:
+            provider_data["malformed_tool_intent"] = {
+                "tool_name": str(getattr(malformed_intent, "tool_name", "")),
+                "source_phase": str(getattr(malformed_intent, "source_phase", "")),
+                "format": str(getattr(malformed_intent, "format", "")),
+                "fingerprint": str(getattr(malformed_intent, "fingerprint", "")),
+            }
         if msg and hasattr(msg, "reasoning_details") and msg.reasoning_details:
             provider_data["reasoning_details"] = msg.reasoning_details
 

@@ -27,6 +27,74 @@ from agent.turn_context import drop_stale_api_content
 logger = logging.getLogger(__name__)
 
 
+_PROTOCOL_INVALID_EVIDENCE_KEYS = (
+    "tool_name",
+    "source_phase",
+    "format",
+    "fingerprint",
+)
+
+
+def _bounded_malformed_tool_intent(value: Any) -> Dict[str, str] | None:
+    """Return only the bounded, non-payload malformed-intent evidence."""
+    if not isinstance(value, dict):
+        return None
+    evidence = {
+        key: value[key]
+        for key in _PROTOCOL_INVALID_EVIDENCE_KEYS
+        if isinstance(value.get(key), str)
+    }
+    return evidence or None
+
+
+def is_protocol_invalid_assistant_record(message: Dict[str, Any]) -> bool:
+    """Recognize both in-memory and durable invalid assistant carriers."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return False
+    if message.get("_protocol_invalid") or "malformed_tool_intent" in message:
+        return True
+    if message.get("display_kind") == "protocol_invalid":
+        return True
+    display_metadata = message.get("display_metadata")
+    return isinstance(display_metadata, dict) and (
+        display_metadata.get("protocol_invalid") is True
+        or isinstance(display_metadata.get("malformed_tool_intent"), dict)
+    )
+
+
+def project_protocol_invalid_persistence(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Make an invalid assistant row safe for durable persistence.
+
+    The raw provider carrier remains available only in the Codex audit
+    sidecar.  Ordinary content and reasoning columns are deliberately blank,
+    and metadata is reduced to the bounded evidence contract.
+    """
+    if not is_protocol_invalid_assistant_record(message):
+        return message
+
+    projected = dict(message)
+    projected["content"] = ""
+    projected["reasoning"] = None
+    projected["reasoning_content"] = None
+    projected["reasoning_details"] = None
+    projected["codex_reasoning_items"] = None
+    projected["api_content"] = None
+    projected["display_kind"] = "protocol_invalid"
+
+    evidence = _bounded_malformed_tool_intent(message.get("malformed_tool_intent"))
+    if evidence is None:
+        display_metadata = message.get("display_metadata")
+        if isinstance(display_metadata, dict):
+            evidence = _bounded_malformed_tool_intent(
+                display_metadata.get("malformed_tool_intent")
+            )
+    metadata: Dict[str, Any] = {"protocol_invalid": True}
+    if evidence is not None:
+        metadata["malformed_tool_intent"] = evidence
+    projected["display_metadata"] = metadata
+    return projected
+
+
 def is_interrupted_tool_result(content: Any) -> bool:
     """Return True if a tool result indicates the tool was interrupted."""
     if not isinstance(content, str):
@@ -186,6 +254,26 @@ def strip_dangling_tool_call_tail(
     return agent_history[:-1]
 
 
+def strip_protocol_invalid_assistant_records(
+    agent_history: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Exclude provider-invalid assistant turns from model replay.
+
+    The invalid row may retain Codex message items and a safe fingerprint for
+    RCA, but it must never be replayed as a successful final answer after a
+    restart.
+    """
+    if not agent_history:
+        return agent_history
+    return [
+        message
+        for message in agent_history
+        if not (
+            is_protocol_invalid_assistant_record(message)
+        )
+    ]
+
+
 def sanitize_replay_history(
     agent_history: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -198,7 +286,11 @@ def sanitize_replay_history(
     """
     if not agent_history:
         return agent_history
-    return strip_dangling_tool_call_tail(strip_interrupted_tool_tails(agent_history))
+    return strip_dangling_tool_call_tail(
+        strip_protocol_invalid_assistant_records(
+            strip_interrupted_tool_tails(agent_history)
+        )
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────

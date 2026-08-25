@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import types
 from types import SimpleNamespace
@@ -881,6 +882,302 @@ def test_consume_codex_stream_separates_commentary_from_analysis(monkeypatch):
     assert reasoning_streamed == ["Need inspect files privately."]
     assert streamed == []
     assert response.output == [commentary_item]
+
+
+def test_consume_codex_stream_preserves_analysis_delta_streaming():
+    """Ordinary analysis remains incremental after the prefix is disproven."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    analysis_item = SimpleNamespace(
+        type="message",
+        phase="analysis",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text="Need to inspect files.")],
+    )
+    reasoning_streamed = []
+
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="analysis"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="Need to "),
+            SimpleNamespace(type="response.output_text.delta", delta="inspect files."),
+            SimpleNamespace(type="response.output_item.done", item=analysis_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5-codex",
+        on_reasoning_delta=reasoning_streamed.append,
+    )
+
+    assert reasoning_streamed == ["Need to ", "inspect files."]
+
+
+@pytest.mark.parametrize(
+    "xml_text",
+    [
+        "<tool_call><name>skill_view</name></tool_call>",
+        "<TOOL_CALL><NAME>skill_view</NAME></TOOL_CALL>",
+    ],
+)
+def test_consume_codex_stream_suppresses_fragmented_xml_protocol_prefixes(xml_text):
+    """Every split inside the XML prefix remains fail-closed and case-insensitive."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    prefix_length = len("<tool_call>")
+    for split_at in range(1, prefix_length):
+        analysis_item = SimpleNamespace(
+            type="message",
+            phase="analysis",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text=xml_text)],
+        )
+        visible = []
+        response = _consume_codex_event_stream(
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="analysis"),
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta=xml_text[:split_at],
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta=xml_text[split_at:],
+                ),
+                SimpleNamespace(type="response.output_item.done", item=analysis_item),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+            model="gpt-5-codex",
+            on_reasoning_delta=visible.append,
+            valid_tool_names={"skill_view"},
+        )
+
+        assert visible == [], f"XML leaked for split {split_at}: {xml_text!r}"
+        assert response._hermes_malformed_tool_intent.tool_name == "skill_view"
+
+
+def test_consume_codex_stream_does_not_duplicate_commentary_candidate_on_transition():
+    """A disproven protocol prefix moves from candidate to commentary once."""
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    commentary_text = "<not protocol"
+    commentary_item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text=commentary_text)],
+    )
+    delivered = []
+
+    _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta="<"),
+            SimpleNamespace(type="response.output_text.delta", delta="not protocol"),
+            SimpleNamespace(type="response.output_item.done", item=commentary_item),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5-codex",
+        on_commentary_message=delivered.append,
+        valid_tool_names={"skill_view"},
+    )
+
+    assert delivered == [commentary_text]
+
+
+def _consume_message_stream(
+    text,
+    *,
+    phase,
+    deltas,
+    on_reasoning_delta=None,
+    on_commentary_message=None,
+):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    item = SimpleNamespace(
+        type="message",
+        phase=phase,
+        status="completed",
+        content=[SimpleNamespace(type="output_text", text=text)],
+    )
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            item=SimpleNamespace(type="message", phase=phase),
+        ),
+        *[
+            SimpleNamespace(type="response.output_text.delta", delta=delta)
+            for delta in deltas
+        ],
+        SimpleNamespace(type="response.output_item.done", item=item),
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(status="completed"),
+        ),
+    ]
+    return _consume_codex_event_stream(
+        _FakeCreateStream(events),
+        model="gpt-5-codex",
+        on_reasoning_delta=on_reasoning_delta,
+        on_commentary_message=on_commentary_message,
+        valid_tool_names={"skill_view"},
+    )
+
+
+def test_consume_codex_stream_suppresses_oversized_xml_candidate(caplog):
+    """An ambiguous XML candidate at the bound remains suppressed with safe evidence."""
+    from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS
+
+    sentinel = "OVERSIZED_ARGUMENT_SENTINEL"
+    xml_text = (
+        "<tool_call><name>skill_view</name><arguments>"
+        + sentinel
+        + "x" * (MAX_INSPECTED_TEXT_CHARS + 100)
+        + "</arguments></tool_call>"
+    )
+    visible = []
+
+    response = _consume_message_stream(
+        xml_text,
+        phase="analysis",
+        deltas=[xml_text],
+        on_reasoning_delta=visible.append,
+    )
+
+    assert visible == []
+    evidence = response._hermes_malformed_tool_intent
+    assert evidence is not None
+    assert evidence.tool_name == "unknown"
+    assert evidence.format == "oversized_protocol_candidate"
+    assert evidence.fingerprint == "sha256:" + hashlib.sha256(xml_text.encode()).hexdigest()
+    assert set(vars(evidence)) == {"tool_name", "source_phase", "format", "fingerprint"}
+    assert sentinel not in repr(evidence)
+    assert sentinel not in caplog.text
+    assert not any(getattr(item, "type", None) == "function_call" for item in response.output)
+
+
+def test_consume_codex_stream_preserves_remainder_after_large_ordinary_analysis_delta():
+    """A single ordinary delta crossing the bound is fully delivered in order."""
+    from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS
+
+    text = "<not protocol " + "a" * (MAX_INSPECTED_TEXT_CHARS + 100)
+    visible = []
+
+    _consume_message_stream(
+        text,
+        phase="analysis",
+        deltas=[text],
+        on_reasoning_delta=visible.append,
+    )
+
+    assert "".join(visible) == text
+    assert visible[0] == text[:MAX_INSPECTED_TEXT_CHARS]
+    assert visible[1] == text[MAX_INSPECTED_TEXT_CHARS:]
+
+
+def test_consume_codex_stream_preserves_long_ordinary_analysis_delta_order():
+    """Long ordinary analysis keeps every original delta exactly once."""
+    deltas = ["<not", " protocol", " analysis: ", "b" * 20_000, " tail"]
+    visible = []
+
+    _consume_message_stream(
+        "".join(deltas),
+        phase="analysis",
+        deltas=deltas,
+        on_reasoning_delta=visible.append,
+    )
+
+    assert visible == deltas
+
+
+def test_consume_codex_stream_delivers_long_ordinary_commentary_once():
+    """Long ordinary commentary crossing the bound is delivered byte-for-byte once."""
+    from agent.malformed_tool_intent import MAX_INSPECTED_TEXT_CHARS
+
+    text = "<not protocol " + "c" * (MAX_INSPECTED_TEXT_CHARS + 100)
+    delivered = []
+
+    _consume_message_stream(
+        text,
+        phase="commentary",
+        deltas=[text],
+        on_commentary_message=delivered.append,
+    )
+
+    assert delivered == [text]
+
+
+MALFORMED_SKILL_VIEW_COMMENTARY = (
+    '<|start|>assistant<|channel|>commentary '
+    'to=functions.skill_view<|constrain|>json\n'
+    '{"name":"test-driven-development"}'
+)
+
+
+def test_consume_codex_stream_suppresses_malformed_text_tool_intent(monkeypatch):
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    commentary_item = SimpleNamespace(
+        type="message",
+        phase="commentary",
+        status="completed",
+        content=[
+            SimpleNamespace(
+                type="output_text",
+                text=MALFORMED_SKILL_VIEW_COMMENTARY,
+            )
+        ],
+    )
+    delivered_commentary = []
+
+    response = _consume_codex_event_stream(
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(
+                type="response.output_text.delta",
+                delta=MALFORMED_SKILL_VIEW_COMMENTARY,
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=commentary_item,
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        model="gpt-5-codex",
+        on_commentary_message=delivered_commentary.append,
+        valid_tool_names={"skill_view"},
+    )
+
+    assert delivered_commentary == []
+    assert response._hermes_malformed_tool_intent.tool_name == "skill_view"
+    assert response._hermes_malformed_tool_intent.source_phase == "commentary"
+    assert not any(
+        getattr(item, "type", None) == "function_call"
+        for item in response.output
+    )
 
 
 
