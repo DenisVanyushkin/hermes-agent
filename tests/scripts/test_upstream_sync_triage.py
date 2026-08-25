@@ -234,6 +234,15 @@ class TestRunTriage:
         d.mkdir()
         return d
 
+    @staticmethod
+    def _run(state: Path, repo: Path, sha: str) -> int:
+        return triage.run_triage(
+            state=state,
+            repo=repo,
+            expected_merge_sha=sha,
+            expected_before=sha,
+        )
+
     def test_writes_an_armed_proposal_the_operator_can_answer(self, tmp_path, state, monkeypatch):
         repo, sha = self._world(tmp_path, state)
         monkeypatch.setenv("HERMES_SYNC_TRIAGE_CMD", _model_cmd(tmp_path, {
@@ -241,7 +250,7 @@ class TestRunTriage:
             "assertion_delta": "none", "patch": NEW_TEST}))
         monkeypatch.setenv("HERMES_SYNC_TRIAGE_PYTEST_CMD", _pytest_cmd(tmp_path, ok=True))
 
-        rc = triage.run_triage(state=state, repo=repo)
+        rc = self._run(state, repo, sha)
 
         assert rc == 0
         out = json.loads((state / "gate-triage.json").read_text())
@@ -262,7 +271,7 @@ class TestRunTriage:
             "patch": "from mod import f\n\n\ndef test_f():\n    assert True\n"}))
         monkeypatch.setenv("HERMES_SYNC_TRIAGE_PYTEST_CMD", _pytest_cmd(tmp_path, ok=True))
 
-        triage.run_triage(state=state, repo=repo)
+        self._run(state, repo, sha)
 
         prop = json.loads((state / "gate-triage.json").read_text())["proposals"][0]
         assert prop["verdict"] == "unsure"
@@ -277,7 +286,7 @@ class TestRunTriage:
             "verdict": "behaviour_lost", "explanation": "the local guard is gone", "patch": NEW_TEST}))
         monkeypatch.setenv("HERMES_SYNC_TRIAGE_PYTEST_CMD", _pytest_cmd(tmp_path, ok=True))
 
-        triage.run_triage(state=state, repo=repo)
+        self._run(state, repo, sha)
 
         prop = json.loads((state / "gate-triage.json").read_text())["proposals"][0]
         assert prop["verdict"] == "behaviour_lost"
@@ -289,7 +298,7 @@ class TestRunTriage:
         repo, sha = self._world(tmp_path, state)
         monkeypatch.setenv("HERMES_SYNC_TRIAGE_CMD", "false")
 
-        rc = triage.run_triage(state=state, repo=repo)
+        rc = self._run(state, repo, sha)
 
         assert rc == 0
         out = json.loads((state / "gate-triage.json").read_text())
@@ -301,7 +310,7 @@ class TestRunTriage:
         repo, sha = self._world(tmp_path, state)
         (state / "gate-failures.json").write_text(json.dumps(
             {"merge_sha": sha, "before": sha, "new_failures": []}))
-        assert triage.run_triage(state=state, repo=repo) == 0
+        assert self._run(state, repo, sha) == 0
         assert not (state / "gate-triage.json").exists()
 
     def test_v2_blocking_failures_preserve_legacy_triage_count(
@@ -344,7 +353,7 @@ class TestRunTriage:
             (state / "gate-post.log").write_text(post_log)
             (state / "apply-prepare.json").write_text(json.dumps(prepare))
             (state / "gate-failures.json").write_text(json.dumps(payload))
-            assert triage.run_triage(state=state, repo=repo) == 0
+            assert self._run(state, repo, sha) == 0
             return json.loads((state / "gate-triage.json").read_text())
 
         legacy = run(
@@ -451,3 +460,8 @@ class TestRunTriage:
         assert out["status"] == "stale_evidence"
         assert out["proposals"] == []
         assert "merge_sha" in out["reason"]
+
+    def test_missing_identity_is_rejected(self, tmp_path, state):
+        repo, sha = self._world(tmp_path, state)
+        with pytest.raises(ValueError, match="requires merge_sha and before"):
+            triage.run_triage(state=state, repo=repo)

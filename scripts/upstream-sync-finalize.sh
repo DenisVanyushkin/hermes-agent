@@ -603,13 +603,14 @@ run_gate_triage() {
   [ -f "$triage" ] || { echo "warning: upstream_sync_triage.py not found; no triage" >>"$DETAIL_LOG"; return 0; }
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  local -a triage_args=("$py" "$triage" --state "$STATE_DIR" --repo "$REPO")
-  if [ -n "$expected_merge" ]; then
-    triage_args+=(--expected-merge-sha "$expected_merge")
+  if [ -z "$expected_merge" ] || [ -z "$expected_before" ]; then
+    echo "triage identity unavailable: expected merge_sha and before are required; no proposal will be made" >>"$DETAIL_LOG"
+    return 0
   fi
-  if [ -n "$expected_before" ]; then
-    triage_args+=(--expected-before "$expected_before")
-  fi
+  local -a triage_args=(
+    "$py" "$triage" --state "$STATE_DIR" --repo "$REPO"
+    --expected-merge-sha "$expected_merge" --expected-before "$expected_before"
+  )
   "${triage_args[@]}" >>"$DETAIL_LOG" 2>&1 || \
     echo "warning: gate triage failed (see above); the gate outcome stands" >>"$DETAIL_LOG"
   return 0

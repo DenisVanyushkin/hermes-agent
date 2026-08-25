@@ -431,6 +431,8 @@ def run_triage(
     the merge does not land, and a triage that fell over must not turn that into
     a different outcome.
     """
+    if not expected_merge_sha or not expected_before:
+        raise ValueError("triage requires merge_sha and before identity")
     state, repo = Path(state), Path(repo)
     failures = _read_json(state / "gate-failures.json")
     mismatches = []
@@ -489,8 +491,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="triage a red upstream-sync fork-test gate")
     parser.add_argument("--state", required=True)
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--expected-merge-sha")
-    parser.add_argument("--expected-before")
+    parser.add_argument("--expected-merge-sha", required=True)
+    parser.add_argument("--expected-before", required=True)
     args = parser.parse_args(argv)
     try:
         return run_triage(
