@@ -880,26 +880,28 @@ class RecordedEvidenceSynthesisProvider:
         *,
         input_payload: dict[str, Any],
         provider_payload: Mapping[str, Any] | None = None,
+        record_input_hash: str | None = None,
     ) -> object:
         transport_payload = (
             dict(provider_payload) if provider_payload is not None else input_payload
         )
         input_hash = synthesis_input_sha256(transport_payload, provider=self)
+        record_key = record_input_hash or input_hash
         if self.semantic_provider.mode == "record":
             try:
-                record = self.store.load(input_hash)
+                record = self.store.load(record_key)
             except LLMProviderError as exc:
                 if exc.reason != "recording_missing":
                     raise
                 return self._record_call(
-                    input_hash,
+                    record_key,
                     transport_payload,
                     synthesis_input_payload=input_payload,
                 )
         else:
-            record = self.store.load(input_hash)
+            record = self.store.load(record_key)
         return self._replay_record(
-            record, expected_input_hash=input_hash, input_payload=transport_payload
+            record, expected_input_hash=record_key, input_payload=transport_payload
         )
 
     def build_charge_unknown_reconciliation_record(
@@ -1867,6 +1869,7 @@ def run_evidence_synthesis_v2(
     provider: RecordedEvidenceSynthesisProviderV2,
     policy: EvidenceSynthesisPolicyV1 | None = None,
     provider_payload: Mapping[str, Any] | None = None,
+    record_input_hash: str | None = None,
 ) -> EvidenceSynthesisResultV2:
     policy = policy or load_evidence_synthesis_policy()
     if not isinstance(provider, RecordedEvidenceSynthesisProviderV2):
@@ -1899,6 +1902,7 @@ def run_evidence_synthesis_v2(
         raw_payload = provider.synthesize_evidence(
             input_payload=input_payload,
             provider_payload=transport_payload,
+            record_input_hash=record_input_hash,
         )
     except Exception as error:
         return _failure_v2(

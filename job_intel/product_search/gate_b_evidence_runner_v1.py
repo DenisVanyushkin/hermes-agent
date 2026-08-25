@@ -1484,6 +1484,7 @@ class _LiveGateBProvider:
                 provider=self._adapter,
                 policy=self._policy,
                 provider_payload=provider_payload,
+                record_input_hash=input_hash,
             )
             v2_record = self._publish_v2_provider_record(
                 dispatch_input_hash=input_hash,
@@ -1506,13 +1507,13 @@ class _LiveGateBProvider:
     ) -> object:
         """Publish V2 from the stored generic record without transport."""
         provider_payload = dict(request.provider_payload)
-        provider_input_sha256 = self._prepare_adapter(
+        self._prepare_adapter(
             input_hash=input_hash,
             provider_payload=provider_payload,
             capability=capability,
         )
         try:
-            generic_record = self._semantic_store.load(provider_input_sha256)
+            generic_record = self._semantic_store.load(input_hash)
             if not isinstance(generic_record, dict):
                 raise ValueError("provider_transport_record_invalid")
             from job_intel.product_search.evidence_synthesis import (
@@ -1524,6 +1525,7 @@ class _LiveGateBProvider:
                 provider=self._adapter,
                 policy=self._policy,
                 provider_payload=provider_payload,
+                record_input_hash=input_hash,
             )
             self._adapter.last_call_metadata["transport_record_sha256"] = _sha256(
                 _canonical_bytes(generic_record)
@@ -2649,7 +2651,7 @@ def _issue_collection_capability(
     receipts: dict[str, DispatchReceipt] = {}
     transport_receipts: dict[str, _TransportRecordReceipt] = {}
     record_identity_bindings: dict[str, str] = {}
-    provider_input_to_dispatch: dict[str, str] = {}
+    provider_input_to_dispatch: dict[str, set[str]] = {}
 
     def capture_record(record: dict[str, object]) -> _TransportRecordReceipt | None:
         if record.get("provider_record_kind") == "gate-b-evidence-synthesis-v2":
@@ -2678,13 +2680,18 @@ def _issue_collection_capability(
         if previous is not None and previous != provider_input_hash:
             raise ValueError("transport_receipt_identity_conflict")
         record_identity_bindings[dispatch_input_hash] = provider_input_hash
-        previous_dispatch = provider_input_to_dispatch.get(provider_input_hash)
-        if previous_dispatch is not None and previous_dispatch != dispatch_input_hash:
-            raise ValueError("transport_receipt_identity_conflict")
-        provider_input_to_dispatch[provider_input_hash] = dispatch_input_hash
+        provider_input_to_dispatch.setdefault(provider_input_hash, set()).add(
+            dispatch_input_hash
+        )
 
     def reserve(dispatch_key: str, _amount: Decimal) -> str:
-        dispatch_key = provider_input_to_dispatch.get(dispatch_key, dispatch_key)
+        if dispatch_key not in reservation_refs:
+            bound_dispatches = provider_input_to_dispatch.get(dispatch_key)
+            if bound_dispatches is None:
+                raise ValueError("reservation_manifest_ref_missing")
+            if len(bound_dispatches) != 1:
+                raise ValueError("reservation_identity_ambiguous")
+            dispatch_key = next(iter(bound_dispatches))
         if dispatch_key not in reservation_refs:
             raise ValueError("reservation_manifest_ref_missing")
         reservation_id = f"gate-b:{dispatch_key}"
@@ -2712,12 +2719,14 @@ def _issue_collection_capability(
             raise ValueError("transport_receipt_binding_missing")
         # Keep the binding and receipt alive for the process-local V2 resume
         # seam. A replay never spends or re-dispatches transport.
-        transport_receipt = transport_receipts.get(provider_input_hash)
+        transport_receipt = transport_receipts.get(dispatch_key)
         if transport_receipt is None:
             raise ValueError("transport_receipt_missing")
-        if transport_receipt.input_hash != provider_input_hash:
+        if transport_receipt.input_hash != dispatch_key:
             raise ValueError("transport_receipt_identity_mismatch")
         record = transport_receipt.record
+        if record.get("input_payload_sha256") != provider_input_hash:
+            raise ValueError("transport_receipt_provider_input_mismatch")
         if record.get("post_dispatch_outcome_v3") != outcome:
             raise ValueError("transport_receipt_outcome_mismatch")
         # The final V2 authority check runs after V2 publication. The

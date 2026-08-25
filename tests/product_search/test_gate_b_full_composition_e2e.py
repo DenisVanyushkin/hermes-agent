@@ -642,15 +642,67 @@ def test_v2_publication_resume_uses_stored_transport_without_redispatch(
     assert entry.recording_sha256 == v2_record["semantic_transport_record_sha256"]
 
 
-def test_duplicate_provider_input_cannot_bind_to_two_dispatches(
+def test_duplicate_provider_input_binds_to_distinct_manifest_dispatches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _provider, capability, _ledger, refs, _request = _live_dispatch_fixture(
+    provider, capability, ledger, refs, request = _live_dispatch_fixture(
         tmp_path, monkeypatch, row_count=2
     )
-    first_dispatch = runner._reservation_input_hash(refs[0])
-    second_dispatch = runner._reservation_input_hash(refs[1])
-    shared_provider_input = "d" * 64
-    capability.bind_record_identity(first_dispatch, shared_provider_input)
-    with pytest.raises(ValueError, match="transport_receipt_identity_conflict"):
-        capability.bind_record_identity(second_dispatch, shared_provider_input)
+    dispatch_keys = [runner._reservation_input_hash(ref) for ref in refs]
+    requests = (
+        request,
+        runner.GateBDispatchRequestV2(
+            synthesis_input=request.synthesis_input,
+            provider_payload=dict(request.provider_payload),
+        ),
+    )
+    results = [
+        provider.dispatch(request_item, input_hash=dispatch_key, capability=capability)
+        for request_item, dispatch_key in zip(requests, dispatch_keys, strict=True)
+    ]
+
+    assert runner._canonical_bytes(requests[0].provider_payload) == runner._canonical_bytes(
+        requests[1].provider_payload
+    )
+    transport_calls = provider._semantic_provider._transport.chat.completions.calls
+    assert len(transport_calls) == 2
+    assert transport_calls[0]["messages"][1]["content"] == transport_calls[1][
+        "messages"
+    ][1]["content"]
+    assert dispatch_keys[0] != dispatch_keys[1]
+    assert [entry.manifest_ref.ordinal for entry in ledger.entries()] == [0, 1]
+
+    recordings = RecordingStore(tmp_path / "recordings")
+    recording_refs = []
+    for ref, dispatch_key, request_item, result in zip(
+        refs, dispatch_keys, requests, results, strict=True
+    ):
+        provider_record = runner._provider_record(provider, dispatch_key)
+        response_bytes = runner._canonical_bytes(result)
+        entry = ledger.entries()[ref.ordinal]
+        recording_ref = recordings.save_exclusive(
+            runner.SealedRecording(
+                manifest_ref=ref,
+                request_bytes=runner._canonical_bytes(request_item.provider_payload),
+                response_bytes=response_bytes,
+                outcome=runner.TerminalOutcome.SUCCESS,
+                metadata={
+                    "input_sha256": ref.input_sha256,
+                    "projection_sha256": ref.projection_sha256,
+                    "response_sha256": runner._sha256(response_bytes),
+                    "semantic_transport_record_sha256": provider_record[
+                        "semantic_transport_record_sha256"
+                    ],
+                    "provider_record_sha256": runner._sha256(
+                        runner._canonical_bytes(provider_record)
+                    ),
+                    "conservative_cost_usd": "0.01",
+                },
+            )
+        )
+        recordings.verify(recording_ref, ledger.manifest, entry)
+        recording_refs.append(recording_ref)
+
+    assert recording_refs[0].manifest_ref.ordinal == 0
+    assert recording_refs[1].manifest_ref.ordinal == 1
+    assert recording_refs[0].recording_sha256 != recording_refs[1].recording_sha256

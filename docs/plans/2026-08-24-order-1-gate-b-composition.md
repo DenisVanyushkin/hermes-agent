@@ -403,7 +403,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 ### 2.5 Дубликаты manifest rows сохраняют разные dispatch identities
 
-- [ ] Пункт 2.5 выполнен целиком
+- [x] Пункт 2.5 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -424,27 +424,27 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 **Задачи**
 
-- [ ] Заменить текущий passing-контроль
+- [x] Заменить текущий passing-контроль
   `test_duplicate_provider_input_cannot_bind_to_two_dispatches` на RED-контроль, доказывающий
   требуемый контракт: два разных `ManifestRef` с одинаковым provider-visible payload получают
   разные dispatch/reservation identities без `transport_receipt_identity_conflict`.
-- [ ] Сделать transport-record identity dispatch-qualified: одинаковые provider-visible bytes не
+- [x] Сделать transport-record identity dispatch-qualified: одинаковые provider-visible bytes не
   должны схлопывать ordinal, ledger entry или recording identity; provider-visible payload при этом
   остаётся byte-identical и не получает технический discriminator.
-- [ ] Обновить reverse binding так, чтобы один provider-input мог быть связан с несколькими
+- [x] Обновить reverse binding так, чтобы один provider-input мог быть связан с несколькими
   dispatch keys, а каждый captured receipt однозначно разрешался по dispatch/reservation identity.
-- [ ] Сохранить правило существующего
+- [x] Сохранить правило существующего
   `test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows`: две manifest rows
   потребляют две dispatch slots и дают два row results.
 
 **DoD**
 
-- [ ] Новый тест `test_duplicate_provider_input_binds_to_distinct_manifest_dispatches` проходит и
+- [x] Новый тест `test_duplicate_provider_input_binds_to_distinct_manifest_dispatches` проходит и
   одновременно утверждает: provider payload bytes равны; dispatch keys различны; ledger refs имеют
   ordinals `0` и `1`; обе строки имеют отдельные проверяемые recordings.
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_collection_runner.py -k 'duplicate_inputs or duplicate_provider_input or reservation_identity'`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_collection_runner.py -k 'duplicate_inputs or duplicate_provider_input or reservation_identity'`
   проходит без xfail/skip.
-- [ ] Call/spend cap считает две manifest rows как две dispatch slots; никакого неявного reuse или
+- [x] Call/spend cap считает две manifest rows как две dispatch slots; никакого неявного reuse или
   второго результата из чужого receipt нет.
 
 ### 2.6 `reconcile` очищает обратную привязку только после безопасной финализации

@@ -206,8 +206,12 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
     ) -> object:
         reservation = capability.reserve(input_hash)
         capability.mark_dispatching(reservation)
+        provider_input_hash = runner._sha256(
+            runner._canonical_bytes(request.provider_payload)
+        )
         record = {
             "input_hash": input_hash,
+            "input_payload_sha256": provider_input_hash,
             "schema_version": "1.0.0",
             "output_sha256": runner._sha256(
                 runner._canonical_bytes(
@@ -232,7 +236,7 @@ def test_collection_runner_verifies_binding_before_provider_and_at_finalization(
             "semantic_transport_record_sha256": "a" * 64,
             "pricing_sha256": "q",
         }
-        capability.bind_record_identity(input_hash, input_hash)
+        capability.bind_record_identity(input_hash, provider_input_hash)
         capability.seal_record(record)
         provider.store.records[input_hash] = record
         capability.reconcile(reservation, Decimal("0"), provider_outcome)
@@ -375,6 +379,7 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
     capability.mark_dispatching(reservation)
     provider.store.record = {
         "input_hash": dispatch_input_hash,
+        "input_payload_sha256": input_hash,
         "schema_version": "1.0.0",
         "output_sha256": runner._sha256(
             runner._canonical_bytes(
@@ -399,7 +404,7 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
         "semantic_transport_record_sha256": "a" * 64,
         "pricing_sha256": "q",
     }
-    capability.bind_record_identity(dispatch_input_hash, dispatch_input_hash)
+    capability.bind_record_identity(dispatch_input_hash, input_hash)
     capability.seal_record(provider.store.record)
     capability.reconcile(reservation, Decimal("0.01"), "terminal_unknown")
 
@@ -415,6 +420,68 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
     assert response_bytes == b""
     assert conservative == Decimal("0.01")
     assert journal.append_pre_dispatch.call_count == 1
+
+
+@pytest.mark.parametrize("record_payload_hash", [None, "2" * 64])
+def test_transport_receipt_from_other_provider_input_is_rejected(
+    record_payload_hash: str | None,
+) -> None:
+    provider_input_hash = "1" * 64
+    ref = ManifestRef(
+        run_id="gate-b-evidence-v1-0123456789abcdef",
+        manifest_sha256="4" * 64,
+        ordinal=0,
+        input_sha256=provider_input_hash,
+        projection_sha256="2" * 64,
+    )
+    manifest = SimpleNamespace(
+        rows=(SimpleNamespace(ordinal=0),),
+        manifest_sha256=ref.manifest_sha256,
+        authorities=SimpleNamespace(
+            pricing_sha256="q",
+            model_sha256="m",
+            prompt_sha256="p",
+            response_schema_sha256="s",
+            source_authority_sha256s={"provider": "v"},
+        ),
+        limits=SimpleNamespace(
+            ordered_call_cap=1,
+            per_call_maximum_usd=Decimal("0.01"),
+            aggregate_maximum_usd=Decimal("0.01"),
+        ),
+        row_ref=lambda _ordinal: ref,
+    )
+    provider = SimpleNamespace(
+        pricing=SimpleNamespace(
+            identity_sha256="q", reservation_cost_usd=Decimal("0.01")
+        )
+    )
+    journal = Mock()
+    journal.append_pre_dispatch.return_value = DispatchReceipt(
+        manifest_ref=ref, sequence=0
+    )
+    capability = runner._issue_collection_capability(
+        manifest=manifest, provider=provider, ledger=journal
+    )
+    dispatch_input_hash = runner._reservation_input_hash(ref)
+    reservation = capability.reserve(dispatch_input_hash)
+    capability.mark_dispatching(reservation)
+    record: dict[str, object] = {
+        "input_hash": dispatch_input_hash,
+        "schema_version": "1.0.0",
+        "post_dispatch_outcome_v3": "success",
+        "measured_cost_usd": "0.01",
+        "conservative_cost_usd": "0.01",
+    }
+    if record_payload_hash is not None:
+        record["input_payload_sha256"] = record_payload_hash
+    capability.bind_record_identity(dispatch_input_hash, provider_input_hash)
+    capability.seal_record(record)
+
+    with pytest.raises(
+        ValueError, match="transport_receipt_provider_input_mismatch"
+    ):
+        capability.reconcile(reservation, Decimal("0.01"), "success")
 
 
 def test_reservation_identity_keeps_duplicate_inputs_distinct() -> None:
@@ -589,6 +656,7 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         capability.mark_dispatching(reservation)
         record = {
             "input_hash": input_hash,
+            "input_payload_sha256": input_hash,
             "schema_version": "1.0.0",
             "output_sha256": runner._sha256(
                 runner._canonical_bytes(
