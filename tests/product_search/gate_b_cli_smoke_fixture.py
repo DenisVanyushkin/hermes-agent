@@ -32,6 +32,7 @@ from job_intel.product_search.gate_b_runtime_v1 import (
     _authority_identity,
     assert_artifact_destination_safe,
 )
+from job_intel.product_search.gate_b_spend_record_v1 import SpendRecordStore
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import LLMProviderError
 
 
@@ -285,7 +286,13 @@ def decision_request_factory(context: Any) -> Any:
     return _decision_result(decision_payload, ref.input_sha256)
 
 
-def prepare(*, root: Path, artifact_root: Path, repo_root: Path) -> tuple[Path, Path, str]:
+def prepare(
+    *,
+    root: Path,
+    artifact_root: Path,
+    repo_root: Path,
+    runtime_manifest_path: Path | None = None,
+) -> tuple[Path, Path, str]:
     assert_artifact_destination_safe(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
     authority_root = artifact_root / "authority"
@@ -361,18 +368,44 @@ exec {sys.executable!s} "$@"
         encoding="utf-8",
     )
     interpreter.chmod(0o755)
-    runtime_identity = RuntimeIdentity(
-        artifact_sha256="1" * 64,
-        artifact_tree_sha256=artifact_root.name,
-        shim_sha256=_sha(shim.read_bytes()),
-        interpreter_sha256=_sha(interpreter.read_bytes()),
-        stdlib_inventory_sha256="3" * 64,
-        installed_distributions_sha256="4" * 64,
-        installed_files_sha256="5" * 64,
-        sys_path_sha256="6" * 64,
-        native_extensions_sha256="7" * 64,
-        shared_libraries_sha256="8" * 64,
-    )
+    if runtime_manifest_path is None:
+        runtime_identity = RuntimeIdentity(
+            artifact_sha256="1" * 64,
+            artifact_tree_sha256=artifact_root.name,
+            shim_sha256=_sha(shim.read_bytes()),
+            interpreter_sha256=_sha(interpreter.read_bytes()),
+            stdlib_inventory_sha256="3" * 64,
+            installed_distributions_sha256="4" * 64,
+            installed_files_sha256="5" * 64,
+            sys_path_sha256="6" * 64,
+            native_extensions_sha256="7" * 64,
+            shared_libraries_sha256="8" * 64,
+        )
+    else:
+        runtime_payload = json.loads(runtime_manifest_path.read_bytes())
+        runtime_identity = RuntimeIdentity.model_validate(
+            {
+                "artifact_sha256": runtime_payload["artifact_sha256"],
+                "artifact_tree_sha256": runtime_payload["artifact_tree_sha256"],
+                "shim_sha256": runtime_payload["shim_sha256"],
+                "interpreter_sha256": runtime_payload["python_executable_sha256"],
+                "stdlib_inventory_sha256": runtime_payload["stdlib_tree_sha256"],
+                "installed_distributions_sha256": runtime_payload[
+                    "installed_distributions_sha256"
+                ],
+                "installed_files_sha256": runtime_payload["installed_files_sha256"],
+                "sys_path_sha256": runtime_payload["sys_path_sha256"],
+                "native_extensions_sha256": runtime_payload[
+                    "native_extensions_sha256"
+                ],
+                "shared_libraries_sha256": runtime_payload[
+                    "shared_libraries_sha256"
+                ],
+                "shared_library_provenance": runtime_payload.get(
+                    "shared_library_provenance", {}
+                ),
+            }
+        )
     authority_identity: AuthorityIdentity = _authority_identity(authorities)
     allow_entries: list[ReviewedFragmentEntryV3] = []
     rows: list[EvidenceManifestRow] = []
@@ -438,6 +471,12 @@ exec {sys.executable!s} "$@"
     manifest_path = root / "evidence-manifest.json"
     manifest_bytes = _canonical(payload)
     manifest_path.write_bytes(manifest_bytes)
+    spend_record_root = root / "spend-records"
+    SpendRecordStore.provision(
+        root=spend_record_root,
+        manifest_sha256=str(payload["manifest_sha256"]),
+        aggregate_maximum_cents=48,
+    )
     runtime_manifest = {
         "artifact_sha256": runtime_identity.artifact_sha256,
         "artifact_tree_sha256": runtime_identity.artifact_tree_sha256,

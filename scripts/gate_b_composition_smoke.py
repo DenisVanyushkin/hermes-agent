@@ -110,16 +110,6 @@ def main() -> int:
         root = Path(temporary)
         source_root = root / "source"
         commit = make_source_commit(source_root)
-        fixture_root = root / "fixture"
-        fixture_artifact = root / ("f" * 64)
-        sys.path.insert(0, str(REPO))
-        from tests.product_search import gate_b_cli_smoke_fixture as fixture
-
-        manifest_path, config_path, _ = fixture.prepare(
-            root=fixture_root,
-            artifact_root=fixture_artifact,
-            repo_root=REPO,
-        )
         stage = root / "built-artifact"
         build_started = time.perf_counter()
         build = run(
@@ -145,14 +135,25 @@ def main() -> int:
         install_started = time.perf_counter()
         shutil.copytree(stage, install_root, symlinks=True)
         install_seconds = time.perf_counter() - install_started
-        manifest_sha = bind_manifest_runtime(
-            manifest_path, install_root / "runtime-manifest.json"
+        fixture_root = root / "fixture"
+        fixture_artifact = root / ("f" * 64)
+        sys.path.insert(0, str(REPO))
+        from tests.product_search import gate_b_cli_smoke_fixture as fixture
+
+        manifest_path, config_path, manifest_sha = fixture.prepare(
+            root=fixture_root,
+            artifact_root=fixture_artifact,
+            repo_root=REPO,
+            runtime_manifest_path=install_root / "runtime-manifest.json",
         )
         supervised_wrapper = install_root / "runtime/scripts/job_intel_gate_b_supervised.sh"
         supervised_wrapper_copy = install_root / "runtime/scripts/.composition-smoke-supervised.sh"
         supervised_wrapper_copy.write_text(
             supervised_wrapper.read_text(encoding="utf-8").replace(
                 "/var/lib/job-intel-gate-b-artifacts", str(install_parent)
+            ).replace(
+                "/var/lib/job-intel-gate-b-spend",
+                str(fixture_root / "spend-records"),
             ),
             encoding="utf-8",
         )

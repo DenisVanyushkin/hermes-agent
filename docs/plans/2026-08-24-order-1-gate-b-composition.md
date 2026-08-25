@@ -559,7 +559,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 ### 3.1 Фикстура готовит spend record
 
-- [ ] **Пункт 3.1 выполнен**
+- [x] **Пункт 3.1 выполнен**
 
 **Закрывает** направление из Suggested scope [issue #8](https://github.com/DenisVanyushkin/hermes-agent/issues/8):
 
@@ -567,20 +567,20 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 **Задачи**
 
-- [ ] Добавить в `prepare()` создание spend record через
+- [x] Добавить в `prepare()` создание spend record через
       `SpendRecordStore.provision(...)` — публичную фабрику, а не запись файла
       руками, иначе фикстура разойдётся с форматом при следующем изменении.
-- [ ] Согласовать `manifest_sha256`, под которым provision создаёт запись, с тем,
+- [x] Согласовать `manifest_sha256`, под которым provision создаёт запись, с тем,
       под которым `_build_committed_budget_reserver()` её открывает — иначе
       `SpendRecordStore.open` снова даст `spend_record_missing`.
-- [ ] Задать бюджет, покрывающий число вызовов smoke, и зафиксировать его в
+- [x] Задать бюджет, покрывающий число вызовов smoke, и зафиксировать его в
       фикстуре явным числом, а не «побольше».
 
 **DoD**
 
-- [ ] `grep -n "spend_record\|SpendRecord" tests/product_search/gate_b_cli_smoke_fixture.py`
+- [x] `grep -n "spend_record\|SpendRecord" tests/product_search/gate_b_cli_smoke_fixture.py`
       даёт непустой результат — прямая инверсия улики из #8, где этот grep пуст.
-- [ ] Прогон smoke больше не падает на `spend_record_missing`; точка отказа (если
+- [x] Прогон smoke больше не падает на `spend_record_missing`; точка отказа (если
       она есть) сдвинулась дальше, и это зафиксировано в выводе.
 
 ### 3.2 Таймауты по фактическому времени сборки и внятная диагностика
