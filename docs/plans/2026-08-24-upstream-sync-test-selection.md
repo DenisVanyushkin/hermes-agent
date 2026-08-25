@@ -539,13 +539,21 @@ failure above.
 нельзя оставить общими после выделения shared `run_gate`.
 Manifest consumer получает именно `$STATE_DIR/attempts` этого запуска как
 ожидаемый корень и не может потребить generation из другого state namespace.
+До чтения `gate-failures.json` triage обязан проверить идентичность payload
+текущему merge attempt по `merge_sha` и `before` (и, если контракт текущего
+вызова их объявляет, по остальным commit-bound метаданным). Отсутствующий или
+несовпавший payload означает «нет применимого triage evidence»: он не даёт
+предложений по stale находкам, пишет диагностическую причину и не превращает
+старый `BLOCK`/`PASS` в результат текущего запуска.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k gate_only_isolation`
 зелёный: тест побайтово сравнивает **весь** `$STATE_DIR` до и после, исключая
 `attempts/` и перечисленные control-plane файлы (`finalize-request*.json`,
 `finalize.lock`), и требует совпадения; созданное — только внутри своей
 generation; отдельный случай доказывает, что повторный запуск на той же тройке
-заводит новую generation, а не переписывает прежнюю.
+заводит новую generation, а не переписывает прежнюю. Acceptance case с stale
+`gate-failures.json` от другого `merge_sha` доказывает отсутствие triage
+предложений и наличие диагностической причины.
 
 **Зависимости.** T18. **Сложность.** M.
 
