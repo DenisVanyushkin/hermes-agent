@@ -491,6 +491,16 @@ failure above.
 зелёный: трассировка доказывает, что оба прогона получили **идентичные**
 манифест и argv.
 
+**Реализация и проверка.** Выполнено в `f8efc5c4ba`: sync-local сначала
+создаёт merge-кандидат и фиксирует `after`, затем один раз строит
+`gate-selection.json` в временном attempt namespace, после чего прогоняет
+один и тот же manifest на `before` и `after`. Call-trace проверяет полный
+argv, одну manifest path, один attempts root, одну boundary и побайтово
+одинаковые вызовы; мутация возврата к `--legacy-selection` была RED.
+Focused call-trace — 1 passed, полный `test_sync_local_customizations.py` —
+10 passed; связанный gate/finalize scope — 104 passed и одно известное
+средовое падение `TestRepoLock::test_rebase_script_refuses_to_run_while_repo_lock_is_held`.
+
 **Зависимости.** T9. **Сложность.** M.
 
 ### T16. Caller требует квитанцию (D7)
