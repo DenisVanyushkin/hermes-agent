@@ -1571,6 +1571,137 @@ def _resolver(tmp_path: Path, body: str) -> str:
     return f"{sys.executable} {r}"
 
 
+class TestAttemptInvariant:
+    """A resumable apply attempt is bound to both sides of its input pair."""
+
+    def _conflict_world(self, tmp_path: Path):
+        repo = _make_repo(tmp_path)
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "f.txt").write_text("upstream conflict\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream conflict")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        return repo, local_head, upstream_head
+
+    def _seed_stale_attempt(
+        self, state: Path, repo: Path, *, local_head: str, upstream_head: str,
+        pending_local_head: str, pending_upstream_head: str,
+    ):
+        scratch = state / "scratch"
+        subprocess.run(
+            ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+            check=True,
+            capture_output=True,
+        )
+        _git(scratch, "config", "user.email", "t@t")
+        _git(scratch, "config", "user.name", "t")
+        _git(scratch, "checkout", "-q", "--detach", local_head)
+        merge = subprocess.run(
+            ["git", "-c", "rerere.enabled=false", "merge", "--no-edit", upstream_head],
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+        )
+        assert merge.returncode != 0
+        assert (scratch / ".git" / "MERGE_HEAD").read_text().strip() == upstream_head
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1",
+            "local_head": pending_local_head,
+            "upstream_head": pending_upstream_head,
+            "features": [],
+        }))
+        (state / "apply-prepare.json").write_text(json.dumps({
+            "schema": "upstream-sync-apply/v1",
+            "status": "ready",
+            "local_base": local_head,
+            "upstream_head": upstream_head,
+            "scratch": str(scratch),
+            "conflicts": ["f.txt"],
+        }))
+
+    def _prepare_or_resume(self, state: Path, repo: Path):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "upstream_sync_apply.py"),
+                "prepare-or-resume",
+                "--state", str(state),
+                "--live", str(repo),
+                "--scratch", "scratch",
+                "--in-flight-ok",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_attempt_invariant_stale_local_head_is_rotated_before_fresh_prepare(self, tmp_path, state):
+        repo, old_local, upstream_head = self._conflict_world(tmp_path)
+        self._seed_stale_attempt(
+            state, repo,
+            local_head=old_local,
+            upstream_head=upstream_head,
+            pending_local_head=old_local,
+            pending_upstream_head=upstream_head,
+        )
+        (repo / "local.txt").write_text("live moved\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "live moved")
+        live_head = _git(repo, "rev-parse", "HEAD")
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        pending = json.loads((state / "pending.json").read_text())
+        prep = json.loads((state / "apply-prepare.json").read_text())
+        assert pending["local_head"] == live_head
+        assert prep["local_base"] == live_head
+        assert prep["upstream_head"] == upstream_head
+        assert _git(state / "scratch", "rev-parse", "HEAD") == live_head
+        assert not (state / "scratch" / ".git" / "MERGE_HEAD").exists()
+        assert prep["status"] == "new_conflicts"
+        archives = list((state / "apply-attempts").glob("*/apply-prepare.json"))
+        assert len(archives) == 1
+        archive = archives[0].parent
+        assert (archive / "pending.json").exists()
+        assert (archive / "scratch" / ".git" / "MERGE_HEAD").read_text().strip() == upstream_head
+
+    def test_attempt_invariant_same_local_with_new_upstream_rotates_stale_resume(self, tmp_path, state):
+        repo, local_head, old_upstream = self._conflict_world(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "upstream-later.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream moved")
+        new_upstream = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        self._seed_stale_attempt(
+            state, repo,
+            local_head=local_head,
+            upstream_head=old_upstream,
+            pending_local_head=local_head,
+            pending_upstream_head=new_upstream,
+        )
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        pending = json.loads((state / "pending.json").read_text())
+        prep = json.loads((state / "apply-prepare.json").read_text())
+        assert pending["local_head"] == local_head
+        assert pending["upstream_head"] == new_upstream
+        assert prep["local_base"] == local_head
+        assert prep["upstream_head"] == new_upstream
+        assert _git(state / "scratch", "rev-parse", "HEAD") == local_head
+        assert not (state / "scratch" / ".git" / "MERGE_HEAD").exists()
+        assert prep["status"] == "new_conflicts"
+        archives = list((state / "apply-attempts").glob("*/apply-prepare.json"))
+        assert len(archives) == 1
+        archive = archives[0].parent
+        assert (archive / "pending.json").exists()
+        assert (archive / "scratch" / ".git" / "MERGE_HEAD").read_text().strip() == old_upstream
+
+
 class TestApplyDecisions:
     """The host applies a decided pending.json end to end: clone, mechanical +
     model resolution, commit, gate, land, publish, archive, memory, and a

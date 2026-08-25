@@ -844,43 +844,38 @@ apply_decisions() {
     exit 0
   fi
 
-  # Resume: a preserved clone with no conflict markers left is someone's hand
-  # work — take it as is. Otherwise (re)build it.
-  prep_status="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"status\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
-  if [ -d "$SCRATCH/.git" ] && [ "$prep_status" = ready ] && \
-     [ -z "$(git -C "$SCRATCH" ls-files -u 2>/dev/null)" ] && \
-     [ "$(git -C "$SCRATCH" rev-parse HEAD 2>/dev/null)" = "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" -o -n "$(git -C "$SCRATCH" rev-parse -q --verify MERGE_HEAD 2>/dev/null)" ]; then
-    echo "apply-decisions: resuming from the preserved clone (no unmerged paths)" >>"$DETAIL_LOG"
-  else
-    rm -rf "$SCRATCH"
-    set +e
-    "$py" "$apply" prepare --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok "${PREPARE_INVARIANT_MODE_ARGS[@]}" >>"$DETAIL_LOG" 2>&1
-    rc=$?
-    set -e
-    case "$rc" in
-      0) ;;
-      4)
-        # A new security-path conflict: the policy does not decide those. Ask
-        # (report_to_thread posts the question) and keep everything armed.
-        write_result awaiting_decision "apply-decisions: a new conflict on a security-sensitive path needs the operator's decision; nothing applied. $(cat "$DETAIL_LOG")"
-        exit 0
-        ;;
-      *)
-        FAILED_STAGE=prepare
-        write_result failed "apply-decisions: prepare failed (rc=$rc); repo untouched. $(cat "$DETAIL_LOG")"
-        exit 0
-        ;;
-    esac
-    set +e
-    "$py" "$apply" resolve-llm --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
-    rc=$?
-    set -e
-    if [ "$rc" -ne 0 ]; then
+  # One helper owns the pair-bound resume decision, stale-attempt archive, and
+  # fresh prepare. No caller may reimplement one of those steps.
+  set +e
+  "$py" "$apply" prepare-or-resume --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok "${PREPARE_INVARIANT_MODE_ARGS[@]}" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    10)
+      echo "apply-decisions: resuming from the pair-bound preserved clone" >>"$DETAIL_LOG"
+      ;;
+    4)
+      # A new security-path conflict: the policy does not decide those. Ask
+      # (report_to_thread posts the question) and keep everything armed.
+      write_result awaiting_decision "apply-decisions: a new conflict on a security-sensitive path needs the operator's decision; nothing applied. $(cat "$DETAIL_LOG")"
+      exit 0
+      ;;
+    *)
+      FAILED_STAGE=prepare
+      write_result failed "apply-decisions: prepare failed (rc=$rc); repo untouched. $(cat "$DETAIL_LOG")"
+      exit 0
+      ;;
+  esac
+  set +e
+  "$py" "$apply" resolve-llm --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
       FAILED_STAGE=resolve
       write_result failed "apply-decisions: the model could not resolve every hunk; the clone is preserved at $SCRATCH with markers in place, decision kept armed. $(cat "$DETAIL_LOG")"
       exit 0
     fi
-  fi
   set +e
   "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
   rc=$?

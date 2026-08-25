@@ -63,6 +63,7 @@ EXIT_UNRESOLVED = 6
 EXIT_LIVE_MOVED = 7
 EXIT_APPLY_FAILED = 8
 EXIT_TIMEOUT = 9
+EXIT_RESUMED = 10
 
 CONFLICT_START = "<<<<<<< "
 CONFLICT_BASE = "||||||| "
@@ -511,6 +512,77 @@ def cmd_prepare(args) -> int:
     _write_json(state / "apply-prepare.json", summary)
     emit(summary)
     return EXIT_OK
+
+
+def _resume_matches_attempt(live: Path, scratch: Path, pending: dict,
+                            prep: dict) -> bool:
+    """Return true only when the preserved clone is bound to this exact pair."""
+    try:
+        live_head = git(live, "rev-parse", "HEAD").stdout.strip()
+        scratch_head = git(scratch, "rev-parse", "HEAD").stdout.strip()
+        merge_head = git(scratch, "rev-parse", "-q", "--verify", "MERGE_HEAD",
+                         check=False).stdout.strip()
+        if prep.get("status") != "ready":
+            return False
+        if pending.get("local_head") != live_head:
+            return False
+        if prep.get("local_base") != live_head:
+            return False
+        if not pending.get("upstream_head") or prep.get("upstream_head") != pending.get("upstream_head"):
+            return False
+        if scratch_head != live_head:
+            return False
+        return not merge_head or merge_head == pending["upstream_head"]
+    except (GitError, OSError, KeyError):
+        return False
+
+
+def _archive_stale_attempt(state: Path, scratch: Path) -> None:
+    """Move the old apply inputs into one append-only archive directory."""
+    archive_root = state / "apply-attempts"
+    archive_root.mkdir(exist_ok=True)
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    tmp = archive_root / f".{stamp}-{os.getpid()}.tmp"
+    final = archive_root / f"{stamp}-{os.getpid()}"
+    suffix = 0
+    while tmp.exists() or final.exists():
+        suffix += 1
+        tmp = archive_root / f".{stamp}-{os.getpid()}-{suffix}.tmp"
+        final = archive_root / f"{stamp}-{os.getpid()}-{suffix}"
+    tmp.mkdir()
+    for name in ("pending.json", "apply-prepare.json", "invariants-pending.json"):
+        path = state / name
+        if path.exists():
+            os.replace(path, tmp / name)
+    if scratch.exists():
+        os.replace(scratch, tmp / scratch.name)
+    os.replace(tmp, final)
+
+
+def cmd_prepare_or_resume(args) -> int:
+    """Resume only a pair-bound clone; otherwise archive it and prepare fresh."""
+    state, live = Path(args.state), Path(args.live)
+    scratch = state / args.scratch
+    pending_path = state / "pending.json"
+    if not pending_path.exists():
+        emit({"status": "error", "reason": "pending.json missing"})
+        return EXIT_USAGE
+    pending = load_pending(state)
+    prep_path = state / "apply-prepare.json"
+    try:
+        prep = json.loads(prep_path.read_text(encoding="utf-8")) if prep_path.exists() else {}
+    except (OSError, ValueError):
+        prep = {}
+    if scratch.is_dir() and _resume_matches_attempt(live, scratch, pending, prep):
+        emit({"status": "resumed", "local_head": pending["local_head"],
+              "upstream_head": pending["upstream_head"], "scratch": str(scratch)})
+        return EXIT_RESUMED
+
+    live_head = git(live, "rev-parse", "HEAD").stdout.strip()
+    _archive_stale_attempt(state, scratch)
+    pending["local_head"] = live_head
+    _write_json(pending_path, pending)
+    return cmd_prepare(args)
 
 
 # --------------------------------------------------------------------------- handoff
@@ -1008,6 +1080,11 @@ def main(argv=None) -> int:
     p_prep.add_argument("--invariant-mode", choices=("block", "report"),
                         help="snapshot invariant handling in apply-prepare.json")
     p_prep.set_defaults(func=cmd_prepare)
+    p_resume = sub.add_parser("prepare-or-resume", parents=[common])
+    p_resume.add_argument("--auto-policy", action="store_true")
+    p_resume.add_argument("--in-flight-ok", action="store_true")
+    p_resume.add_argument("--invariant-mode", choices=("block", "report"))
+    p_resume.set_defaults(func=cmd_prepare_or_resume)
     sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
     p_commit = sub.add_parser("commit", parents=[common])
     p_commit.add_argument("--break-glass", action="store_true",
