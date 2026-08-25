@@ -453,6 +453,16 @@ nodeid был одновременно помещён в `common_path`, поэт
 post; из-за нечитаемого collect; из-за нечитаемого probe — и ни один из
 четырёх не приписывает падения мержу.
 
+**Реализация и проверка.** Выполнено в `557cfadeb5`: `gate_report_text`
+рендерит подписанные baseline/post/probe, отдельные counts и nodeids
+`common_path`/`post_only_path`, а `unreadable_runs` явно даёт инфраструктурный
+`UNKNOWN`, отличимый от чистого `PASS` и не называющий сбой регрессией мержа.
+`upstream-sync-finalize.sh` передаёт persisted `gate-failures.json` в Slack
+composer. `scripts/run_tests.sh tests/scripts/test_upstream_sync_slack.py -k
+'GateReport or without_a_triage'` — 7 passed; полный Slack-файл — 27 passed;
+связанный finalize scope — 57 passed и одно известное средовое падение
+`TestRepoLock::test_rebase_script_refuses_to_run_while_repo_lock_is_held`.
+
 **Зависимости.** T13. **Сложность.** M.
 
 ---
