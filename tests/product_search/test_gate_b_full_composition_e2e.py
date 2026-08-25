@@ -876,11 +876,19 @@ def test_v2_publication_resume_does_not_get_stuck_on_prior_terminal_row(
     assert ledger.state(1) is JournalState.DISPATCHED
 
     monkeypatch.setattr(provider.store, "save_exclusive", original_save)
+    fresh_semantic_provider = LLMObservationProvider(
+        store=SemanticRecordingStore(tmp_path / "semantic-records"),
+        mode="record",
+        model_id=provider._policy.model_id,
+        transport=provider._semantic_provider._transport,
+        prompt_version=provider._policy.semantic_prompt_version,
+    )
+    fresh_provider = runner._LiveGateBProvider(fresh_semantic_provider)
     runner.run_collection(
         manifest=manifest,
         corpus_rows=corpus_rows,
         reviewed_allowlist=allowlist,
-        provider_factory=lambda: provider,
+        provider_factory=lambda: fresh_provider,
         ledger=ledger,
         recordings=recordings,
         decision_evidence=decision_evidence,

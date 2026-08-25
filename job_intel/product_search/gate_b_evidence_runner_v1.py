@@ -634,6 +634,14 @@ class DecisionEvidenceRef(_StrictFrozenModel):
     decision_sha256: str = Field(pattern=SHA256_PATTERN)
 
 
+class DecisionEvidenceMissingError(ValueError):
+    """No Decision v2 artifact exists for the requested manifest row."""
+
+
+class DecisionEvidenceInvalidError(ValueError):
+    """A Decision v2 artifact exists but fails integrity validation."""
+
+
 class DecisionEvidenceStore:
     """Create-once canonical Decision v2 bytes for offline adjudication."""
 
@@ -708,15 +716,17 @@ class DecisionEvidenceStore:
                 continue
             try:
                 decision_bytes = base64.b64decode(payload["decision_b64"], validate=True)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise DecisionEvidenceInvalidError(
+                    "decision evidence is invalid"
+                ) from exc
             ref = DecisionEvidenceRef(
                 manifest_ref=manifest_ref,
                 decision_sha256=_sha256(decision_bytes),
             )
             self.bytes_for(ref)
             return ref
-        raise ValueError("decision evidence for manifest row missing")
+        raise DecisionEvidenceMissingError("decision evidence for manifest row missing")
 
     def verify(self, ref: DecisionEvidenceRef, manifest: EvidenceManifest) -> None:
         if ref.manifest_ref != manifest.row_ref(ref.manifest_ref.ordinal):
@@ -1258,6 +1268,8 @@ class RunOneRowProvider(Protocol):
 
     def dispatch(self, request: GateBDispatchRequestV2) -> object: ...
 
+    def verify_provider_record(self, record: dict[str, object]) -> None: ...
+
 
 class GovernedStructuredProviderAdapter:
     """Production-shaped adapter over the semantic governed-call runtime."""
@@ -1347,6 +1359,10 @@ class _LiveGateBProvider:
         if not callable(verifier):
             raise ValueError("v2_provider_record_verifier_required")
         verifier(record)
+
+    def bind_record_verifier(self, capability: object) -> None:
+        verifier = getattr(capability, "verify_record", None)
+        self._v2_record_verifier = verifier if callable(verifier) else None
 
     def _publish_v2_provider_record(
         self,
@@ -1446,8 +1462,7 @@ class _LiveGateBProvider:
             )
         else:
             self._adapter.record_capability = capability
-        verifier = getattr(capability, "verify_record", None)
-        self._v2_record_verifier = verifier if callable(verifier) else None
+        self.bind_record_verifier(capability)
         provider_input_sha256 = synthesis_input_sha256(
             provider_payload, provider=self._adapter
         )
@@ -2899,6 +2914,9 @@ def run_collection(
     capability = _issue_collection_capability(
         manifest=manifest, provider=provider, ledger=ledger
     )
+    bind_record_verifier = getattr(provider, "bind_record_verifier", None)
+    if callable(bind_record_verifier):
+        bind_record_verifier(capability)
     results: list[CollectionRowResult] = []
     for corpus_row in rows:
         row = manifest.row(corpus_row.ordinal)

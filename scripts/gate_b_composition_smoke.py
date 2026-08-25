@@ -338,6 +338,7 @@ def main() -> int:
             AdjudicationSet,
             AdjudicationVerdict,
             DecisionEvidenceStore,
+            DecisionEvidenceMissingError,
             EvidenceManifest,
         )
 
@@ -349,7 +350,7 @@ def main() -> int:
             row_ref = manifest.row_ref(ordinal)
             try:
                 decision_ref = decision_store.find_for_manifest_ref(row_ref)
-            except ValueError as exc:
+            except DecisionEvidenceMissingError as exc:
                 raise SmokeFailure(
                     "production_decision_request_factory_not_called"
                 ) from exc
@@ -480,7 +481,7 @@ def main() -> int:
             "isolation_probe": isolation_probe,
             "isolation_probe_error": isolation_probe_error,
             "dispatch_probe": dispatch_probe,
-            "decision_request_factory_calls": factory_call_count,
+            "decision_evidence_rows": factory_call_count,
             "first_stop": first_stop,
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")

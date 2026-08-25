@@ -435,6 +435,14 @@ def test_run_one_row_rejects_unverified_store_record_before_decision_factory(
 def test_run_one_row_declares_compatibility_provider_contract() -> None:
     hints = get_type_hints(run_one_row)
     assert hints["provider"] is runner.RunOneRowProvider
+    declared = set(runner.RunOneRowProvider.__dict__) | set(
+        runner.RunOneRowProvider.__annotations__
+    )
+    assert {
+        "store",
+        "dispatch",
+        "verify_provider_record",
+    } <= declared
 
 
 def _run_one_row_with_keyed_record(
