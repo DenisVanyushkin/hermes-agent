@@ -656,6 +656,13 @@ pre-existing failure.
 `scripts/run_tests.sh tests/scripts/` — 657 passed и те же три известных
 pre-existing failure: два footgun-сканера и средовой `TestRepoLock`.
 
+**Follow-up review fix.** `4a1d75e0a8` добавляет два независимых acceptance
+случая: stale `pending.local_head` при scratch, пересобранном на live HEAD, и
+stale `prep.upstream_head` при `MERGE_HEAD`, совпадающем с pending. Удаление
+только local-сверки краснеет первым случаем, удаление только upstream-сверки —
+вторым; оба mutation-прогона проверены отдельно. После восстановления полный
+affected scope — 97 passed и одно известное средовое падение `TestRepoLock`.
+
 **Зависимости.** T19. **Сложность.** M.
 
 ---
