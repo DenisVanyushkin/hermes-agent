@@ -94,6 +94,7 @@ BACKUP_REF="$(json_field backup_ref)"
 # they were shown started well after the real cause.
 FAILED_STAGE=""
 BREAK_GLASS_NOTICE=""
+GATE_OUTCOME="unknown"
 
 write_result() {
   # Statuses: ok | failed | awaiting_decision (apply-decisions stopped to ask
@@ -323,6 +324,24 @@ adopt_scratch_clone() {
 # branch — the same before/after comparison the sync script applies to an
 # automatic merge. Baseline is our HEAD, post is the merge; only NEW failures
 # block, and an unreadable run (killed, no summary line) blocks too.
+run_gate() {
+  local before="$1" after="$2" boundary="$3" attempt_id="$4" mode="$5"
+  GATE_OUTCOME="unknown"
+  printf 'run_gate seam: mode=%s before=%s after=%s boundary=%s attempt_id=%s\n' \
+    "$mode" "$before" "$after" "$boundary" "$attempt_id" >>"$DETAIL_LOG"
+  if merge_passes_fork_tests "$before" "$after" "$boundary"; then
+    GATE_OUTCOME="pass"
+    printf 'run_gate outcome: mode=%s outcome=pass attempt_id=%s\n' \
+      "$mode" "$attempt_id" >>"$DETAIL_LOG"
+    return 0
+  fi
+  # Preserve the distinction between a measured block and an unreadable or
+  # invalid execution for every caller of the shared seam.
+  printf 'run_gate outcome: mode=%s outcome=%s attempt_id=%s\n' \
+    "$mode" "$GATE_OUTCOME" "$attempt_id" >>"$DETAIL_LOG"
+  return 1
+}
+
 merge_passes_fork_tests() {
   # Граница приходит третьим аргументом от вызывающего, который её уже сверил
   # (UPSTREAM_FULL из pending.json, до проверки родителей). Выводить её здесь
@@ -533,6 +552,11 @@ PY
       echo "classification:"
       cat "$classification_json"
     } >>"$DETAIL_LOG"
+    if [ "$unknown_count" -ne 0 ]; then
+      GATE_OUTCOME="unknown"
+    else
+      GATE_OUTCOME="block"
+    fi
     rm -f "$t11_failures_file"
     cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
     return 1
@@ -642,7 +666,7 @@ land_merge() {
       write_result failed "merge_sha parent mismatch: parents ($MERGE_PARENTS) are not (HEAD $HEAD_SHA, approved upstream $UPSTREAM_FULL) — refusing; repo untouched, no rollback."
       exit 0
     fi
-    if ! merge_passes_fork_tests "$HEAD_SHA" "$MERGE_SHA" "$UPSTREAM_FULL"; then
+    if ! run_gate "$HEAD_SHA" "$MERGE_SHA" "$UPSTREAM_FULL" "apply-merge:$MERGE_SHA" apply; then
       FAILED_STAGE=test-gate
       # Before the report, not after: the operator's message IS the triage.
       run_gate_triage
@@ -672,6 +696,31 @@ land_merge() {
     if [ "$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['status'])" "$RESULT" 2>/dev/null)" = ok ]; then
       rm -rf "$SCRATCH"
     fi
+}
+
+# gate-only — run the same gate composition without changing live HEAD. The
+# stricter attempt-state write boundary is completed by T19; this entrypoint
+# already refuses a request whose baseline is not the current live HEAD.
+gate_only() {
+  local before after boundary attempt_id current
+  before="$(json_field before)"
+  after="$(json_field after)"
+  boundary="$(json_field boundary)"
+  attempt_id="$(json_field attempt_id)"
+  if [ -z "$before" ] || [ -z "$after" ] || [ -z "$boundary" ] || [ -z "$attempt_id" ]; then
+    write_result failed "gate-only needs before, after, boundary, and attempt_id; live repo untouched."
+    return
+  fi
+  if ! current="$(git -C "$REPO" rev-parse HEAD 2>>"$DETAIL_LOG")" || [ "$current" != "$before" ]; then
+    write_result failed "gate-only before $before is not the live HEAD ${current:-unknown}; refusing to run."
+    return
+  fi
+  if run_gate "$before" "$after" "$boundary" "$attempt_id" gate-only; then
+    write_result ok "gate-only completed with gate_verdict=pass. $(cat "$DETAIL_LOG")"
+  else
+    FAILED_STAGE=test-gate
+    write_result failed "gate-only completed with gate_verdict=$GATE_OUTCOME; live repo untouched. $(cat "$DETAIL_LOG")"
+  fi
 }
 
 # apply-decisions — the host-owned path. pending.json carries every decision
@@ -958,6 +1007,9 @@ case "$ACTION" in
     ;;
   apply-triage-fixes)
     apply_triage_fixes
+    ;;
+  gate-only)
+    gate_only
     ;;
   ack-invariant)
     resume_invariant_ack

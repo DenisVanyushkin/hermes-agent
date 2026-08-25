@@ -668,6 +668,20 @@ def _apply_request(state: Path, *, upstream_sha, merge_sha, scratch_repo="scratc
     )
 
 
+def _gate_only_request(state: Path, *, before, after, boundary, attempt_id="test-run"):
+    (state / "finalize-request.json").write_text(
+        json.dumps(
+            {
+                "action": "gate-only",
+                "before": before,
+                "after": after,
+                "boundary": boundary,
+                "attempt_id": attempt_id,
+            }
+        )
+    )
+
+
 class TestApplyMergeFromScratchClone:
     def test_merge_parented_on_head_and_upstream_is_fast_forwarded(
         self, tmp_path, state
@@ -692,6 +706,8 @@ class TestApplyMergeFromScratchClone:
         logged = calls.read_text()
         assert f"sync-local-customizations.sh --post-update-only {local_head}" in logged
         assert "upstream-sync-smoketest.sh" in logged
+        detail = (state / "finalize-detail.log").read_text()
+        assert f"run_gate seam: mode=apply before={local_head} after={merge_sha} boundary={upstream_head}" in detail
 
     def test_merge_not_parented_on_live_head_is_refused(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
@@ -827,6 +843,47 @@ class TestScratchCloneIsAdoptedBeforeReading:
         assert "chown -R" in logged and str(state / "scratch") in logged, logged
 
 
+class TestSharedGateSeam:
+    @pytest.mark.parametrize("outcome", ["pass", "block", "unknown"])
+    def test_gate_only_uses_the_shared_gate_seam_without_landing(
+        self, tmp_path, state, outcome
+    ):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        _git(repo, "fetch", str(state / "scratch"), "HEAD")
+        scripts, calls = _stub_scripts(tmp_path)
+        if outcome == "block":
+            TestApplyMergeIsGatedOnForkTests()._node_aware_block_stub(scripts)
+        elif outcome == "unknown":
+            runner = scripts / "run-fork-tests.sh"
+            runner.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'collecting ...'\n"
+                "exit 137\n"
+            )
+            runner.chmod(0o755)
+
+        _gate_only_request(
+            state,
+            before=local_head,
+            after=merge_sha,
+            boundary=upstream_head,
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        expected_status = "ok" if outcome == "pass" else "failed"
+        assert res["status"] == expected_status, proc.stderr + res.get("detail", "")
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        detail = (state / "finalize-detail.log").read_text()
+        assert f"run_gate seam: mode=gate-only before={local_head} after={merge_sha} boundary={upstream_head}" in detail
+        assert f"run_gate outcome: mode=gate-only outcome={outcome}" in detail
+        generations = list((state / "attempts").glob("*/*"))
+        assert len(generations) == 1
+        assert (generations[0] / "gate-selection.json").exists()
+        assert (generations[0] / "attempt.json").exists()
+
+
 class TestApplyMergeIsGatedOnForkTests:
     """A plausible-looking resolution of a merge-both conflict can still be
     wrong, and the smoketest only proves the tree imports. The agent's merge is
@@ -857,6 +914,48 @@ class TestApplyMergeIsGatedOnForkTests:
             'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
         )
+
+    def _node_aware_block_stub(self, scripts: Path) -> None:
+        """Emit valid structured evidence for a measured block.
+
+        The upstream-parent probe must pass the newly-added upstream node;
+        otherwise the gate correctly reports ``unknown`` rather than a block.
+        This double therefore distinguishes the probe worktree from the
+        baseline/post worktrees and uses paths that exist in the manifest.
+        """
+        python = str(sys.executable)
+        gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            'SEL=""; WT=""; PROBE=0\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --attempt-root|--boundary) shift 2 ;;\n'
+            '  --probe-nodeids-from) PROBE=1; shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            'esac; done\n'
+            'if [ "$PROBE" -eq 1 ]; then\n'
+            "  echo '0 failed, 1 passed in 0.10s'\n"
+            "  exit 0\n"
+            "fi\n"
+            f'HEAD="$({python} -c \'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())\' "$WT")"\n'
+            f'SIDE="$({python} - "$SEL" "$HEAD" <<\'PY\'\n'
+            'import json,sys\n'
+            'from pathlib import Path\n'
+            'm=json.loads(Path(sys.argv[1]).read_text())\n'
+            'print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")\n'
+            'PY\n'
+            ')"\n'
+            f'{python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
+            "echo 'FAILED tests/test_fork_only.py::test_fork_only - AssertionError'\n"
+            'if [ -f "$WT/tests/test_upstream_added.py" ]; then\n'
+            "  echo 'FAILED tests/test_upstream_added.py::test_added - AssertionError'\n"
+            "  echo '2 failed, 1 passed in 0.10s'\n"
+            "else\n"
+            "  echo '1 failed, 1 passed in 0.10s'\n"
+            "fi\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
 
     def test_both_gate_runs_receive_the_same_upstream_boundary(self, tmp_path, state):
         """Обе половины гейта меряют от одной и той же границы.
@@ -994,14 +1093,14 @@ class TestApplyMergeIsGatedOnForkTests:
         assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
-        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
         (state / "pending.json").write_text(json.dumps(
             {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
              "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
                            "local_subjects": ["tip"]}]}))
         merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
         scripts, calls = _stub_scripts(tmp_path)
-        self._breaking_tests_stub(scripts)
+        self._node_aware_block_stub(scripts)
 
         _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
         proc = _run_finalize(repo, state, scripts)
@@ -1009,13 +1108,16 @@ class TestApplyMergeIsGatedOnForkTests:
         res = _result(state)
         assert res["status"] == "failed", proc.stderr
         assert res["failed_stage"] == "test-gate"
-        assert "test_broken_by_merge" in res["detail"]
+        assert "tests/test_upstream_added.py::test_added" in res["detail"]
         assert _git(repo, "rev-parse", "HEAD") == local_head          # not landed
         assert (state / "pending.json").exists()                      # decision kept
         assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
         assert not calls.exists() or "rollback" not in calls.read_text()
         # The temporary test-gate worktree was removed.
         assert len(_git(repo, "worktree", "list").splitlines()) == 1
+        assert "run_gate outcome: mode=apply outcome=block" in (
+            state / "finalize-detail.log"
+        ).read_text()
 
     def test_pre_existing_failures_do_not_block(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
@@ -1027,6 +1129,9 @@ class TestApplyMergeIsGatedOnForkTests:
 
         assert _result(state)["status"] == "ok", proc.stderr
         assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert "run_gate outcome: mode=apply outcome=pass" in (
+            state / "finalize-detail.log"
+        ).read_text()
 
     def test_an_unreadable_test_run_refuses_to_land(self, tmp_path, state):
         """No summary line means the run was killed, not clean — the gate must
@@ -1045,6 +1150,9 @@ class TestApplyMergeIsGatedOnForkTests:
         res = _result(state)
         assert res["status"] == "failed", proc.stderr
         assert res["failed_stage"] == "test-gate"
+        assert "run_gate outcome: mode=apply outcome=unknown" in (
+            state / "finalize-detail.log"
+        ).read_text()
         assert _git(repo, "rev-parse", "HEAD") == local_head
 
 
