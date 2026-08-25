@@ -177,7 +177,12 @@ def _resolution_summary(prep: dict) -> list[str]:
     return out
 
 
-def applied_text(prep: dict, result: dict) -> str:
+def applied_text(
+    prep: dict,
+    result: dict,
+    *,
+    gate_failures: dict | None = None,
+) -> str:
     lines = [
         f"*Upstream sync applied* — upstream `{_short(prep.get('upstream_head'))}` "
         f"merged into `local/customizations` (was `{_short(prep.get('local_base'))}`).",
@@ -189,7 +194,10 @@ def applied_text(prep: dict, result: dict) -> str:
         "- fork tests: no new failures · smoketest: passed · gateway restarted · pushed",
         f"- decisions recorded into memory · finished {result.get('finished_at', '')}",
     ]
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    if gate_failures:
+        text += "\n" + gate_report_text(gate_failures)
+    return text
 
 
 MAX_PATCH_CHARS = 2500
@@ -317,7 +325,9 @@ def gate_report_text(failures: dict) -> str:
         if items:
             lines.append(f"- {label} failures:")
             for item in items:
-                lines.append(f"  - `{item.get('nodeid') or item.get('path') or 'unknown outcome'}`")
+                nodeid = item.get("nodeid") or item.get("path") or "unknown outcome"
+                classification = item.get("classification") or "unclassified"
+                lines.append(f"  - `{nodeid}` — `{classification}`")
     if unreadable:
         lines += [
             "- verdict: `UNKNOWN` — gate infrastructure failure; this is not a merge regression.",

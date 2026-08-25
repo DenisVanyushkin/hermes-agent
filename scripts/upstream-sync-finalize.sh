@@ -165,6 +165,11 @@ PY
   fi
   # After the archive: the thread report reads pending.json or its archive.
   report_to_thread "$1"
+  # A successful gate keeps its normalized payload alive until the report has
+  # consumed it; then remove it so the next attempt cannot inherit stale PASS.
+  if [ "$1" = ok ]; then
+    rm -f "$STATE_DIR/gate-failures.json"
+  fi
 }
 
 # The operator-facing summary, threaded under the conflict report when
@@ -211,7 +216,7 @@ result = load(result_path)
 triage = load(os.path.join(state, "gate-triage.json"))
 gate_failures = load(os.path.join(state, "gate-failures.json"))
 if status == "ok" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
-    text = slack.applied_text(prep, result)
+    text = slack.applied_text(prep, result, gate_failures=gate_failures)
 elif status == "awaiting_decision":
     text = slack.report_text(pending)
 elif status == "failed" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
@@ -530,8 +535,8 @@ PY
     return 1
   fi
   rm -f "$t11_failures_file"
+  cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json"
   rm -f "$attempt_dir/gate-failures.json"
-  rm -f "$STATE_DIR/gate-failures.json"
   return 0
 }
 

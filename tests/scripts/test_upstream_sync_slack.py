@@ -292,6 +292,8 @@ class TestGateReport:
         assert "post_only_path: 2" in text
         assert "pre_existing: 1" in text
         assert "tests/upstream.py::test_one" in text
+        assert "fork_regression" in text
+        assert "upstream_red_admission_failure" in text
 
 
 class TestTriageText:

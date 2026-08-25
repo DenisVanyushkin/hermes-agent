@@ -1407,6 +1407,11 @@ class TestApplyDecisions:
         assert posts and posts[-1]["channel"] == "C0TEST" and posts[-1]["thread_ts"] == "1786.001"
         assert "applied" in posts[-1]["text"].lower()
         assert "f.txt" in posts[-1]["text"]
+        assert "*Fork test gate*" in posts[-1]["text"]
+        assert "verdict: `PASS`" in posts[-1]["text"]
+        assert "common_path: 0" in posts[-1]["text"]
+        assert "post_only_path: 0" in posts[-1]["text"]
+        assert not (state / "gate-failures.json").exists()
         # the clone is gone on success
         assert not (state / "scratch").exists()
 
