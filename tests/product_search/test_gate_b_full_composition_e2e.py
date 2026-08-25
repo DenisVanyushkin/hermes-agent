@@ -781,9 +781,45 @@ def test_v2_publication_resume_does_not_get_stuck_on_prior_terminal_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """RED: a row-1 publication failure must resume past row 0."""
-    provider, capability, ledger, refs, request = _live_dispatch_fixture(
+    live_provider, capability, ledger, refs, request = _live_dispatch_fixture(
         tmp_path, monkeypatch, row_count=2
     )
+
+    class SmokeShapedProvider:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.store = inner.store
+            self.pricing = inner.pricing
+            self.authority_identity = inner.authority_identity
+
+        def dispatch(
+            self,
+            request: runner.GateBDispatchRequestV2,
+            *,
+            input_hash: str,
+            capability: object,
+        ) -> object:
+            self.verify_provider_record = capability.verify_record
+            return self.inner.dispatch(
+                request,
+                input_hash=input_hash,
+                capability=capability,
+            )
+
+        def resume_v2_publication(
+            self,
+            request: runner.GateBDispatchRequestV2,
+            *,
+            input_hash: str,
+            capability: object,
+        ) -> object:
+            return self.inner.resume_v2_publication(
+                request,
+                input_hash=input_hash,
+                capability=capability,
+            )
+
+    provider = SmokeShapedProvider(live_provider)
     projected_v3 = _projected_fixture()
     raw = {
         "company": "Northstar",
@@ -879,11 +915,13 @@ def test_v2_publication_resume_does_not_get_stuck_on_prior_terminal_row(
     fresh_semantic_provider = LLMObservationProvider(
         store=SemanticRecordingStore(tmp_path / "semantic-records"),
         mode="record",
-        model_id=provider._policy.model_id,
-        transport=provider._semantic_provider._transport,
-        prompt_version=provider._policy.semantic_prompt_version,
+        model_id=live_provider._policy.model_id,
+        transport=live_provider._semantic_provider._transport,
+        prompt_version=live_provider._policy.semantic_prompt_version,
     )
-    fresh_provider = runner._LiveGateBProvider(fresh_semantic_provider)
+    fresh_provider = SmokeShapedProvider(
+        runner._LiveGateBProvider(fresh_semantic_provider)
+    )
     runner.run_collection(
         manifest=manifest,
         corpus_rows=corpus_rows,

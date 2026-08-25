@@ -88,6 +88,34 @@ def test_provider_record_without_keyed_verifier_fails_closed() -> None:
         runner._provider_record(provider, "dispatch-input")
 
 
+def test_provider_record_uses_explicit_capability_verifier_after_dispatch() -> None:
+    record = {"provider_record_kind": "gate-b-evidence-synthesis-v2"}
+    verified: list[dict[str, object]] = []
+
+    class Store:
+        def load(self, _input_hash: str) -> dict[str, object]:
+            return record
+
+    class SmokeShapedProvider:
+        store = Store()
+
+        def dispatch(self, capability: object) -> None:
+            self.verify_provider_record = capability.verify_record
+
+    capability = SimpleNamespace(verify_record=verified.append)
+    provider = SmokeShapedProvider()
+    provider.dispatch(capability)
+    del provider.verify_provider_record
+
+    loaded = runner._provider_record(
+        provider,
+        "dispatch-input",
+        verify_record=capability.verify_record,
+    )
+    assert loaded is record
+    assert verified == [record]
+
+
 def test_decision_evidence_store_namespaces_identical_bytes_by_manifest_ref(
     tmp_path: Path,
 ) -> None:

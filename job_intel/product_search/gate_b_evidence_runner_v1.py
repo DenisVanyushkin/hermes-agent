@@ -2534,7 +2534,12 @@ def _default_binding_verifier(
     )
 
 
-def _provider_record(provider: GovernedProvider, input_hash: str) -> dict[str, object]:
+def _provider_record(
+    provider: GovernedProvider,
+    input_hash: str,
+    *,
+    verify_record: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
     store = getattr(provider, "store", None)
     loader = getattr(store, "load", None)
     if not callable(loader):
@@ -2544,7 +2549,11 @@ def _provider_record(provider: GovernedProvider, input_hash: str) -> dict[str, o
         raise ValueError("provider_record_invalid")
     # The producer exposes the trusted keyed-verifier contract.  Do not infer
     # whether to verify from a discriminator inside the untrusted record.
-    verifier = getattr(provider, "verify_provider_record", None)
+    verifier = (
+        getattr(provider, "verify_provider_record", None)
+        if verify_record is None
+        else verify_record
+    )
     if not callable(verifier):
         raise ValueError("v2_provider_record_verifier_required")
     verifier(record)
@@ -2638,9 +2647,13 @@ def _assert_provider_record_authority(
 
 
 def _provider_dispatch_result(
-    provider: GovernedProvider, input_hash: str, result: object
+    provider: GovernedProvider,
+    input_hash: str,
+    result: object,
+    *,
+    verify_record: Callable[[dict[str, object]], None] | None = None,
 ) -> tuple[dict[str, object], str, str, bytes, Decimal | None, Decimal]:
-    record = _provider_record(provider, input_hash)
+    record = _provider_record(provider, input_hash, verify_record=verify_record)
     outcome = str(record.get("post_dispatch_outcome_v3", ""))
     try:
         terminal = TerminalOutcome(outcome)
@@ -2977,7 +2990,11 @@ def run_collection(
                 # record before raising. Consume that record as the row result;
                 # an absent record is a fail-closed provider contract violation.
                 try:
-                    _provider_record(provider, dispatch_input_hash)
+                    _provider_record(
+                        provider,
+                        dispatch_input_hash,
+                        verify_record=capability.verify_record,
+                    )
                 except Exception as exc:
                     raise ValueError("provider_failure_record_missing") from exc
                 dispatch_result = None
@@ -2988,7 +3005,12 @@ def run_collection(
             response_bytes,
             measured_cost,
             conservative_cost,
-        ) = _provider_dispatch_result(provider, dispatch_input_hash, dispatch_result)
+        ) = _provider_dispatch_result(
+            provider,
+            dispatch_input_hash,
+            dispatch_result,
+            verify_record=capability.verify_record,
+        )
         _assert_provider_record_authority(manifest, provider_record)
         semantic_transport_record_sha256 = provider_record.get(
             "semantic_transport_record_sha256"
@@ -3165,7 +3187,11 @@ def run_one_row(
         )
     )
     dispatch_input_hash = _reservation_input_hash(ref)
-    provider_record = _provider_record(provider, dispatch_input_hash)
+    provider_record = _provider_record(
+        provider,
+        dispatch_input_hash,
+        verify_record=getattr(provider, "verify_provider_record", None),
+    )
     _assert_provider_record_authority(manifest, provider_record)
     response_bytes = _canonical_bytes(response_payload)
     validation_status = validate_provider_payload_v3(
