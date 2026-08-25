@@ -196,6 +196,104 @@ def _prop(**kw):
     return base
 
 
+def _gate_failures(**over):
+    base = {
+        "schema_version": "upstream-sync-gate-failures/v2",
+        "common_path": [],
+        "post_only_path": [],
+        "pre_existing": [],
+        "unknown": [],
+        "unreadable_runs": [],
+        "blocking_failures": [],
+    }
+    base.update(over)
+    return base
+
+
+class TestGateReport:
+    @pytest.mark.parametrize(
+        ("source", "stage", "label"),
+        [
+            ("baseline", "collect", "baseline (before merge)"),
+            ("merged", "collect", "post (after merge)"),
+            ("upstream_parent", "collect", "upstream-parent probe"),
+            ("upstream_parent", "probe", "upstream-parent probe"),
+        ],
+    )
+    def test_unreadable_run_is_infrastructure_unknown_not_merge_regression(
+        self, source, stage, label
+    ):
+        text = slack.gate_report_text(
+            _gate_failures(
+                unreadable_runs=[{"source": source, "stage": stage}],
+                unknown=[
+                    {
+                        "path": "tests/broken.py",
+                        "nodeid": "tests/broken.py::test_broken",
+                        "source": source,
+                        "stage": stage,
+                    }
+                ],
+            )
+        )
+
+        assert label in text
+        assert "infrastructure" in text.lower()
+        assert "not a merge regression" in text.lower()
+        assert "tests/broken.py::test_broken" in text
+
+    def test_clean_run_is_distinct_from_unreadable_run(self):
+        clean = slack.gate_report_text(_gate_failures())
+        unreadable = slack.gate_report_text(
+            _gate_failures(unreadable_runs=[{"source": "merged", "stage": "collect"}])
+        )
+
+        assert "clean" in clean.lower()
+        assert "unreadable" not in clean.lower()
+        assert "unreadable" in unreadable.lower()
+        assert clean != unreadable
+
+    def test_blocking_buckets_have_separate_counts_and_run_labels(self):
+        common = {
+            "path": "tests/common.py",
+            "nodeid": "tests/common.py::test_common",
+            "classification": "fork_regression",
+        }
+        post_only = [
+            {
+                "path": "tests/upstream.py",
+                "nodeid": "tests/upstream.py::test_one",
+                "classification": "upstream_red_admission_failure",
+            },
+            {
+                "path": "tests/upstream.py",
+                "nodeid": "tests/upstream.py::test_two",
+                "classification": "fork_compatibility_failure",
+            },
+        ]
+        text = slack.gate_report_text(
+            _gate_failures(
+                common_path=[common],
+                post_only_path=post_only,
+                blocking_failures=[common, *post_only],
+                pre_existing=[
+                    {
+                        "path": "tests/old.py",
+                        "nodeid": "tests/old.py::test_old",
+                        "classification": "pre_existing_failure",
+                    }
+                ],
+            )
+        )
+
+        assert "baseline (before merge)" in text
+        assert "post (after merge)" in text
+        assert "common_path: 1" in text
+        assert "post_only_path: 2" in text
+        assert "pre_existing: 1" in text
+        assert "tests/upstream.py::test_one" in text
+
+
 class TestTriageText:
     def test_shows_the_verdict_explanation_and_patch(self):
         text = slack.triage_text(_triage([_prop()]))

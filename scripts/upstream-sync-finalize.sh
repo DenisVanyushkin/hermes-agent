@@ -209,12 +209,15 @@ if not channel:
 prep = load(os.path.join(state, "apply-prepare.json"))
 result = load(result_path)
 triage = load(os.path.join(state, "gate-triage.json"))
+gate_failures = load(os.path.join(state, "gate-failures.json"))
 if status == "ok" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
     text = slack.applied_text(prep, result)
 elif status == "awaiting_decision":
     text = slack.report_text(pending)
 elif status == "failed" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
-    text = slack.failed_text(prep, result, scratch=scratch, triage=triage)
+    text = slack.failed_text(
+        prep, result, scratch=scratch, triage=triage, gate_failures=gate_failures
+    )
 else:
     sys.exit(0)
 slack.post(channel, text, thread_ts=thread)
