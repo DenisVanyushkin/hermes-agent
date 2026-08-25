@@ -539,7 +539,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 - [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_readiness_experiment.py`
   проходит assertions `transport_success: 48`, `assessed: 45`, `decision_fail_closed: 3` и summary
   `Transport completed: 48/48. Decisions assessed: 45/48. Not measurable: 3/48.`
-- [ ] `.venv/bin/ruff check job_intel/product_search/gate_b_evidence_runner_v1.py job_intel/product_search/evidence_synthesis.py job_intel/vacancy_understanding/semantic/runtime/llm_provider.py tests/product_search/test_gate_b_full_composition_e2e.py tests/product_search/test_gate_b_collection_runner.py tests/product_search/test_gate_b_recording_replay.py tests/product_search/test_gate_b_evidence_skeleton.py`
+- [x] `.venv/bin/ruff check job_intel/product_search/gate_b_evidence_runner_v1.py job_intel/product_search/evidence_synthesis.py job_intel/vacancy_understanding/semantic/runtime/llm_provider.py tests/product_search/test_gate_b_full_composition_e2e.py tests/product_search/test_gate_b_collection_runner.py tests/product_search/test_gate_b_recording_replay.py tests/product_search/test_gate_b_evidence_skeleton.py`
   завершается с exit `0`, затем `git diff --check` не печатает ошибок.
 
 ---
