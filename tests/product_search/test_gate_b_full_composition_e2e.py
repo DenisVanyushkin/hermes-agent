@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
@@ -16,7 +18,10 @@ from job_intel.product_search.gate_b_evidence_runner_v1 import (
     ManifestRef,
     RecordingStore,
 )
-from job_intel.product_search.gate_b_evidence_v3 import ReviewedFragmentAllowlistV3
+from job_intel.product_search.gate_b_evidence_v3 import (
+    EvidenceSynthesisInputV3,
+    ReviewedFragmentAllowlistV3,
+)
 from job_intel.product_search.decision_v2 import load_decision_policy
 from job_intel.product_search import gate_b_evidence_runner_v1 as runner
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import (
@@ -70,6 +75,16 @@ V2_RECORD_MUTATION_FIELDS = (
     "max_output_tokens",
     "semantic_transport_record_sha256",
 )
+
+
+def test_dispatch_request_declares_v3_projection_contract() -> None:
+    hints = get_type_hints(runner.GateBDispatchRequestV2)
+    assert hints["synthesis_input"] is EvidenceSynthesisInputV3
+
+
+def test_production_factory_has_no_smoke_trace_hook() -> None:
+    source = inspect.getsource(runner.build_decision_request_from_context_v2)
+    assert "GATE_B_SMOKE_FACTORY_TRACE" not in source
 
 
 def _mutated_v2_value(value: object) -> object:

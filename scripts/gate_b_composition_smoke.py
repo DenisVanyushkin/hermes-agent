@@ -243,10 +243,6 @@ def main() -> int:
             ).replace(
                 "/var/lib/job-intel-gate-b-spend",
                 str(fixture_root / "spend-records"),
-            ).replace(
-                '  --setenv=GATE_B_SMOKE_PROBE_CAP="${GATE_B_SMOKE_PROBE_CAP:-}" \\\n',
-                '  --setenv=GATE_B_SMOKE_PROBE_CAP="${GATE_B_SMOKE_PROBE_CAP:-}" \\\n'
-                '  --setenv=GATE_B_SMOKE_FACTORY_TRACE="${GATE_B_SMOKE_FACTORY_TRACE:-}" \\\n',
             ),
             encoding="utf-8",
         )
@@ -280,7 +276,6 @@ def main() -> int:
             "GATE_B_SMOKE_ISOLATION_PROBE": str(probe_path),
             "GATE_B_SMOKE_DISPATCH_LOG": str(dispatch_probe_path),
             "GATE_B_SMOKE_PROBE_CAP": "1",
-            "GATE_B_SMOKE_FACTORY_TRACE": "1",
         }
         target_started = time.perf_counter()
         try:
@@ -331,15 +326,6 @@ def main() -> int:
             )
         if not dispatch_probe_path.is_file():
             raise RuntimeError("provider did not publish dispatch probe")
-        factory_trace = [
-            line.strip()
-            for line in target_attempt.stderr.splitlines()
-            if line.strip() == "build_decision_request_from_context_v2"
-        ]
-        if not factory_trace:
-            raise SmokeFailure(
-                "production_decision_request_factory_not_called"
-            )
         dispatch_probe = json.loads(dispatch_probe_path.read_bytes())
         manifest_row_count = 48
         if dispatch_probe.get("dispatch_count") != manifest_row_count:
@@ -357,16 +343,25 @@ def main() -> int:
 
         manifest = EvidenceManifest.model_validate(json.loads(manifest_path.read_bytes()))
         decision_store = DecisionEvidenceStore(state / "decisions")
-        verdicts = tuple(
-            AdjudicationVerdict(
-                manifest_ref=manifest.row_ref(ordinal),
-                decision_sha256=decision_store.find_for_manifest_ref(
-                    manifest.row_ref(ordinal)
-                ).decision_sha256,
-                correct=True,
+        factory_call_count = 0
+        verdicts_list: list[AdjudicationVerdict] = []
+        for ordinal in range(manifest.row_count):
+            row_ref = manifest.row_ref(ordinal)
+            try:
+                decision_ref = decision_store.find_for_manifest_ref(row_ref)
+            except ValueError as exc:
+                raise SmokeFailure(
+                    "production_decision_request_factory_not_called"
+                ) from exc
+            factory_call_count += 1
+            verdicts_list.append(
+                AdjudicationVerdict(
+                    manifest_ref=row_ref,
+                    decision_sha256=decision_ref.decision_sha256,
+                    correct=True,
+                )
             )
-            for ordinal in range(manifest.row_count)
-        )
+        verdicts = tuple(verdicts_list)
         adjudication = AdjudicationSet.from_verdicts(verdicts)
         adjudication_path = state / "adjudication.json"
         adjudication_path.write_bytes(canonical(adjudication.model_dump(mode="json")))
@@ -485,7 +480,7 @@ def main() -> int:
             "isolation_probe": isolation_probe,
             "isolation_probe_error": isolation_probe_error,
             "dispatch_probe": dispatch_probe,
-            "decision_request_factory_calls": len(factory_trace),
+            "decision_request_factory_calls": factory_call_count,
             "first_stop": first_stop,
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")

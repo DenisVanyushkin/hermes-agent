@@ -9,6 +9,7 @@ from pathlib import Path
 import socket
 import sqlite3
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
@@ -429,6 +430,11 @@ def test_run_one_row_rejects_unverified_store_record_before_decision_factory(
             decision_request_factory=unexpected_decision_factory,
         )
     assert decision_calls == 0
+
+
+def test_run_one_row_declares_compatibility_provider_contract() -> None:
+    hints = get_type_hints(run_one_row)
+    assert hints["provider"] is runner.RunOneRowProvider
 
 
 def _run_one_row_with_keyed_record(

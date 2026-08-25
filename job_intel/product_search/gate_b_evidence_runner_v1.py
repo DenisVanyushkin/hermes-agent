@@ -432,8 +432,6 @@ def build_decision_request_from_context_v2(
     context: DecisionRequestFactoryContextV1,
 ) -> DecisionRequestV2:
     """Adapt the positional runtime factory contract to the V2 builder."""
-    if os.environ.get("GATE_B_SMOKE_FACTORY_TRACE"):
-        print("build_decision_request_from_context_v2", file=sys.stderr, flush=True)
     return build_decision_request_v2(
         response_payload=context.response_payload,
         projected=context.projected,
@@ -1220,7 +1218,7 @@ class GateEvaluator:
 class GateBDispatchRequestV2:
     """Immutable seam carrying the full local projection and redacted payload."""
 
-    synthesis_input: EvidenceSynthesisInputV2
+    synthesis_input: EvidenceSynthesisInputV3
     provider_payload: Mapping[str, object]
 
     def __post_init__(self) -> None:
@@ -1246,6 +1244,19 @@ class GovernedProvider(Protocol):
         input_hash: str,
         capability: object,
     ) -> object: ...
+
+
+class RunOneRowProvider(Protocol):
+    """Compatibility provider used by the legacy one-row skeleton.
+
+    This seam intentionally predates the governed dispatch protocol: it
+    supplies a store-backed record and dispatches without ledger capability
+    keyword arguments.  Production collection uses ``GovernedProvider``.
+    """
+
+    store: object
+
+    def dispatch(self, request: GateBDispatchRequestV2) -> object: ...
 
 
 class GovernedStructuredProviderAdapter:
@@ -3095,7 +3106,7 @@ def run_one_row(
     raw: Mapping[str, object],
     reviewed_allowlist: ReviewedFragmentAllowlistV3,
     company_evidence_catalog: CompanyEvidenceCatalogV3 | None = None,
-    provider: GovernedProvider,
+    provider: RunOneRowProvider,
     ledger: ForegroundDispatchLedger,
     recordings: RecordingStore,
     decision_evidence: DecisionEvidenceStore,
