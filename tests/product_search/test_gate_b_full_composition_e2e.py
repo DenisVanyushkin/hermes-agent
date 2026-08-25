@@ -517,10 +517,6 @@ def test_v2_record_field_mutation_is_rejected_by_keyed_verifier(
         runner._provider_record(provider, dispatch_input_hash)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Task 10: publication failure after reconcile leaves a terminal ledger entry",
-)
 def test_v2_publication_failure_does_not_leave_paid_terminal_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -540,6 +536,110 @@ def test_v2_publication_failure_does_not_leave_paid_terminal_dispatch(
             capability=capability,
         )
     assert ledger.entries()[0].state is JournalState.DISPATCHED
+
+
+def test_v2_publication_resume_uses_stored_transport_without_redispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    semantic_fake = _ProductionShapedSemanticFake(_provider_payload(projected))
+    manifest_sha256 = "e" * 64
+    (tmp_path / "provider-records").mkdir()
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
+    semantic_provider = LLMObservationProvider(
+        store=SemanticRecordingStore(tmp_path / "semantic-records"),
+        mode="record",
+        model_id=policy.model_id,
+        transport=semantic_fake,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    provider = runner._LiveGateBProvider(semantic_provider)
+    manifest, corpus_row = _fixture_manifest(
+        projected=projected_v3,
+        provider=provider,
+        manifest_sha256=manifest_sha256,
+    )
+    manifest.decision_clock = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        runner,
+        "project_vacancy_evidence_v3",
+        lambda *_args, **_kwargs: projected_v3,
+    )
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=runner.NoDurableAccounting()
+    )
+    allowlist = ReviewedFragmentAllowlistV3(
+        schema_version="3.1.0",
+        gate_a_run_id="gate-a-20260816T141344Z",
+        gate_b_corpus_sha256="b" * 64,
+        entries=(),
+    )
+    recordings = RecordingStore(tmp_path / "recordings")
+    decision_evidence = runner.DecisionEvidenceStore(tmp_path / "decisions")
+    original_save = provider.store.save_exclusive
+
+    def fail_publication(_record: dict[str, object]) -> None:
+        raise RuntimeError("v2 publication failure")
+
+    monkeypatch.setattr(provider.store, "save_exclusive", fail_publication)
+    with pytest.raises(RuntimeError, match="v2 publication failure"):
+        runner.run_collection(
+            manifest=manifest,
+            corpus_rows=(corpus_row,),
+            reviewed_allowlist=allowlist,
+            provider_factory=lambda: provider,
+            ledger=ledger,
+            recordings=recordings,
+            decision_evidence=decision_evidence,
+            decision_policy=load_decision_policy(),
+            decision_request_factory=runner.build_decision_request_from_context_v2,
+            source_artifact=SimpleNamespace(),
+            runtime=SimpleNamespace(),
+            authorities=SimpleNamespace(),
+            binding_verifier=lambda *_args, **_kwargs: None,
+        )
+    assert ledger.entries()[0].state is JournalState.DISPATCHED
+    assert len(semantic_fake.chat.completions.calls) == 1
+
+    monkeypatch.setattr(provider.store, "save_exclusive", original_save)
+    monkeypatch.setattr(
+        provider,
+        "dispatch",
+        lambda *_args, **_kwargs: pytest.fail("resume must not redispatch"),
+    )
+    monkeypatch.setattr(
+        ledger,
+        "append_pre_dispatch",
+        lambda *_args, **_kwargs: pytest.fail("resume must not reserve"),
+    )
+    runner.run_collection(
+        manifest=manifest,
+        corpus_rows=(corpus_row,),
+        reviewed_allowlist=allowlist,
+        provider_factory=lambda: provider,
+        ledger=ledger,
+        recordings=recordings,
+        decision_evidence=decision_evidence,
+        decision_policy=load_decision_policy(),
+        decision_request_factory=runner.build_decision_request_from_context_v2,
+        source_artifact=SimpleNamespace(),
+        runtime=SimpleNamespace(),
+        authorities=SimpleNamespace(),
+        binding_verifier=lambda *_args, **_kwargs: None,
+    )
+    assert len(semantic_fake.chat.completions.calls) == 1
+    entry = ledger.entries()[0]
+    assert entry.state is JournalState.SUCCESS
+    assert entry.recording_sha256 is not None
+    v2_record = runner._provider_record(
+        provider, runner._reservation_input_hash(manifest.row_ref(0))
+    )
+    assert entry.recording_sha256 == v2_record["semantic_transport_record_sha256"]
 
 
 def test_duplicate_provider_input_cannot_bind_to_two_dispatches(

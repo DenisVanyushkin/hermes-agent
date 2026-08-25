@@ -403,7 +403,7 @@ def test_terminal_unknown_uses_empty_provider_record_and_conservative_cost() -> 
     capability.seal_record(provider.store.record)
     capability.reconcile(reservation, Decimal("0.01"), "terminal_unknown")
 
-    args = journal.commit_terminal.call_args.args
+    args = journal.hold_reconciled.call_args.args
     assert args[1] is TerminalOutcome.TERMINAL_UNKNOWN
     assert args[3] is None
     assert args[4] == Decimal("0.01")
@@ -695,7 +695,7 @@ def test_collection_runner_dispatches_duplicate_inputs_as_distinct_rows(
         refs[0],
         refs[1],
     ]
-    assert journal.commit_terminal.call_count == 2
+    assert journal.hold_reconciled.call_count == 2
     assert [result.manifest_ref for result in report.rows] == [refs[0], refs[1]]
 
 

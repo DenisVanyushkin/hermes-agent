@@ -473,6 +473,15 @@ class JournalEntry(_StrictFrozenModel):
     conservative_cost_usd: Decimal = Field(ge=Decimal("0"))
 
 
+@dataclass(frozen=True)
+class ReconciledDispatch:
+    manifest_ref: ManifestRef
+    outcome: TerminalOutcome
+    recording_sha256: str
+    measured_cost_usd: Decimal | None
+    conservative_cost_usd: Decimal
+
+
 class NoDurableAccounting:
     """Explicit test-only opt-out from the production spend record."""
 
@@ -497,6 +506,7 @@ class ForegroundDispatchLedger:
     ) -> None:
         self.manifest = manifest
         self._entries: dict[int, JournalEntry] = {}
+        self._reconciled: dict[int, ReconciledDispatch] = {}
         self._committed_budget_reserver = committed_budget_reserver
 
     def _validate_ref(self, ref: ManifestRef) -> None:
@@ -562,6 +572,47 @@ class ForegroundDispatchLedger:
         if other_cost + conservative_cost_usd > self.manifest.limits.aggregate_maximum_usd:
             raise ValueError("spend_cap_exhausted")
         self._entries[receipt.manifest_ref.ordinal] = entry
+
+    def hold_reconciled(
+        self,
+        receipt: DispatchReceipt,
+        outcome: TerminalOutcome,
+        recording_sha256: str,
+        measured_cost_usd: Decimal | None,
+        conservative_cost_usd: Decimal,
+    ) -> None:
+        self._validate_ref(receipt.manifest_ref)
+        current = self._entries.get(receipt.manifest_ref.ordinal)
+        if current is None or current.state is not JournalState.DISPATCHED:
+            raise ValueError("dispatch reconciliation requires dispatched state")
+        pending = ReconciledDispatch(
+            manifest_ref=receipt.manifest_ref,
+            outcome=outcome,
+            recording_sha256=recording_sha256,
+            measured_cost_usd=measured_cost_usd,
+            conservative_cost_usd=conservative_cost_usd,
+        )
+        previous = self._reconciled.get(receipt.manifest_ref.ordinal)
+        if previous is not None and previous != pending:
+            raise ValueError("dispatch reconciliation conflict")
+        self._reconciled[receipt.manifest_ref.ordinal] = pending
+
+    def finalize_reconciled(self, ref: ManifestRef) -> None:
+        self._validate_ref(ref)
+        pending = self._reconciled.get(ref.ordinal)
+        if pending is None:
+            raise ValueError("dispatch reconciliation missing")
+        current = self._entries.get(ref.ordinal)
+        if current is None or current.state is not JournalState.DISPATCHED:
+            raise ValueError("dispatch reconciliation is not pending")
+        self.commit_terminal(
+            DispatchReceipt(manifest_ref=ref, sequence=current.sequence),
+            pending.outcome,
+            pending.recording_sha256,
+            pending.measured_cost_usd,
+            pending.conservative_cost_usd,
+        )
+        del self._reconciled[ref.ordinal]
 
     def entries(self) -> tuple[JournalEntry, ...]:
         return tuple(self._entries[index] for index in sorted(self._entries))
@@ -1354,18 +1405,18 @@ class _LiveGateBProvider:
         self.store.save_exclusive(v2_record)
         return v2_record
 
-    def dispatch(
+    def _prepare_adapter(
         self,
-        request: GateBDispatchRequestV2,
         *,
         input_hash: str,
+        provider_payload: dict[str, object],
         capability: object,
-    ) -> object:
-        provider_payload = dict(request.provider_payload)
+    ) -> str:
         if self._adapter is None:
             from job_intel.product_search.evidence_synthesis import (
                 RecordedEvidenceSynthesisProviderV2,
             )
+
             self._adapter = RecordedEvidenceSynthesisProviderV2(
                 semantic_provider=self._semantic_provider,
                 policy=self._policy,
@@ -1384,6 +1435,46 @@ class _LiveGateBProvider:
         if not callable(binder):
             raise ValueError("transport_receipt_binder_required")
         binder(input_hash, provider_input_sha256)
+        return provider_input_sha256
+
+    def _verify_published_v2_record(self, record: dict[str, object]) -> None:
+        self.verify_provider_record(record)
+        for name, expected in self.authority_identity.items():
+            if record.get(name) != expected:
+                raise ValueError("provider_record_authority_mismatch")
+
+    @staticmethod
+    def _response_payload(record: Mapping[str, object]) -> dict[str, object]:
+        raw_response_text = record.get("raw_response_text")
+        if not isinstance(raw_response_text, str) or not raw_response_text:
+            return {}
+        try:
+            response_payload = json.loads(raw_response_text)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LLMProviderError("schema_invalid", "structured JSON invalid") from exc
+        if not isinstance(response_payload, dict):
+            raise LLMProviderError("schema_invalid", "structured JSON object required")
+        return response_payload
+
+    def _finalize_pending(self, input_hash: str, capability: object) -> None:
+        finalizer = getattr(capability, "finalize_pending", None)
+        if not callable(finalizer):
+            raise ValueError("dispatch_finalizer_required")
+        finalizer(input_hash)
+
+    def dispatch(
+        self,
+        request: GateBDispatchRequestV2,
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object:
+        provider_payload = dict(request.provider_payload)
+        self._prepare_adapter(
+            input_hash=input_hash,
+            provider_payload=provider_payload,
+            capability=capability,
+        )
         try:
             from job_intel.product_search.evidence_synthesis import (
                 run_evidence_synthesis_v2,
@@ -1400,18 +1491,52 @@ class _LiveGateBProvider:
                 result=result,
                 capability=capability,
             )
-            raw_response_text = v2_record["raw_response_text"]
-            if not isinstance(raw_response_text, str) or not raw_response_text:
-                return {}
-            try:
-                response_payload = json.loads(raw_response_text)
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise LLMProviderError(
-                    "schema_invalid", "structured JSON invalid"
-                ) from exc
-            if not isinstance(response_payload, dict):
-                raise LLMProviderError("schema_invalid", "structured JSON object required")
-            return response_payload
+            self._verify_published_v2_record(v2_record)
+            self._finalize_pending(input_hash, capability)
+            return self._response_payload(v2_record)
+        finally:
+            self._adapter.record_capability = None
+
+    def resume_v2_publication(
+        self,
+        request: GateBDispatchRequestV2,
+        *,
+        input_hash: str,
+        capability: object,
+    ) -> object:
+        """Publish V2 from the stored generic record without transport."""
+        provider_payload = dict(request.provider_payload)
+        provider_input_sha256 = self._prepare_adapter(
+            input_hash=input_hash,
+            provider_payload=provider_payload,
+            capability=capability,
+        )
+        try:
+            generic_record = self._semantic_store.load(provider_input_sha256)
+            if not isinstance(generic_record, dict):
+                raise ValueError("provider_transport_record_invalid")
+            from job_intel.product_search.evidence_synthesis import (
+                run_evidence_synthesis_v2,
+            )
+
+            result = run_evidence_synthesis_v2(
+                synthesis_input=request.synthesis_input,
+                provider=self._adapter,
+                policy=self._policy,
+                provider_payload=provider_payload,
+            )
+            self._adapter.last_call_metadata["transport_record_sha256"] = _sha256(
+                _canonical_bytes(generic_record)
+            )
+            v2_record = self._publish_v2_provider_record(
+                dispatch_input_hash=input_hash,
+                input_payload=request.synthesis_input.model_dump(mode="json"),
+                result=result,
+                capability=capability,
+            )
+            self._verify_published_v2_record(v2_record)
+            self._finalize_pending(input_hash, capability)
+            return self._response_payload(v2_record)
         finally:
             self._adapter.record_capability = None
 
@@ -2582,10 +2707,12 @@ def _issue_collection_capability(
         receipt = receipts.get(reservation_id)
         if dispatch_key is None or receipt is None:
             raise ValueError("reservation_unknown")
-        provider_input_hash = record_identity_bindings.pop(dispatch_key, None)
+        provider_input_hash = record_identity_bindings.get(dispatch_key)
         if provider_input_hash is None:
             raise ValueError("transport_receipt_binding_missing")
-        transport_receipt = transport_receipts.pop(provider_input_hash, None)
+        # Keep the binding and receipt alive for the process-local V2 resume
+        # seam. A replay never spends or re-dispatches transport.
+        transport_receipt = transport_receipts.get(provider_input_hash)
         if transport_receipt is None:
             raise ValueError("transport_receipt_missing")
         if transport_receipt.input_hash != provider_input_hash:
@@ -2602,7 +2729,7 @@ def _issue_collection_capability(
             else Decimal(str(record["measured_cost_usd"]))
         )
         conservative = Decimal(str(record.get("conservative_cost_usd")))
-        ledger.commit_terminal(
+        ledger.hold_reconciled(
             receipt,
             TerminalOutcome(outcome),
             transport_record_sha256,
@@ -2613,7 +2740,7 @@ def _issue_collection_capability(
     metadata_seal_key = hashlib.sha256(
         ("gate-b-provider-record:" + manifest.manifest_sha256).encode("ascii")
     ).digest()
-    return _issue_structured_call_capability(
+    capability = _issue_structured_call_capability(
         run_identity_sha256=manifest.manifest_sha256,
         pricing=pricing,
         exact_call_cap=manifest.limits.ordered_call_cap,
@@ -2625,6 +2752,15 @@ def _issue_collection_capability(
         capture_record=capture_record,
         bind_record_identity=bind_record_identity,
     )
+
+    def finalize_pending(dispatch_input_hash: str) -> None:
+        ref = reservation_refs.get(dispatch_input_hash)
+        if ref is None:
+            raise ValueError("reservation_manifest_ref_missing")
+        ledger.finalize_reconciled(ref)
+
+    setattr(capability, "finalize_pending", finalize_pending)
+    return capability
 
 
 def run_collection(
@@ -2715,24 +2851,35 @@ def run_collection(
             raise ValueError("provider input hash does not match manifest row")
         ref = manifest.row_ref(corpus_row.ordinal)
         dispatch_input_hash = _reservation_input_hash(ref)
-        try:
-            dispatch_result = provider.dispatch(
-                GateBDispatchRequestV2(
-                    synthesis_input=projected,
-                    provider_payload=request_payload,
-                ),
+        dispatch_request = GateBDispatchRequestV2(
+            synthesis_input=projected,
+            provider_payload=request_payload,
+        )
+        if ledger.state(corpus_row.ordinal) is JournalState.DISPATCHED:
+            resume = getattr(provider, "resume_v2_publication", None)
+            if not callable(resume):
+                raise ValueError("v2_publication_resume_required")
+            dispatch_result = resume(
+                dispatch_request,
                 input_hash=dispatch_input_hash,
                 capability=capability,
             )
-        except LLMProviderError:
-            # The governed provider persists its canonical terminal-failure
-            # record before raising.  Consume that record as the row result;
-            # an absent record is a fail-closed provider contract violation.
+        else:
             try:
-                _provider_record(provider, dispatch_input_hash)
-            except Exception as exc:
-                raise ValueError("provider_failure_record_missing") from exc
-            dispatch_result = None
+                dispatch_result = provider.dispatch(
+                    dispatch_request,
+                    input_hash=dispatch_input_hash,
+                    capability=capability,
+                )
+            except LLMProviderError:
+                # The governed provider persists its canonical terminal-failure
+                # record before raising. Consume that record as the row result;
+                # an absent record is a fail-closed provider contract violation.
+                try:
+                    _provider_record(provider, dispatch_input_hash)
+                except Exception as exc:
+                    raise ValueError("provider_failure_record_missing") from exc
+                dispatch_result = None
         (
             provider_record,
             provider_record_sha256,

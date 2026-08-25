@@ -337,7 +337,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 ### 2.4 Восстановление после сбоя V2-публикации без повторного provider call
 
-- [ ] Пункт 2.4 выполнен целиком
+- [x] Пункт 2.4 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -347,32 +347,32 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 **Задачи**
 
-- [ ] Сохранить существующий strict-xfail
+- [x] Сохранить существующий strict-xfail
   `test_v2_publication_failure_does_not_leave_paid_terminal_dispatch` как RED-контроль.
-- [ ] Разделить transport reconciliation и terminal ledger publication: `reconcile` проверяет и
+- [x] Разделить transport reconciliation и terminal ledger publication: `reconcile` проверяет и
   удерживает transport receipt/cost/outcome, но `ledger.commit_terminal` вызывается только после
   успешного create-once сохранения и keyed-проверки V2-envelope.
-- [ ] Сохранить при publication failure состояние `JournalState.DISPATCHED`, зарезервированный
+- [x] Сохранить при publication failure состояние `JournalState.DISPATCHED`, зарезервированный
   conservative cost и generic semantic record в process-local provider store; не освобождать
   call/spend cap и не разрешать второй transport dispatch.
-- [ ] Добавить producer-owned in-process recovery seam
+- [x] Добавить producer-owned in-process recovery seam
   `resume_v2_publication(request: GateBDispatchRequestV2, *, input_hash: str, capability: object)`:
   он загружает уже записанный generic semantic record, проверяет seal/authority, повторно строит и
   валидирует V2-result, публикует V2-envelope и только затем финализирует ledger. Seam не принимает
   transport и не вызывает `chat.completions.create`.
-- [ ] На повторном входе в `run_collection` с тем же process-local ledger распознавать
+- [x] На повторном входе в `run_collection` с тем же process-local ledger распознавать
   `JournalState.DISPATCHED` + сохранённый generic semantic record как recoverable publication
   state, заново вывести provider-input identity из manifest-bound request, проверить record новой
   capability того же manifest и вызвать `resume_v2_publication` вместо `dispatch`. Resume не
   вызывает `reserve`/`mark_dispatching`, затем продолжает обычные Decision v2,
   `RecordingStore.save_exclusive` и `recordings.verify`; новый процесс и новый ledger не объявлять
   resume-механизмом.
-- [ ] Добавить RED-тест
+- [x] Добавить RED-тест
   `test_v2_publication_resume_uses_stored_transport_without_redispatch`: первый save падает,
   повторный `run_collection` с тем же provider stores и process-local ledger после восстановления
   V2 store
   завершает V2 publication/ledger/recording при неизменном transport call count `1`.
-- [ ] После GREEN удалить strict-xfail с исходного теста без ослабления его assertion на
+- [x] После GREEN удалить strict-xfail с исходного теста без ослабления его assertion на
   `JournalState.DISPATCHED` после publication failure.
 
 **Граница восстановления и остаточный риск**
@@ -384,19 +384,21 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 исчезнут. Новый процесс в таком случае обязан остановиться fail-closed; план не имеет права
 называть это cross-process resume или незаметно делать второй provider call.
 
-- [ ] До закрытия 2.4 владелец либо явно принимает эту process-local границу, либо остаточный
+- [x] До закрытия 2.4 владелец либо явно принимает эту process-local границу, либо остаточный
   риск выносится в отдельный tracked issue; ссылка на решение или issue записана в evidence реализации.
-- [ ] Условие полного снятия риска зафиксировано без воскрешения retired launch protocol: durable,
+- Evidence: владелец принял process-local границу Order 1; cross-process recovery вынесен в
+  [issue #11](https://github.com/DenisVanyushkin/hermes-agent/issues/11).
+- [x] Условие полного снятия риска зафиксировано без воскрешения retired launch protocol: durable,
   create-once, manifest-ref-bound recovery journal с dispatch identity, provider-input hash, generic transport
   receipt SHA, spend reservation/outcome и тестом рестарта, который публикует V2 без network/provider/spend.
 
 **DoD**
 
-- [ ] Оба теста publication failure/resume возвращают `2 passed`; после первого сбоя ledger
+- [x] Оба теста publication failure/resume возвращают `2 passed`; после первого сбоя ledger
   остаётся `DISPATCHED`, после resume становится терминальным и содержит transport receipt SHA.
-- [ ] Fake transport фиксирует ровно один вызов до и после resume; попытка повторного dispatch для
+- [x] Fake transport фиксирует ровно один вызов до и после resume; попытка повторного dispatch для
   той же строки отклоняется до transport.
-- [ ] Resume завершается `recordings.verify` и Decision v2 без network/provider/spend; новый
+- [x] Resume завершается `recordings.verify` и Decision v2 без network/provider/spend; новый
   `ForegroundDispatchLedger` или cross-process restart не обещаются и не добавляются.
 
 ### 2.5 Дубликаты manifest rows сохраняют разные dispatch identities
