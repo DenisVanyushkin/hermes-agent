@@ -652,7 +652,9 @@ pre-existing failure.
 устаревшая попытка ротируется, а новый `pending.local_head` фиксируется
 атомарно перед prepare. `pytest tests/scripts/test_upstream_sync_finalize.py
 -k attempt_invariant` — 2 passed; полный scope из finalize/apply — 95 passed и
-одно известное средовое падение `TestRepoLock`.
+одно известное средовое падение `TestRepoLock`. Полный
+`scripts/run_tests.sh tests/scripts/` — 657 passed и те же три известных
+pre-existing failure: два footgun-сканера и средовой `TestRepoLock`.
 
 **Зависимости.** T19. **Сложность.** M.
 
