@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,8 @@ def _inert_test_cmd(world) -> Path:
     script = world["fork"].parent / "inert-tests.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+        + _manifest_receipt_preamble()
+        + "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
         "echo '1 failed, 5 passed in 2.00s'\n"
     )
     script.chmod(0o755)
@@ -98,6 +100,30 @@ def _stub_hermes_bin(world) -> Path:
     script.write_text('#!/usr/bin/env bash\necho "hermes stub $*"\nexit 0\n')
     script.chmod(0o755)
     return script
+
+
+def _manifest_receipt_preamble() -> str:
+    """Make test doubles emit the same side-bound receipt as the real runner."""
+    return f'''PYTHON={sys.executable!r}
+GATE={str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")!r}
+SEL=""
+WT=""
+while [ $# -gt 0 ]; do case "$1" in
+  --selection-from) SEL="$2"; shift 2 ;;
+  --attempt-root|--boundary) shift 2 ;;
+  *) WT="$1"; shift ;;
+esac; done
+HEAD="$(${{PYTHON}} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$(${{PYTHON}} - "$SEL" "$HEAD" <<'PY'
+import json,sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text())
+print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")
+PY
+)"
+DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
+'''
 
 
 def _run_sync(world, extra_env=None, argv=()) -> subprocess.CompletedProcess:
@@ -168,7 +194,9 @@ def _boundary_recording_test_cmd(world) -> tuple[Path, Path]:
     script = world["fork"].parent / "boundary-recording-tests.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        'printf "%s\\n" "$*" >> ' + str(log) + "\n"
+        'CALL_ARGS="$*"\n'
+        + _manifest_receipt_preamble()
+        + 'printf "%s\\n" "$CALL_ARGS" >> ' + str(log) + "\n"
         "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
         "echo '1 failed, 5 passed in 2.00s'\n"
     )
@@ -239,7 +267,8 @@ def _staged_test_cmd(tmp_path: Path, baseline: str, post: str) -> Path:
     script = tmp_path / "staged-tests.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        f'marker="{marker}"\n'
+        + _manifest_receipt_preamble()
+        + f'marker="{marker}"\n'
         'count=$(cat "$marker" 2>/dev/null || echo 0)\n'
         'echo $((count + 1)) > "$marker"\n'
         'if [ "$count" -eq 0 ]; then\n'

@@ -672,21 +672,34 @@ if not isinstance(attempt_dir, str) or not attempt_dir:
 print(Path(attempt_dir) / "gate-selection.json")
 PY
 )"
+SELECTION_DIGEST="$(sha256sum "$SELECTION_MANIFEST" | awk '{print $1}')"
+PRE_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side pre --digest "$SELECTION_DIGEST")"
+POST_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side post --digest "$SELECTION_DIGEST")"
 rm -f "$SELECTION_BEFORE_PATHS" "$SELECTION_AFTER_PATHS" "$SELECTION_BOUNDARY_PATHS" \
   "$SELECTION_CHANGED_PATHS" "$SELECTION_REPORT_FILE"
 
-# Nonnzero test-run codes are expected: failures are the measured outcome.
+# Nonzero test-run codes are expected: failures are the measured outcome.
 git -C "$SYNC_WT" checkout --detach "$BEFORE_FULL" >/dev/null 2>&1
 if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
   --attempt-root "$SELECTION_ATTEMPT_ROOT" --boundary "$UPSTREAM_FULL" "$SYNC_WT" \
   >"$BASELINE_LOG_FILE" 2>&1; then
   :
 fi
+if ! grep -Fqx "$PRE_RECEIPT" "$BASELINE_LOG_FILE"; then
+  echo "FAILED: baseline runner receipt missing or measured the wrong manifest side." >&2
+  tail -n 5 "$BASELINE_LOG_FILE" >&2
+  exit 1
+fi
 git -C "$SYNC_WT" checkout --detach "$MERGED_HEAD" >/dev/null 2>&1
 if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
   --attempt-root "$SELECTION_ATTEMPT_ROOT" --boundary "$UPSTREAM_FULL" "$SYNC_WT" \
   >"$POST_LOG_FILE" 2>&1; then
   :
+fi
+if ! grep -Fqx "$POST_RECEIPT" "$POST_LOG_FILE"; then
+  echo "FAILED: post runner receipt missing or measured the wrong manifest side." >&2
+  tail -n 5 "$POST_LOG_FILE" >&2
+  exit 1
 fi
 
 # Тот же приём, что и в гейте merge-tree: код 2 означает «сравнить не смогли»

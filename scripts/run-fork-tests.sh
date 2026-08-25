@@ -161,6 +161,7 @@ OURS=()
 MERGE_CHANGED=()
 DROPPED=()
 TESTS=()
+RECEIPT_SIDE=""
 if [ -n "$SELECTION_FROM" ]; then
   if ! HEAD_SHA="$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)"; then
     echo "FAILED: cannot resolve checkout HEAD for manifest consumption" >&2
@@ -181,6 +182,23 @@ if [ -n "$SELECTION_FROM" ]; then
   fi
   if [ -n "$selection_output" ]; then
     mapfile -t TESTS <<<"$selection_output"
+  fi
+  if ! RECEIPT_SIDE="$(
+    "$CONTROL_PYTHON" - "$SELECTION_FROM" "$HEAD_SHA" <<'PY'
+import json, sys
+from pathlib import Path
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+head = sys.argv[2]
+if head == manifest.get("before"):
+    print("pre")
+elif head == manifest.get("after"):
+    print("post")
+else:
+    raise SystemExit("manifest checkout side is neither before nor after")
+PY
+  )" || [ -z "$RECEIPT_SIDE" ]; then
+    echo "FAILED: could not derive the measured manifest side" >&2
+    exit 2
   fi
 elif [ -n "$PROBE_NODEIDS_FROM" ]; then
   if ! mapfile -t TESTS < <(
@@ -276,12 +294,22 @@ else
   fi
   RECEIPT_SOURCE=legacy
 fi
-if ! RECEIPT_LINE="$(
-  "$CONTROL_PYTHON" "$GATE_HELPER" receipt \
-    --source "$RECEIPT_SOURCE" --digest "$SELECTION_DIGEST"
-)"; then
-  echo "FAILED: could not format the fork test receipt" >&2
-  exit 2
+if [ -n "$RECEIPT_SIDE" ]; then
+  if ! RECEIPT_LINE="$(
+    "$CONTROL_PYTHON" "$GATE_HELPER" receipt \
+      --source "$RECEIPT_SOURCE" --side "$RECEIPT_SIDE" --digest "$SELECTION_DIGEST"
+  )"; then
+    echo "FAILED: could not format the fork test receipt" >&2
+    exit 2
+  fi
+else
+  if ! RECEIPT_LINE="$(
+    "$CONTROL_PYTHON" "$GATE_HELPER" receipt \
+      --source "$RECEIPT_SOURCE" --digest "$SELECTION_DIGEST"
+  )"; then
+    echo "FAILED: could not format the fork test receipt" >&2
+    exit 2
+  fi
 fi
 printf '%s\n' "$RECEIPT_LINE" >&2
 

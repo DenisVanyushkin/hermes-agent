@@ -339,7 +339,8 @@ merge_passes_fork_tests() {
   local baseline_nodes merged_nodes upstream_nodes probe_request probe_nodeids
   local probe_log probe_wt classification_json blocking_count unknown_count
   local before_paths after_paths boundary_paths changed_paths
-  local selection_report attempt_dir selection_manifest selection_digest receipt_line
+  local selection_report attempt_dir selection_manifest selection_digest
+  local baseline_receipt_line post_receipt_line
   listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
   before_paths="$listing_dir/before.paths"
   after_paths="$listing_dir/after.paths"
@@ -384,8 +385,10 @@ merge_passes_fork_tests() {
     echo "could not hash the selection manifest for the runner receipt" >>"$DETAIL_LOG"
     return 1
   fi
-  if ! receipt_line="$("$py" "$gate" receipt \
-    --source manifest --digest "$selection_digest" 2>>"$DETAIL_LOG")"; then
+  if ! baseline_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side pre --digest "$selection_digest" 2>>"$DETAIL_LOG")" ||
+     ! post_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side post --digest "$selection_digest" 2>>"$DETAIL_LOG")"; then
     echo "could not format the expected runner receipt" >>"$DETAIL_LOG"
     return 1
   fi
@@ -400,7 +403,7 @@ merge_passes_fork_tests() {
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$baseline" 2>&1 || true
-  if ! grep -Fqx "$receipt_line" "$baseline"; then
+  if ! grep -Fqx "$baseline_receipt_line" "$baseline"; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
     echo "runner receipt missing or mismatched in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
@@ -414,7 +417,7 @@ merge_passes_fork_tests() {
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$post" 2>&1 || true
-  if ! grep -Fqx "$receipt_line" "$post"; then
+  if ! grep -Fqx "$post_receipt_line" "$post"; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
     echo "runner receipt missing or mismatched in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"

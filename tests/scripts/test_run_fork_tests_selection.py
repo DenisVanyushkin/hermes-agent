@@ -578,6 +578,7 @@ def test_manifest_selection_emits_receipt_for_consumed_file(
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     expected = upstream_sync_gate.fork_test_receipt(
         source="manifest",
+        side="post",
         digest=digest,
     )
     assert result.returncode == 0, f"stderr={result.stderr!r}"

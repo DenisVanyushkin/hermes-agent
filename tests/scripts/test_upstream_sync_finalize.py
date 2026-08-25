@@ -55,6 +55,40 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _manifest_receipt_preamble() -> str:
+    """Make test doubles emit a receipt whose side comes from the checkout."""
+    return f'''PYTHON={sys.executable!r}
+GATE={str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")!r}
+SEL=""
+WT=""
+while [ $# -gt 0 ]; do case "$1" in
+  --selection-from) SEL="$2"; shift 2 ;;
+  --attempt-root|--boundary) shift 2 ;;
+  *) WT="$1"; shift ;;
+esac; done
+HEAD="$(${{PYTHON}} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$(${{PYTHON}} - "$SEL" "$HEAD" <<'PY'
+import json,sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text())
+print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")
+PY
+)"
+DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
+'''
+
+
+def _manifest_receipt_after_parse() -> str:
+    """Receipt command for doubles that already parsed and retained WT/SEL."""
+    python = str(sys.executable)
+    gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+    return f'''HEAD="$({python} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$({python} -c 'import json,sys; m=json.load(open(sys.argv[1])); print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")' "$SEL" "$HEAD")"
+{python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk '{{print $1}}')"
+'''
+
+
 def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     """Fake SCRIPTS_DIR whose scripts record invocations instead of acting.
 
@@ -77,13 +111,8 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     tests_stub = scripts / "run-fork-tests.sh"
     tests_stub.write_text(
         "#!/usr/bin/env bash\n"
-        'SEL=""\n'
-        'while [ $# -gt 0 ]; do case "$1" in\n'
-        '  --selection-from) SEL="$2"; shift 2 ;;\n'
-        '  *) shift ;;\n'
-        'esac; done\n'
-        'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
-        "echo '0 failed, 5 passed in 2.00s'\n"
+        + _manifest_receipt_preamble()
+        + "echo '0 failed, 5 passed in 2.00s'\n"
     )
     tests_stub.chmod(0o755)
     # Copied by pattern, not by name: a hand-kept list silently omits every new
@@ -321,8 +350,9 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
         inert = tmp_path / "inert-tests.sh"
         inert.write_text(
             "#!/usr/bin/env bash\n"
-            "echo FAILED tests/known.py::test_flaky - AssertionError\n"
-            "echo 1 failed, 5 passed in 2.00s\n"
+            + _manifest_receipt_preamble()
+            + "echo FAILED tests/known.py::test_flaky - AssertionError\n"
+            + "echo 1 failed, 5 passed in 2.00s\n"
         )
         inert.chmod(0o755)
         env = dict(os.environ)
@@ -822,8 +852,8 @@ class TestApplyMergeIsGatedOnForkTests:
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
             'printf "%s\\n" "$SEL" >> "$(dirname "$0")/selection-calls.log"\n'
             'printf "%s\\n" "$ROOT" >> "$(dirname "$0")/attempt-root-calls.log"\n'
-            'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
-            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            + _manifest_receipt_after_parse()
+            + "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
             'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
         )
@@ -1081,6 +1111,7 @@ class TestRunnerFinalizeReceiptSeam:
 
         expected = upstream_sync_gate.fork_test_receipt(
             source="manifest",
+            side="post",
             digest=hashlib.sha256(manifest.read_bytes()).hexdigest(),
         )
         receipt_check = subprocess.run(
@@ -1981,8 +2012,8 @@ class TestRedGateIsTriagedAndProposedToTheOperator:
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
-            'printf "fork test receipt: contract=v1 source=manifest manifest_sha256=%s\\n" "$(sha256sum "$SEL" | awk "{print \\$1}")"\n'
-            'if [ "$PROBE" -eq 1 ]; then\n'
+            + _manifest_receipt_after_parse()
+            + 'if [ "$PROBE" -eq 1 ]; then\n'
             "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"
             "  echo '1 failed, 5 passed in 2.00s'\n"
             "  exit 0\n"
