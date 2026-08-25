@@ -549,6 +549,15 @@ e2e-stub этот прогон дал 646 passed и три известных pr
 зелёный для `sync-local-customizations.sh` и `upstream-sync-smoketest.sh`,
 включая случай с cwd `/`.
 
+**Реализация и проверка.** Выполнено в `a9046023fc`: оба скрипта сначала
+уважают явный `HERMES_REPO`, а только при его отсутствии используют выбор по
+cwd/SCRIPT_DIR/fallback. Добавлены два изолированных теста с runtime-root,
+отличным от выбранного repo, и `cwd=/`; до правки оба падали на выборе
+runtime-root, после правки focused `repo_precedence` дал 2 passed, весь
+`test_sync_local_customizations.py` — 12 passed. Полный
+`scripts/run_tests.sh tests/scripts/` дал 648 passed и три известных
+pre-existing failure: два footgun-сканера и средовой `TestRepoLock`.
+
 **Зависимости.** T16. **Сложность.** S.
 
 ---
