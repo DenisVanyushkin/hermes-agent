@@ -484,6 +484,99 @@ def test_transport_receipt_from_other_provider_input_is_rejected(
         capability.reconcile(reservation, Decimal("0.01"), "success")
 
 
+def test_finalized_dispatch_releases_reverse_provider_input_binding() -> None:
+    provider_input_hash = "1" * 64
+    refs = tuple(
+        ManifestRef(
+            run_id="gate-b-evidence-v1-0123456789abcdef",
+            manifest_sha256="4" * 64,
+            ordinal=ordinal,
+            input_sha256=provider_input_hash,
+            projection_sha256="2" * 64,
+        )
+        for ordinal in (0, 1)
+    )
+    manifest = SimpleNamespace(
+        rows=tuple(SimpleNamespace(ordinal=ordinal) for ordinal in (0, 1)),
+        manifest_sha256=refs[0].manifest_sha256,
+        authorities=SimpleNamespace(
+            pricing_sha256="q",
+            model_sha256="m",
+            prompt_sha256="p",
+            response_schema_sha256="s",
+            source_authority_sha256s={"provider": "v"},
+        ),
+        limits=SimpleNamespace(
+            ordered_call_cap=2,
+            per_call_maximum_usd=Decimal("0.01"),
+            aggregate_maximum_usd=Decimal("0.02"),
+        ),
+        row_ref=lambda ordinal: refs[ordinal],
+    )
+    provider = SimpleNamespace(
+        pricing=SimpleNamespace(
+            identity_sha256="q", reservation_cost_usd=Decimal("0.01")
+        )
+    )
+    ledger = runner.ForegroundDispatchLedger(
+        manifest,
+        committed_budget_reserver=runner.NoDurableAccounting(),
+    )
+    capability = runner._issue_collection_capability(
+        manifest=manifest, provider=provider, ledger=ledger
+    )
+
+    def dispatch_once(ref: ManifestRef) -> str:
+        dispatch_input_hash = runner._reservation_input_hash(ref)
+        reservation = capability.reserve(dispatch_input_hash)
+        capability.mark_dispatching(reservation)
+        record = {
+            "input_hash": dispatch_input_hash,
+            "input_payload_sha256": provider_input_hash,
+            "schema_version": "1.0.0",
+            "post_dispatch_outcome_v3": "success",
+            "measured_cost_usd": "0.01",
+            "conservative_cost_usd": "0.01",
+        }
+        capability.bind_record_identity(dispatch_input_hash, provider_input_hash)
+        capability.seal_record(record)
+        capability.reconcile(reservation, Decimal("0.01"), "success")
+        return dispatch_input_hash
+
+    first_dispatch = dispatch_once(refs[0])
+    capability.finalize_pending(first_dispatch)
+    capability.finalize_pending(first_dispatch)
+    with pytest.raises(ValueError, match="terminal commit conflict"):
+        ledger.commit_terminal(
+            DispatchReceipt(manifest_ref=refs[0], sequence=0),
+            TerminalOutcome.SUCCESS,
+            "b" * 64,
+            Decimal("0.01"),
+            Decimal("0.01"),
+        )
+
+    second_dispatch = runner._reservation_input_hash(refs[1])
+    capability.bind_record_identity(second_dispatch, provider_input_hash)
+    second_reservation = capability.reserve(provider_input_hash)
+    capability.mark_dispatching(second_reservation)
+    second_record = {
+        "input_hash": second_dispatch,
+        "input_payload_sha256": provider_input_hash,
+        "schema_version": "1.0.0",
+        "post_dispatch_outcome_v3": "success",
+        "measured_cost_usd": "0.01",
+        "conservative_cost_usd": "0.01",
+    }
+    capability.seal_record(second_record)
+    capability.reconcile(second_reservation, Decimal("0.01"), "success")
+    capability.finalize_pending(second_dispatch)
+
+    entries = ledger.entries()
+    assert [entry.manifest_ref.ordinal for entry in entries] == [0, 1]
+    assert all(entry.state is JournalState.SUCCESS for entry in entries)
+    assert entries[0].recording_sha256 != entries[1].recording_sha256
+
+
 def test_reservation_identity_keeps_duplicate_inputs_distinct() -> None:
     common = {
         "run_id": "gate-b-evidence-v1-0123456789abcdef",

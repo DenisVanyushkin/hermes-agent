@@ -449,7 +449,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 ### 2.6 `reconcile` очищает обратную привязку только после безопасной финализации
 
-- [ ] Пункт 2.6 выполнен целиком
+- [x] Пункт 2.6 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -457,22 +457,22 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 **Задачи**
 
-- [ ] Добавить RED-тест `test_finalized_dispatch_releases_reverse_provider_input_binding`, который
+- [x] Добавить RED-тест `test_finalized_dispatch_releases_reverse_provider_input_binding`, который
   завершает первую строку, затем связывает тот же provider-input со второй manifest row и проверяет,
   что stale dispatch не перехватывает reserve/reconcile второй строки.
-- [ ] Хранить reverse binding до успешной V2 publication/finalization из 2.4, чтобы partial failure
+- [x] Хранить reverse binding до успешной V2 publication/finalization из 2.4, чтобы partial failure
   оставался resumable; после terminal commit атомарно удалить только binding завершённого dispatch.
-- [ ] Очищать связанные `reservations`, `receipts`, `transport_receipts` и pending-finalization
+- [x] Очищать связанные `reservations`, `receipts`, `transport_receipts` и pending-finalization
   entry согласованно; повторная идемпотентная финализация тех же bytes разрешена, конфликтующие
   bytes отклоняются.
 
 **DoD**
 
-- [ ] `test_finalized_dispatch_releases_reverse_provider_input_binding` проходит: второй dispatch
+- [x] `test_finalized_dispatch_releases_reverse_provider_input_binding` проходит: второй dispatch
   получает собственный `ManifestRef`, receipt и terminal ledger entry.
-- [ ] Publication failure из 2.4 не очищает binding преждевременно и остаётся resumable; успешная
+- [x] Publication failure из 2.4 не очищает binding преждевременно и остаётся resumable; успешная
   финализация удаляет stale binding и не ослабляет call/spend cap.
-- [ ] Focused capability/collection tests проходят два последовательных цикла bind → reconcile →
+- [x] Focused capability/collection tests проходят два последовательных цикла bind → reconcile →
   publish/finalize для одинакового provider-input без утечки результата между ordinals.
 
 ### 2.7 `run_one_row` не принимает непроверенный caller-supplied provider record

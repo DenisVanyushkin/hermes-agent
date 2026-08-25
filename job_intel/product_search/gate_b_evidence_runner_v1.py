@@ -601,6 +601,13 @@ class ForegroundDispatchLedger:
         self._validate_ref(ref)
         pending = self._reconciled.get(ref.ordinal)
         if pending is None:
+            current = self._entries.get(ref.ordinal)
+            if current is not None and current.state in {
+                JournalState.SUCCESS,
+                JournalState.TERMINAL_FAILURE,
+                JournalState.TERMINAL_UNKNOWN,
+            }:
+                return
             raise ValueError("dispatch reconciliation missing")
         current = self._entries.get(ref.ordinal)
         if current is None or current.state is not JournalState.DISPATCHED:
@@ -2767,6 +2774,26 @@ def _issue_collection_capability(
         if ref is None:
             raise ValueError("reservation_manifest_ref_missing")
         ledger.finalize_reconciled(ref)
+        # Resume needs these bindings until V2 publication and terminal ledger
+        # commit succeed; only then release this dispatch's process-local state.
+        reservation_ids = [
+            reservation_id
+            for reservation_id, bound_dispatch in reservations.items()
+            if bound_dispatch == dispatch_input_hash
+        ]
+        for reservation_id in reservation_ids:
+            reservations.pop(reservation_id, None)
+            receipts.pop(reservation_id, None)
+        transport_receipts.pop(dispatch_input_hash, None)
+        provider_input_hash = record_identity_bindings.pop(
+            dispatch_input_hash, None
+        )
+        if provider_input_hash is not None:
+            bound_dispatches = provider_input_to_dispatch.get(provider_input_hash)
+            if bound_dispatches is not None:
+                bound_dispatches.discard(dispatch_input_hash)
+                if not bound_dispatches:
+                    provider_input_to_dispatch.pop(provider_input_hash, None)
 
     setattr(capability, "finalize_pending", finalize_pending)
     return capability
