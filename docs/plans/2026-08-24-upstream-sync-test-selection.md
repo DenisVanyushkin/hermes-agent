@@ -719,11 +719,11 @@ node-presence, а отсутствующие upstream nodes не запуска�
 
 **Зачем.** `sync-runtime-scripts.sh` публикует `install -m 755` по одному файлу
 (28, плюс `lib` на 37 и данные на 45/57) — атомарной подмены каталога нет.
-Совместимый набор — **семь** файлов: finalizer, runner, gate, sync-local,
-smoketest (его меняет T17), triage, slack.
+Совместимый набор — **восемь** файлов: finalizer, runner, gate, sync-local,
+smoketest (его меняет T17), triage, slack и apply (его helper меняет T20).
 
 **DoD.** `scripts/acceptance/publish-runtime.sh` завершается кодом 0: сверяет
-все семь `diff`-ов, отсутствие `finalize-request.json` и что path-unit возвращён
+все восемь `diff`-ов, отсутствие `finalize-request.json` и что path-unit возвращён
 в `active` только после сверки.
 
 **Зависимости.** T21. **Сложность.** M.

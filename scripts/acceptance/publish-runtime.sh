@@ -24,6 +24,7 @@ RUNTIME_FILES=(
   upstream-sync-smoketest.sh
   upstream_sync_triage.py
   upstream_sync_slack.py
+  upstream_sync_apply.py
 )
 
 mkdir -p "$TARGET_SCRIPTS" "$TARGET_STATE"
