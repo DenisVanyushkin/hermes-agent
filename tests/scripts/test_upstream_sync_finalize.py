@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import upstream_sync_gate
+from scripts import upstream_sync_apply, upstream_sync_gate
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
@@ -1635,6 +1635,34 @@ class TestAttemptInvariant:
             capture_output=True,
             text=True,
         )
+
+    def test_attempt_archive_recovery_uses_pending_as_commit_marker(self, tmp_path, state, monkeypatch):
+        scratch = state / "scratch"
+        scratch.mkdir()
+        (scratch / "evidence.txt").write_text("old\n")
+        (state / "apply-prepare.json").write_text("{\"status\": \"ready\"}\n")
+        (state / "pending.json").write_text("{\"local_head\": \"old\"}\n")
+        real_replace = upstream_sync_apply.os.replace
+
+        def fail_after_scratch(source, destination):
+            result = real_replace(source, destination)
+            if Path(source).name == "scratch":
+                raise OSError("simulated interruption before commit marker")
+            return result
+
+        monkeypatch.setattr(upstream_sync_apply.os, "replace", fail_after_scratch)
+        with pytest.raises(OSError, match="commit marker"):
+            upstream_sync_apply._archive_stale_attempt(state, scratch)
+        assert (state / "pending.json").exists()
+        assert list((state / "apply-attempts").glob(".*.tmp"))
+
+        monkeypatch.setattr(upstream_sync_apply.os, "replace", real_replace)
+        upstream_sync_apply._archive_stale_attempt(state, scratch)
+        assert not (state / "pending.json").exists()
+        assert not list((state / "apply-attempts").glob(".*.tmp"))
+        archive = next((state / "apply-attempts").iterdir())
+        assert (archive / "pending.json").exists()
+        assert (archive / "scratch" / "evidence.txt").exists()
 
     def _seed_pair_only_attempt(
         self, state: Path, repo: Path, *, scratch_head: str,

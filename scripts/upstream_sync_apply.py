@@ -537,25 +537,57 @@ def _resume_matches_attempt(live: Path, scratch: Path, pending: dict,
         return False
 
 
+def _recover_incomplete_archive(state: Path) -> None:
+    """Restore a commit marker left in staging after an interrupted move."""
+    archive_root = state / "apply-attempts"
+    if not archive_root.exists():
+        return
+    staging = sorted(
+        path for path in archive_root.iterdir()
+        if path.is_dir() and path.name.startswith(".") and path.name.endswith(".tmp")
+    )
+    if len(staging) > 1:
+        raise OSError("multiple incomplete apply-attempt archives")
+    if staging and not (state / "pending.json").exists():
+        marker = staging[0] / "pending.json"
+        if marker.exists():
+            os.replace(marker, state / "pending.json")
+
+
 def _archive_stale_attempt(state: Path, scratch: Path) -> None:
-    """Move the old apply inputs into one append-only archive directory."""
+    """Move old apply inputs into one append-only archive, pending last."""
     archive_root = state / "apply-attempts"
     archive_root.mkdir(exist_ok=True)
-    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    tmp = archive_root / f".{stamp}-{os.getpid()}.tmp"
-    final = archive_root / f"{stamp}-{os.getpid()}"
-    suffix = 0
-    while tmp.exists() or final.exists():
-        suffix += 1
-        tmp = archive_root / f".{stamp}-{os.getpid()}-{suffix}.tmp"
-        final = archive_root / f"{stamp}-{os.getpid()}-{suffix}"
-    tmp.mkdir()
-    for name in ("pending.json", "apply-prepare.json", "invariants-pending.json"):
+    staging = sorted(
+        path for path in archive_root.iterdir()
+        if path.is_dir() and path.name.startswith(".") and path.name.endswith(".tmp")
+    )
+    if len(staging) > 1:
+        raise OSError("multiple incomplete apply-attempt archives")
+    if staging:
+        tmp = staging[0]
+        final = archive_root / tmp.name[1:-4]
+    else:
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+        tmp = archive_root / f".{stamp}-{os.getpid()}.tmp"
+        final = archive_root / f"{stamp}-{os.getpid()}"
+        suffix = 0
+        while tmp.exists() or final.exists():
+            suffix += 1
+            tmp = archive_root / f".{stamp}-{os.getpid()}-{suffix}.tmp"
+            final = archive_root / f"{stamp}-{os.getpid()}-{suffix}"
+        tmp.mkdir()
+    for name in ("apply-prepare.json", "invariants-pending.json"):
         path = state / name
         if path.exists():
             os.replace(path, tmp / name)
     if scratch.exists():
         os.replace(scratch, tmp / scratch.name)
+    pending = state / "pending.json"
+    if pending.exists():
+        os.replace(pending, tmp / "pending.json")
+    if not (tmp / "pending.json").exists():
+        raise OSError("incomplete apply-attempt archive has no pending marker")
     os.replace(tmp, final)
 
 
@@ -564,6 +596,7 @@ def cmd_prepare_or_resume(args) -> int:
     state, live = Path(args.state), Path(args.live)
     scratch = state / args.scratch
     pending_path = state / "pending.json"
+    _recover_incomplete_archive(state)
     if not pending_path.exists():
         emit({"status": "error", "reason": "pending.json missing"})
         return EXIT_USAGE
