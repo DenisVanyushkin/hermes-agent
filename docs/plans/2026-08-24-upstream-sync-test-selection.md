@@ -663,6 +663,17 @@ stale `prep.upstream_head` при `MERGE_HEAD`, совпадающем с pendin
 вторым; оба mutation-прогона проверены отдельно. После восстановления полный
 affected scope — 97 passed и одно известное средовое падение `TestRepoLock`.
 
+**Follow-up review fix: восстановимое архивирование.** `666a207c6c` делает
+`pending.json` последним перемещаемым файлом и использует его как commit marker:
+при обрыве незавершённое скрытое staging-поколение восстанавливает marker перед
+следующей проверкой попытки, после чего архивирование сходится к опубликованному
+append-only поколению. Acceptance-тест
+`test_attempt_archive_recovery_uses_pending_as_commit_marker` проверяет обрыв
+перед marker и успешное завершение после повторного запуска; мутация с
+перемещением `pending.json` раньше scratch дала красный тест. Affected scope
+после восстановления — 98 passed и одно известное средовое падение
+`TestRepoLock`.
+
 **Зависимости.** T19. **Сложность.** M.
 
 ---
