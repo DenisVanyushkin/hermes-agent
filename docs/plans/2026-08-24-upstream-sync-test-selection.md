@@ -569,12 +569,20 @@ pre-existing failure: два footgun-сканера и средовой `TestRep
 **Зачем.** «Та же композиция» словами не проверяется: отдельная пустая ветка
 `gate-only` прошла бы проверку на неизменность HEAD.
 
-**Что сделать.** `run_gate(before, after, boundary, attempt_id)`, который зовут
-оба пути.
+**Что сделать.** `run_gate(before, after, boundary, attempt_id, mode)`, который
+зовут оба пути; `mode` только маркирует вызов в evidence и не меняет
+композицию.
 
 **DoD.** `pytest tests/scripts/test_upstream_sync_finalize.py -k shared_gate_seam`
 зелёный: параметризованный spy доказывает совпадение аргументов, набора
 артефактов и исходов `pass`/`block`/`unknown` для обоих вызывающих.
+
+**Результат.** Выполнено коммитом `868253754b`: `apply` и новый
+`gate-only` проходят один `run_gate`; parameterized acceptance double
+проверяет `pass`, измеренный `block` и fail-closed `unknown`, при этом
+`gate-only` не меняет live HEAD. Focused T18 дал 7 passed; полный
+`scripts/run_tests.sh tests/scripts/` — 651 passed и три известных
+pre-existing failure: два footgun-сканера и средовой `TestRepoLock`.
 
 **Зависимости.** T11. **Сложность.** M.
 
