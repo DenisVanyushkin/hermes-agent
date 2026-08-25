@@ -579,6 +579,46 @@ def test_node_probe_scope_selects_exact_newly_seen_failing_nodeids():
     }
 
 
+def test_node_probe_scope_excludes_paths_absent_from_upstream_boundary():
+    selector = getattr(upstream_sync_gate, "build_upstream_probe_request", None)
+    assert callable(selector), "node probe request builder is not implemented"
+    absent_path_node = "tests/local_only.py::test_added_by_merge"
+    common_node = "tests/tests.py::test_common_new_failure"
+    request = selector(
+        baseline=_node_run(collected=set(), failed=set()),
+        merged=_node_run(
+            collected={absent_path_node, common_node},
+            failed={absent_path_node, common_node},
+        ),
+        manifest=_manifest(
+            ("tests/local_only.py", False, True),
+            ("tests/tests.py", True, True),
+        ),
+        available_paths={"tests/tests.py"},
+    )
+    assert request == {
+        "nodeids": [common_node],
+        "paths": ["tests/tests.py"],
+    }
+
+
+def test_probe_request_can_be_restricted_to_nodes_collected_upstream():
+    filter_request = getattr(upstream_sync_gate, "filter_probe_request", None)
+    assert callable(filter_request), "probe request node filter is not implemented"
+    absent_node = "tests/tests.py::test_removed_upstream"
+    present_node = "tests/tests.py::test_existing_upstream"
+    assert filter_request(
+        {
+            "nodeids": [absent_node, present_node],
+            "paths": ["tests/tests.py"],
+        },
+        {present_node},
+    ) == {
+        "nodeids": [present_node],
+        "paths": ["tests/tests.py"],
+    }
+
+
 def test_same_failures_before_and_after_mean_no_regression():
     log = _log(["tests/a.py::test_one", "tests/b.py::test_two"])
     assert new_failures(log, log) == []
@@ -655,6 +695,7 @@ def test_outcomes_parser_reads_real_pytest_collection_summary(tmp_path):
     [
         ("2 passed, 1 error in 0.12s\n", 1),
         ("76 failed, 6259 passed, 2 skipped, 6 warnings in 679.63s\n", 0),
+        ("164 failed, 7154 passed, 5 skipped, 9 warnings in 815.76s (0:13:35)\n", 0),
     ],
 )
 def test_outcomes_parser_accepts_known_pytest_summary_forms(summary, error_count):

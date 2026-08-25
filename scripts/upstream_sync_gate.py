@@ -660,6 +660,7 @@ def build_upstream_probe_request(
     baseline: dict[str, Any],
     merged: dict[str, Any],
     manifest: dict[str, Any],
+    available_paths: set[str] | None = None,
 ) -> dict[str, list[str]]:
     """Select the exact merged failures that need an upstream-parent probe.
 
@@ -683,16 +684,38 @@ def build_upstream_probe_request(
 
     presence = _manifest_presence(manifest)
     newly_seen = merged_failed - baseline_failed
+    selected_nodeids: set[str] = set()
     paths: set[str] = set()
     for nodeid in newly_seen:
         path = nodeid.split("::", 1)[0]
+        if available_paths is not None and path not in available_paths:
+            continue
         path_presence = presence.get(path)
         if path_presence is None or not path_presence[1]:
             raise ValueError(
                 f"newly failed nodeid {nodeid} has no post-merge test path in the manifest"
             )
+        selected_nodeids.add(nodeid)
         paths.add(path)
-    return {"nodeids": sorted(newly_seen), "paths": sorted(paths)}
+    return {"nodeids": sorted(selected_nodeids), "paths": sorted(paths)}
+
+
+def filter_probe_request(
+    request: dict[str, Any], available_nodeids: set[str]
+) -> dict[str, list[str]]:
+    """Keep only probe nodeids collected by the upstream-parent checkout."""
+    nodeids = request.get("nodeids")
+    if not isinstance(nodeids, list) or not all(isinstance(item, str) for item in nodeids):
+        raise ValueError("probe request nodeids must be a string list")
+    if not isinstance(available_nodeids, set) or not all(
+        isinstance(item, str) for item in available_nodeids
+    ):
+        raise ValueError("available probe nodeids must be a string set")
+    selected = sorted(set(nodeids) & available_nodeids)
+    return {
+        "nodeids": selected,
+        "paths": sorted({nodeid.split("::", 1)[0] for nodeid in selected}),
+    }
 
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
@@ -702,7 +725,7 @@ _COLLECTION_ERROR_LINE = re.compile(
 _NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
     r"^=*\s*(?P<counts>(?:\d+\s+(?:failed|passed|skipped|warnings?|errors?|error)\b"
-    r"(?:,\s*)?)+)\s+in\s+[\d.]+s\s*$",
+    r"(?:,\s*)?)+)\s+in\s+[\d.]+s(?:\s+\(\d+:\d{2}:\d{2}\))?\s*$",
     re.MULTILINE,
 )
 _COUNT_TOKEN = re.compile(
@@ -806,6 +829,13 @@ def _main(argv: list[str] | None = None) -> int:
     p_probe.add_argument("--baseline", required=True)
     p_probe.add_argument("--merged", required=True)
     p_probe.add_argument("--manifest", required=True)
+    p_probe.add_argument("--boundary-paths")
+
+    p_filter_probe = sub.add_parser(
+        "filter-probe-request", help="filter an upstream probe to collected nodeids"
+    )
+    p_filter_probe.add_argument("--request", required=True)
+    p_filter_probe.add_argument("--available-nodeids", required=True)
 
     p_classify = sub.add_parser(
         "classify-node-failures", help="classify structured baseline, probe and merged outcomes"
@@ -873,10 +903,33 @@ def _main(argv: list[str] | None = None) -> int:
             baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
             merged = json.loads(Path(args.merged).read_text(encoding="utf-8"))
             manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+            available_paths = None
+            if args.boundary_paths:
+                available_paths = {
+                    line
+                    for line in Path(args.boundary_paths)
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                    if line
+                }
             print(json.dumps(
                 build_upstream_probe_request(
-                    baseline=baseline, merged=merged, manifest=manifest
+                    baseline=baseline,
+                    merged=merged,
+                    manifest=manifest,
+                    available_paths=available_paths,
                 ),
+                ensure_ascii=False,
+                sort_keys=True,
+            ))
+            return 0
+        elif args.cmd == "filter-probe-request":
+            request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+            available = json.loads(
+                Path(args.available_nodeids).read_text(encoding="utf-8")
+            )
+            print(json.dumps(
+                filter_probe_request(request, set(available)),
                 ensure_ascii=False,
                 sort_keys=True,
             ))

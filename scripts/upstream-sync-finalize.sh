@@ -368,7 +368,7 @@ merge_passes_fork_tests() {
   [ -x "$py" ] || py="$(command -v python3)"
   local wt baseline post rc new_failures listing_dir
   local baseline_nodes merged_nodes upstream_nodes probe_request probe_nodeids
-  local probe_log probe_wt classification_json blocking_count unknown_count
+  local probe_log probe_wt probe_boundary_paths probe_filtered_request probe_available_nodeids classification_json blocking_count unknown_count
   local before_paths after_paths boundary_paths changed_paths
   local selection_report attempt_dir selection_manifest selection_digest
   local baseline_receipt_line post_receipt_line
@@ -478,21 +478,71 @@ merge_passes_fork_tests() {
   fi
 
   probe_request="$attempt_dir/gate-upstream-probe.request.json"
+  probe_boundary_paths="$attempt_dir/gate-upstream-probe.boundary.paths"
+  if ! git -C "$REPO" ls-tree -r --name-only "$boundary" -- tests/ >"$probe_boundary_paths" 2>>"$DETAIL_LOG"; then
+    echo "could not list upstream-parent test paths for the narrow probe" >>"$DETAIL_LOG"
+    return 1
+  fi
   if ! "$py" "$gate" probe-request \
     --baseline "$baseline_nodes" --merged "$merged_nodes" \
-    --manifest "$selection_manifest" >"$probe_request" 2>>"$DETAIL_LOG"; then
+    --manifest "$selection_manifest" --boundary-paths "$probe_boundary_paths" \
+    >"$probe_request" 2>>"$DETAIL_LOG"; then
     echo "could not build the narrow upstream-parent probe request; refusing to land the merge" >>"$DETAIL_LOG"
     return 1
   fi
+  probe_filtered_request="$attempt_dir/gate-upstream-probe.filtered.request.json"
+  probe_available_nodeids="$attempt_dir/gate-upstream-probe.available.nodeids.json"
   probe_nodeids="$attempt_dir/gate-upstream-probe.nodeids.json"
-  "$py" - "$probe_request" "$probe_nodeids" <<'PY'
+  probe_log="$attempt_dir/gate-upstream-probe.log"
+  if ! probe_wt="$(mktemp -d -t hermes-upstream-probe-XXXXXX)" ||
+     ! git -C "$REPO" worktree add --detach "$probe_wt" "$boundary" >>"$DETAIL_LOG" 2>&1; then
+    rm -rf "$probe_wt"
+    echo "could not create the upstream-parent probe worktree" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! "$py" - "$probe_request" "$probe_wt" "$probe_available_nodeids" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+worktree = Path(sys.argv[2])
+available = []
+for nodeid in request.get("nodeids", []):
+    path = nodeid.split("::", 1)[0]
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", path, "--collect-only", "-q",
+            "-p", "no:cacheprovider", "--timeout=90",
+        ],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    output = (proc.stdout + proc.stderr).splitlines()
+    if proc.returncode == 0 and any(line.strip() == nodeid for line in output):
+        available.append(nodeid)
+Path(sys.argv[3]).write_text(json.dumps(sorted(set(available))), encoding="utf-8")
+PY
+  then
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+    echo "could not collect upstream-parent probe node presence" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! "$py" "$gate" filter-probe-request \
+    --request "$probe_request" --available-nodeids "$probe_available_nodeids" \
+    >"$probe_filtered_request" 2>>"$DETAIL_LOG"; then
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+    echo "could not filter the upstream-parent probe request" >>"$DETAIL_LOG"
+    return 1
+  fi
+  "$py" - "$probe_filtered_request" "$probe_nodeids" <<'PY'
 import json, sys
 from pathlib import Path
 request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 Path(sys.argv[2]).write_text(json.dumps(request.get("nodeids", [])), encoding="utf-8")
 PY
-
-  probe_log="$attempt_dir/gate-upstream-probe.log"
   if ! "$py" - "$probe_nodeids" <<'PY' >/dev/null
 import json, sys
 from pathlib import Path
@@ -501,14 +551,10 @@ PY
   then
     printf '%s\n' '{"collect_ok":true,"probe_ok":true,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
     : >"$probe_log"
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
   else
-    if ! probe_wt="$(mktemp -d -t hermes-upstream-probe-XXXXXX)" ||
-       ! git -C "$REPO" worktree add --detach "$probe_wt" "$boundary" >>"$DETAIL_LOG" 2>&1; then
-      rm -rf "$probe_wt"
-      echo "could not create the upstream-parent probe worktree" >>"$DETAIL_LOG"
-      return 1
-    fi
-    "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_request" "$probe_wt" >"$probe_log" 2>&1 || true
+    "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_filtered_request" "$probe_wt" >"$probe_log" 2>&1 || true
     if ! "$py" "$gate" node-outcome --log "$probe_log" \
       --expected-nodeids "$probe_nodeids" >"$upstream_nodes" 2>>"$DETAIL_LOG"; then
       printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
