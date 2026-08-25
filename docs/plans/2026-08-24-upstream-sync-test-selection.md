@@ -463,6 +463,15 @@ composer. `scripts/run_tests.sh tests/scripts/test_upstream_sync_slack.py -k
 связанный finalize scope — 57 passed и одно известное средовое падение
 `TestRepoLock::test_rebase_script_refuses_to_run_while_repo_lock_is_held`.
 
+**Follow-up review fix.** `254ed22084` keeps each classification beside its
+nodeid in the Slack report. On a clean apply the normalized gate payload is
+copied to `STATE_DIR` before the result report, `applied_text` includes the
+reachable `PASS` verdict, and the payload is removed only after reporting so
+stale evidence cannot survive into the next attempt. The end-to-end finalize
+test asserts the posted PASS and post-report cleanup; the full Slack/finalize
+scope remains 27 and 57 passed respectively, with only the known environment
+failure above.
+
 **Зависимости.** T13. **Сложность.** M.
 
 ---
