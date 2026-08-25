@@ -1636,6 +1636,80 @@ class TestAttemptInvariant:
             text=True,
         )
 
+    def _seed_pair_only_attempt(
+        self, state: Path, repo: Path, *, scratch_head: str,
+        pending_local_head: str, pending_upstream_head: str,
+        prep_local_base: str, prep_upstream_head: str, merge_head: str = "",
+    ):
+        scratch = state / "scratch"
+        subprocess.run(
+            ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+            check=True,
+            capture_output=True,
+        )
+        _git(scratch, "checkout", "-q", "--detach", scratch_head)
+        if merge_head:
+            (scratch / ".git" / "MERGE_HEAD").write_text(merge_head + "\n")
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1",
+            "local_head": pending_local_head,
+            "upstream_head": pending_upstream_head,
+            "features": [],
+        }))
+        (state / "apply-prepare.json").write_text(json.dumps({
+            "schema": "upstream-sync-apply/v1",
+            "status": "ready",
+            "local_base": prep_local_base,
+            "upstream_head": prep_upstream_head,
+            "scratch": str(scratch),
+            "conflicts": [],
+        }))
+
+    def test_attempt_invariant_local_identity_is_checked_independently(self, tmp_path, state):
+        repo, stale_local, upstream_head = self._conflict_world(tmp_path)
+        (repo / "live.txt").write_text("moved\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "live moved")
+        live_head = _git(repo, "rev-parse", "HEAD")
+        self._seed_pair_only_attempt(
+            state, repo,
+            scratch_head=live_head,
+            pending_local_head=stale_local,
+            pending_upstream_head=upstream_head,
+            prep_local_base=live_head,
+            prep_upstream_head=upstream_head,
+        )
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        assert json.loads((state / "apply-prepare.json").read_text())["status"] == "new_conflicts"
+        assert list((state / "apply-attempts").glob("*/apply-prepare.json"))
+
+    def test_attempt_invariant_upstream_identity_is_checked_independently(self, tmp_path, state):
+        repo, local_head, old_upstream = self._conflict_world(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "upstream-later.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream moved")
+        new_upstream = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        self._seed_pair_only_attempt(
+            state, repo,
+            scratch_head=local_head,
+            pending_local_head=local_head,
+            pending_upstream_head=new_upstream,
+            prep_local_base=local_head,
+            prep_upstream_head=old_upstream,
+            merge_head=new_upstream,
+        )
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        assert json.loads((state / "apply-prepare.json").read_text())["status"] == "new_conflicts"
+        assert list((state / "apply-attempts").glob("*/apply-prepare.json"))
+
     def test_attempt_invariant_stale_local_head_is_rotated_before_fresh_prepare(self, tmp_path, state):
         repo, old_local, upstream_head = self._conflict_world(tmp_path)
         self._seed_stale_attempt(
