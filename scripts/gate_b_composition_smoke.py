@@ -28,6 +28,16 @@ GATEWAY_VENV = Path(
 )
 GATEWAY_PYTHON = GATEWAY_VENV / "bin" / "python"
 
+# Measured on hermes-agent after 3.1: artifact build is roughly two minutes;
+# keep a generous bound while still failing a genuinely stuck build.
+BUILD_TIMEOUT_SECONDS = 300
+TARGET_TIMEOUT_SECONDS = 30
+EVALUATION_TIMEOUT_SECONDS = 60
+
+
+class SmokeFailure(RuntimeError):
+    """Named, operator-facing failure from the composition smoke harness."""
+
 
 def canonical(value: object) -> bytes:
     return json.dumps(
@@ -39,8 +49,50 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=True)
+def run(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        phase = command[command.index("-m") + 1] if "-m" in command else command[0]
+        raise SmokeFailure(
+            f"smoke_phase_timeout:{phase}:>{timeout_seconds:g}s"
+        ) from exc
+
+
+def _named_target_failure(stderr: str) -> str:
+    # Keep this allowlist to exact raised error tokens. Unknown failures remain
+    # the honest ``smoke_target_failed`` fallback instead of guessing broadly.
+    for prerequisite in (
+        "spend_record_missing",
+        "decision_policy_authority_mismatch",
+        "company_evidence_root_required",
+        "corpus_manifest_sha256_mismatch",
+    ):
+        if prerequisite in stderr:
+            return f"smoke_precondition_failed:{prerequisite}"
+    return "smoke_target_failed"
+
+
+def _stderr_tail(stderr: str) -> str:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if "Error:" in line or "error" in line.lower():
+            return line
+    return lines[-1] if lines else "no target diagnostics"
 
 
 def make_source_commit(root: Path) -> str:
@@ -126,6 +178,7 @@ def main() -> int:
             ],
             cwd=REPO,
             env={**os.environ, "PYTHONPATH": str(REPO)},
+            timeout_seconds=BUILD_TIMEOUT_SECONDS,
         )
         build_seconds = time.perf_counter() - build_started
         build_result = json.loads(build.stdout)
@@ -146,6 +199,22 @@ def main() -> int:
             repo_root=REPO,
             runtime_manifest_path=install_root / "runtime-manifest.json",
         )
+        manifest_payload = json.loads(manifest_path.read_bytes())
+        spend_record_path = (
+            fixture_root
+            / "spend-records"
+            / str(manifest_payload["manifest_sha256"])
+            / "committed-budget.json"
+        )
+        # Fault injection for the 3.2 acceptance experiment; never normal mode.
+        if os.environ.get("GATE_B_SMOKE_REMOVE_SPEND_RECORD") == "1":
+            spend_record_path.unlink(missing_ok=True)
+        if not spend_record_path.is_file():
+            raise SmokeFailure(
+                "smoke_precondition_failed:spend_record_missing; "
+                f"artifact_build_seconds={build_seconds:.3f}; "
+                f"artifact_install_seconds={install_seconds:.3f}"
+            )
         supervised_wrapper = install_root / "runtime/scripts/job_intel_gate_b_supervised.sh"
         supervised_wrapper_copy = install_root / "runtime/scripts/.composition-smoke-supervised.sh"
         supervised_wrapper_copy.write_text(
@@ -184,37 +253,52 @@ def main() -> int:
             "GATE_B_SMOKE_PROBE_CAP": "1",
         }
         target_started = time.perf_counter()
-        target_attempt = subprocess.run(
-                [
-                    str(supervised_wrapper_copy),
-                    "run-supervised",
-                    "--corpus",
-                    str(fixture_root / "corpus-rows.json"),
-                    *target_args,
-                    "--reviewed-allowlist",
-                    str(fixture_root / "reviewed-allowlist.json"),
-                    "--decision-policy",
-                    str(fixture_artifact / "authority/decision_contract.v2.yaml"),
-                    "--authority-root",
-                    str(fixture_artifact / "authority"),
-                    "--company-evidence-root",
-                    str(fixture_root / "company-evidence"),
-                    "--provider-factory",
-                    "gate_b_cli_smoke_fixture:provider_factory",
-                    "--decision-request-factory",
-                    "job_intel.product_search.gate_b_evidence_runner_v1:build_decision_request_from_context_v2",
-                ],
-                cwd=install_root / "runtime",
-                env=target_env,
-                text=True,
-                capture_output=True,
-        )
+        try:
+            target_attempt = subprocess.run(
+                    [
+                        str(supervised_wrapper_copy),
+                        "run-supervised",
+                        "--corpus",
+                        str(fixture_root / "corpus-rows.json"),
+                        *target_args,
+                        "--reviewed-allowlist",
+                        str(fixture_root / "reviewed-allowlist.json"),
+                        "--decision-policy",
+                        str(fixture_artifact / "authority/decision_contract.v2.yaml"),
+                        "--authority-root",
+                        str(fixture_artifact / "authority"),
+                        "--company-evidence-root",
+                        str(fixture_root / "company-evidence"),
+                        "--provider-factory",
+                        "gate_b_cli_smoke_fixture:provider_factory",
+                        "--decision-request-factory",
+                        "job_intel.product_search.gate_b_evidence_runner_v1:build_decision_request_from_context_v2",
+                    ],
+                    cwd=install_root / "runtime",
+                    env=target_env,
+                    text=True,
+                    capture_output=True,
+                    timeout=TARGET_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SmokeFailure(
+                "smoke_phase_timeout:supervised_collection:"
+                f">{TARGET_TIMEOUT_SECONDS}s; "
+                f"artifact_build_seconds={build_seconds:.3f}; "
+                f"artifact_install_seconds={install_seconds:.3f}"
+            ) from exc
         target_seconds = time.perf_counter() - target_started
         if target_attempt is None or target_attempt.returncode != 0:
             detail = "no target attempt"
             if target_attempt is not None:
                 detail = target_attempt.stderr.strip()
-            raise RuntimeError(f"supervised collection failed: {detail}")
+            raise SmokeFailure(
+                f"{_named_target_failure(detail)}; "
+                f"artifact_build_seconds={build_seconds:.3f}; "
+                f"artifact_install_seconds={install_seconds:.3f}; "
+                f"target_seconds={target_seconds:.3f}; "
+                f"detail={_stderr_tail(detail)}"
+            )
         if not dispatch_probe_path.is_file():
             raise RuntimeError("provider did not publish dispatch probe")
         dispatch_probe = json.loads(dispatch_probe_path.read_bytes())
@@ -248,36 +332,43 @@ def main() -> int:
         adjudication_path = state / "adjudication.json"
         adjudication_path.write_bytes(canonical(adjudication.model_dump(mode="json")))
         evaluation_started = time.perf_counter()
-        evaluation_attempt = subprocess.run(
-            [
-                str(supervised_wrapper_copy),
-                "evaluate-run",
-                "--manifest",
-                str(manifest_path),
-                "--manifest-sha256",
-                manifest_sha,
-                "--measurement-report",
-                str(state / "measurement-report.json"),
-                "--measurement-report-sha256",
-                sha256((state / "measurement-report.json").read_bytes()),
-                "--adjudication",
-                str(adjudication_path),
-                "--adjudication-sha256",
-                adjudication.adjudication_sha256,
-                "--gate-policy",
-                str(install_root / "runtime/config/product_search/gate_b_benchmark.v3.yaml"),
-                "--output",
-                str(state),
-            ],
-            cwd=install_root / "runtime",
-            env=target_env,
-            text=True,
-            capture_output=True,
-        )
+        try:
+            evaluation_attempt = subprocess.run(
+                [
+                    str(supervised_wrapper_copy),
+                    "evaluate-run",
+                    "--manifest",
+                    str(manifest_path),
+                    "--manifest-sha256",
+                    manifest_sha,
+                    "--measurement-report",
+                    str(state / "measurement-report.json"),
+                    "--measurement-report-sha256",
+                    sha256((state / "measurement-report.json").read_bytes()),
+                    "--adjudication",
+                    str(adjudication_path),
+                    "--adjudication-sha256",
+                    adjudication.adjudication_sha256,
+                    "--gate-policy",
+                    str(install_root / "runtime/config/product_search/gate_b_benchmark.v3.yaml"),
+                    "--output",
+                    str(state),
+                ],
+                cwd=install_root / "runtime",
+                env=target_env,
+                text=True,
+                capture_output=True,
+                timeout=EVALUATION_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SmokeFailure(
+                "smoke_phase_timeout:evaluate_run:"
+                f">{EVALUATION_TIMEOUT_SECONDS}s"
+            ) from exc
         evaluation_seconds = time.perf_counter() - evaluation_started
         if evaluation_attempt.returncode != 0:
-            raise RuntimeError(
-                f"gate evaluation failed: {evaluation_attempt.stderr.strip()}"
+            raise SmokeFailure(
+                f"smoke_evaluation_failed: {evaluation_attempt.stderr.strip()}"
             )
         decision_path = state / "gate-decision.json"
         if not decision_path.is_file():
@@ -365,4 +456,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SmokeFailure as exc:
+        print(f"SMOKE_FAILURE: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
