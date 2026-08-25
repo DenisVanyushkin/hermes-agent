@@ -9,6 +9,7 @@ than injecting missing production inputs or continuing after a failed gate.
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -95,6 +96,22 @@ def _stderr_tail(stderr: str) -> str:
     return lines[-1] if lines else "no target diagnostics"
 
 
+@contextmanager
+def _smoke_tempdir():
+    path = Path(tempfile.mkdtemp(prefix="gate-b-composition-smoke-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+        if path.exists():
+            sys.stdout.flush()
+            print(
+                "SMOKE_CLEANUP_RETAINED: "
+                f"{path} (root-owned files from the systemd target remain)",
+                file=sys.stderr,
+            )
+
+
 def make_source_commit(root: Path) -> str:
     root.mkdir()
     archive = root.parent / "source.tar"
@@ -158,8 +175,7 @@ def bind_manifest_runtime(manifest_path: Path, runtime_manifest_path: Path) -> s
 
 def main() -> int:
     started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="gate-b-composition-smoke-") as temporary:
-        root = Path(temporary)
+    with _smoke_tempdir() as root:
         source_root = root / "source"
         commit = make_source_commit(source_root)
         stage = root / "built-artifact"
@@ -223,6 +239,10 @@ def main() -> int:
             ).replace(
                 "/var/lib/job-intel-gate-b-spend",
                 str(fixture_root / "spend-records"),
+            ).replace(
+                '  --setenv=GATE_B_SMOKE_PROBE_CAP="${GATE_B_SMOKE_PROBE_CAP:-}" \\\n',
+                '  --setenv=GATE_B_SMOKE_PROBE_CAP="${GATE_B_SMOKE_PROBE_CAP:-}" \\\n'
+                '  --setenv=GATE_B_SMOKE_FACTORY_TRACE="${GATE_B_SMOKE_FACTORY_TRACE:-}" \\\n',
             ),
             encoding="utf-8",
         )
@@ -230,7 +250,6 @@ def main() -> int:
         state = root / "state"
         state.mkdir()
         dispatch_probe_path = state / "dispatch-probe.json"
-        factory_trace_path = state / "decision-request-factory.trace"
         decision_request_factory = (
             "gate_b_cli_smoke_fixture:broken_decision_request_factory"
             if os.environ.get("GATE_B_SMOKE_BREAK_DECISION_FACTORY") == "1"
@@ -257,7 +276,7 @@ def main() -> int:
             "GATE_B_SMOKE_ISOLATION_PROBE": str(probe_path),
             "GATE_B_SMOKE_DISPATCH_LOG": str(dispatch_probe_path),
             "GATE_B_SMOKE_PROBE_CAP": "1",
-            "GATE_B_SMOKE_FACTORY_TRACE": str(factory_trace_path),
+            "GATE_B_SMOKE_FACTORY_TRACE": "1",
         }
         target_started = time.perf_counter()
         try:
@@ -308,15 +327,15 @@ def main() -> int:
             )
         if not dispatch_probe_path.is_file():
             raise RuntimeError("provider did not publish dispatch probe")
-        if not factory_trace_path.is_file():
+        factory_trace = [
+            line.strip()
+            for line in target_attempt.stderr.splitlines()
+            if line.strip() == "build_decision_request_from_context_v2"
+        ]
+        if not factory_trace:
             raise SmokeFailure(
                 "production_decision_request_factory_not_called"
             )
-        factory_trace = factory_trace_path.read_text(encoding="utf-8").splitlines()
-        if not factory_trace or any(
-            item != "build_decision_request_from_context_v2" for item in factory_trace
-        ):
-            raise SmokeFailure("production_decision_request_factory_trace_invalid")
         dispatch_probe = json.loads(dispatch_probe_path.read_bytes())
         manifest_row_count = 48
         if dispatch_probe.get("dispatch_count") != manifest_row_count:

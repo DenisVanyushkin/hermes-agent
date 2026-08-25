@@ -36,8 +36,8 @@ from job_intel.product_search.gate_b_spend_record_v1 import SpendRecordStore
 from job_intel.vacancy_understanding.semantic.runtime.llm_provider import LLMProviderError
 
 
-CORPUS_SHA256 = "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69"
 GATE_A_RUN_ID = "gate-a-20260816T141344Z"
+CORPUS_AUTHORITY_SCHEMA = "gate-b-corpus-authority-v1"
 
 
 def _canonical(value: object) -> bytes:
@@ -48,13 +48,43 @@ def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _allowlist(entries: list[ReviewedFragmentEntryV3]) -> ReviewedFragmentAllowlistV3:
+def _allowlist(
+    entries: list[ReviewedFragmentEntryV3],
+    corpus_sha256: str = "0" * 64,
+) -> ReviewedFragmentAllowlistV3:
     return ReviewedFragmentAllowlistV3(
         schema_version="3.0.0",
         gate_a_run_id=GATE_A_RUN_ID,
-        gate_b_corpus_sha256=CORPUS_SHA256,
+        gate_b_corpus_sha256=corpus_sha256,
         entries=tuple(entries),
     )
+
+
+def _load_corpus_authority(
+    path: Path,
+    *,
+    expected_corpus_sha256: str,
+) -> str:
+    """Load and verify the machine-readable corpus authority."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("corpus_authority_unavailable")
+    try:
+        encoded = path.read_bytes()
+        payload = json.loads(encoded)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("corpus_authority_invalid") from exc
+    if _canonical(payload) != encoded:
+        raise ValueError("corpus_authority_noncanonical")
+    if not isinstance(payload, dict):
+        raise ValueError("corpus_authority_invalid")
+    if payload.get("schema_version") != CORPUS_AUTHORITY_SCHEMA:
+        raise ValueError("corpus_authority_schema_mismatch")
+    declared = payload.get("corpus_sha256")
+    if not isinstance(declared, str) or len(declared) != 64:
+        raise ValueError("corpus_authority_invalid")
+    if declared != expected_corpus_sha256:
+        raise ValueError("corpus_authority_mismatch")
+    return declared
 
 
 def _make_record(index: int) -> tuple[dict[str, str], dict[str, str]]:
@@ -211,12 +241,12 @@ class FakeProvider:
             "provider_input_sha256": provider_input_hash,
             "input": request.synthesis_input.model_dump(mode="json"),
             "provider_id": "fake-provider",
-            "provider_version": "fake-provider-v1",
+            "provider_version": "product-search-evidence-replay/2.0",
             "model_id": "fake-model",
             "requested_model": "fake-model",
             "response_model": "fake-model",
-            "semantic_prompt_version": "smoke-semantic-prompt-v1",
-            "prompt_version": "smoke-prompt-v1",
+            "semantic_prompt_version": "product-search-evidence-synthesis-2.0.0",
+            "prompt_version": "product-search-evidence-synthesis-2.0.0",
             "schema_version": "2.0.0",
             "output_sha256": output_sha256,
             "provider_sha256": _sha(b"provider:smoke"),
@@ -251,11 +281,11 @@ class FakeProvider:
         capability.bind_record_identity(input_hash, provider_input_hash)
         self.verify_provider_record = capability.verify_record
         capability.seal_record(generic_record)
-        capability.capture_record(generic_record)
         record["semantic_transport_record_sha256"] = _sha(_canonical(generic_record))
         capability.seal_record(record)
         self.store.records[input_hash] = record
         capability.reconcile(reservation, Decimal("0"), outcome)
+        capability.finalize_pending(input_hash)
         extra_dispatch_refused = None
         if (
             os.environ.get("GATE_B_SMOKE_PROBE_CAP") == "1"
@@ -338,6 +368,7 @@ def prepare(
     artifact_root: Path,
     repo_root: Path,
     runtime_manifest_path: Path | None = None,
+    corpus_authority_path: Path | None = None,
 ) -> tuple[Path, Path, str]:
     assert_artifact_destination_safe(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -457,10 +488,40 @@ exec {sys.executable!s} "$@"
     authority_identity: AuthorityIdentity = _authority_identity(authorities)
     allow_entries: list[ReviewedFragmentEntryV3] = []
     rows: list[EvidenceManifestRow] = []
-    corpus_rows: list[dict[str, object]] = []
+    corpus_rows = [
+        {"ordinal": index, "record": record, "raw": raw}
+        for index in range(48)
+        for record, raw in (_make_record(index),)
+    ]
+    corpus_bytes = _canonical(corpus_rows)
+    computed_corpus_sha256 = _sha(corpus_bytes)
+    configured_authority = corpus_authority_path or (
+        Path(os.environ["GATE_B_SMOKE_CORPUS_AUTHORITY_PATH"])
+        if os.environ.get("GATE_B_SMOKE_CORPUS_AUTHORITY_PATH")
+        else None
+    )
+    authority_path = configured_authority or (root / "corpus-authority.json")
+    if not authority_path.exists():
+        if configured_authority is not None:
+            raise ValueError("corpus_authority_unavailable")
+        authority_path.parent.mkdir(parents=True, exist_ok=True)
+        authority_path.write_bytes(
+            _canonical(
+                {
+                    "schema_version": CORPUS_AUTHORITY_SCHEMA,
+                    "corpus_sha256": computed_corpus_sha256,
+                }
+            )
+        )
+    corpus_sha256 = _load_corpus_authority(
+        authority_path,
+        expected_corpus_sha256=computed_corpus_sha256,
+    )
     allowlist = None
     for index in range(48):
-        record, raw = _make_record(index)
+        row_data = corpus_rows[index]
+        record = row_data["record"]
+        raw = row_data["raw"]
         candidates = evidence.build_vacancy_projection_candidates_v3(record, raw)
         entries = [
             ReviewedFragmentEntryV3(
@@ -475,7 +536,7 @@ exec {sys.executable!s} "$@"
             for item in candidates.description_candidates
         ]
         allow_entries.extend(entries)
-        allowlist = _allowlist(allow_entries)
+        allowlist = _allowlist(allow_entries, corpus_sha256)
         projected = evidence.project_vacancy_evidence_v3(
             record,
             raw,
@@ -491,7 +552,6 @@ exec {sys.executable!s} "$@"
                 projection_sha256=_sha(_canonical(projected.model_dump(mode="json"))),
             )
         )
-        corpus_rows.append({"ordinal": index, "record": record, "raw": raw})
     assert allowlist is not None
     allowlist_path = root / "reviewed-allowlist.json"
     allowlist_path.write_bytes(_canonical(allowlist.model_dump(mode="json")))
@@ -502,6 +562,7 @@ exec {sys.executable!s} "$@"
         "run_id": "gate-b-evidence-v1-0123456789abcdef",
         "created_at": "2026-08-22T12:00:00Z",
         "decision_clock": "2026-08-22T12:00:00Z",
+        "corpus_sha256": corpus_sha256,
         "benchmark_kind": "gate_b_description_evidence",
         "row_count": 48,
         "rows": [row.model_dump(mode="json") for row in rows],

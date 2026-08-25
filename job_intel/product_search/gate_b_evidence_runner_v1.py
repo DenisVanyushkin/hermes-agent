@@ -432,10 +432,8 @@ def build_decision_request_from_context_v2(
     context: DecisionRequestFactoryContextV1,
 ) -> DecisionRequestV2:
     """Adapt the positional runtime factory contract to the V2 builder."""
-    trace_path = os.environ.get("GATE_B_SMOKE_FACTORY_TRACE")
-    if trace_path:
-        with Path(trace_path).open("a", encoding="utf-8") as trace:
-            trace.write("build_decision_request_from_context_v2\n")
+    if os.environ.get("GATE_B_SMOKE_FACTORY_TRACE"):
+        print("build_decision_request_from_context_v2", file=sys.stderr, flush=True)
     return build_decision_request_v2(
         response_payload=context.response_payload,
         projected=context.projected,
