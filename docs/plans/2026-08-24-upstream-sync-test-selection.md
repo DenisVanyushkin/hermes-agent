@@ -695,6 +695,22 @@ append-only поколению. Acceptance-тест
 скрипт сам сверяет `HEAD`, `pending.json`, `scratch/` до и после и печатает
 `gate_verdict`.
 
+**Результат.** Выполнено коммитом `2b5fcfc740`: acceptance запускает
+установленный gate-only entrypoint с `HERMES_SCRIPTS_DIR` из этого worktree,
+disposable shared clone и изолированным state namespace; path-unit и live
+checkout не затрагиваются. На диагностическом merge `f941342b` скрипт дал
+`gate_verdict=block`, а `HEAD`, `pending.json` и `scratch/` остались
+неизменными. Это ожидаемый результат до T25, а не требование зелёного gate.
+
+**Follow-up, найденный T21.** Реальный full pytest summary с parenthetical
+elapsed time и nodeid, отсутствующий в upstream parent, сначала переводили
+репетицию в `unknown`. В том же коммите parser принимает форму
+`in 815.76s (0:13:35)`, probe ограничивается boundary-paths и collect-only
+node-presence, а отсутствующие upstream nodes не запускаются как probe. Это
+сохраняет классификацию local/merge-introduced и не маскирует её под
+инфраструктурный unknown. Affected suite: 108 passed и одно известное
+средовое падение `TestRepoLock`.
+
 **Зависимости.** T1–T20. **Сложность.** M.
 
 ### T22. Приземлить ветку правок и опубликовать рантайм
