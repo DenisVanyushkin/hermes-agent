@@ -501,12 +501,34 @@ Focused call-trace — 1 passed, полный `test_sync_local_customizations.py
 10 passed; связанный gate/finalize scope — 104 passed и одно известное
 средовое падение `TestRepoLock::test_rebase_script_refuses_to_run_while_repo_lock_is_held`.
 
+После проверки T15 добавлен структурный guard в `ae95702e49`: runner в
+manifest-режиме выводит в квитанции фактически измеренную сторону (`side=pre`
+или `side=post`), вычисленную из провалидированного manifest и реального HEAD.
+Оба вызывающих требуют свою ожидаемую квитанцию; мутация baseline-чекаута на
+`after` выдаёт `side=post` и завершается отказом до сравнения. Это закрывает
+слепоту инертного `HERMES_SYNC_TEST_CMD`, который иначе печатал бы одинаковый
+лог для обоих деревьев.
+
 **Зависимости.** T9. **Сложность.** M.
 
 ### T16. Caller требует квитанцию (D7)
 
-**DoD.** `pytest tests/scripts/test_sync_local_customizations.py tests/scripts/test_upstream_sync_finalize.py -k receipt_required`
-зелёный для обоих вызывающих.
+**DoD.** Оба вызывающих требуют точную квитанцию с digest единого manifest и
+ожидаемой стороной: baseline обязан быть `side=pre`, post обязан быть
+`side=post`; отсутствие квитанции или подмена стороны даёт fail-closed отказ.
+Тесты должны пересекать настоящий runner/finalizer receipt seam и отдельно
+краснеть при мутации baseline на after.
+
+**Реализация и проверка.** Выполнено в `ae95702e49`: общий helper формирует
+квитанцию, runner сам выводит измеренную сторону, sync-local и finalize
+проверяют её независимо после baseline и post. Проверены мутация baseline на
+`after` (отказ с `side=post`), `test_sync_local_customizations.py` — 10 passed,
+`test_upstream_sync_finalize.py` — 57 passed и одно известное средовое
+падение `TestRepoLock::test_rebase_script_refuses_to_run_while_repo_lock_is_held`.
+После T15 production callers больше не используют `--legacy-selection`, но
+legacy-режим и его filter_tests остаются совместимым отдельным cleanup scope:
+удаление сейчас смешало бы миграцию с удалением поддерживаемого прямого
+runner-контракта и его тестов.
 
 **Зависимости.** T15. **Сложность.** S.
 
