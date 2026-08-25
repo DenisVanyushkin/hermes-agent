@@ -612,6 +612,17 @@ generation; отдельный случай доказывает, что пов�
 `gate-failures.json` от другого `merge_sha` доказывает отсутствие triage
 предложений и наличие диагностической причины.
 
+**Результат.** Выполнено коммитом `35d7ecf4b7`: `gate-only` оставляет
+`finalize-result.json`, `finalize-detail.log`, pending/prepare, scratch,
+legacy gate logs, gate-failures и triage evidence побайтово неизменными; его
+`attempt-result.json` и все gate evidence остаются внутри собственной
+generation. Повторный запуск создаёт append-only generation 2. Triage получает
+ожидаемые `merge_sha` и `before`, а stale payload превращается в
+`stale_evidence` без предложений. Focused T19 дал 4 passed, полный triage
+suite — 22 passed; полный `scripts/run_tests.sh tests/scripts/` завершён
+654 passed и тремя известными pre-existing failure: два footgun-сканера и
+средовой `TestRepoLock`.
+
 **Зависимости.** T18. **Сложность.** M.
 
 ### T20. Единый инвариант `prepare`/`scratch` (D8)
