@@ -199,9 +199,26 @@ class FakeProvider:
         else:
             outcome = "terminal_failure"
             raw_response_text = "{}"
+        provider_input_hash = _sha(_canonical(dict(request.provider_payload)))
+        if raw_response_text:
+            output_sha256 = _sha(_canonical(json.loads(raw_response_text)))
+        else:
+            output_sha256 = _sha(b"")
         record = {
+            "input_hash": input_hash,
+            "input_payload_sha256": provider_input_hash,
+            "semantic_input_sha256": provider_input_hash,
+            "provider_input_sha256": provider_input_hash,
+            "input": request.synthesis_input.model_dump(mode="json"),
             "provider_id": "fake-provider",
+            "provider_version": "fake-provider-v1",
             "model_id": "fake-model",
+            "requested_model": "fake-model",
+            "response_model": "fake-model",
+            "semantic_prompt_version": "smoke-semantic-prompt-v1",
+            "prompt_version": "smoke-prompt-v1",
+            "schema_version": "2.0.0",
+            "output_sha256": output_sha256,
             "provider_sha256": _sha(b"provider:smoke"),
             "model_sha256": _sha(b"model:smoke"),
             "prompt_sha256": _sha(b"prompt:smoke"),
@@ -209,10 +226,34 @@ class FakeProvider:
             "response_schema_sha256": _sha(b"schema:smoke"),
             "raw_response_text": raw_response_text,
             "post_dispatch_outcome_v3": outcome,
+            "status": "success" if outcome == "success" else outcome,
+            "failure_code": None if outcome == "success" else outcome,
+            "failure_diagnostic": None,
+            "latency_ms": 1,
+            "cost_usd": "0",
             "measured_cost_usd": "0",
             "conservative_cost_usd": "0.01",
             "pricing_sha256": _sha(b"pricing:smoke"),
+            "provider_authority_identity": dict(self.authority_identity),
+            "pricing": {
+                "identity_sha256": _sha(b"pricing:smoke"),
+                "reservation_cost_usd": "0.01",
+            },
+            "max_output_tokens": 4096,
+            "provider_record_kind": "gate-b-evidence-synthesis-v2",
         }
+        generic_record = dict(record)
+        generic_record.pop("provider_record_kind")
+        generic_record.pop("provider_authority_identity")
+        generic_record.pop("pricing")
+        generic_record.pop("max_output_tokens")
+        generic_record.pop("semantic_transport_record_sha256", None)
+        capability.bind_record_identity(input_hash, provider_input_hash)
+        self.verify_provider_record = capability.verify_record
+        capability.seal_record(generic_record)
+        capability.capture_record(generic_record)
+        record["semantic_transport_record_sha256"] = _sha(_canonical(generic_record))
+        capability.seal_record(record)
         self.store.records[input_hash] = record
         capability.reconcile(reservation, Decimal("0"), outcome)
         extra_dispatch_refused = None
@@ -286,6 +327,11 @@ def decision_request_factory(context: Any) -> Any:
     return _decision_result(decision_payload, ref.input_sha256)
 
 
+def broken_decision_request_factory(context: Any) -> Any:
+    del context
+    raise RuntimeError("smoke_factory_injected_failure")
+
+
 def prepare(
     *,
     root: Path,
@@ -322,7 +368,9 @@ def prepare(
         "response_schema_bytes": b"schema:smoke",
         "profile_bytes": b"profile:smoke",
         "policy_bytes": policy_path.read_bytes(),
-        "decision_v2_bytes": b"decision-v2:smoke",
+        # Bind the manifest authority to the exact policy bytes placed in the
+        # artifact; never duplicate a policy hash as a free-standing literal.
+        "decision_v2_bytes": policy_path.read_bytes(),
         "pricing_bytes": b"pricing:smoke",
         "source:gate_a": b"gate-a:smoke",
         "source:provider": b"provider:smoke",

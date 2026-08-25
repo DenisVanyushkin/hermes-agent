@@ -230,6 +230,12 @@ def main() -> int:
         state = root / "state"
         state.mkdir()
         dispatch_probe_path = state / "dispatch-probe.json"
+        factory_trace_path = state / "decision-request-factory.trace"
+        decision_request_factory = (
+            "gate_b_cli_smoke_fixture:broken_decision_request_factory"
+            if os.environ.get("GATE_B_SMOKE_BREAK_DECISION_FACTORY") == "1"
+            else "job_intel.product_search.gate_b_evidence_runner_v1:build_decision_request_from_context_v2"
+        )
         target_args = [
             "--manifest",
             str(manifest_path),
@@ -251,6 +257,7 @@ def main() -> int:
             "GATE_B_SMOKE_ISOLATION_PROBE": str(probe_path),
             "GATE_B_SMOKE_DISPATCH_LOG": str(dispatch_probe_path),
             "GATE_B_SMOKE_PROBE_CAP": "1",
+            "GATE_B_SMOKE_FACTORY_TRACE": str(factory_trace_path),
         }
         target_started = time.perf_counter()
         try:
@@ -272,7 +279,7 @@ def main() -> int:
                         "--provider-factory",
                         "gate_b_cli_smoke_fixture:provider_factory",
                         "--decision-request-factory",
-                        "job_intel.product_search.gate_b_evidence_runner_v1:build_decision_request_from_context_v2",
+                        decision_request_factory,
                     ],
                     cwd=install_root / "runtime",
                     env=target_env,
@@ -301,6 +308,15 @@ def main() -> int:
             )
         if not dispatch_probe_path.is_file():
             raise RuntimeError("provider did not publish dispatch probe")
+        if not factory_trace_path.is_file():
+            raise SmokeFailure(
+                "production_decision_request_factory_not_called"
+            )
+        factory_trace = factory_trace_path.read_text(encoding="utf-8").splitlines()
+        if not factory_trace or any(
+            item != "build_decision_request_from_context_v2" for item in factory_trace
+        ):
+            raise SmokeFailure("production_decision_request_factory_trace_invalid")
         dispatch_probe = json.loads(dispatch_probe_path.read_bytes())
         manifest_row_count = 48
         if dispatch_probe.get("dispatch_count") != manifest_row_count:
@@ -446,6 +462,7 @@ def main() -> int:
             "isolation_probe": isolation_probe,
             "isolation_probe_error": isolation_probe_error,
             "dispatch_probe": dispatch_probe,
+            "decision_request_factory_calls": len(factory_trace),
             "first_stop": first_stop,
             "durable_artifacts_at_stop": sorted(
                 path.relative_to(state).as_posix() for path in state.rglob("*")
