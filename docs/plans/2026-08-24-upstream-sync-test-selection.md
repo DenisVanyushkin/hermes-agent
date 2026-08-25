@@ -379,7 +379,9 @@ node-aware classifier. Это было намеренное расширение
 включать дословно `2 errors in 0.05s` (множественное `errors` не должно
 потеряться из-за `error\b`) и `no tests ran in 0.01s` (нечитаемый прогон,
 rc 2), рядом с рабочими формами `2 passed, 1 error in 0.12s` и боевой строкой
-`76 failed, 6259 passed, 2 skipped, 6 warnings in 679.63s`.
+`164 failed, 7154 passed, 5 skipped, 9 warnings in 815.76s (0:13:35)`.
+Эта строка дословно взята из архивного baseline/post-лога; суффикс времени
+в скобках обязателен для реального полного прогона.
 
 **Фактическое выполнение.** T12 выполнен коммитом `aff19e73b5`
 (`parse pytest collection errors as gate outcomes`). Реализация добавила общий
