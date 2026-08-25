@@ -642,6 +642,223 @@ def test_v2_publication_resume_uses_stored_transport_without_redispatch(
     assert entry.recording_sha256 == v2_record["semantic_transport_record_sha256"]
 
 
+def test_v2_publication_resume_with_new_provider_replays_stored_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED: resume must not depend on the first provider adapter's RAM state."""
+    projected_v3 = _projected_fixture()
+    projected = synthesis.EvidenceSynthesisInputV2.model_validate(
+        projected_v3.model_dump(mode="json")
+    )
+    policy = synthesis.load_evidence_synthesis_policy()
+    semantic_fake = _ProductionShapedSemanticFake(_provider_payload(projected))
+    manifest_sha256 = "f" * 64
+    (tmp_path / "provider-records").mkdir()
+    monkeypatch.setenv("GATE_B_MANIFEST_SHA256", manifest_sha256)
+    monkeypatch.setenv("GATE_B_PROVIDER_STORE_DIR", str(tmp_path / "provider-records"))
+    semantic_store = SemanticRecordingStore(tmp_path / "semantic-records")
+    semantic_provider = LLMObservationProvider(
+        store=semantic_store,
+        mode="record",
+        model_id=policy.model_id,
+        transport=semantic_fake,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    provider = runner._LiveGateBProvider(semantic_provider)
+    manifest, corpus_row = _fixture_manifest(
+        projected=projected_v3,
+        provider=provider,
+        manifest_sha256=manifest_sha256,
+    )
+    manifest.decision_clock = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        runner,
+        "project_vacancy_evidence_v3",
+        lambda *_args, **_kwargs: projected_v3,
+    )
+    ledger = ForegroundDispatchLedger(
+        manifest, committed_budget_reserver=runner.NoDurableAccounting()
+    )
+    allowlist = ReviewedFragmentAllowlistV3(
+        schema_version="3.1.0",
+        gate_a_run_id="gate-a-20260816T141344Z",
+        gate_b_corpus_sha256="b" * 64,
+        entries=(),
+    )
+    recordings = RecordingStore(tmp_path / "recordings")
+    decision_evidence = runner.DecisionEvidenceStore(tmp_path / "decisions")
+    original_save = provider.store.save_exclusive
+
+    def fail_publication(_record: dict[str, object]) -> None:
+        raise RuntimeError("v2 publication failure")
+
+    monkeypatch.setattr(provider.store, "save_exclusive", fail_publication)
+    with pytest.raises(RuntimeError, match="v2 publication failure"):
+        runner.run_collection(
+            manifest=manifest,
+            corpus_rows=(corpus_row,),
+            reviewed_allowlist=allowlist,
+            provider_factory=lambda: provider,
+            ledger=ledger,
+            recordings=recordings,
+            decision_evidence=decision_evidence,
+            decision_policy=load_decision_policy(),
+            decision_request_factory=runner.build_decision_request_from_context_v2,
+            source_artifact=SimpleNamespace(),
+            runtime=SimpleNamespace(),
+            authorities=SimpleNamespace(),
+            binding_verifier=lambda *_args, **_kwargs: None,
+        )
+
+    monkeypatch.setattr(provider.store, "save_exclusive", original_save)
+    fresh_semantic_provider = LLMObservationProvider(
+        store=SemanticRecordingStore(tmp_path / "semantic-records"),
+        mode="record",
+        model_id=policy.model_id,
+        transport=semantic_fake,
+        prompt_version=policy.semantic_prompt_version,
+    )
+    fresh_provider = runner._LiveGateBProvider(fresh_semantic_provider)
+    runner.run_collection(
+        manifest=manifest,
+        corpus_rows=(corpus_row,),
+        reviewed_allowlist=allowlist,
+        provider_factory=lambda: fresh_provider,
+        ledger=ledger,
+        recordings=recordings,
+        decision_evidence=decision_evidence,
+        decision_policy=load_decision_policy(),
+        decision_request_factory=runner.build_decision_request_from_context_v2,
+        source_artifact=SimpleNamespace(),
+        runtime=SimpleNamespace(),
+        authorities=SimpleNamespace(),
+        binding_verifier=lambda *_args, **_kwargs: None,
+    )
+    assert ledger.entries()[0].state is JournalState.SUCCESS
+    input_hash = runner._reservation_input_hash(manifest.row_ref(0))
+    generic_record = fresh_provider._semantic_store.load(input_hash)
+    v2_record = runner._provider_record(fresh_provider, input_hash)
+    assert v2_record["usage"] == generic_record["usage"]
+
+
+def test_v2_publication_resume_does_not_get_stuck_on_prior_terminal_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RED: a row-1 publication failure must resume past row 0."""
+    provider, capability, ledger, refs, request = _live_dispatch_fixture(
+        tmp_path, monkeypatch, row_count=2
+    )
+    projected_v3 = _projected_fixture()
+    raw = {
+        "company": "Northstar",
+        "title": "Head of Product",
+        "location": "Remote",
+        "posted_at": "2026-08-23T00:00:00Z",
+    }
+    payload = request.provider_payload
+    input_sha256 = runner._sha256(runner._canonical_bytes(payload))
+    projection_sha256 = runner._sha256(
+        runner._canonical_bytes(projected_v3.model_dump(mode="json"))
+    )
+    rows = tuple(
+        EvidenceManifestRow(
+            ordinal=ordinal,
+            corpus_key=f"northstar/head-of-product-{ordinal}",
+            raw_sha256=runner._sha256(runner._canonical_bytes(raw)),
+            input_sha256=input_sha256,
+            projection_sha256=projection_sha256,
+        )
+        for ordinal in range(2)
+    )
+    manifest = ledger.manifest
+    manifest_run_id = "gate-b-evidence-v1-0123456789abcdef"
+    manifest_sha256 = manifest.manifest_sha256
+    refs = tuple(
+        ManifestRef(
+            run_id=manifest_run_id,
+            manifest_sha256=manifest_sha256,
+            ordinal=ordinal,
+            input_sha256=input_sha256,
+            projection_sha256=projection_sha256,
+        )
+        for ordinal in range(2)
+    )
+    manifest.run_id = manifest_run_id
+    manifest.corpus_sha256 = None
+    manifest.decision_clock = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    manifest.rows = rows
+    manifest.row_ref = lambda ordinal: refs[ordinal]
+    manifest.row = lambda ordinal: rows[ordinal]
+    manifest.row_count = 2
+    manifest.limits = SimpleNamespace(
+        ordered_call_cap=2,
+        per_call_maximum_usd=provider.pricing.reservation_cost_usd,
+        aggregate_maximum_usd=provider.pricing.reservation_cost_usd * 2,
+    )
+    monkeypatch.setattr(
+        runner,
+        "project_vacancy_evidence_v3",
+        lambda *_args, **_kwargs: projected_v3,
+    )
+    allowlist = ReviewedFragmentAllowlistV3(
+        schema_version="3.1.0",
+        gate_a_run_id="gate-a-20260816T141344Z",
+        gate_b_corpus_sha256="b" * 64,
+        entries=(),
+    )
+    corpus_rows = tuple(CorpusRow(ordinal=ordinal, record={}, raw=raw) for ordinal in range(2))
+    recordings = RecordingStore(tmp_path / "recordings")
+    decision_evidence = runner.DecisionEvidenceStore(tmp_path / "decisions")
+    save_calls = 0
+    original_save = provider.store.save_exclusive
+
+    def fail_row_one_publication(record: dict[str, object]) -> object:
+        nonlocal save_calls
+        save_calls += 1
+        if save_calls == 2:
+            raise RuntimeError("v2 publication failure on row 1")
+        return original_save(record)
+
+    monkeypatch.setattr(provider.store, "save_exclusive", fail_row_one_publication)
+    with pytest.raises(RuntimeError, match="v2 publication failure on row 1"):
+        runner.run_collection(
+            manifest=manifest,
+            corpus_rows=corpus_rows,
+            reviewed_allowlist=allowlist,
+            provider_factory=lambda: provider,
+            ledger=ledger,
+            recordings=recordings,
+            decision_evidence=decision_evidence,
+            decision_policy=load_decision_policy(),
+            decision_request_factory=runner.build_decision_request_from_context_v2,
+            source_artifact=SimpleNamespace(),
+            runtime=SimpleNamespace(),
+            authorities=SimpleNamespace(),
+            binding_verifier=lambda *_args, **_kwargs: None,
+        )
+    assert ledger.state(0) is JournalState.SUCCESS
+    assert ledger.state(1) is JournalState.DISPATCHED
+
+    monkeypatch.setattr(provider.store, "save_exclusive", original_save)
+    runner.run_collection(
+        manifest=manifest,
+        corpus_rows=corpus_rows,
+        reviewed_allowlist=allowlist,
+        provider_factory=lambda: provider,
+        ledger=ledger,
+        recordings=recordings,
+        decision_evidence=decision_evidence,
+        decision_policy=load_decision_policy(),
+        decision_request_factory=runner.build_decision_request_from_context_v2,
+        source_artifact=SimpleNamespace(),
+        runtime=SimpleNamespace(),
+        authorities=SimpleNamespace(),
+        binding_verifier=lambda *_args, **_kwargs: None,
+    )
+    assert ledger.state(0) is JournalState.SUCCESS
+    assert ledger.state(1) is JournalState.SUCCESS
+
+
 def test_duplicate_provider_input_binds_to_distinct_manifest_dispatches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

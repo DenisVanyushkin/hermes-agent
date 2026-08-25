@@ -1539,6 +1539,24 @@ class _LiveGateBProvider:
             self._adapter.last_call_metadata["transport_record_sha256"] = _sha256(
                 _canonical_bytes(generic_record)
             )
+            raw_response_text = generic_record.get("raw_response_text")
+            if isinstance(raw_response_text, str) and raw_response_text:
+                self._adapter.last_response_payload = self._response_payload(
+                    generic_record
+                )
+            else:
+                self._adapter.last_response_payload = None
+            for name in (
+                "usage",
+                "cost_usd",
+                "measured_cost_usd",
+                "conservative_cost_usd",
+                "post_dispatch_outcome_v3",
+                "failure_diagnostic",
+                "retry_count",
+            ):
+                if name in generic_record:
+                    self._adapter.last_call_metadata[name] = generic_record[name]
             v2_record = self._publish_v2_provider_record(
                 dispatch_input_hash=input_hash,
                 input_payload=request.synthesis_input.model_dump(mode="json"),
@@ -2893,7 +2911,8 @@ def run_collection(
             synthesis_input=projected,
             provider_payload=request_payload,
         )
-        if ledger.state(corpus_row.ordinal) is JournalState.DISPATCHED:
+        row_state = ledger.state(corpus_row.ordinal)
+        if row_state is JournalState.DISPATCHED:
             resume = getattr(provider, "resume_v2_publication", None)
             if not callable(resume):
                 raise ValueError("v2_publication_resume_required")
@@ -2902,6 +2921,15 @@ def run_collection(
                 input_hash=dispatch_input_hash,
                 capability=capability,
             )
+        elif row_state in {
+            JournalState.SUCCESS,
+            JournalState.TERMINAL_FAILURE,
+            JournalState.TERMINAL_UNKNOWN,
+        }:
+            # A prior terminal row is already paid and published.  Rebuild its
+            # result from the verified V2 record instead of dispatching again;
+            # this lets a later resumable row make progress.
+            dispatch_result = None
         else:
             try:
                 dispatch_result = provider.dispatch(
