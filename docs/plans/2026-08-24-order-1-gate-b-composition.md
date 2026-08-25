@@ -201,7 +201,7 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 ---
 ## 2. Сквозной проход `run_collection` до `recordings.verify`
 
-- [ ] Раздел 2 выполнен целиком
+- [x] Раздел 2 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -210,19 +210,19 @@ authority-полями **до** `seal_record`. Поэтому раздел 1 —
 
 **Задачи**
 
-- [ ] Выполнить подпункты 2.1–2.4 в указанном порядке: каждый следующий blocker становится
+- [x] Выполнить подпункты 2.1–2.4 в указанном порядке: каждый следующий blocker становится
   наблюдаемым только после устранения предыдущего.
-- [ ] После зелёного минимального E2E выполнить подпункты 2.5–2.7; они не блокируют достижение
+- [x] После зелёного минимального E2E выполнить подпункты 2.5–2.7; они не блокируют достижение
   `recordings.verify`, но блокируют закрытие issue #10 и агрегатный чекбокс раздела 2.
-- [ ] Выполнить интеграционный gate 2.8 без ослабления тестов, удаления проверок или подмены
+- [x] Выполнить интеграционный gate 2.8 без ослабления тестов, удаления проверок или подмены
   production-композиции моками.
 
 **DoD**
 
-- [ ] Все агрегатные чекбоксы 2.1–2.8 отмечены только после выполнения их собственных DoD.
-- [ ] `run_collection` проводит production-shaped строку через `dispatch`, Decision v2,
+- [x] Все агрегатные чекбоксы 2.1–2.8 отмечены только после выполнения их собственных DoD.
+- [x] `run_collection` проводит production-shaped строку через `dispatch`, Decision v2,
   `RecordingStore.save_exclusive` и `recordings.verify` без реального provider/network/spend.
-- [ ] Transport receipt и V2-envelope остаются разными, явно связанными артефактами; ни один
+- [x] Transport receipt и V2-envelope остаются разными, явно связанными артефактами; ни один
   SHA не используется одновременно как transport anchor и как hash V2-envelope.
 
 ### 2.1 Typed V2 dispatch seam: полная проекция локально, редактированный payload в transport
@@ -507,7 +507,7 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 ### 2.8 Интеграционный acceptance gate раздела 2
 
-- [ ] Пункт 2.8 выполнен целиком
+- [x] Пункт 2.8 выполнен целиком
 
 Закрывает: [issue #10](https://github.com/DenisVanyushkin/hermes-agent/issues/10)
 
@@ -517,26 +517,26 @@ recording lineage привязаны к `ManifestRef`/ordinal, а одинако
 
 **Задачи**
 
-- [ ] Зафиксировать RED baseline на исходном HEAD командой
+- [x] Зафиксировать RED baseline на исходном HEAD командой
   `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py`:
   `1 failed, 1 passed, 2 xfailed`, текущая ошибка — два отсутствующих поля при
   `EvidenceSynthesisInputV2.model_validate(payload)`.
-- [ ] После выполнения 2.1–2.7 удалить оба strict-xfail marker; не менять production-shaped fake
+- [x] После выполнения 2.1–2.7 удалить оба strict-xfail marker; не менять production-shaped fake
   на Mock, не подменять `recordings`, `reconcile`, `RecordingStore` или `DecisionEvidenceStore`.
-- [ ] Запустить существующие четыре acceptance node отдельно и получить `4 passed`; новые тесты,
+- [x] Запустить существующие четыре acceptance node отдельно и получить `4 passed`; новые тесты,
   добавленные этим планом, также остаются в полном файле и проходят.
-- [ ] Запустить focused regression suites collection/recording/skeleton и readiness experiment;
+- [x] Запустить focused regression suites collection/recording/skeleton и readiness experiment;
   сохранить fake-only режим, без live provider/network/spend.
 
 **DoD**
 
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_full_composition_e2e.py`
   завершается с exit `0`; output не содержит `failed`, `xfailed`, `xpassed` или `skipped`.
-- [ ] `rg -n '@pytest\.mark\.xfail|pytest\.xfail' tests/product_search/test_gate_b_full_composition_e2e.py`
+- [x] `rg -n '@pytest\.mark\.xfail|pytest\.xfail' tests/product_search/test_gate_b_full_composition_e2e.py`
   не находит маркеров, скрывающих blocker 3 или blocker 4.
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_collection_runner.py tests/product_search/test_gate_b_recording_replay.py tests/product_search/test_gate_b_evidence_skeleton.py`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_collection_runner.py tests/product_search/test_gate_b_recording_replay.py tests/product_search/test_gate_b_evidence_skeleton.py`
   завершается с exit `0`.
-- [ ] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_readiness_experiment.py`
+- [x] `/usr/bin/timeout 90s .venv/bin/pytest -q tests/product_search/test_gate_b_readiness_experiment.py`
   проходит assertions `transport_success: 48`, `assessed: 45`, `decision_fail_closed: 3` и summary
   `Transport completed: 48/48. Decisions assessed: 45/48. Not measurable: 3/48.`
 - [ ] `.venv/bin/ruff check job_intel/product_search/gate_b_evidence_runner_v1.py job_intel/product_search/evidence_synthesis.py job_intel/vacancy_understanding/semantic/runtime/llm_provider.py tests/product_search/test_gate_b_full_composition_e2e.py tests/product_search/test_gate_b_collection_runner.py tests/product_search/test_gate_b_recording_replay.py tests/product_search/test_gate_b_evidence_skeleton.py`
