@@ -7,7 +7,9 @@ set -euo pipefail
 # ~/.hermes/state/upstream-sync/last-synced.json (when a SHA is given).
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
+if [ -n "${HERMES_REPO:-}" ]; then
+  REPO="$HERMES_REPO"
+elif [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
   REPO="${PWD}"
 elif [ -d "$SCRIPT_DIR/../agent" ] && [ -d "$SCRIPT_DIR/../gateway" ]; then
   REPO="$(cd -- "$SCRIPT_DIR/.." && pwd)"

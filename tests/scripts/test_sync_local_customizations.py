@@ -16,6 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNC = REPO_ROOT / "scripts" / "sync-local-customizations.sh"
+SMOKETEST = REPO_ROOT / "scripts" / "upstream-sync-smoketest.sh"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -159,6 +160,32 @@ def _run_sync(world, extra_env=None, argv=()) -> subprocess.CompletedProcess:
         text=True,
         timeout=300,
     )
+
+
+def _repo_precedence_runtime(tmp_path: Path, source: Path, *, with_git_retry: bool) -> tuple[Path, Path]:
+    runtime = tmp_path / "runtime-root"
+    runtime_scripts = runtime / "scripts"
+    runtime_scripts.mkdir(parents=True)
+    (runtime / "agent").mkdir()
+    (runtime / "gateway").mkdir()
+    runtime_script = runtime_scripts / source.name
+    runtime_script.write_bytes(source.read_bytes())
+    runtime_script.chmod(0o755)
+    if with_git_retry:
+        lib = runtime_scripts / "lib"
+        lib.mkdir()
+        source_lib = REPO_ROOT / "scripts" / "lib" / "git-retry.sh"
+        (lib / "git-retry.sh").write_bytes(source_lib.read_bytes())
+
+    selected = tmp_path / "selected-repo"
+    selected.mkdir()
+    _git(selected, "init", "-q", "-b", "repo-precedence-marker")
+    _git(selected, "config", "user.email", "t@t")
+    _git(selected, "config", "user.name", "t")
+    (selected / "marker.txt").write_text("selected\n")
+    _git(selected, "add", "marker.txt")
+    _git(selected, "commit", "-qm", "selected repo")
+    return runtime_script, selected
 
 
 def _add_upstream_commit(world, path: str, content: str, message: str) -> None:
@@ -427,3 +454,61 @@ def test_post_update_only_without_a_before_head_refuses(world):
     proc = _run_sync(world, argv=["--post-update-only"])
     assert proc.returncode != 0
     assert "post-update-only" in proc.stderr
+
+
+def test_repo_precedence_sync_local_prefers_explicit_repo_from_root_cwd(tmp_path):
+    script, selected = _repo_precedence_runtime(
+        tmp_path, SYNC, with_git_retry=True
+    )
+    env = dict(os.environ)
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "HERMES_REPO": str(selected),
+            "HERMES_LOCAL_BRANCH": "repo-precedence-marker",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script), "--post-update-only", "missing-commit"],
+        cwd="/",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 2, output
+    assert "--post-update-only was given an unknown commit" in output
+    assert "Local branch not found" not in output
+
+
+def test_repo_precedence_smoketest_prefers_explicit_repo_from_root_cwd(tmp_path):
+    script, selected = _repo_precedence_runtime(
+        tmp_path, SMOKETEST, with_git_retry=False
+    )
+    for repo, exit_code in ((script.parent.parent, "11"), (selected, "12")):
+        python = repo / "venv" / "bin" / "python"
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text(f"#!/usr/bin/env bash\nexit {exit_code}\n")
+        python.chmod(0o755)
+    env = dict(os.environ)
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
+            "HERMES_SYNC_STATE_DIR": str(tmp_path / "state"),
+            "HERMES_REPO": str(selected),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd="/",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert f"Repo: {selected}" in output
+    assert "core package import failed" in output
