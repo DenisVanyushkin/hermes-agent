@@ -626,7 +626,9 @@ suite — 22 passed; полный `scripts/run_tests.sh tests/scripts/` заве
 **Follow-up.** По ревью identity guard усилен коммитом `ba88d28242`:
 `run_triage` и CLI требуют одновременно `merge_sha` и `before`, финализатор
 передаёт их без условного legacy-пропуска, а вызов API без identity
-отвергается. Полный triage suite после миграции — 23 passed.
+отвергается. Полный triage suite после миграции — 23 passed; итоговый полный
+`scripts/run_tests.sh tests/scripts/` — 655 passed и те же три известных
+pre-existing failure.
 
 **Зависимости.** T18. **Сложность.** M.
 
