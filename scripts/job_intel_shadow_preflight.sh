@@ -72,7 +72,12 @@ workdir="${JOB_INTEL_WORKDIR:-$expected_workdir}"
   || fail "JOB_INTEL_WORKDIR points at '$workdir', expected '$expected_workdir'"
 [[ "${JOB_INTEL_SCRIPTS_DIR:-$expected_workdir/scripts}" == "$expected_workdir/scripts" ]] \
   || fail "JOB_INTEL_SCRIPTS_DIR points outside the pinned checkout"
-pin_file="${JOB_INTEL_SHADOW_PIN_FILE:-/etc/job-intel/job-intel-shadow.pin}"
+# The pin path is not settable from the environment: a redirected pin verifies
+# a file the operator does not control and proves nothing about the checkout.
+canonical_pin_file="/etc/job-intel/job-intel-shadow.pin"
+[[ -z "${JOB_INTEL_SHADOW_PIN_FILE:-}" || "${JOB_INTEL_SHADOW_PIN_FILE}" == "$canonical_pin_file" ]] \
+  || fail "JOB_INTEL_SHADOW_PIN_FILE points at '${JOB_INTEL_SHADOW_PIN_FILE}', only $canonical_pin_file is accepted"
+pin_file="$canonical_pin_file"
 [[ -r "$pin_file" ]] || fail "pin file $pin_file is missing; refusing to run unpinned"
 pinned="$(tr -d '[:space:]' <"$pin_file")"
 [[ -n "$pinned" ]] || fail "pin file $pin_file is empty"
@@ -88,9 +93,13 @@ fi
 # A matching HEAD says nothing about the working tree, and the resident agent
 # edits it in place. Tracked modifications mean the running code is not the
 # reviewed code even when the commit matches.
-dirty="$(git -C "$workdir" status --porcelain --untracked-files=no 2>/dev/null || true)"
-if [[ -n "$dirty" ]]; then
-  fail "working tree has tracked modifications; the running code is not the pinned code: $(echo "$dirty" | head -3 | tr '\n' ' ')"
+# Tree state is decided by a dedicated script so the behaviour can be tested
+# against a throwaway repository; the canonical checkout is passed here and
+# nowhere is it settable from the environment.
+tree_state_script="$workdir/scripts/job_intel_tree_state.sh"
+[[ -x "$tree_state_script" ]] || fail "tree-state checker missing at $tree_state_script"
+if ! tree_reason="$(bash "$tree_state_script" "$workdir" 2>&1)"; then
+  fail "checkout is not safe to run from: $tree_reason"
 fi
 
 python_bin="$workdir/venv/bin/python"

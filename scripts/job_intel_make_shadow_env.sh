@@ -23,6 +23,11 @@ declare -a DROP=(
   SLACK_APP_TOKEN
   SLACK_HOME_CHANNEL
   JOB_INTEL_SLACK_WEBHOOK_URL
+  # Not a credential, but an authority path: carrying it would let the
+  # production env file choose which pin the preflight verifies, which is the
+  # same class of redirection as pointing JOB_INTEL_WORKDIR elsewhere.
+  JOB_INTEL_SHADOW_PIN_FILE
+  HERMES_MANAGED_DIR
 )
 
 # Credential-shaped, but required by acquisition and therefore carried on
