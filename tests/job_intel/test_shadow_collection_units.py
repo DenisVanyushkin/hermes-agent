@@ -127,6 +127,36 @@ def test_preflight_pins_the_checkout_rather_than_probing_for_a_helper() -> None:
     assert "delivery_disabled" in preflight
 
 
+def test_preflight_compares_the_pin_exactly_and_rejects_a_dirty_tree() -> None:
+    """A prefix match would accept any commit sharing the leading characters,
+    and a matching HEAD says nothing about uncommitted edits in the tree the
+    resident agent keeps rewriting."""
+    preflight = PREFLIGHT.read_text(encoding="utf-8")
+    assert '"$actual" != "$pinned"' in preflight, "comparison must be exact, not a prefix"
+    assert '"$pinned"*' not in preflight, "prefix comparison must be gone"
+    assert "${#pinned} -eq 40" in preflight, "an abbreviated pin must be refused"
+    assert "status --porcelain" in preflight, "a dirty tracked tree must stop the run"
+
+
+def test_preflight_refuses_a_redirectable_checkout_or_managed_store() -> None:
+    """The environment is carried from production, so paths that decide which
+    code is authoritative must not be settable by it."""
+    preflight = PREFLIGHT.read_text(encoding="utf-8")
+    assert "JOB_INTEL_WORKDIR points at" in preflight
+    assert "JOB_INTEL_SCRIPTS_DIR points outside" in preflight
+    assert "HERMES_MANAGED_DIR is set" in preflight
+
+
+def test_managed_store_path_matches_the_resolver() -> None:
+    """hermes_cli/managed_scope resolves to /etc/hermes, never $HERMES_HOME/managed."""
+    preflight = PREFLIGHT.read_text(encoding="utf-8")
+    service = SERVICE.read_text(encoding="utf-8")
+    assert "/etc/hermes" in preflight
+    assert "/etc/hermes" in service
+    assert "managed/.env" not in preflight, "the wrong managed path protects nothing"
+    assert "managed/.env" not in service
+
+
 def test_timer_points_at_the_shadow_service() -> None:
     timer = TIMER.read_text(encoding="utf-8")
     assert "Unit=job-intel-shadow-collection.service" in timer

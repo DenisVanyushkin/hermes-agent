@@ -32,11 +32,17 @@ done
 # absence of a variable is not a barrier. Every store that can supply them must
 # be unreachable from inside the namespace.
 hermes_home="${HERMES_HOME:-/home/hermes/.hermes}"
+# hermes_cli/managed_scope.get_managed_dir() resolves the managed store to
+# $HERMES_MANAGED_DIR or /etc/hermes — never to $HERMES_HOME/managed. Guarding
+# the wrong path would have looked identical in the journal and protected
+# nothing.
+managed_dir="${HERMES_MANAGED_DIR:-/etc/hermes}"
+[[ -z "${HERMES_MANAGED_DIR:-}" ]] || fail "HERMES_MANAGED_DIR is set; the managed store is redirectable"
 for path in \
   /etc/job-intel/job-intel.env \
   "$hermes_home/.env" \
   "$hermes_home/.op.env" \
-  "$hermes_home/managed/.env" \
+  "$managed_dir/.env" \
   "$hermes_home/config.yaml" \
   "$hermes_home/auth.json"
 do
@@ -56,15 +62,35 @@ fi
 # nothing about the rest of the checkout, which the resident agent rewrites.
 # The pin file is written by hand when the owner authorises a specific commit,
 # so an unreviewed code change stops the timer instead of running under it.
-workdir="${JOB_INTEL_WORKDIR:-/home/hermes/.hermes/hermes-agent}"
+# The environment must not be able to move the checkout whose commit we verify:
+# JOB_INTEL_WORKDIR and JOB_INTEL_SCRIPTS_DIR are carried from the production
+# env file, and a redirected workdir would pin a different tree than the one
+# that runs. Both are therefore asserted against the expected canonical paths.
+expected_workdir="/home/hermes/.hermes/hermes-agent"
+workdir="${JOB_INTEL_WORKDIR:-$expected_workdir}"
+[[ "$workdir" == "$expected_workdir" ]] \
+  || fail "JOB_INTEL_WORKDIR points at '$workdir', expected '$expected_workdir'"
+[[ "${JOB_INTEL_SCRIPTS_DIR:-$expected_workdir/scripts}" == "$expected_workdir/scripts" ]] \
+  || fail "JOB_INTEL_SCRIPTS_DIR points outside the pinned checkout"
 pin_file="${JOB_INTEL_SHADOW_PIN_FILE:-/etc/job-intel/job-intel-shadow.pin}"
 [[ -r "$pin_file" ]] || fail "pin file $pin_file is missing; refusing to run unpinned"
 pinned="$(tr -d '[:space:]' <"$pin_file")"
 [[ -n "$pinned" ]] || fail "pin file $pin_file is empty"
+[[ ${#pinned} -eq 40 ]] \
+  || fail "pin must be a full 40-character sha, got '${pinned}' (${#pinned} chars)"
 actual="$(git -C "$workdir" rev-parse HEAD 2>/dev/null || true)"
 [[ -n "$actual" ]] || fail "cannot resolve HEAD of $workdir"
-if [[ "$actual" != "$pinned"* && "$pinned" != "$actual"* ]]; then
+# Exact equality, not a prefix match: an abbreviated pin would accept any commit
+# sharing those leading characters.
+if [[ "$actual" != "$pinned" ]]; then
   fail "checkout drifted: pinned $pinned, found $actual — re-review and update the pin"
+fi
+# A matching HEAD says nothing about the working tree, and the resident agent
+# edits it in place. Tracked modifications mean the running code is not the
+# reviewed code even when the commit matches.
+dirty="$(git -C "$workdir" status --porcelain --untracked-files=no 2>/dev/null || true)"
+if [[ -n "$dirty" ]]; then
+  fail "working tree has tracked modifications; the running code is not the pinned code: $(echo "$dirty" | head -3 | tr '\n' ' ')"
 fi
 
 python_bin="$workdir/venv/bin/python"
