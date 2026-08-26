@@ -1,72 +1,105 @@
-"""Manifest and verification for code that runs before any import.
+"""Manifest and verification for the interpreter tree that runs before any import.
 
-Python executes every ``.pth`` file and ``sitecustomize.py`` in its site
-directories during interpreter startup — before ``job_intel`` is imported and
-therefore before the delivery kill-switch exists. The commit pin cannot cover
-them: the virtualenv is deliberately outside the repository and ignored by git,
-so a tree check will never see a change there.
+Python executes every ``.pth`` in its site directories at startup, and those
+``.pth`` files import real modules: on this host ``_virtualenv.pth`` imports
+``_virtualenv.py`` and ``00-pysqlite3-shim.pth`` imports the ``pysqlite3``
+package and its extension. Hashing only the ``.pth`` files would therefore
+leave the code they load unguarded, so the whole target ``site-packages`` tree
+is manifested instead.
 
-Usage:
-    python job_intel_site_integrity.py write <manifest>
-    python job_intel_site_integrity.py verify <manifest>
+**This script must be run by a trusted interpreter that is not the target
+venv**, with ``-I -S`` so it performs no site initialisation of its own.
+Running the target venv to check the target venv executes the very code under
+suspicion first — a guard placed after the door.
 
-The manifest is a sorted ``sha256  path`` listing. Verification fails on a
-changed, added, or removed entry, and prints which.
+Usage (both forms take the target site-packages explicitly):
+    /usr/bin/python3.12 -I -S job_intel_site_integrity.py write <manifest> <site-packages>
+    /usr/bin/python3.12 -I -S job_intel_site_integrity.py verify <manifest> <site-packages>
+
+Manifest lines are ``sha256  mode  uid  gid  size  relpath`` for regular files,
+``symlink  ->  target  relpath`` for symlinks and ``dir  mode  uid  gid  relpath``
+for directories, sorted by path. Symlinks are never followed.
 """
 
 from __future__ import annotations
 
-import glob
 import hashlib
 import os
 from pathlib import Path
-import site
 import sys
 
 
-def _entries() -> list[tuple[str, str]]:
-    seen: dict[str, str] = {}
-    for directory in site.getsitepackages():
-        patterns = (os.path.join(directory, "*.pth"), os.path.join(directory, "sitecustomize.py"))
-        for pattern in patterns:
-            for path in glob.glob(pattern):
-                real = os.path.realpath(path)
-                digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-                seen[real] = digest
-    return sorted(seen.items())
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-def _render(entries: list[tuple[str, str]]) -> str:
-    return "".join(f"{digest}  {path}\n" for path, digest in entries)
+def _manifest(root: Path) -> str:
+    lines: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames.sort()
+        base = Path(dirpath)
+        for name in sorted(dirnames + filenames):
+            path = base / name
+            rel = path.relative_to(root).as_posix()
+            info = path.lstat()
+            if os.path.islink(path):
+                lines.append(f"symlink  ->  {os.readlink(path)}  {rel}")
+            elif path.is_dir():
+                lines.append(f"dir  {info.st_mode:o}  {info.st_uid}  {info.st_gid}  {rel}")
+            else:
+                lines.append(
+                    f"{_digest(path)}  {info.st_mode:o}  {info.st_uid}  "
+                    f"{info.st_gid}  {info.st_size}  {rel}"
+                )
+    lines.sort(key=lambda line: line.rsplit("  ", 1)[-1])
+    return "".join(line + "\n" for line in lines)
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3 or argv[1] not in {"write", "verify"}:
+    if len(argv) != 4 or argv[1] not in {"write", "verify"}:
         print(__doc__, file=sys.stderr)
         return 2
-    action, manifest_path = argv[1], Path(argv[2])
-    current = _render(_entries())
+    action, manifest_path, site_root = argv[1], Path(argv[2]), Path(argv[3])
+
+    if "site" in sys.modules and action == "verify":
+        # -S was not passed: this interpreter has already run site initialisation,
+        # and if it is the target venv the guarded code has already executed.
+        print("refusing to verify from an interpreter that ran site init", file=sys.stderr)
+        return 5
+
+    if not site_root.is_dir():
+        print(f"target site-packages not found at {site_root}", file=sys.stderr)
+        return 6
+
+    current = _manifest(site_root)
 
     if action == "write":
         manifest_path.write_text(current, encoding="utf-8")
-        print(f"wrote {manifest_path} with {len(current.splitlines())} entries")
+        print(f"wrote {manifest_path}: {len(current.splitlines())} entries under {site_root}")
         return 0
 
     if not manifest_path.is_file():
         print(f"site manifest missing at {manifest_path}", file=sys.stderr)
         return 3
-    recorded = manifest_path.read_text(encoding="utf-8")
-    if recorded == current:
-        print(f"site integrity OK: {len(current.splitlines())} pre-import entries match")
+    if manifest_path.read_text(encoding="utf-8") == current:
+        print(f"site integrity OK: {len(current.splitlines())} entries match")
         return 0
 
-    recorded_map = dict(line.split("  ", 1)[::-1] for line in recorded.splitlines() if line)
-    current_map = dict(line.split("  ", 1)[::-1] for line in current.splitlines() if line)
-    for path in sorted(set(recorded_map) | set(current_map)):
-        was, now = recorded_map.get(path), current_map.get(path)
-        if was != now:
-            state = "added" if was is None else "removed" if now is None else "changed"
-            print(f"pre-import code {state}: {path}", file=sys.stderr)
+    recorded = {ln.rsplit("  ", 1)[-1]: ln for ln in manifest_path.read_text(encoding="utf-8").splitlines()}
+    now = {ln.rsplit("  ", 1)[-1]: ln for ln in current.splitlines()}
+    shown = 0
+    for rel in sorted(set(recorded) | set(now)):
+        if recorded.get(rel) != now.get(rel):
+            state = "added" if rel not in recorded else "removed" if rel not in now else "changed"
+            print(f"startup tree {state}: {rel}", file=sys.stderr)
+            shown += 1
+            if shown >= 10:
+                print("...", file=sys.stderr)
+                break
     return 4
 
 

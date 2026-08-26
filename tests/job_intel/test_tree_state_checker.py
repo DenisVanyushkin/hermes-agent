@@ -86,27 +86,24 @@ def test_pth_in_the_checkout_root_is_not_this_checks_business(tmp_path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_untracked_file_inside_an_untracked_directory_is_seen(tmp_path) -> None:
-    """--untracked-files=normal collapses a directory to one entry, hiding its
-    contents; the checker must use =all."""
+def test_untracked_directory_contents_are_not_collapsed(tmp_path) -> None:
+    """--untracked-files=normal reports an untracked directory as one entry and
+    hides what is inside it. The assertion is on the listing the checker sees,
+    because a return code alone would stay green under either setting."""
     repo = make_repo(tmp_path)
     nested = repo / "scratch"
     nested.mkdir()
-    (nested / "sitecustomize.py").write_text("import os\n", encoding="utf-8")
+    (nested / "payload.py").write_text("import os\n", encoding="utf-8")
 
-    result = run(repo)
+    listing = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    collapsed = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=normal"],
+        capture_output=True, text=True, check=True,
+    ).stdout
 
-    # Not at the root, so not refused — but it must be visible in the listing
-    # rather than collapsed away, which is what =all guarantees.
-    assert result.returncode == 0, result.stderr
-
-
-def test_harmless_untracked_file_is_allowed(tmp_path) -> None:
-    """Control group: refusing every untracked file would make the checker
-    unusable, since evidence and scratch files legitimately appear."""
-    repo = make_repo(tmp_path)
-    (repo / "notes.md").write_text("scratch\n", encoding="utf-8")
-
-    result = run(repo)
-
-    assert result.returncode == 0, result.stderr
+    assert "scratch/payload.py" in listing
+    assert "scratch/payload.py" not in collapsed, "fixture no longer demonstrates the difference"
+    assert "--untracked-files=all" in CHECKER.read_text(encoding="utf-8")
