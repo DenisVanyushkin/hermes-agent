@@ -135,7 +135,10 @@ def test_preflight_compares_the_pin_exactly_and_rejects_a_dirty_tree() -> None:
     assert '"$actual" != "$pinned"' in preflight, "comparison must be exact, not a prefix"
     assert '"$pinned"*' not in preflight, "prefix comparison must be gone"
     assert "${#pinned} -eq 40" in preflight, "an abbreviated pin must be refused"
-    assert "status --porcelain" in preflight, "a dirty tracked tree must stop the run"
+    # Tree state moved into its own script so it could be tested behaviourally;
+    # what the preflight must still do is call it with the canonical checkout.
+    assert "job_intel_tree_state.sh" in preflight, "the tree-state helper must be invoked"
+    assert "site_integrity" in preflight, "pre-import code must be verified before the venv runs"
 
 
 def test_preflight_refuses_a_redirectable_checkout_or_managed_store() -> None:

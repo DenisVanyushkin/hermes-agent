@@ -12,7 +12,9 @@ set -uo pipefail
 
 dir="${1:?usage: job_intel_tree_state.sh <checkout>}"
 
-if ! status="$(git -C "$dir" status --porcelain --untracked-files=normal 2>&1)"; then
+# --untracked-files=all, not normal: normal collapses an untracked directory to
+# a single "?? dir/" entry, hiding executable files inside it.
+if ! status="$(git -C "$dir" status --porcelain --untracked-files=all 2>&1)"; then
   echo "git status failed in $dir: $(printf '%s' "$status" | head -1)" >&2
   exit 2
 fi
@@ -23,11 +25,14 @@ if [[ -n "$tracked" ]]; then
   exit 3
 fi
 
-# Python loads sitecustomize.py and .pth files without any import statement, so
-# an untracked file can execute while every tracked file matches the pin.
-untracked="$(printf '%s\n' "$status" | grep '^??' | grep -E '(sitecustomize\.py|\.pth|conftest\.py|/__init__\.py)$' || true)"
+# Only what this check can actually see and what actually auto-loads from the
+# checkout root: Python imports sitecustomize.py from sys.path[0]. Files inside
+# the virtualenv are ignored by git and are covered by the separate site
+# integrity manifest instead — claiming them here would be a guarantee this
+# check cannot deliver.
+untracked="$(printf '%s\n' "$status" | grep '^?? sitecustomize\.py$' || true)"
 if [[ -n "$untracked" ]]; then
-  echo "untracked auto-loading code: $(printf '%s' "$untracked" | head -3 | tr '\n' ' ')" >&2
+  echo "untracked auto-loading code at the checkout root: sitecustomize.py" >&2
   exit 4
 fi
 

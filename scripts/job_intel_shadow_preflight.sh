@@ -102,8 +102,20 @@ if ! tree_reason="$(bash "$tree_state_script" "$workdir" 2>&1)"; then
   fail "checkout is not safe to run from: $tree_reason"
 fi
 
+# Code that runs before any import: every .pth and sitecustomize.py in the
+# interpreter site directories executes at startup, ahead of job_intel and
+# therefore ahead of the kill-switch. The commit pin cannot cover them — the
+# virtualenv is outside the repository and ignored by git.
+site_manifest="/etc/job-intel/job-intel-shadow.site-manifest"
+site_script="$workdir/scripts/job_intel_site_integrity.py"
+[[ -r "$site_manifest" ]] || fail "site manifest missing at $site_manifest"
+[[ -r "$site_script" ]] || fail "site integrity checker missing at $site_script"
+
 python_bin="$workdir/venv/bin/python"
 [[ -x "$python_bin" ]] || fail "interpreter not found at $python_bin"
+site_result="$("$python_bin" "$site_script" verify "$site_manifest" 2>&1)" \
+  || fail "pre-import code changed: $(printf '%s' "$site_result" | head -3 | tr '\n' ' ')"
+
 "$python_bin" - <<'PY' || fail "the pinned checkout does not enforce the delivery kill-switch"
 import os, sys
 sys.path.insert(0, os.environ.get("JOB_INTEL_WORKDIR", "/home/hermes/.hermes/hermes-agent"))

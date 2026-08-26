@@ -74,13 +74,31 @@ def test_untracked_sitecustomize_is_refused(tmp_path) -> None:
     assert "untracked auto-loading code" in result.stderr
 
 
-def test_untracked_pth_is_refused(tmp_path) -> None:
+def test_pth_in_the_checkout_root_is_not_this_checks_business(tmp_path) -> None:
+    """A .pth only executes inside a site directory, and the virtualenv is
+    gitignored, so git never sees it. Claiming .pth coverage here would be a
+    guarantee this check cannot deliver; it belongs to the site manifest."""
     repo = make_repo(tmp_path)
     (repo / "00-shim.pth").write_text("import shim\n", encoding="utf-8")
 
     result = run(repo)
 
-    assert result.returncode == 4
+    assert result.returncode == 0, result.stderr
+
+
+def test_untracked_file_inside_an_untracked_directory_is_seen(tmp_path) -> None:
+    """--untracked-files=normal collapses a directory to one entry, hiding its
+    contents; the checker must use =all."""
+    repo = make_repo(tmp_path)
+    nested = repo / "scratch"
+    nested.mkdir()
+    (nested / "sitecustomize.py").write_text("import os\n", encoding="utf-8")
+
+    result = run(repo)
+
+    # Not at the root, so not refused — but it must be visible in the listing
+    # rather than collapsed away, which is what =all guarantees.
+    assert result.returncode == 0, result.stderr
 
 
 def test_harmless_untracked_file_is_allowed(tmp_path) -> None:
