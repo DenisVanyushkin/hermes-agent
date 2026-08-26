@@ -2554,7 +2554,10 @@ def cron_delivery_targets() -> list[dict]:
         connected |= _relay_fronted_delivery_platforms(connected)
     except Exception:
         logger.debug("cron_delivery_targets: gateway config unavailable", exc_info=True)
-        connected = set()
+        # A gateway failure is a delivery-safety failure.  Do not expose even
+        # locally resolved bot-chat targets while the target inventory is
+        # incomplete; technical failures must not fan out to recipients.
+        return targets
 
     for name in _iter_home_target_platforms():
         if name not in connected:
