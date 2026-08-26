@@ -428,6 +428,87 @@ def test_bootstrap_unit_uses_one_interpreter_for_start_and_stop() -> None:
     assert start_interpreter == stop_interpreter == "${PRODUCT_SEARCH_PYTHON}"
 
 
+def _bootstrap_runtime_config(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    script = Path(__file__).parents[2] / "scripts/browser-desktop-bootstrap.sh"
+    return subprocess.run(
+        ["bash", str(script), "--print-runtime-config", *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+    )
+
+
+def _runtime_config(stdout: str) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+
+
+def test_bootstrap_runtime_config_preserves_linkedin_defaults() -> None:
+    result = _bootstrap_runtime_config("--profile", "linkedin")
+
+    assert result.returncode == 0, result.stderr
+    assert _runtime_config(result.stdout) == {
+        "profile": "linkedin",
+        "namespace": "ln-eg",
+        "cdp_port": "9222",
+        "novnc_bind": "169.254.77.2",
+        "cdp_endpoint": "http://169.254.77.2:19222",
+        "cdp_tunnel_host": "169.254.77.2",
+        "cdp_tunnel_port": "19222",
+    }
+
+
+def test_bootstrap_runtime_config_preserves_non_linkedin_defaults() -> None:
+    result = _bootstrap_runtime_config("--profile", "hh")
+
+    assert result.returncode == 0, result.stderr
+    config = _runtime_config(result.stdout)
+    assert config["profile"] == "hh"
+    assert config["namespace"] == ""
+    assert config["novnc_bind"] == "127.0.0.1"
+    assert config["cdp_endpoint"] == "http://127.0.0.1:9223"
+    assert config["cdp_tunnel_host"] == "127.0.0.1"
+    assert config["cdp_tunnel_port"] == "9223"
+
+
+def test_bootstrap_runtime_config_allows_an_arbitrary_profile_in_a_namespace(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ip = fake_bin / "ip"
+    fake_ip.write_text("#!/bin/sh\nprintf '%s\\n' ln-eg\n", encoding="utf-8")
+    fake_ip.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    result = _bootstrap_runtime_config(
+        "--profile", "a0probe", "--network-namespace", "ln-eg", env=environment
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = _runtime_config(result.stdout)
+    assert config["profile"] == "a0probe"
+    assert config["namespace"] == "ln-eg"
+    assert config["novnc_bind"] == "169.254.77.2"
+    assert config["cdp_endpoint"] == "http://169.254.77.2:19222"
+    assert config["cdp_tunnel_host"] == "169.254.77.2"
+    assert config["cdp_tunnel_port"] == "19222"
+
+
+def test_bootstrap_runtime_config_rejects_a_missing_namespace(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ip = fake_bin / "ip"
+    fake_ip.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_ip.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    result = _bootstrap_runtime_config(
+        "--profile", "a0probe", "--network-namespace", "typo", env=environment
+    )
+
+    assert result.returncode != 0
+    assert "network namespace" in result.stderr.lower()
+
+
 def test_acquisition_unit_binds_to_bootstrap_without_privilege_escalation() -> None:
     unit = (Path(__file__).parents[2] / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.service").read_text()
 

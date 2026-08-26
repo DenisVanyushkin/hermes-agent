@@ -16,6 +16,7 @@ set -euo pipefail
 #   sudo bash scripts/browser-desktop-bootstrap.sh
 #   sudo bash scripts/browser-desktop-bootstrap.sh --profile linkedin --url https://www.linkedin.com/
 #   sudo bash scripts/browser-desktop-bootstrap.sh --profile hh --url https://hh.ru/
+#   sudo bash scripts/browser-desktop-bootstrap.sh --profile a0probe --network-namespace ln-eg
 #
 # Connect from your workstation:
 #   ssh -L 6080:127.0.0.1:6080 -L 9222:127.0.0.1:9222 user@vps
@@ -34,6 +35,10 @@ CDP_ENDPOINT="http://127.0.0.1:${CDP_PORT}"
 CDP_TUNNEL_HOST="127.0.0.1"
 CDP_TUNNEL_PORT="${CDP_PORT}"
 BASE_DIR="/var/lib/browser-desktop"
+NETWORK_NAMESPACE=""
+EXPLICIT_NETWORK_NAMESPACE=0
+PRINT_RUNTIME_CONFIG=0
+NOVNC_BIND="127.0.0.1"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CDP_RELAY_SOURCE="${SCRIPT_DIR}/browser-desktop-cdp-relay.py"
 CDP_RELAY="/usr/local/libexec/browser-desktop-cdp-relay.py"
@@ -56,6 +61,29 @@ validate_profile_name() {
   if [[ ! "${PROFILE}" =~ ^[A-Za-z0-9_-]+$ ]]; then
     echo "Invalid profile name: ${PROFILE}. Use only letters, numbers, underscore, and dash." >&2
     exit 1
+  fi
+}
+
+validate_network_namespace() {
+  if ! ip netns list | awk '{print $1}' | grep -qx "${NETWORK_NAMESPACE}"; then
+    echo "Network namespace not found: ${NETWORK_NAMESPACE}" >&2
+    exit 1
+  fi
+}
+
+configure_runtime_network() {
+  if [[ -n "${NETWORK_NAMESPACE}" ]]; then
+    NETNS_PREFIX=(ip netns exec "${NETWORK_NAMESPACE}")
+    NOVNC_BIND="169.254.77.2"
+    CDP_ENDPOINT="http://169.254.77.2:${CDP_RELAY_PORT}"
+    CDP_TUNNEL_HOST="169.254.77.2"
+    CDP_TUNNEL_PORT="${CDP_RELAY_PORT}"
+  else
+    NETNS_PREFIX=()
+    NOVNC_BIND="127.0.0.1"
+    CDP_ENDPOINT="http://127.0.0.1:${CDP_PORT}"
+    CDP_TUNNEL_HOST="127.0.0.1"
+    CDP_TUNNEL_PORT="${CDP_PORT}"
   fi
 }
 
@@ -91,6 +119,10 @@ Usage: sudo bash scripts/browser-desktop-bootstrap.sh [options]
 Options:
   --profile NAME   Chromium profile name (default: linkedin)
   --url URL        Start Chromium at URL (default: LinkedIn)
+  --network-namespace NAME
+                   Run this profile inside an existing network namespace
+  --print-runtime-config
+                   Print the selected runtime values without side effects
   -h, --help       Show this help
 
 Examples:
@@ -117,6 +149,19 @@ while [[ $# -gt 0 ]]; do
       URL="$2"
       shift 2
       ;;
+    --network-namespace)
+      if [[ -z "${2:-}" ]]; then
+        echo "Missing value for --network-namespace" >&2
+        exit 1
+      fi
+      NETWORK_NAMESPACE="$2"
+      EXPLICIT_NETWORK_NAMESPACE=1
+      shift 2
+      ;;
+    --print-runtime-config)
+      PRINT_RUNTIME_CONFIG=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -131,6 +176,24 @@ done
 
 validate_profile_name
 select_ports
+
+if [[ -z "${NETWORK_NAMESPACE}" && "${PROFILE}" == "linkedin" ]]; then
+  NETWORK_NAMESPACE="${LINKEDIN_NETNS:-ln-eg}"
+fi
+if (( EXPLICIT_NETWORK_NAMESPACE )); then
+  validate_network_namespace
+fi
+configure_runtime_network
+if (( PRINT_RUNTIME_CONFIG )); then
+  printf 'profile=%s\n' "${PROFILE}"
+  printf 'namespace=%s\n' "${NETWORK_NAMESPACE}"
+  printf 'cdp_port=%s\n' "${CDP_PORT}"
+  printf 'novnc_bind=%s\n' "${NOVNC_BIND}"
+  printf 'cdp_endpoint=%s\n' "${CDP_ENDPOINT}"
+  printf 'cdp_tunnel_host=%s\n' "${CDP_TUNNEL_HOST}"
+  printf 'cdp_tunnel_port=%s\n' "${CDP_TUNNEL_PORT}"
+  exit 0
+fi
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this script with sudo/root so it can install packages and configure the service user." >&2
@@ -559,14 +622,9 @@ PASSWORD="$(get_password)"
 # noVNC внутри netns обязан слушать не на 127.0.0.1: это его собственный
 # loopback, недостижимый из SSH-туннеля оператора. Слушает на veth-адресе,
 # который скрипт linkedin-netns-up.sh поднял для управления.
-NOVNC_BIND="127.0.0.1"
-if [[ "${PROFILE}" == "linkedin" ]]; then
+if [[ -n "${NETWORK_NAMESPACE}" ]] && (( ! EXPLICIT_NETWORK_NAMESPACE )); then
   bash "${SCRIPT_DIR}/linkedin-netns-up.sh"
   NETNS_PREFIX=(ip netns exec "${LINKEDIN_NETNS:-ln-eg}")
-  NOVNC_BIND="169.254.77.2"
-  CDP_ENDPOINT="http://169.254.77.2:${CDP_RELAY_PORT}"
-  CDP_TUNNEL_HOST="169.254.77.2"
-  CDP_TUNNEL_PORT="${CDP_RELAY_PORT}"
 fi
 
 ensure_display_free
@@ -605,7 +663,7 @@ if [[ -z "${CHROMIUM_BIN}" || ! -x "${CHROMIUM_BIN}" ]]; then
   exit 1
 fi
 
-if [[ "${PROFILE}" == "linkedin" ]]; then
+if [[ -n "${NETWORK_NAMESPACE}" ]]; then
   if [[ ! -x "${CDP_RELAY}" ]]; then
     echo "CDP relay is missing or not executable: ${CDP_RELAY}" >&2
     exit 1
@@ -628,7 +686,7 @@ if ! process_matches "remote-debugging-port=${CDP_PORT}"; then
     --new-window "${URL}"
 fi
 
-if [[ "${PROFILE}" == "linkedin" ]]; then
+if [[ -n "${NETWORK_NAMESPACE}" ]]; then
   if ! process_matches "browser-desktop-cdp-relay.py.*--listen-port ${CDP_RELAY_PORT}"; then
     start_as_browser "${LOG_DIR}/cdp-relay-${PROFILE}.log" python3 "${CDP_RELAY}" \
       --listen-host 169.254.77.2 \
