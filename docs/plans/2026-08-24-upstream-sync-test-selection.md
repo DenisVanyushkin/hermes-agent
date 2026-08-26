@@ -752,8 +752,10 @@ smoketest (его меняет T17), triage, slack и apply (его helper ме�
 им же.
 
 **DoD.** `scripts/acceptance/fresh-attempt.sh` завершается кодом 0: инвариант
-T20 выполняется, `upstream_head` равен `git rev-parse upstream/main` после
-свежего fetch.
+T20 выполняется; `pending.local_head`, `prepare.local_base` и live `HEAD`
+совпадают, а утверждённый `pending.upstream_head` совпадает с
+`prepare.upstream_head` и `scratch`/`MERGE_HEAD`. Свежий `upstream/main` после
+fetch не подменяет этот утверждённый срез: он станет входом следующего синка.
 
 **Зависимости.** T23. **Сложность.** M.
 
