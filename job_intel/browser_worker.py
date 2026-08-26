@@ -11,7 +11,6 @@ import traceback
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from .browser_sourcing import (
@@ -62,10 +61,6 @@ def _prepare_browser_runtime_env() -> None:
     os.environ.pop("JOB_INTEL_BROWSER_CHANNEL", None)
     os.environ.pop("JOB_INTEL_BROWSER_CDP_URL", None)
     os.environ["JOB_INTEL_BROWSER_HEADLESS"] = "0"
-
-
-def _bootstrap_script() -> Path:
-    return Path(__file__).resolve().parents[1] / "scripts" / "browser-desktop-bootstrap.sh"
 
 
 def _cdp_ready(cdp_url: str, *, attempts: int = 1, delay_seconds: float = 1.0) -> bool:
@@ -166,82 +161,31 @@ def _endpoint_dirty(source: str, cdp_url: str) -> bool:
     return foreign > 0 or page_count > int(target.get("max_page_targets", 8))
 
 
-def _recycle_browser_desktop(source: str) -> None:
-    target = _CDP_TARGETS.get(source)
-    if not target:
-        return
-    cdp_url = str(target["cdp_url"])
-    port = urlparse(cdp_url).port or 0
-    profile = str(target["profile"])
-    kill_script = """
-set -e
-port="{port}"
-profile="{profile}"
-# Match both arguments independently: Chromium places --user-data-dir before
-# --remote-debugging-port, while renderer processes may use another order.
-pids="$(ps -u browser -o pid=,args= | awk -v port="$port" -v profile="$profile" '
-  index($0, "remote-debugging-port=" port) && index($0, "profiles/" profile) {{print $1}}
-')"
-if [ -n "$pids" ]; then
-  # First try graceful termination.
-  for pid in $pids; do
-    pkill -TERM -P "$pid" 2>/dev/null || true
-    kill -TERM "$pid" 2>/dev/null || true
-  done
-  sleep 2
-  # Then force kill if still present.
-  for pid in $pids; do
-    pkill -KILL -P "$pid" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
-  done
-fi
-""".format(port=port, profile=profile)
-
-    subprocess.run(["sudo", "-n", "bash", "-lc", kill_script], capture_output=True, text=True, timeout=30, check=False)
-    for _ in range(20):
-        if not _cdp_ready(cdp_url):
-            break
-        time.sleep(1.0)
-
-    # If the CDP endpoint is still up, fall back to killing the listener by port.
-    if _cdp_ready(cdp_url):
-        fallback = """
-set -e
-port={port}
-# Best-effort: kill whatever is listening on the CDP port.
-ss -ltnp 2>/dev/null | awk -v p=":{port}" '$4 ~ p {{print $NF}}' | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | while read -r pid; do
-  [ -n \"$pid\" ] || continue
-  pkill -TERM -P \"$pid\" 2>/dev/null || true
-  kill -TERM \"$pid\" 2>/dev/null || true
-done
-sleep 2
-ss -ltnp 2>/dev/null | awk -v p=":{port}" '$4 ~ p {{print $NF}}' | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | while read -r pid; do
-  [ -n \"$pid\" ] || continue
-  pkill -KILL -P \"$pid\" 2>/dev/null || true
-  kill -KILL \"$pid\" 2>/dev/null || true
-done
-""".format(port=port)
-        subprocess.run(["sudo", "-n", "bash", "-lc", fallback], capture_output=True, text=True, timeout=30, check=False)
-        for _ in range(10):
-            if not _cdp_ready(cdp_url):
-                break
-            time.sleep(0.5)
-
-
 def _browser_process_age_seconds(source: str) -> int:
     target = _CDP_TARGETS.get(source)
     if not target:
         return 0
     cdp_url = str(target["cdp_url"])
-    port = urlparse(cdp_url).port or 0
+    port = int(cdp_url.rsplit(":", 1)[-1])
     profile = str(target["profile"])
-    cmd = f"ps -eo etimes=,args= | grep 'remote-debugging-port={port}' | grep 'profiles/{profile}' | grep -v grep | awk 'NR==1 {{print $1}}'"
-    proc = subprocess.run(["sudo", "-n", "bash", "-lc", cmd], capture_output=True, text=True, timeout=15, check=False)
-    out = (proc.stdout or "").strip()
-    try:
-        return int(out)
-    except Exception:
-        return 0
+    proc = subprocess.run(
+        ["ps", "-eo", "etimes=,args="],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    for line in (proc.stdout or "").splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) != 2:
+            continue
+        if f"remote-debugging-port={port}" not in fields[1] or f"profiles/{profile}" not in fields[1]:
+            continue
+        try:
+            return int(fields[0])
+        except ValueError:
+            return 0
+    return 0
 
 
 def _browser_process_stale(source: str) -> bool:
@@ -268,44 +212,16 @@ def _ensure_browser_desktop(source: str, *, force_recycle: bool = False) -> str:
     if not target:
         return ""
     cdp_url = str(target["cdp_url"])
-    if force_recycle:
-        _recycle_browser_desktop(source)
     if _cdp_ready(cdp_url):
         cleanup = _close_foreign_pages(source, cdp_url)
         if cleanup["remaining_foreign"] == 0 and not _endpoint_dirty(source, cdp_url) and not _browser_process_stale(source):
             return cdp_url
-        _recycle_browser_desktop(source)
-    script = _bootstrap_script()
-    if not script.exists():
-        raise BrowserNativeUnavailable(f"browser-desktop bootstrap script is missing: {script}")
-    browser_python = os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or sys.executable
-    repo_root = Path(__file__).resolve().parents[1]
-    proc = subprocess.run(
-        [
-            "sudo",
-            "-n",
-            "env",
-            f"JOB_INTEL_BROWSER_PYTHON={browser_python}",
-            f"PYTHONPATH={repo_root}",
-            "bash",
-            str(script),
-            "--profile",
-            str(target["profile"]),
-            "--url",
-            str(target["start_url"]),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=240,
-        check=False,
+        raise BrowserNativeUnavailable(
+            f"browser CDP endpoint is dirty or stale; bootstrap must recycle it for {source}"
+        )
+    raise BrowserNativeUnavailable(
+        f"browser CDP endpoint is unavailable; bootstrap must be active for {source}: {cdp_url}"
     )
-    if proc.returncode != 0 and not _cdp_ready(cdp_url, attempts=5, delay_seconds=1.0):
-        detail = (proc.stderr or proc.stdout or f"browser-desktop bootstrap failed for {source}").strip()
-        raise BrowserNativeUnavailable(detail)
-    if not _cdp_ready(cdp_url, attempts=45, delay_seconds=1.0):
-        raise BrowserNativeUnavailable(f"browser-desktop CDP endpoint did not become ready for {source}: {cdp_url}")
-    _close_foreign_pages(source, cdp_url)
-    return cdp_url
 
 
 def _payload(
@@ -349,7 +265,6 @@ def _with_browser_source(source: str, fn):
         except Exception as exc:
             last_exc = exc
             if source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
-                _recycle_browser_desktop(source)
                 time.sleep(2.0)
                 continue
             raise

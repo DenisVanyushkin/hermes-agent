@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-import sys
-import types
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
+import threading
+import types
 
 import pytest
+
+from job_intel import browser_worker
 
 from job_intel.browser_sourcing import (
     AcquisitionMetrics,
@@ -204,6 +211,196 @@ def test_browser_client_fetch_html_wraps_runtime_failures() -> None:
         assert "Playwright browser fetch failed" in str(exc)
     else:
         raise AssertionError("expected BrowserNativeUnavailable")
+
+
+def test_acquisition_warm_and_cold_paths_never_dispatch_sudo(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def exploding_sudo_run(argv, **kwargs):
+        command = list(argv)
+        calls.append(command)
+        if command[:1] == ["sudo"]:
+            raise AssertionError(f"acquisition dispatched sudo: {command!r}")
+        return subprocess.CompletedProcess(command, 0, stdout="0\n", stderr="")
+
+    monkeypatch.setattr(browser_worker.subprocess, "run", exploding_sudo_run)
+    monkeypatch.setattr(browser_worker, "_close_foreign_pages", lambda *_args: {"remaining_foreign": 0})
+    monkeypatch.setattr(browser_worker, "_endpoint_dirty", lambda *_args: False)
+    monkeypatch.setattr(browser_worker, "_cdp_ready", lambda *_args, **_kwargs: True)
+
+    assert browser_worker._ensure_browser_desktop("linkedin") == "http://169.254.77.2:19222"
+
+    monkeypatch.setattr(browser_worker, "_cdp_ready", lambda *_args, **_kwargs: False)
+    with pytest.raises(BrowserNativeUnavailable, match="bootstrap|endpoint"):
+        browser_worker._ensure_browser_desktop("linkedin")
+
+    assert all(command[:1] != ["sudo"] for command in calls)
+
+
+def test_browser_process_age_check_stays_unprivileged_and_semantic(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_ps(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=(
+                "  42 /usr/bin/chromium --user-data-dir=/var/lib/browser-desktop/"
+                "profiles/linkedin --remote-debugging-port=19222\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(browser_worker.subprocess, "run", fake_ps)
+
+    assert browser_worker._browser_process_age_seconds("linkedin") == 42
+    assert calls == [["ps", "-eo", "etimes=,args="]]
+
+
+def _notify_socket(path: Path) -> socket.socket:
+    receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    receiver.bind(str(path))
+    receiver.settimeout(3)
+    return receiver
+
+
+def _supervisor_command(
+    *, profile: Path, cdp_url: str, lock_path: Path, notify_path: Path, timeout: str
+) -> tuple[list[str], dict[str, str], Path]:
+    bootstrap_script = profile.parent / "fake-browser-desktop-bootstrap.sh"
+    bootstrap_log = profile.parent / "bootstrap-argv.log"
+    bootstrap_script.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > {str(bootstrap_log)!r}\n",
+        encoding="utf-8",
+    )
+    bootstrap_script.chmod(0o755)
+    command = [
+        sys.executable,
+        str(Path(__file__).parents[2] / "scripts/job_intel_browser_supervisor.py"),
+        "--source",
+        "linkedin",
+        "--profile",
+        str(profile),
+        "--cdp-url",
+        cdp_url,
+        "--lock-path",
+        str(lock_path),
+        "--startup-timeout",
+        timeout,
+        "--poll-interval",
+        "0.02",
+        "--monitor-interval",
+        "30",
+        "--bootstrap-script",
+        str(bootstrap_script),
+    ]
+    return command, {**os.environ, "NOTIFY_SOCKET": str(notify_path)}, bootstrap_log
+
+
+def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Path) -> None:
+    events: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            if self.path != "/json/version":
+                self.send_response(404)
+                self.end_headers()
+                return
+            events.append("json/version")
+            body = b'{"Browser":"fake"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    notify_path = tmp_path / "notify.sock"
+    receiver = _notify_socket(notify_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    command, environment, bootstrap_log = _supervisor_command(
+        profile=profile,
+        cdp_url=f"http://127.0.0.1:{server.server_port}",
+        lock_path=tmp_path / "profile.lock",
+        notify_path=notify_path,
+        timeout="30",
+    )
+    process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        message, _ = receiver.recvfrom(128)
+        assert message == b"READY=1\n"
+        assert events == ["json/version"]
+        assert bootstrap_log.read_text(encoding="utf-8").splitlines() == [
+            "--profile",
+            "linkedin",
+            "--url",
+            "https://www.linkedin.com/",
+        ]
+        assert process.poll() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        receiver.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=3)
+
+
+def test_supervisor_times_out_without_cdp_ready_and_never_notifies(tmp_path: Path) -> None:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    notify_path = tmp_path / "notify.sock"
+    receiver = _notify_socket(notify_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    command, environment, _bootstrap_log = _supervisor_command(
+        profile=profile,
+        cdp_url=f"http://127.0.0.1:{port}",
+        lock_path=tmp_path / "profile.lock",
+        notify_path=notify_path,
+        timeout="0.2",
+    )
+
+    result = subprocess.run(command, env=environment, capture_output=True, timeout=5)
+
+    assert result.returncode != 0
+    with pytest.raises(socket.timeout):
+        receiver.recvfrom(128)
+    receiver.close()
+
+
+def test_bootstrap_unit_declares_foreground_notify_and_explicit_teardown() -> None:
+    unit = (Path(__file__).parents[2] / "deploy/systemd/experiments/job-intel-browser-bootstrap.service").read_text()
+
+    assert "Type=notify" in unit
+    assert "KillMode=control-group" in unit
+    assert "KillMode=process" not in unit
+    assert "KillMode=none" not in unit
+    assert "StopWhenUnneeded=yes" in unit
+    assert "ExecStop=" in unit
+    assert "job_intel_browser_supervisor.py" in unit
+    assert "browser-desktop-bootstrap.sh" in unit
+    assert "--source linkedin" in unit
+    assert "--cdp-url" not in unit
+    assert "User=root" in unit
+
+
+def test_acquisition_unit_binds_to_bootstrap_without_privilege_escalation() -> None:
+    unit = (Path(__file__).parents[2] / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.service").read_text()
+
+    assert "BindsTo=job-intel-browser-bootstrap.service" in unit
+    assert "After=job-intel-browser-bootstrap.service" in unit
+    assert "NoNewPrivileges=yes" in unit
+    assert "sudo" not in unit.lower()
 
 
 def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:

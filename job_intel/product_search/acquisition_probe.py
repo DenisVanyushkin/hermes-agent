@@ -870,65 +870,67 @@ def relocate_experiment_manifest(
     ).hexdigest()
     relocated["source_isolation"] = {
         "ashby": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/ashby.lock"),
         },
         "duckduckgo": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
-        "headhunter": {"collection_method": "api", "mode": "api"},
+        "headhunter": {"mode": "api"},
         "greenhouse": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/greenhouse.lock"),
         },
         "lever": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/lever.lock"),
         },
         "linkedin": {
             "backup_path": str(new_root / "browser-profile-backup/linkedin"),
-            "collection_method": "browser",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/linkedin-profile.lock"),
             "shared_profile_path": str(SHARED_BROWSER_PROFILES["linkedin"]),
         },
         "personio": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/personio.lock"),
         },
         "recruitee": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/recruitee.lock"),
         },
         "remoteok": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/remoteok.lock"),
         },
         "remotive": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/remotive.lock"),
         },
         "smartrecruiters": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/smartrecruiters.lock"),
         },
         "teamtailor": {
-            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/teamtailor.lock"),
         },
     }
-    validate_experiment_manifest(relocated)
+    original_isolation = dict(manifest.get("source_isolation") or {})
+    for family, original_settings in original_isolation.items():
+        if not isinstance(original_settings, Mapping) or "collection_method" not in original_settings:
+            continue
+        if family in relocated["source_isolation"]:
+            relocated["source_isolation"][family]["collection_method"] = original_settings[
+                "collection_method"
+            ]
+    # A legacy manifest without source_isolation is accepted on input for
+    # relocation compatibility. Its generated legacy isolation map must not be
+    # enriched with collection_method, and is intentionally not revalidated as
+    # a newly classified manifest. Classified manifests remain fail-closed.
+    if original_isolation:
+        validate_experiment_manifest(relocated)
     return relocated
 
 
