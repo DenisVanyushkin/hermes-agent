@@ -7,9 +7,9 @@ authorized_base: 496e542b3b002d28a65a814fd2d56b84a63c8cdc
 plan: docs/plans/2026-08-26-p0-open-market-acquisition.md
 plan_sha256_at_authorization: 4c02fb0282e58f545fc3590b9e4755c1660cf2ccfeb4418ba7ac46e4f7d60a85
 plan_commit: 496e542b3b002d28a65a814fd2d56b84a63c8cdc
-scope_table_sha256: 31dd03845ddf685da33485267478d4d804b2961a076f680c41ab68bf04294fad
+scope_table_sha256: 49a8bc4d45d42561746eb8af3a5c7d34e3f293add80d8ec23ab3b7e25909b468
 scope_table_canonicalization: "sorted unique backticked paths from the section 4 table, one per line, LF-terminated"
-scope_table_path_count: 21
+scope_table_path_count: 22
 supersedes_product_claim_of: docs/evidence/product-search-gate-a/owner-decision.md
 owner_decision: authorized
 owner_decision_date: 2026-08-26
@@ -82,7 +82,7 @@ hardening). База выбрана именно такой, чтобы пров
 списка путей, по одному в строке, с завершающим переводом строки. Формулировки
 в колонках «Раздел» и «Основание» в хеш не входят, поэтому их правка не
 инвалидирует разрешение, а добавление или удаление пути — инвалидирует.
-Путей в таблице: 21. Проверяется скриптом по объединению путей
+Путей в таблице: 22. Проверяется скриптом по объединению путей
 каждого коммита в диапазоне, а не только по итоговому diff.
 
 | Путь | Раздел | Основание |
@@ -94,6 +94,7 @@ hardening). База выбрана именно такой, чтобы пров
 | `config/product_search/linkedin_geography.v1.yaml` (новый) | A2, B2 | «production source configuration» |
 | `deploy/systemd/experiments/job-intel-browser-bootstrap.service` (новый) | A0 | **привилегированный** юнит холодного старта; разрешён владельцем отдельным ответом (раздел 5) |
 | `deploy/systemd/experiments/job-intel-product-search-probe-experiment.service` | A0 | зависимость от bootstrap вместо `sudo` |
+| `scripts/browser-desktop-bootstrap.sh` | A0 | поправка 2026-08-26: выбор network namespace становится параметром вместо следствия имени профиля |
 | `scripts/job_intel_browser_supervisor.py` (новый) | A0 | супервизор `Type=notify` |
 | `scripts/job_intel_profile_lock.sh` (новый) | A0 | блокировка профиля |
 | `scripts/job_intel_profile_manifest.py` (новый) | A0 | манифест дерева профиля |
@@ -108,6 +109,20 @@ hardening). База выбрана именно такой, чтобы пров
 | `tests/product_search/test_gate_a_geography.py` (новый) | B2 | тест контракта улики |
 | `docs/plans/2026-08-26-p0-open-market-acquisition.md` | весь план | артефакт работ |
 | `docs/evidence/product-search-gate-a/2026-08-26-p0-authorization.md` | 0.1 | этот документ |
+
+**Поправка 2026-08-26: `scripts/browser-desktop-bootstrap.sh`.** Владелец на прямой
+вопрос, брать ли расширение объёма, ответил: «берём первый путь, готовь поправку
+к разрешению». Основание: план требует выполнять A0 на клоне профиля и в той же
+композиции, а резидентный network namespace включается в этом скрипте по условию
+«имя профиля равно linkedin» при жёстко зашитом `BASE_DIR`. Клон под другим именем
+ушёл бы на LinkedIn с датацентрового адреса, клон под тем же именем невозможен:
+каталог один. Без этой поправки два требования плана неисполнимы в его
+собственных границах.
+
+Правка ограничена превращением выбора namespace в явный параметр: поведение по
+умолчанию не меняется, и это проверяется тестом, потому что от скрипта зависят
+теневой сбор и живая hh-сессия. Разрешение на изменение прочих свойств скрипта
+этой поправкой не выдаётся. Число путей в таблице: 21 → 22.
 
 Пути `scripts/job_intel_startup_guard.sh` и `scripts/job_intel_site_integrity.py`
 входят в `authorized_base` и **не входят** в разрешённые пути после базы: их
