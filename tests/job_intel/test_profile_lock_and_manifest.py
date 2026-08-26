@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -234,3 +235,23 @@ def test_mode_change_changes_profile_manifest_without_uid_gid_mutation(
     after = _manifest(profile)
 
     assert before != after
+
+
+def test_profile_manifest_refuses_unreadable_entry_without_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "unreadable.db").write_bytes(b"private\n")
+    manifest_module = _load_manifest_module()
+
+    def unreadable(_path: Path) -> str:
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(manifest_module, "_sha256_file", unreadable)
+    monkeypatch.setattr(sys, "argv", [str(MANIFEST_SCRIPT), str(profile)])
+
+    assert manifest_module.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Permission denied" in captured.err

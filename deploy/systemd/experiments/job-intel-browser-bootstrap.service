@@ -2,19 +2,19 @@
 Description=Privileged browser bootstrap for bounded Job Intel product search proof
 After=network-online.target
 Wants=network-online.target
+StopWhenUnneeded=yes
 
 [Service]
 Type=notify
 User=root
 Group=root
 EnvironmentFile=/etc/job-intel/product-search-probe-experiment.env
-ExecStart=/usr/bin/env python3 ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --source linkedin --profile /var/lib/browser-desktop/profiles/linkedin --bootstrap-script ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/browser-desktop-bootstrap.sh --lock-path /run/job-intel/linkedin-profile.lock
+ExecStart=${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --source linkedin --profile /var/lib/browser-desktop/profiles/linkedin --bootstrap-script ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/browser-desktop-bootstrap.sh --lock-path /run/job-intel/linkedin-profile.lock
 # Explicitly stop the managed endpoint; systemd also tears down the foreground
 # supervisor and its lock holder as a control group.
-ExecStop=/usr/bin/env python3 ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --stop --source linkedin --profile /var/lib/browser-desktop/profiles/linkedin --lock-path /run/job-intel/linkedin-profile.lock
+ExecStop=${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --stop --source linkedin --profile /var/lib/browser-desktop/profiles/linkedin --lock-path /run/job-intel/linkedin-profile.lock
 KillMode=control-group
 TimeoutStartSec=120
-StopWhenUnneeded=yes
 Restart=no
 
 [Install]

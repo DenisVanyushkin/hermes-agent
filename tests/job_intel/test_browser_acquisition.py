@@ -258,6 +258,26 @@ def test_browser_process_age_check_stays_unprivileged_and_semantic(monkeypatch) 
     assert calls == [["ps", "-eo", "etimes=,args="]]
 
 
+def test_supervisor_rejects_profile_override_without_explicit_cdp(tmp_path: Path) -> None:
+    command = [
+        sys.executable,
+        str(Path(__file__).parents[2] / "scripts/job_intel_browser_supervisor.py"),
+        "--source",
+        "linkedin",
+        "--profile",
+        str(tmp_path / "a0probe"),
+        "--bootstrap-script",
+        str(tmp_path / "unused-bootstrap.sh"),
+        "--lock-path",
+        str(tmp_path / "profile.lock"),
+    ]
+
+    result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+
+    assert result.returncode != 0
+    assert "--cdp-url" in result.stderr
+
+
 def _notify_socket(path: Path) -> socket.socket:
     receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     receiver.bind(str(path))
@@ -323,7 +343,7 @@ def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Pat
     server_thread.start()
     notify_path = tmp_path / "notify.sock"
     receiver = _notify_socket(notify_path)
-    profile = tmp_path / "profile"
+    profile = tmp_path / "linkedin"
     profile.mkdir()
     command, environment, bootstrap_log = _supervisor_command(
         profile=profile,
@@ -392,6 +412,20 @@ def test_bootstrap_unit_declares_foreground_notify_and_explicit_teardown() -> No
     assert "--source linkedin" in unit
     assert "--cdp-url" not in unit
     assert "User=root" in unit
+
+
+def test_bootstrap_unit_uses_one_interpreter_for_start_and_stop() -> None:
+    unit = (Path(__file__).parents[2] / "deploy/systemd/experiments/job-intel-browser-bootstrap.service").read_text()
+    commands = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in unit.splitlines()
+        if line.startswith(("ExecStart=", "ExecStop="))
+    }
+
+    start_interpreter = commands["ExecStart"].split(maxsplit=1)[0]
+    stop_interpreter = commands["ExecStop"].split(maxsplit=1)[0]
+
+    assert start_interpreter == stop_interpreter == "${PRODUCT_SEARCH_PYTHON}"
 
 
 def test_acquisition_unit_binds_to_bootstrap_without_privilege_escalation() -> None:

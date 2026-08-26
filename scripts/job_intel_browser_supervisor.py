@@ -73,6 +73,10 @@ def _target_for_source(source: str) -> dict[str, object]:
 def _run(args: argparse.Namespace) -> int:
     lock_script = Path(__file__).with_name("job_intel_profile_lock.sh")
     target = _target_for_source(args.source)
+    default_profile = Path("/var/lib/browser-desktop/profiles") / str(target["profile"])
+    profile_override = args.profile != default_profile
+    if (profile_override or args.url is not None) and not args.cdp_url:
+        raise RuntimeError("profile or URL overrides require explicit --cdp-url")
     cdp_url = args.cdp_url or str(target["cdp_url"])
     lock_holder: subprocess.Popen[str] | None = None
     try:
@@ -93,9 +97,9 @@ def _run(args: argparse.Namespace) -> int:
                 "bash",
                 str(args.bootstrap_script),
                 "--profile",
-                str(target["profile"]),
+                args.profile.name,
                 "--url",
-                str(target["start_url"]),
+                args.url or str(target["start_url"]),
             ],
             capture_output=True,
             text=True,
@@ -128,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", required=True)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--cdp-url", help="test-only endpoint override; production resolves it from --source")
+    parser.add_argument("--url")
     parser.add_argument("--lock-path", type=Path, default=Path("/run/job-intel/linkedin-profile.lock"))
     parser.add_argument("--startup-timeout", type=float, default=120.0)
     parser.add_argument("--poll-interval", type=float, default=0.2)
