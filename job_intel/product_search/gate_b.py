@@ -403,9 +403,20 @@ def _dry_run_io_enforcement(
         boundary.slack_credentials_scrubbed = len(saved_credentials)
         token = _DRY_RUN_POLICY.set(policy)
         _ACTIVE_DRY_RUN_POLICY = policy
+        original_sqlite_connect = sqlite3.connect
+
+        def guarded_sqlite_connect(database: object, *args: Any, **kwargs: Any) -> Any:
+            # CPython 3.12 does not emit the documented sqlite3.connect audit
+            # event. Enforce the same deny-by-default policy at the call site
+            # so a test cannot open the live Job Intel database unnoticed.
+            policy.audit("sqlite3.connect", (database,))
+            return original_sqlite_connect(database, *args, **kwargs)
+
+        sqlite3.connect = guarded_sqlite_connect  # type: ignore[assignment]
         try:
             yield
         finally:
+            sqlite3.connect = original_sqlite_connect  # type: ignore[assignment]
             _ACTIVE_DRY_RUN_POLICY = None
             _DRY_RUN_POLICY.reset(token)
             os.environ.update(saved_credentials)
@@ -545,15 +556,16 @@ def _gate_a_snapshot(
 
 
 def _protected_metadata_snapshot() -> dict[str, tuple[int, int, int]]:
-    """Snapshot repository-owned metadata, not a concurrently live database.
+    """Snapshot protected metadata, including the isolated test database.
 
     The dry-run audit hook independently rejects every production DB open or
-    write outside the isolated read roots.  A live database must not also be
-    used as a before/after sentinel: the gateway may legitimately update it
-    while this read-only preflight runs, which would turn unrelated activity
-    into a false Gate B failure.
+    write outside the isolated read roots.  The production path remains in
+    this sentinel in the runtime; the product-search test scope redirects it
+    to a per-test database so unrelated live writers cannot create a false
+    Gate B failure.
     """
     paths = [
+        PRODUCTION_DATABASE_PATH,
         REPO_ROOT / "config/product_search/career_profile.v2.yaml",
         REPO_ROOT / "config/product_search/search_contract.v1.yaml",
         REPO_ROOT / "config/product_search/evidence_synthesis.v1.yaml",
