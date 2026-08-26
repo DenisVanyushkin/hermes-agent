@@ -1,0 +1,28 @@
+[Unit]
+Description=Job Intel shadow collection (no user delivery)
+Documentation=file:///home/hermes/.hermes/hermes-agent/docs/plans/2026-08-26-p0-open-market-acquisition.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+# The shadow env file is the only environment source: it carries no Slack
+# credentials and no webhook, and it sets JOB_INTEL_DELIVERY_DISABLED=1.
+# EnvironmentFile is applied after Environment=, so a drop-in cannot be used to
+# override what the file declares — the file is the authority on purpose.
+EnvironmentFile=/etc/job-intel/job-intel-shadow.env
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/home/hermes/.hermes/hermes-agent
+ExecStart=/usr/bin/env bash /home/hermes/.hermes/hermes-agent/scripts/job_intel_host_wrapper.sh daily
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/job-intel /var/log/job-intel /etc/job-intel /var/lib/browser-desktop
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

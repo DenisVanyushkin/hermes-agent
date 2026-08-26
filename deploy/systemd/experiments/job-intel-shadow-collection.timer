@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule Job Intel shadow collection
+
+[Timer]
+OnCalendar=*-*-* 09:17:00
+Persistent=true
+Unit=job-intel-shadow-collection.service
+
+[Install]
+WantedBy=timers.target

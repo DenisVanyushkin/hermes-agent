@@ -117,3 +117,54 @@ def test_advisory_still_sends_when_the_switch_is_off(production_like) -> None:
     shadow_advisory.post_advisory("delivery is expected here", dry_run=False)
 
     assert spy.calls > 0
+
+
+def test_shadow_run_sends_nothing_and_records_no_sent_card(production_like, tmp_path) -> None:
+    """The two halves of the same guarantee, asserted in one run.
+
+    Zero outbound attempts proves the network side. Absence of ``sent`` in the
+    card ledger proves the bookkeeping side: a shadow run that labels selected
+    cards as sent is indistinguishable from a delivering one in every policy
+    metric derived from that table.
+    """
+    from job_intel.models import Vacancy
+    from job_intel.store import JobIntelStore
+
+    db_path = tmp_path / "job_intel.sqlite3"
+    store = JobIntelStore(db_path)
+    store.bootstrap()
+
+    vacancy = Vacancy(
+        source="greenhouse",
+        source_id="shadow-1",
+        company="Wise",
+        title="Product Director - APAC Growth",
+        location="Singapore",
+        url="https://example.com/shadow-1",
+        description=(
+            "Own the P&L for APAC expansion, lead monetization and growth for a "
+            "consumer platform, and build the regional product organization."
+        ),
+    )
+    production_like.setattr(
+        cli, "_collect_vacancies", lambda: ([vacancy], {"greenhouse": {"status": "ok"}})
+    )
+    production_like.setenv("JOB_INTEL_DB_PATH", str(db_path))
+    production_like.setenv("JOB_INTEL_DELIVERY_DISABLED", "1")
+
+    cli.run_daily()
+
+    assert production_like.webhook_spy.calls == 0
+    assert production_like.gateway_spy.calls == 0
+
+    with store.connect(read_only=True) as conn:
+        decisions = [
+            row[0]
+            for row in conn.execute("SELECT decision FROM vacancy_card_decisions")
+        ]
+        sent_notifications = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE delivery_status = 'sent'"
+        ).fetchone()[0]
+
+    assert "sent" not in decisions, decisions
+    assert sent_notifications == 0

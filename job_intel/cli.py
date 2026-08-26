@@ -2467,7 +2467,11 @@ def run_daily() -> str:
                     continue
                 if decision_plan.should_notify:
                     surfaced_rows.append((vacancy, evaluation, vacancy_id))
-                    decision = "sent"
+                    # The ledger records what happened, not what was chosen. With
+                    # delivery disabled the card is selected but never sent, and
+                    # calling that "sent" would make a shadow run indistinguishable
+                    # from a delivering one in every policy metric derived from it.
+                    decision = "would_send" if delivery_disabled() else "sent"
                 else:
                     store.set_vacancy_status(vacancy_id, "notified")
                     decision = "suppressed"
