@@ -6,6 +6,9 @@ status: authorized
 authorized_base: 496e542b3b002d28a65a814fd2d56b84a63c8cdc
 plan: docs/plans/2026-08-26-p0-open-market-acquisition.md
 plan_sha256: 4c02fb0282e58f545fc3590b9e4755c1660cf2ccfeb4418ba7ac46e4f7d60a85
+scope_table_sha256: 31dd03845ddf685da33485267478d4d804b2961a076f680c41ab68bf04294fad
+scope_table_canonicalization: "sorted unique backticked paths from the section 4 table, one per line, LF-terminated"
+scope_table_path_count: 21
 supersedes_product_claim_of: docs/evidence/product-search-gate-a/owner-decision.md
 owner_decision: authorized
 owner_decision_date: 2026-08-26
@@ -47,11 +50,13 @@ prior_product_claim_superseded: true
 - при этом **все** ячейки отрапортованы как `qualified_results_found`, потому
   что `acquisition_probe.py:404` ставит это состояние по факту непустой выдачи.
 
-Два теневых прогона 2026-08-26 (`run_id` 467 и 468) подтвердили, что LinkedIn
-падает и сейчас, причём по причине из собственного юнита
-(`NoNewPrivileges` против `sudo` в `browser_worker.py`), а причина отказа
-теряется: `source_kpi_run` несёт `source_status = error`, а `error_class`,
-`error_fingerprint` и `error_message_truncated` — `NULL`.
+Два теневых прогона 2026-08-26 подтвердили, что LinkedIn падает и сейчас, по
+причине из собственного юнита (`NoNewPrivileges` против `sudo` в
+`browser_worker.py`), а сама причина теряется. Значения сняты с боевой БД
+пофайлово, а не обобщены: `run_id 467` — `source_status = blocked`,
+`run_id 468` — `source_status = error`; у обоих `found_count = 0` и
+`error_class`, `error_fingerprint`, `error_message_truncated` равны `NULL`.
+Разные статусы при одной причине — отдельный симптом того же дефекта учёта.
 
 Срез делает Open Market проверяемым источником и приводит измерение в
 соответствие с тем, что оно декларирует. Он **не** трогает решатель, портфель
@@ -67,7 +72,12 @@ hardening). База выбрана именно такой, чтобы пров
 ## 4. Полный перечень путей
 
 Список закрыт. Путь, не названный здесь, работами не затрагивается; его
-появление требует нового разрешения. Проверяется скриптом по объединению путей
+появление требует новой поправки. Канонический хеш таблицы —
+`scope_table_sha256` в заголовке: SHA-256 от отсортированного уникального
+списка путей, по одному в строке, с завершающим переводом строки. Формулировки
+в колонках «Раздел» и «Основание» в хеш не входят, поэтому их правка не
+инвалидирует разрешение, а добавление или удаление пути — инвалидирует.
+Путей в таблице: 21. Проверяется скриптом по объединению путей
 каждого коммита в диапазоне, а не только по итоговому diff.
 
 | Путь | Раздел | Основание |
@@ -77,6 +87,7 @@ hardening). База выбрана именно такой, чтобы пров
 | `job_intel/browser_worker.py` | A0, A1, A2, A3 | покрыт исключением только для коммита `65d60daae16` |
 | `job_intel/product_search/acquisition_probe.py` | A0, A2, B1–B3 | в исключении не назван |
 | `config/product_search/linkedin_geography.v1.yaml` (новый) | A2, B2 | «production source configuration» |
+| `deploy/systemd/experiments/job-intel-browser-bootstrap.service` (новый) | A0 | **привилегированный** юнит холодного старта; разрешён владельцем отдельным ответом (раздел 5) |
 | `deploy/systemd/experiments/job-intel-product-search-probe-experiment.service` | A0 | зависимость от bootstrap вместо `sudo` |
 | `scripts/job_intel_browser_supervisor.py` (новый) | A0 | супервизор `Type=notify` |
 | `scripts/job_intel_profile_lock.sh` (новый) | A0 | блокировка профиля |
@@ -94,8 +105,28 @@ hardening). База выбрана именно такой, чтобы пров
 | `docs/evidence/product-search-gate-a/2026-08-26-p0-authorization.md` | 0.1 | этот документ |
 
 Пути `scripts/job_intel_startup_guard.sh` и `scripts/job_intel_site_integrity.py`
-относятся к уже выполненному и отдельно санкционированному предусловию; новой
-санкции не требуют и остаются в списке только для проверки объёма.
+входят в `authorized_base` и **не входят** в разрешённые пути после базы: их
+изменение этим документом не санкционировано и требует отдельной поправки.
+Прежняя формулировка утверждала, что они «остаются в списке», хотя в таблице их
+нет; это исправлено.
+
+**Инвариант по ATS.** Изменения раздела A2 вводят типизированную передачу
+параметров только для LinkedIn. Строковый вызов ATS-снимка не меняется, поэтому
+`job_intel/ats_sources.py` и `job_intel/product_search/acquisition_plugins/ats_snapshot.py`
+работами не затрагиваются и в таблице отсутствуют намеренно. Обобщённый
+рефакторинг диспетчеризации источников этим разрешением не покрыт.
+
+**Фикстуры живой разметки** (A1, A4) размещаются inline внутри уже разрешённого
+`tests/job_intel/test_browser_acquisition.py`. Отдельный файл фикстуры потребовал
+бы нового пути и, значит, новой поправки.
+
+**Контракт записи причины отказа** (A0). Прогон Gate A пишет только
+`probe_runs` и `probe_evidence`; таблицы `source_kpi_run` в экспериментальной БД
+нет, а операционный писатель в `job_intel/cli.py` жёстко пишет `NULL` в поля
+ошибки и в таблице разрешённых путей отсутствует. Поэтому машинно-читаемая
+причина отказа реализуется **экспериментально-локально**, внутри разрешённого
+`job_intel/product_search/acquisition_probe.py`. Операционный теневой KPI этим
+срезом не исправляется; его починка — отдельная задача и отдельное решение.
 
 ## 5. Отдельное решение: привилегированный юнит
 
