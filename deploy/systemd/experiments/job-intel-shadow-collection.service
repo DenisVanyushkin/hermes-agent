@@ -17,10 +17,16 @@ Environment=PYTHONNOUSERSITE=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/home/hermes/.hermes/hermes-agent
 # Absence of a variable is not a barrier: the delivery path can re-read an env
-# file and repopulate credentials from it. These files are therefore made
-# unreachable inside the namespace rather than merely left unmentioned.
+# file and repopulate credentials from it, and hermes_cli/env_loader.py knows
+# several stores beyond the job-intel env. All of them are made unreachable
+# inside the namespace rather than merely left unmentioned. The leading dash
+# tolerates a store that does not exist yet but might later.
 InaccessiblePaths=/etc/job-intel/job-intel.env
-InaccessiblePaths=/home/hermes/.hermes/.env
+InaccessiblePaths=-/home/hermes/.hermes/.env
+InaccessiblePaths=-/home/hermes/.hermes/.op.env
+InaccessiblePaths=-/home/hermes/.hermes/managed/.env
+InaccessiblePaths=-/home/hermes/.hermes/config.yaml
+InaccessiblePaths=-/home/hermes/.hermes/auth.json
 ExecStartPre=/usr/bin/env bash /home/hermes/.hermes/hermes-agent/scripts/job_intel_shadow_preflight.sh
 ExecStart=/usr/bin/env bash /home/hermes/.hermes/hermes-agent/scripts/job_intel_host_wrapper.sh daily
 NoNewPrivileges=yes

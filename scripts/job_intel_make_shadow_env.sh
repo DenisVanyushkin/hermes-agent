@@ -6,10 +6,12 @@
 # silently rots the moment production gains a setting. Secrets stay out of Git
 # because the file is produced on the host from the production file.
 #
-# Policy is allowlist-first and fail-closed: a key that is neither carried nor
-# explicitly dropped aborts the generation, so a newly introduced production
-# setting cannot be silently omitted from the shadow run — or silently carried
-# into it, if it turns out to be a credential.
+# Classification is fail-closed in both directions:
+#   - a key matching a credential-shaped pattern is refused unless it appears in
+#     exactly one of DROP or CARRY_SECRET, so a future JOB_INTEL_*_TOKEN cannot
+#     ride in on a prefix rule;
+#   - a key matching nothing at all aborts generation, so a new production
+#     setting cannot be silently omitted.
 set -euo pipefail
 
 source_env="${1:-/etc/job-intel/job-intel.env}"
@@ -23,6 +25,14 @@ declare -a DROP=(
   JOB_INTEL_SLACK_WEBHOOK_URL
 )
 
+# Credential-shaped, but required by acquisition and therefore carried on
+# purpose. Every entry is a deliberate decision, not a prefix side effect.
+declare -a CARRY_SECRET=(
+  JOB_INTEL_HH_CLIENT_ID
+  JOB_INTEL_HH_CLIENT_SECRET
+  JOB_INTEL_HH_TOKEN_CACHE
+)
+
 # Overridden rather than copied.
 declare -A OVERRIDE=(
   [JOB_INTEL_RUN_TYPE]=shadow
@@ -31,8 +41,7 @@ declare -A OVERRIDE=(
   [SEMANTIC_SHADOW_ADVISORY_ENABLED]=0
 )
 
-# Carried verbatim. Prefixes keep acquisition configuration complete without
-# enumerating every ATS seed by hand.
+# Carried verbatim when they are not credential-shaped.
 declare -a CARRY_PREFIX=(
   JOB_INTEL_
   HERMES_HOME
@@ -42,13 +51,16 @@ declare -a CARRY_PREFIX=(
   SCORING_MODEL_VERSION
 )
 
-is_dropped() {
-  local key="$1"
-  for name in "${DROP[@]}"; do [[ "$key" == "$name" ]] && return 0; done
+# A key whose name looks like a credential or a delivery destination.
+CREDENTIAL_PATTERN='(TOKEN|SECRET|PASSWORD|WEBHOOK|API_KEY|CREDENTIAL|SLACK|TELEGRAM|WHATSAPP|CHANNEL|CHAT_ID)'
+
+in_list() {
+  local key="$1"; shift
+  for name in "$@"; do [[ "$key" == "$name" ]] && return 0; done
   return 1
 }
 
-is_carried() {
+has_prefix() {
   local key="$1"
   for prefix in "${CARRY_PREFIX[@]}"; do [[ "$key" == "$prefix"* ]] && return 0; done
   return 1
@@ -64,15 +76,34 @@ trap 'rm -f "$tmp"' EXIT
 } >"$tmp"
 
 unknown=()
+unclassified_secret=()
 while IFS= read -r line; do
   [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
   key="${line%%=*}"
   key="${key// /}"
-  if is_dropped "$key"; then continue; fi
+
+  if in_list "$key" "${DROP[@]}"; then continue; fi
   if [[ -n "${OVERRIDE[$key]+set}" ]]; then continue; fi
-  if is_carried "$key"; then printf '%s\n' "$line" >>"$tmp"; continue; fi
+
+  # Credential-shaped keys never ride in on a prefix rule.
+  if [[ "$key" =~ $CREDENTIAL_PATTERN ]]; then
+    if in_list "$key" "${CARRY_SECRET[@]}"; then
+      printf '%s\n' "$line" >>"$tmp"
+      continue
+    fi
+    unclassified_secret+=("$key")
+    continue
+  fi
+
+  if has_prefix "$key"; then printf '%s\n' "$line" >>"$tmp"; continue; fi
   unknown+=("$key")
 done <"$source_env"
+
+if ((${#unclassified_secret[@]})); then
+  echo "credential-shaped keys not classified in $source_env: ${unclassified_secret[*]}" >&2
+  echo "add each to DROP (never carried) or to CARRY_SECRET (carried on purpose); refusing to guess" >&2
+  exit 4
+fi
 
 if ((${#unknown[@]})); then
   echo "unclassified keys in $source_env: ${unknown[*]}" >&2
@@ -82,5 +113,9 @@ fi
 
 for key in "${!OVERRIDE[@]}"; do printf '%s=%s\n' "$key" "${OVERRIDE[$key]}" >>"$tmp"; done
 
-install -o root -g hermes -m 0640 "$tmp" "$target_env"
-echo "wrote $target_env"
+if [[ "${SHADOW_ENV_STDOUT:-0}" == "1" ]]; then
+  cat "$tmp"
+else
+  install -o root -g hermes -m 0640 "$tmp" "$target_env"
+  echo "wrote $target_env"
+fi

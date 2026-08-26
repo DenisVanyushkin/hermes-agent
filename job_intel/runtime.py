@@ -440,10 +440,17 @@ _DELIVERY_ALLOWED_VALUES = frozenset({"", "0", "false"})
 def delivery_disabled() -> bool:
     """Whether outbound Slack delivery is switched off for this process.
 
-    Fail-closed: delivery proceeds only on an explicit opt-in value. Anything
-    unrecognised — a typo, a leftover ``shadow``, a future third state someone
-    invents — suppresses. A shadow collection run that stays silent because of
-    a misspelled variable is a nuisance; a production send that happens because
-    of one is not recoverable.
+    The variable is a hard disable layered over unchanged legacy behaviour,
+    not a global opt-in to delivery:
+
+    - unset: delivery proceeds exactly as it did before this switch existed,
+      so introducing the switch changes no existing production path;
+    - ``""``, ``0``, ``false``: delivery proceeds; the switch is explicitly off;
+    - any other present value: delivery is suppressed.
+
+    The last rule is the fail-closed one: a typo, a leftover ``shadow``, or a
+    future third state someone invents all suppress. A shadow run that stays
+    silent because of a misspelled variable is a nuisance; a production send
+    that happens because of one is not recoverable.
     """
     return os.getenv(DELIVERY_DISABLED_ENV, "").strip().lower() not in _DELIVERY_ALLOWED_VALUES
