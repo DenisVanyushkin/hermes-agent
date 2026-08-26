@@ -21,6 +21,17 @@ from job_intel.product_search.search_contract import load_search_contract
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _ready_checks(*families: str) -> dict[str, object]:
+    """Browser families need a capability answer before dispatch.
+
+    These tests are about deduplication and failure recording, not about the
+    runtime gate, so they declare the runtime ready explicitly rather than
+    relying on an absent check being treated as permission — which it is not.
+    """
+    from job_intel.product_search.acquisition_probe import RuntimeCapabilityResult
+
+    return {family: (lambda: RuntimeCapabilityResult(state="ready")) for family in families}
+
 def test_query_expansion_is_deterministic_and_preserves_cell_family_identity() -> None:
     contract = load_search_contract(ROOT / "config/product_search/search_contract.v1.yaml")
 
@@ -86,7 +97,7 @@ def test_probe_writes_content_addressed_evidence_and_deduplicates_canonical_urls
         ),
         sources={"fake": fake_source},
         output_dir=tmp_path / "probe",
-        isolation={"fake": SourceIsolation(mode="exclusive_lock", path=tmp_path / "fake.lock")},
+        isolation={"fake": SourceIsolation(mode="exclusive_lock", path=tmp_path / "fake.lock", collection_method="api")},
         now=lambda: datetime(2026, 8, 11, tzinfo=timezone.utc),
     )
 
@@ -166,7 +177,7 @@ def test_probe_deduplicates_linkedin_and_headhunter_tracking_urls(tmp_path: Path
     )
     sources = {family: (lambda _query, rows=rows: rows) for family, rows in records.items()}
     isolation = {
-        family: SourceIsolation(mode="exclusive_lock", path=tmp_path / f"{family}.lock")
+        family: SourceIsolation(mode="exclusive_lock", path=tmp_path / f"{family}.lock", collection_method="api")
         for family in records
     }
 
@@ -174,6 +185,7 @@ def test_probe_deduplicates_linkedin_and_headhunter_tracking_urls(tmp_path: Path
         run_id="run-tracking-urls",
         queries=queries,
         sources=sources,
+        runtime_capability_checks=_ready_checks(*records),
         output_dir=tmp_path / "probe",
         isolation=isolation,
     )
@@ -198,7 +210,7 @@ def test_probe_names_auth_antibot_rate_limit_and_unresolved_evidence(tmp_path: P
         ),
         sources={"blocked": blocked},
         output_dir=tmp_path / "probe",
-        isolation={"blocked": SourceIsolation(mode="exclusive_lock", path=tmp_path / "blocked.lock")},
+        isolation={"blocked": SourceIsolation(mode="exclusive_lock", path=tmp_path / "blocked.lock", collection_method="api")},
         max_attempts=2,
     )
 
@@ -232,7 +244,7 @@ def test_source_without_clone_or_exclusive_lock_is_blocked_without_invocation(tm
 def test_probe_rejects_production_paths_and_slack_credentials(tmp_path: Path) -> None:
     query = ({"query_id": "q1", "cell_id": "uk", "source_family": "fake", "query": "VP Product"},)
     source = {"fake": lambda _query: []}
-    isolation = {"fake": SourceIsolation(mode="exclusive_lock", path=tmp_path / "lock")}
+    isolation = {"fake": SourceIsolation(mode="exclusive_lock", path=tmp_path / "lock", collection_method="api")}
 
     for forbidden in (
         Path("/var/lib/job-intel/state"),
@@ -386,6 +398,7 @@ def test_probe_records_unexpected_source_failure_without_aborting_run(tmp_path: 
         raise RuntimeError("Playwright is unavailable")
 
     result = run_probe(
+        runtime_capability_checks=_ready_checks("linkedin"),
         run_id="run-failure",
         queries=(
             {
@@ -399,7 +412,8 @@ def test_probe_records_unexpected_source_failure_without_aborting_run(tmp_path: 
         output_dir=tmp_path / "probe",
         isolation={
             "linkedin": SourceIsolation(
-                mode="cloned_profile", path=tmp_path / "profiles/linkedin"
+                mode="cloned_profile", path=tmp_path / "profiles/linkedin",
+                collection_method="browser",
             )
         },
     )
@@ -442,7 +456,8 @@ def test_source_state_preserves_observation_when_later_query_fails(tmp_path: Pat
         output_dir=tmp_path / "probe",
         isolation={
             "duckduckgo": SourceIsolation(
-                mode="exclusive_lock", path=tmp_path / "locks/duckduckgo.lock"
+                mode="exclusive_lock", path=tmp_path / "locks/duckduckgo.lock",
+                collection_method="api",
             )
         },
     )

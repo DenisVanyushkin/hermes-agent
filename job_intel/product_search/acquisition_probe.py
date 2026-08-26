@@ -9,10 +9,10 @@ import os
 from pathlib import Path
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .search_contract import SearchContract
 
@@ -26,6 +26,38 @@ FORBIDDEN_PROBE_ROOTS = (
     Path("/home/hermes/.hermes/hermes-agent/.worktrees"),
 )
 GATE_A_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-a")
+
+SourceIsolationMode = Literal["cloned_profile", "exclusive_lock", "api", "blocked"]
+SourceCollectionMethod = Literal["browser", "api"]
+SourceState = Literal[
+    "observed",
+    "observed_with_failures",
+    "blocked_no_safe_isolation",
+    "blocked_missing_public_interface",
+    "runtime_capability_blocked",
+    "blocked_anti_bot",
+    "blocked_rate_limit_or_timeout",
+    "blocked_extraction_failure",
+    "blocked_multiple_failures",
+]
+
+OBSERVED_SOURCE_STATES = frozenset({"observed", "observed_with_failures"})
+
+# These are source outcomes that mean the market was not observed. Keep this
+# vocabulary explicit: cell aggregation must not infer observability from a
+# string prefix that could accidentally include a new source failure.
+UNOBSERVED_SOURCE_STATES = frozenset(
+    {
+        "blocked_no_safe_isolation",
+        "blocked_missing_public_interface",
+        "runtime_capability_blocked",
+        "blocked_anti_bot",
+        "blocked_rate_limit_or_timeout",
+        "blocked_extraction_failure",
+        "blocked_multiple_failures",
+    }
+)
+
 SHARED_BROWSER_PROFILES = {
     "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
 }
@@ -38,10 +70,48 @@ class ProbeSourceBlocked(RuntimeError):
         self.detail = detail
 
 
+class RuntimeCapabilityResult(BaseModel):
+    """Answer of the pre-dispatch capability seam.
+
+    Closed on purpose (``extra="forbid"``) and with a fixed set of states: an
+    unrecognised answer must not read as ready. A raw dict here would leave the
+    closed vocabulary as an agreement between test doubles rather than a
+    property of the contract.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: Literal["ready", "runtime_capability_blocked", "not_applicable"]
+    error_class: str | None = None
+    error_fingerprint: str | None = None
+    error_message_truncated: str | None = Field(default=None, max_length=512)
+    bootstrap_traffic_events: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _blocked_must_carry_a_reason(self) -> "RuntimeCapabilityResult":
+        if self.state != "runtime_capability_blocked":
+            return self
+        missing = [
+            name
+            for name in ("error_class", "error_fingerprint", "error_message_truncated")
+            if not (getattr(self, name) or "").strip()
+        ]
+        if missing:
+            # A blocked result without a reason is the exact loss this gate
+            # exists to prevent: runs 467 and 468 recorded the block and lost
+            # why. Whitespace does not count as a reason.
+            raise ValueError(f"blocked capability result lacks: {', '.join(missing)}")
+        return self
+
+
 @dataclass(frozen=True)
 class SourceIsolation:
-    mode: str
+    mode: SourceIsolationMode
     path: Path | None
+    # ``api`` isolation is unambiguously an API collection method. Other
+    # isolation modes require this explicit classification; None is rejected
+    # by the pre-dispatch gate instead of silently becoming ready.
+    collection_method: SourceCollectionMethod | None = None
 
 
 class ProbeQuery(BaseModel):
@@ -139,12 +209,13 @@ class ProbeResult(BaseModel):
     run_id: str
     stage_counts: dict[str, int]
     provisional_labels: dict[str, int]
-    source_states: dict[str, str]
+    source_states: dict[str, SourceState]
     cell_states: dict[str, str]
     duplicates: int
     evidence: tuple[EvidencePackage, ...]
     cost: dict[str, float]
     latency_seconds: float
+    family_attempts: tuple[dict[str, Any], ...] = ()
 
 
 def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> tuple[ProbeQuery, ...]:
@@ -211,7 +282,9 @@ def _ensure_slack_blind(environment: Mapping[str, str]) -> None:
         raise ValueError(f"Slack credentials are forbidden in acquisition probe: {', '.join(present)}")
 
 
-def _record_source_state(states: dict[str, str], family: str, state: str) -> None:
+def _record_source_state(
+    states: dict[str, SourceState], family: str, state: SourceState
+) -> None:
     previous = states.get(family)
     if previous is None or previous == state:
         states[family] = state
@@ -269,12 +342,83 @@ def run_probe(
     queries: Iterable[ProbeQuery | Mapping[str, Any]],
     sources: Mapping[str, Callable[[str], Iterable[Any]]],
     output_dir: Path | str,
+    runtime_capability_checks: Mapping[str, Callable[[], Any]] | None = None,
     isolation: Mapping[str, SourceIsolation],
     max_attempts: int = 2,
     environment: Mapping[str, str] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> ProbeResult:
     started = time.monotonic()
+    checks = dict(runtime_capability_checks or {})
+    capability_by_family: dict[str, RuntimeCapabilityResult] = {}
+    market_dispatch_counts: dict[str, int] = {}
+
+    def _blocked(reason: str, detail: str, traffic: int = 0) -> RuntimeCapabilityResult:
+        return RuntimeCapabilityResult(
+            state="runtime_capability_blocked",
+            error_class="runtime_capability",
+            error_fingerprint=reason,
+            error_message_truncated=detail[:512] or reason,
+            bootstrap_traffic_events=traffic,
+        )
+
+    def _capability(
+        family: str, source_isolation: SourceIsolation
+    ) -> RuntimeCapabilityResult:
+        """Answer once per family per run.
+
+        Once per family, not once per query: the live contract issues 112
+        LinkedIn queries, and a cold browser start for each of them is not a
+        contract anyone would run.
+        """
+        cached = capability_by_family.get(family)
+        if cached is not None:
+            return cached
+
+        collection_method = source_isolation.collection_method
+        if collection_method is None and source_isolation.mode == "api":
+            collection_method = "api"
+        if collection_method not in {"browser", "api"}:
+            result = _blocked(
+                "unclassified_collection_method",
+                f"no collection method for {family}",
+            )
+        elif collection_method == "api":
+            result = RuntimeCapabilityResult(state="not_applicable")
+        else:
+            checker = checks.get(family)
+            if checker is None:
+                result = _blocked(
+                    "no_capability_check", f"no capability check for {family}"
+                )
+            else:
+                try:
+                    raw = checker()
+                    result = (
+                        raw
+                        if isinstance(raw, RuntimeCapabilityResult)
+                        else RuntimeCapabilityResult.model_validate(raw)
+                    )
+                except Exception as exc:  # noqa: BLE001 - any failure is a refusal
+                    # The preflight itself can fail. That must not abort the run and
+                    # must not fall through to the extraction path, which would
+                    # blame the source for a runtime problem.
+                    result = _blocked(
+                        "capability_check_failed", f"{type(exc).__name__}: {exc}"
+                    )
+
+        if collection_method == "browser" and result.state == "not_applicable":
+            # For a browser family this answer is a contradiction, and the safe
+            # reading of a contradiction is refusal.
+            result = _blocked(
+                "not_applicable_for_browser_family",
+                f"{family} needs a browser runtime, capability reported not_applicable",
+                result.bootstrap_traffic_events,
+            )
+
+        capability_by_family[family] = result
+        return result
+
     output = Path(output_dir)
     _ensure_safe_output(output)
     _ensure_slack_blind(environment or {})
@@ -286,7 +430,7 @@ def run_probe(
 
     evidence: list[EvidencePackage] = []
     observations: list[dict[str, Any]] = []
-    source_states: dict[str, str] = {}
+    source_states: dict[str, SourceState] = {}
     cell_attempts: dict[str, list[str]] = {}
 
     for raw_query in queries:
@@ -305,7 +449,17 @@ def run_probe(
             )
             continue
 
+        capability = _capability(query.source_family, source_isolation)
+        if capability.state == "runtime_capability_blocked":
+            _record_source_state(
+                source_states, query.source_family, "runtime_capability_blocked"
+            )
+            continue
+
         records: list[Any] | None = None
+        market_dispatch_counts[query.source_family] = (
+            market_dispatch_counts.get(query.source_family, 0) + 1
+        )
         for attempt in range(1, max_attempts + 1):
             try:
                 records = list(source(query.query))
@@ -399,7 +553,10 @@ def run_probe(
     cell_states: dict[str, str] = {}
     for cell_id in cell_attempts:
         cell_records = [record for record in observations if record.get("cell_id") == cell_id]
-        cell_blocked = all(source_states.get(family, "").startswith("blocked") for family in cell_attempts[cell_id])
+        cell_blocked = all(
+            source_states.get(family) in UNOBSERVED_SOURCE_STATES
+            for family in cell_attempts[cell_id]
+        )
         if cell_records:
             cell_states[cell_id] = "qualified_results_found"
         elif cell_blocked:
@@ -421,6 +578,23 @@ def run_probe(
         evidence=tuple(evidence),
         cost={"provider_cost_usd": 0.0},
         latency_seconds=round(time.monotonic() - started, 6),
+        family_attempts=tuple(
+            {
+                "source_family": family,
+                "capability_state": capability.state,
+                "outcome": (
+                    "runtime_capability_blocked"
+                    if capability.state == "runtime_capability_blocked"
+                    else source_states.get(family, "not_attempted")
+                ),
+                "error_class": capability.error_class,
+                "error_fingerprint": capability.error_fingerprint,
+                "error_message_truncated": capability.error_message_truncated,
+                "market_query_dispatch_count": market_dispatch_counts.get(family, 0),
+                "bootstrap_traffic_events": capability.bootstrap_traffic_events,
+            }
+            for family, capability in sorted(capability_by_family.items())
+        ),
     )
     (output / "summary.json").write_text(
         result.model_dump_json(indent=2), encoding="utf-8"
@@ -525,8 +699,14 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     if editable:
         raise ValueError("editable installs are forbidden")
     for family, settings in dict(manifest.get("source_isolation") or {}).items():
-        mode = str(dict(settings).get("mode") or "")
-        path = str(dict(settings).get("path") or "")
+        settings_dict = dict(settings)
+        mode = str(settings_dict.get("mode") or "")
+        path = str(settings_dict.get("path") or "")
+        collection_method = str(settings_dict.get("collection_method") or "")
+        if collection_method not in {"browser", "api"}:
+            raise ValueError(f"invalid source collection method: {family}")
+        if mode == "api" and collection_method != "api":
+            raise ValueError(f"API isolation must use API collection method: {family}")
         if mode == "api":
             if family != "headhunter":
                 raise ValueError(f"API source isolation is not supported for: {family}")
@@ -690,49 +870,60 @@ def relocate_experiment_manifest(
     ).hexdigest()
     relocated["source_isolation"] = {
         "ashby": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/ashby.lock"),
         },
         "duckduckgo": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
-        "headhunter": {"mode": "api"},
+        "headhunter": {"collection_method": "api", "mode": "api"},
         "greenhouse": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/greenhouse.lock"),
         },
         "lever": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/lever.lock"),
         },
         "linkedin": {
             "backup_path": str(new_root / "browser-profile-backup/linkedin"),
+            "collection_method": "browser",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/linkedin-profile.lock"),
             "shared_profile_path": str(SHARED_BROWSER_PROFILES["linkedin"]),
         },
         "personio": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/personio.lock"),
         },
         "recruitee": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/recruitee.lock"),
         },
         "remoteok": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/remoteok.lock"),
         },
         "remotive": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/remotive.lock"),
         },
         "smartrecruiters": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/smartrecruiters.lock"),
         },
         "teamtailor": {
+            "collection_method": "api",
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/teamtailor.lock"),
         },
@@ -840,6 +1031,11 @@ def main() -> int:
             family: SourceIsolation(
                 mode=str(settings.get("mode") or "blocked"),
                 path=Path(settings["path"]) if settings.get("path") else None,
+                collection_method=(
+                    str(settings["collection_method"])
+                    if settings.get("collection_method")
+                    else None
+                ),
             )
             for family, settings in dict(manifest.get("source_isolation") or {}).items()
         }
