@@ -63,6 +63,7 @@ from .models import Evaluation, Vacancy
 from .runtime import (
     assert_runtime_contract,
     build_runtime_contract,
+    delivery_disabled,
     file_access_flags,
     parse_iso_datetime,
     resolve_db_path,
@@ -886,6 +887,13 @@ def _deliver_to_slack(
     prefer_gateway: bool = False,
     thread_ts: str | None = None,
 ) -> SlackDeliveryResult:
+    if delivery_disabled():
+        return SlackDeliveryResult(
+            success=False,
+            attempts=0,
+            error="outbound delivery is disabled by JOB_INTEL_DELIVERY_DISABLED",
+            status="suppressed",
+        )
     webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
     if message == "[SILENT]":
         return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")

@@ -431,3 +431,19 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+DELIVERY_DISABLED_ENV = "JOB_INTEL_DELIVERY_DISABLED"
+_DELIVERY_ALLOWED_VALUES = frozenset({"", "0", "false"})
+
+
+def delivery_disabled() -> bool:
+    """Whether outbound Slack delivery is switched off for this process.
+
+    Fail-closed: delivery proceeds only on an explicit opt-in value. Anything
+    unrecognised — a typo, a leftover ``shadow``, a future third state someone
+    invents — suppresses. A shadow collection run that stays silent because of
+    a misspelled variable is a nuisance; a production send that happens because
+    of one is not recoverable.
+    """
+    return os.getenv(DELIVERY_DISABLED_ENV, "").strip().lower() not in _DELIVERY_ALLOWED_VALUES
