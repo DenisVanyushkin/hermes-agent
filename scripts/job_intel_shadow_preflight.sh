@@ -38,6 +38,8 @@ hermes_home="${HERMES_HOME:-/home/hermes/.hermes}"
 # nothing.
 managed_dir="${HERMES_MANAGED_DIR:-/etc/hermes}"
 [[ -z "${HERMES_MANAGED_DIR:-}" ]] || fail "HERMES_MANAGED_DIR is set; the managed store is redirectable"
+[[ -z "${JOB_INTEL_SYSTEM_PYTHON:-}" ]] \
+  || fail "JOB_INTEL_SYSTEM_PYTHON is set; the trusted interpreter is not selectable"
 for path in \
   /etc/job-intel/job-intel.env \
   "$hermes_home/.env" \

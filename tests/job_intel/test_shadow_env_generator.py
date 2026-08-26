@@ -102,10 +102,13 @@ def test_authority_paths_are_never_carried(tmp_path) -> None:
         tmp_path,
         BASE_ENV
         + "JOB_INTEL_SHADOW_PIN_FILE=/tmp/operator-controlled.pin\n"
-        + "HERMES_MANAGED_DIR=/tmp/operator-controlled\n",
+        + "HERMES_MANAGED_DIR=/tmp/operator-controlled\n"
+        + "JOB_INTEL_SYSTEM_PYTHON=/bin/true\n",
     )
 
     assert result.returncode == 0, result.stderr
     assert "JOB_INTEL_SHADOW_PIN_FILE" not in result.stdout
     assert "HERMES_MANAGED_DIR" not in result.stdout
+    assert "JOB_INTEL_SYSTEM_PYTHON" not in result.stdout
+    assert "/bin/true" not in result.stdout
     assert "operator-controlled" not in result.stdout

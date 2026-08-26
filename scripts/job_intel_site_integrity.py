@@ -16,7 +16,7 @@ venv**, with ``-I -S`` so it performs no site initialisation of its own.
 Running the target venv to check the target venv executes the very code under
 suspicion first — a guard placed after the door.
 
-Usage (both forms take the target site-packages explicitly):
+Usage (both forms take the target venv root explicitly):
     /usr/bin/python3.12 -I -S job_intel_site_integrity.py write <manifest> <venv-root>
     /usr/bin/python3.12 -I -S job_intel_site_integrity.py verify <manifest> <venv-root>
 

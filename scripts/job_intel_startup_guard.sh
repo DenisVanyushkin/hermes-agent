@@ -14,15 +14,22 @@
 # which is generated from the production file — must not be able to.
 set -euo pipefail
 
+fail() { echo "startup guard FAILED: $1" >&2; exit 1; }
+
 manifest="${1:?manifest path required}"
 venv_root="${2:?venv root required}"
 checker="${3:?checker path required}"
 expected_uid="${4:?expected manifest owner uid required}"
 shift 4
 
-system_python="${JOB_INTEL_SYSTEM_PYTHON:-/usr/bin/python3.12}"
-
-fail() { echo "startup guard FAILED: $1" >&2; exit 1; }
+# Literal, never from the environment. The generated collection environment is
+# derived from the production env file, so anything readable from it is
+# attacker-influenced: pointing this at /bin/true makes the verification exit 0
+# without running, and the guard would then exec the target. Same class as
+# JOB_INTEL_WORKDIR and JOB_INTEL_SHADOW_PIN_FILE, which are already refused.
+system_python="/usr/bin/python3.12"
+[[ -z "${JOB_INTEL_SYSTEM_PYTHON:-}" ]] \
+  || fail "JOB_INTEL_SYSTEM_PYTHON is set; the trusted interpreter is not selectable"
 
 [[ -x "$system_python" ]] || fail "trusted system interpreter missing at $system_python"
 

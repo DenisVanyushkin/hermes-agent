@@ -142,3 +142,40 @@ def test_manifest_owned_by_someone_else_is_refused(tmp_path) -> None:
     assert result.returncode == 1
     assert "must be owned by uid 0" in result.stderr
     assert not marker.exists()
+
+
+def test_the_trusted_interpreter_cannot_be_chosen_by_the_environment(tmp_path) -> None:
+    """Codex's reproduction: /bin/true ignores the checker arguments and exits
+    0, so a guard that took its interpreter from the environment would verify
+    nothing and then exec the target anyway."""
+    venv, manifest, marker, target = build(tmp_path)
+    (venv / "lib" / "python3.12" / "site-packages" / "99-tampered.pth").write_text(
+        "import os\n", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        ["bash", str(GUARD), str(manifest), str(venv), str(CHECKER),
+         str(os.getuid()), str(target)],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, JOB_INTEL_SYSTEM_PYTHON="/bin/true"),
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert "not selectable" in result.stderr
+    assert not marker.exists(), "the target ran with verification bypassed"
+
+
+def test_the_variable_is_refused_even_on_an_intact_tree(tmp_path) -> None:
+    """Refusing only when the tree is already tampered would leave the
+    redirection usable as a foothold."""
+    venv, manifest, marker, target = build(tmp_path)
+
+    result = subprocess.run(
+        ["bash", str(GUARD), str(manifest), str(venv), str(CHECKER),
+         str(os.getuid()), str(target)],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, JOB_INTEL_SYSTEM_PYTHON="/usr/bin/python3.12"),
+    )
+
+    assert result.returncode == 1
+    assert not marker.exists()
