@@ -545,8 +545,15 @@ def _gate_a_snapshot(
 
 
 def _protected_metadata_snapshot() -> dict[str, tuple[int, int, int]]:
+    """Snapshot repository-owned metadata, not a concurrently live database.
+
+    The dry-run audit hook independently rejects every production DB open or
+    write outside the isolated read roots.  A live database must not also be
+    used as a before/after sentinel: the gateway may legitimately update it
+    while this read-only preflight runs, which would turn unrelated activity
+    into a false Gate B failure.
+    """
     paths = [
-        PRODUCTION_DATABASE_PATH,
         REPO_ROOT / "config/product_search/career_profile.v2.yaml",
         REPO_ROOT / "config/product_search/search_contract.v1.yaml",
         REPO_ROOT / "config/product_search/evidence_synthesis.v1.yaml",

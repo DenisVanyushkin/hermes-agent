@@ -171,3 +171,14 @@ def test_forbidden_side_effect_mutation_fails_closed(tmp_path: Path) -> None:
     protected.write_bytes(b"after")
     with pytest.raises(GateBPreflightError, match="forbidden_side_effect_mutation"):
         assert_paths_unchanged(before, snapshot_paths([protected]))
+
+
+def test_protected_snapshot_excludes_live_job_intel_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External live DB activity is not Gate B's own side-effect evidence."""
+    production_db = tmp_path / "job_intel.sqlite3"
+    production_db.write_bytes(b"before")
+    monkeypatch.setattr(gate_b, "PRODUCTION_DATABASE_PATH", production_db)
+
+    assert str(production_db) not in gate_b._protected_metadata_snapshot()
