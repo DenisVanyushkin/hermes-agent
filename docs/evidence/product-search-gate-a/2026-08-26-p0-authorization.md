@@ -5,7 +5,8 @@ document: p0-authorization
 status: authorized
 authorized_base: 496e542b3b002d28a65a814fd2d56b84a63c8cdc
 plan: docs/plans/2026-08-26-p0-open-market-acquisition.md
-plan_sha256: 4c02fb0282e58f545fc3590b9e4755c1660cf2ccfeb4418ba7ac46e4f7d60a85
+plan_sha256_at_authorization: 4c02fb0282e58f545fc3590b9e4755c1660cf2ccfeb4418ba7ac46e4f7d60a85
+plan_commit: 496e542b3b002d28a65a814fd2d56b84a63c8cdc
 scope_table_sha256: 31dd03845ddf685da33485267478d4d804b2961a076f680c41ab68bf04294fad
 scope_table_canonicalization: "sorted unique backticked paths from the section 4 table, one per line, LF-terminated"
 scope_table_path_count: 21
@@ -20,6 +21,10 @@ prior_product_claim_superseded: true
 # Разрешение на переоткрытие Gate A для среза P0
 
 Владелец принял решение 2026-08-26; раздел 10 содержит его дословно.
+Поля plan_sha256_at_authorization и plan_commit фиксируют состояние плана
+на момент выдачи разрешения. Последующие отметки выполнения меняют сам план
+и не инвалидируют это разрешение: предмет разрешения — таблица путей, а её
+отдельный scope_table_sha256 остаётся операционным якорем объёма.
 
 ## 1. Почему запрос вообще нужен
 

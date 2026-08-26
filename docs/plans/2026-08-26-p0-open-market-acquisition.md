@@ -394,8 +394,6 @@ namespace при этом не менялись, признаков утечки
 | `deploy/systemd/experiments/job-intel-product-search-probe-experiment.service` | A0 | композиция пробного юнита меняется: зависимость от bootstrap вместо `sudo` |
 | `tests/product_search/test_runtime_capability_gate.py` (новый) | A0 | тесты тёплого и холодного путей, кода `runtime_capability_blocked` и композиции bootstrap-юнита |
 | `scripts/check_p0_scope.sh` (новый) | 0.1 | проверяльщик объёма по таблице |
-| `scripts/job_intel_startup_guard.sh` | предусловие | гарантия порядка: проверка дерева до запуска целевого интерпретатора |
-| `scripts/job_intel_site_integrity.py` | предусловие | манифест целевого venv |
 | `scripts/job_intel_browser_supervisor.py` (новый) | A0 | процесс переднего плана для `Type=notify`: держит время жизни Chromium и `flock` профиля, шлёт `READY=1` после успешного `/json/version` |
 | `scripts/job_intel_profile_lock.sh` (новый) | A0 | исключительная блокировка профиля с явным контрактом держателя |
 | `scripts/job_intel_profile_manifest.py` (новый) | A0 | детерминированный манифест дерева профиля |
