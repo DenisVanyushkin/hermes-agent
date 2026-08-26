@@ -142,7 +142,7 @@ def test_missing_site_root_is_refused(tmp_path) -> None:
     )
 
     assert result.returncode == 6
-    assert "target site-packages not found" in result.stderr
+    assert "trust root not found" in result.stderr
 
 
 def test_verification_refuses_an_interpreter_that_ran_site_init(tmp_path) -> None:

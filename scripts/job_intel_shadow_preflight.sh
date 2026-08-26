@@ -102,31 +102,26 @@ if ! tree_reason="$(bash "$tree_state_script" "$workdir" 2>&1)"; then
   fail "checkout is not safe to run from: $tree_reason"
 fi
 
-# Code that runs before any import. Every .pth in the target site directories
-# executes at interpreter startup, and those .pth files import real modules —
-# on this host _virtualenv.pth loads _virtualenv.py and 00-pysqlite3-shim.pth
-# loads the pysqlite3 package and its extension. The whole site-packages tree
-# is therefore manifested, not just the .pth files.
+# Code that runs before any import. Every .pth in the target venv executes at
+# interpreter startup, and those .pth files import real modules; bin/python is
+# itself a replaceable symlink and pyvenv.cfg decides which site directories
+# exist at all. The whole venv is therefore the trust boundary.
 #
-# The verification runs under the SYSTEM interpreter with -I -S, never under
-# the target venv: starting the target venv to inspect the target venv executes
-# the suspect code first, which is a guard placed after the door.
+# The ordering guarantee — verify with a trusted interpreter, start the target
+# one only afterwards — lives in job_intel_startup_guard.sh so it can be proved
+# by executing it rather than by reading this file.
 site_manifest="/etc/job-intel/job-intel-shadow.site-manifest"
 site_script="$workdir/scripts/job_intel_site_integrity.py"
-site_root="$workdir/venv/lib/python3.12/site-packages"
-system_python="/usr/bin/python3.12"
-[[ -r "$site_manifest" ]] || fail "site manifest missing at $site_manifest"
+venv_root="$workdir/venv"
+startup_guard="$workdir/scripts/job_intel_startup_guard.sh"
+[[ -x "$startup_guard" ]] || fail "startup guard missing at $startup_guard"
 [[ -r "$site_script" ]] || fail "site integrity checker missing at $site_script"
-[[ -x "$system_python" ]] || fail "trusted system interpreter missing at $system_python"
-[[ -d "$site_root" ]] || fail "target site-packages missing at $site_root"
 
-site_result="$("$system_python" -I -S "$site_script" verify "$site_manifest" "$site_root" 2>&1)" \
-  || fail "startup tree changed before any import: $(printf '%s' "$site_result" | head -3 | tr '\n' ' ')"
-
-# Only now is the target interpreter allowed to start.
-python_bin="$workdir/venv/bin/python"
+python_bin="$venv_root/bin/python"
 [[ -x "$python_bin" ]] || fail "interpreter not found at $python_bin"
-"$python_bin" - <<'PY' || fail "the pinned checkout does not enforce the delivery kill-switch"
+
+bash "$startup_guard" "$site_manifest" "$venv_root" "$site_script" 0 \
+  "$python_bin" - <<'PY' || fail "startup tree unverified, or the pinned checkout does not enforce the delivery kill-switch"
 import os, sys
 sys.path.insert(0, os.environ.get("JOB_INTEL_WORKDIR", "/home/hermes/.hermes/hermes-agent"))
 try:
