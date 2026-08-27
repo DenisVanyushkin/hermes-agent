@@ -474,9 +474,10 @@ def classify_node_failures(
     baseline: dict[str, Any],
     upstream_parent: dict[str, Any],
     merged: dict[str, Any],
+    merged_isolated: dict[str, Any],
     manifest: dict[str, Any],
 ) -> dict[str, list[dict[str, str]]]:
-    """Classify merged failures using one manifest and three node outcomes.
+    """Classify merged failures using one manifest and four node outcomes.
 
     This is deliberately a pure decision function. Callers must provide
     structured collection/probe outcomes and the persisted selection
@@ -488,6 +489,7 @@ def classify_node_failures(
         ("baseline", baseline),
         ("upstream_parent", upstream_parent),
         ("merged", merged),
+        ("merged_isolated", merged_isolated),
     )
     collected: dict[str, set[str]] = {}
     failed: dict[str, set[str]] = {}
@@ -567,6 +569,11 @@ def classify_node_failures(
                 continue
             classification = "pre_existing_failure"
             bucket = "pre_existing"
+        elif nodeid in collected["merged_isolated"] and nodeid not in failed[
+            "merged_isolated"
+        ]:
+            classification = "order_dependent_failure"
+            bucket = "common_path" if path_presence[0] else "post_only_path"
         elif nodeid in collected["baseline"]:
             if not path_presence[0]:
                 result["unknown"].append(
@@ -858,6 +865,7 @@ def _main(argv: list[str] | None = None) -> int:
     p_classify.add_argument("--baseline", required=True)
     p_classify.add_argument("--upstream-parent", required=True)
     p_classify.add_argument("--merged", required=True)
+    p_classify.add_argument("--merged-isolated", required=True)
     p_classify.add_argument("--manifest", required=True)
 
     p_outcome = sub.add_parser(
@@ -956,6 +964,9 @@ def _main(argv: list[str] | None = None) -> int:
                     Path(args.upstream_parent).read_text(encoding="utf-8")
                 ),
                 merged=json.loads(Path(args.merged).read_text(encoding="utf-8")),
+                merged_isolated=json.loads(
+                    Path(args.merged_isolated).read_text(encoding="utf-8")
+                ),
                 manifest=json.loads(Path(args.manifest).read_text(encoding="utf-8")),
             )
             print(json.dumps(classification, ensure_ascii=False, sort_keys=True))

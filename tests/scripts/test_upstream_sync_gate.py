@@ -471,6 +471,7 @@ def _manifest(*entries: tuple[str, bool, bool]) -> dict:
                     collected=set(),
                     failed={"tests/test_common.py::test_not_collected"},
                 ),
+                "merged_isolated": _node_run(collected=set(), failed=set()),
                 "manifest": _manifest(("tests/test_common.py", True, True)),
             },
             {
@@ -500,8 +501,108 @@ def test_classification_matrix(case, expected):
         baseline=case["baseline"],
         upstream_parent=case["upstream_parent"],
         merged=case["merged"],
+        merged_isolated=case.get("merged_isolated", case["merged"]),
         manifest=case["manifest"],
     ) == expected
+
+
+def test_merged_failure_that_passes_in_merged_isolation_is_order_dependent():
+    nodeid = "tests/test_common.py::test_order_dependent"
+    result = upstream_sync_gate.classify_node_failures(
+        baseline=_node_run(collected=set(), failed=set()),
+        upstream_parent=_node_run(collected={nodeid}, failed=set()),
+        merged=_node_run(collected={nodeid}, failed={nodeid}),
+        merged_isolated=_node_run(collected={nodeid}, failed=set()),
+        manifest=_manifest(("tests/test_common.py", True, True)),
+    )
+
+    assert result["common_path"] == [
+        {
+            "path": "tests/test_common.py",
+            "nodeid": nodeid,
+            "classification": "order_dependent_failure",
+        }
+    ]
+
+
+def test_order_dependent_failure_is_blocking_without_human_decision():
+    node = {
+        "path": "tests/test_common.py",
+        "nodeid": "tests/test_common.py::test_order_dependent",
+        "classification": "order_dependent_failure",
+    }
+
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification={
+            "common_path": [node],
+            "post_only_path": [],
+            "pre_existing": [],
+            "unknown": [],
+        },
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[],
+    )
+
+    assert payload["blocking_failures"] == [node]
+
+
+def test_failure_that_remains_in_merged_isolation_is_not_order_dependent():
+    nodeid = "tests/test_common.py::test_still_fails"
+    result = upstream_sync_gate.classify_node_failures(
+        baseline=_node_run(collected=set(), failed=set()),
+        upstream_parent=_node_run(collected={nodeid}, failed=set()),
+        merged=_node_run(collected={nodeid}, failed={nodeid}),
+        merged_isolated=_node_run(collected={nodeid}, failed={nodeid}),
+        manifest=_manifest(("tests/test_common.py", True, True)),
+    )
+
+    assert result["common_path"] == [
+        {
+            "path": "tests/test_common.py",
+            "nodeid": nodeid,
+            "classification": "fork_compatibility_failure",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("merged_failed", "merged_isolated_failed", "expected_classification"),
+    [
+        (False, False, None),
+        (False, True, None),
+        (True, False, "order_dependent_failure"),
+        (True, True, "fork_compatibility_failure"),
+    ],
+    ids=[
+        "merged-pass-isolated-pass",
+        "merged-pass-isolated-fail",
+        "merged-fail-isolated-pass",
+        "merged-fail-isolated-fail",
+    ],
+)
+def test_classification_covers_merged_and_isolated_failure_matrix(
+    merged_failed, merged_isolated_failed, expected_classification
+):
+    nodeid = "tests/test_common.py::test_matrix"
+    result = upstream_sync_gate.classify_node_failures(
+        baseline=_node_run(collected=set(), failed=set()),
+        upstream_parent=_node_run(collected={nodeid}, failed=set()),
+        merged=_node_run(
+            collected={nodeid}, failed={nodeid} if merged_failed else set()
+        ),
+        merged_isolated=_node_run(
+            collected={nodeid},
+            failed={nodeid} if merged_isolated_failed else set(),
+        ),
+        manifest=_manifest(("tests/test_common.py", True, True)),
+    )
+
+    entries = result["common_path"]
+    if expected_classification is None:
+        assert entries == []
+    else:
+        assert entries[0]["classification"] == expected_classification
 
 
 def test_unreadable_merged_run_with_no_failures_is_not_clean():
@@ -515,6 +616,7 @@ def test_unreadable_merged_run_with_no_failures_is_not_clean():
         merged=_node_run(
             collected=set(), failed=set(), collect_ok=False
         ),
+        merged_isolated=_node_run(collected=set(), failed=set()),
         manifest=_manifest(("tests/test_common.py", True, True)),
     )
 
@@ -534,6 +636,9 @@ def test_classifier_leaves_blocking_aggregate_to_persistence():
         merged=_node_run(
             collected={"tests/test_post_only.py::test_new"},
             failed={"tests/test_post_only.py::test_new"},
+        ),
+        merged_isolated=_node_run(
+            collected={"tests/test_post_only.py::test_new"}, failed=set()
         ),
         manifest=_manifest(("tests/test_post_only.py", False, True)),
     )
@@ -687,6 +792,10 @@ def test_passed_baseline_node_is_classified_as_fork_regression(tmp_path):
         baseline=json.loads(baseline_result.stdout),
         upstream_parent=_node_run(collected=set(), failed=set()),
         merged=json.loads(merged_result.stdout),
+        merged_isolated=_node_run(
+            collected=json.loads(merged_result.stdout)["collected_nodeids"],
+            failed=json.loads(merged_result.stdout)["failed_nodeids"],
+        ),
         manifest=_manifest(("tests/test_scheduler.py", True, True)),
     )
 

@@ -490,6 +490,40 @@ merge_passes_fork_tests() {
     echo "could not build the narrow upstream-parent probe request; refusing to land the merge" >>"$DETAIL_LOG"
     return 1
   fi
+  merged_isolated_nodes="$attempt_dir/gate-merged-isolated.nodes.json"
+  merged_isolated_log="$attempt_dir/gate-merged-isolated.log"
+  merged_probe_wt=""
+  merged_isolated_probe_nodeids="$attempt_dir/gate-merged-isolated.nodeids.json"
+  if ! "$py" - "$probe_request" "$merged_isolated_probe_nodeids" <<'PY'
+import json, sys
+from pathlib import Path
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+nodeids = request.get("nodeids")
+if not isinstance(nodeids, list) or not all(isinstance(item, str) for item in nodeids):
+    raise SystemExit("probe request nodeids must be a string list")
+Path(sys.argv[2]).write_text(json.dumps(nodeids), encoding="utf-8")
+raise SystemExit(0 if nodeids else 1)
+PY
+  then
+    printf '%s\n' '{"collect_ok":true,"probe_ok":true,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+    : >"$merged_isolated_log"
+  else
+    if ! merged_probe_wt="$(mktemp -d -t hermes-merged-probe-XXXXXX)" ||
+       ! git -C "$REPO" worktree add --detach "$merged_probe_wt" "$after" >>"$DETAIL_LOG" 2>&1; then
+      rm -rf "$merged_probe_wt"
+      printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+      : >"$merged_isolated_log"
+      echo "could not create the merged-tree probe worktree" >>"$DETAIL_LOG"
+    else
+      "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_request" "$merged_probe_wt" >"$merged_isolated_log" 2>&1 || true
+      if ! "$py" "$gate" node-outcome --log "$merged_isolated_log" \
+        --expected-nodeids "$merged_isolated_probe_nodeids" >"$merged_isolated_nodes" 2>>"$DETAIL_LOG"; then
+        printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+      fi
+      git -C "$REPO" worktree remove --force "$merged_probe_wt" >/dev/null 2>&1 || true
+      rm -rf "$merged_probe_wt"
+    fi
+  fi
   probe_filtered_request="$attempt_dir/gate-upstream-probe.filtered.request.json"
   probe_available_nodeids="$attempt_dir/gate-upstream-probe.available.nodeids.json"
   probe_nodeids="$attempt_dir/gate-upstream-probe.nodeids.json"
@@ -566,7 +600,8 @@ PY
   classification_json="$attempt_dir/gate-classification.json"
   if ! "$py" "$gate" classify-node-failures \
     --baseline "$baseline_nodes" --upstream-parent "$upstream_nodes" \
-    --merged "$merged_nodes" --manifest "$selection_manifest" \
+    --merged "$merged_nodes" --merged-isolated "$merged_isolated_nodes" \
+    --manifest "$selection_manifest" \
     >"$classification_json" 2>>"$DETAIL_LOG"; then
     echo "could not classify structured node outcomes; refusing to land the merge" >>"$DETAIL_LOG"
     return 1
