@@ -9,10 +9,10 @@ Type=notify
 User=root
 Group=root
 EnvironmentFile=/etc/job-intel/product-search-probe-experiment.env
-ExecStart=${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --source linkedin --profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH} --network-namespace ${PRODUCT_SEARCH_BROWSER_NETWORK_NAMESPACE} --bootstrap-script ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/browser-desktop-bootstrap.sh --lock-path ${PRODUCT_SEARCH_BROWSER_LOCK_PATH}
+ExecStart=/usr/bin/env ${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --source linkedin --profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH} --network-namespace ${PRODUCT_SEARCH_BROWSER_NETWORK_NAMESPACE} --bootstrap-script ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/browser-desktop-bootstrap.sh --lock-path ${PRODUCT_SEARCH_BROWSER_LOCK_PATH}
 # Explicitly stop the managed endpoint; systemd also tears down the foreground
 # supervisor and its lock holder as a control group.
-ExecStop=${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --stop --source linkedin --profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH} --lock-path ${PRODUCT_SEARCH_BROWSER_LOCK_PATH}
+ExecStop=/usr/bin/env ${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --stop --source linkedin --profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH} --lock-path ${PRODUCT_SEARCH_BROWSER_LOCK_PATH}
 KillMode=control-group
 TimeoutStartSec=120
 Restart=no

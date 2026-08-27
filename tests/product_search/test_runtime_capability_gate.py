@@ -554,3 +554,18 @@ def test_bootstrap_unit_is_clone_and_namespace_parameterized() -> None:
     assert "BindsTo=job-intel-browser-bootstrap.service" in acquisition_unit
     assert "After=job-intel-browser-bootstrap.service" in acquisition_unit
     assert "sudo" not in acquisition_unit
+
+
+def test_bootstrap_unit_exec_tokens_are_absolute_binaries() -> None:
+    root = Path(__file__).resolve().parents[2]
+    unit = (
+        root / "deploy/systemd/experiments/job-intel-browser-bootstrap.service"
+    ).read_text(encoding="utf-8")
+    commands = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in unit.splitlines()
+        if line.startswith(("ExecStart=", "ExecStop="))
+    }
+    assert commands
+    for command in commands.values():
+        assert command.split(maxsplit=1)[0].startswith("/")
