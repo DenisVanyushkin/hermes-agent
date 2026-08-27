@@ -5,22 +5,64 @@ import json
 from pathlib import Path
 import sqlite3
 
+import pytest
+
 from job_intel.product_search.acquisition_probe import (
     ProbeSourceBlocked,
     SourceIsolation,
+    EXCLUSION_REASON_CATALOG,
     build_isolated_probe_environment,
+    build_experiment_manifest,
     build_snapshot_queries,
     expand_queries,
     ProbeQuery,
     LinkedInExecutionPlan,
     resolve_public_sources,
     run_probe,
+    validate_experiment_manifest,
     validate_probe_output_path,
 )
 from job_intel.product_search.search_contract import load_search_contract
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_experiment_manifest_binds_exclusion_reason_catalog(tmp_path: Path) -> None:
+    root = tmp_path / "experiment"
+    runtime = root / "runtime"
+    python_runtime = root / "python-runtime"
+    stdlib_root = root / "stdlib"
+    runtime.mkdir(parents=True)
+    python_runtime.mkdir()
+    stdlib_root.mkdir()
+    executable = python_runtime / "bin/python"
+    executable.parent.mkdir()
+    executable.write_text("python", encoding="utf-8")
+    (runtime / "uv.lock").write_text("lock", encoding="utf-8")
+    (python_runtime / "installed-distributions.txt").write_text("", encoding="utf-8")
+
+    manifest = build_experiment_manifest(
+        root=root,
+        commit="a" * 40,
+        python_executable=executable,
+        python_version="3.12.0",
+        stdlib_root=stdlib_root,
+        sys_path=(str(runtime),),
+    )
+
+    assert manifest["exclusion_reason_codes"] == {
+        "version": EXCLUSION_REASON_CATALOG.version,
+        "sha256": EXCLUSION_REASON_CATALOG.sha256,
+    }
+
+    wrong_version = dict(manifest)
+    wrong_version["exclusion_reason_codes"] = {
+        **manifest["exclusion_reason_codes"],
+        "version": "unreviewed",
+    }
+    with pytest.raises(ValueError, match="exclusion reason catalog"):
+        validate_experiment_manifest(wrong_version)
 
 
 def _ready_checks(*families: str) -> dict[str, object]:

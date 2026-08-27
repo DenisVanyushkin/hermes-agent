@@ -33,12 +33,15 @@ from job_intel.browser_sourcing import (
     BrowserFetchResult,
     BrowserNativeUnavailable,
     BrowserSourceClient,
+    EXCLUSION_REASON_CATALOG,
+    classify_linkedin_dom_job_ids,
     browser_native_available,
     extract_company_career_vacancies_from_html,
     extract_linkedin_vacancies_from_html,
     metrics_from_counts,
     resolve_browser_config,
 )
+from job_intel.models import Vacancy
 
 
 def _load_browser_supervisor():
@@ -55,6 +58,10 @@ def _manifest_with_source_isolation(root: Path, settings: dict[str, object]) -> 
         "gate": "gate-a",
         "environment_id": "product-search-gate-a",
         "root": str(root),
+        "exclusion_reason_codes": {
+            "version": EXCLUSION_REASON_CATALOG.version,
+            "sha256": EXCLUSION_REASON_CATALOG.sha256,
+        },
         "paths": {
             name: str(root / name)
             for name in (
@@ -429,6 +436,21 @@ def test_linkedin_trace_reconciles_dom_ids_independently_from_card_parser(monkey
     assert page_trace["returned_unique_job_ids"] == ["101", "202"]
     assert page_trace["excluded_job_ids_by_reason"] == {}
     assert page_trace["unexplained_dom_job_ids"] == ["303"]
+    assert page_trace["job_id_outcomes"] == {
+        "101": "parsed",
+        "202": "parsed",
+        "303": "unexplained",
+    }
+    assert page_trace["extraction_counts"] == {
+        "dom": 3,
+        "parsed_before_filter": 2,
+        "returned": 2,
+        "duplicate_canonical": 0,
+        "duplicate_canonical_returned": 0,
+        "excluded": 0,
+        "unexplained": 1,
+        "vacancies_extracted": 2,
+    }
     assert set(page_trace["dom_unique_job_ids"]) == (
         set(page_trace["parsed_unique_job_ids_before_role_filter"])
         | set(page_trace["excluded_job_ids_by_reason"])
@@ -1376,6 +1398,107 @@ def test_gate_a_incomplete_scroll_is_critical_degradation() -> None:
     health = client.session_health_snapshot()
     assert health["critical_degradation"] is True
     assert health["status"] == "blocked"
+
+
+def _a4_vacancy(job_id: str, title: str = "VP Product") -> Vacancy:
+    url = f"https://www.linkedin.com/jobs/view/{job_id}"
+    return Vacancy(
+        source="linkedin",
+        source_id=job_id,
+        company="Spark",
+        title=title,
+        location="United Kingdom",
+        url=url,
+        description=title,
+    )
+
+
+def test_a4_dom_id_accounting_is_exhaustive_and_arithmetic_closes() -> None:
+    accounting = classify_linkedin_dom_job_ids(
+        dom_job_ids=frozenset({"101", "202", "303", "404"}),
+        parser_vacancies=[
+            _a4_vacancy("101"),
+            _a4_vacancy("202"),
+            _a4_vacancy("202", title="Director Product"),
+            _a4_vacancy("303", title="Software Engineer"),
+        ],
+        returned_vacancies=[_a4_vacancy("101"), _a4_vacancy("202")],
+        excluded_by_reason={"303": "role_filter"},
+    )
+
+    assert accounting.outcome_by_id == {
+        "101": "parsed",
+        "202": "duplicate-canonical",
+        "303": "excluded",
+        "404": "unexplained",
+    }
+    assert accounting.excluded_by_reason == {"303": "role_filter"}
+    assert accounting.dom_count == (
+        accounting.parsed_count
+        + accounting.duplicate_canonical_count
+        + accounting.excluded_count
+        + accounting.unexplained_count
+    )
+    assert accounting.parser_before_filter_count == (
+        accounting.parsed_count
+        + accounting.duplicate_canonical_count
+        + accounting.excluded_count
+    )
+    assert accounting.returned_count == (
+        accounting.parsed_count + accounting.duplicate_canonical_returned_count
+    )
+    assert accounting.vacancies_extracted == accounting.returned_count
+
+
+def test_a4_unknown_exclusion_reason_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown LinkedIn exclusion reason"):
+        classify_linkedin_dom_job_ids(
+            dom_job_ids=frozenset({"303"}),
+            parser_vacancies=[_a4_vacancy("303", title="Software Engineer")],
+            returned_vacancies=[],
+            excluded_by_reason={"303": "new_reason_not_reviewed"},
+        )
+
+
+def test_a4_qualification_is_a_named_post_extraction_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0))
+    plan = LinkedInExecutionPlan(page_offsets=(0,), max_scroll_checkpoints=1)
+    parsed = [_a4_vacancy("101"), _a4_vacancy("202", title="Software Engineer")]
+
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda: None)
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "job_intel.browser_sourcing._linkedin_card_vacancies_from_html",
+        lambda *_args, **_kwargs: parsed,
+    )
+    monkeypatch.setattr(
+        "job_intel.browser_sourcing._jobposting_objects",
+        lambda _html: [],
+    )
+    monkeypatch.setattr(
+        client,
+        "fetch_page",
+        lambda url, **_kwargs: BrowserFetchResult(
+            requested_url=url,
+            final_url=url,
+            html="<html><body>results</body></html>",
+            html_sha256="a" * 64,
+            page_offset=0,
+            planned_scroll_steps=1,
+            completed_scroll_steps=1,
+            scroll_trace=(),
+            dom_unique_job_ids=frozenset({"101", "202"}),
+            artifact_ref=None,
+        ),
+    )
+
+    vacancies = client.search_linkedin(
+        "VP Product",
+        geography_location="United Kingdom",
+        execution_plan=plan,
+    )
+
+    assert [vacancy.source_id for vacancy in vacancies] == ["101"]
 
 
 def test_gate_a_incomplete_page_plan_is_critical_and_not_a_clean_zero(

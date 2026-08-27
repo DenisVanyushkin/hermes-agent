@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import time
+from collections import Counter
 from contextlib import suppress
 
 
@@ -67,6 +68,45 @@ _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
     "linkedin": resolve_browser_profile_base() / "linkedin",
     "company_career": _BROWSER_PROFILE_DEFAULT,
 }
+
+
+@dataclass(frozen=True)
+class ExclusionReasonCatalog:
+    """Versioned, closed data vocabulary for parser exclusions."""
+
+    version: str
+    codes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.version.strip():
+            raise ValueError("exclusion reason catalog version is required")
+        if tuple(sorted(set(self.codes))) != self.codes or not self.codes:
+            raise ValueError("exclusion reason catalog codes must be sorted and unique")
+
+    @property
+    def canonical_json(self) -> str:
+        return json.dumps(
+            {"codes": list(self.codes), "version": self.version},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+
+    def validate(self, reason: str) -> None:
+        if reason not in self.codes:
+            raise ValueError(f"unknown LinkedIn exclusion reason: {reason}")
+
+
+# This is deliberately data, not a collection of ad-hoc string literals at
+# call sites. A new reason needs review and a new version before it can hide a
+# parser loss behind an exclusion label.
+EXCLUSION_REASON_CATALOG = ExclusionReasonCatalog(
+    version="1.0",
+    codes=("role_filter",),
+)
 
 
 def build_linkedin_search_url(
@@ -217,6 +257,129 @@ class BrowserFetchResult:
 def _linkedin_job_id_from_url(url: str) -> str | None:
     match = re.search(r"/jobs/view/([^/?#]+)", urlparse(url).path, flags=re.I)
     return match.group(1) if match else None
+
+
+@dataclass(frozen=True)
+class LinkedInDomJobIdAccounting:
+    outcome_by_id: dict[str, str]
+    parsed_ids: frozenset[str]
+    duplicate_canonical_ids: frozenset[str]
+    duplicate_canonical_returned_ids: frozenset[str]
+    excluded_by_reason: dict[str, str]
+    unexplained_ids: frozenset[str]
+    parser_before_filter_count: int
+    returned_count: int
+    vacancies_extracted: int
+
+    @property
+    def dom_count(self) -> int:
+        return len(self.outcome_by_id)
+
+    @property
+    def parsed_count(self) -> int:
+        return len(self.parsed_ids)
+
+    @property
+    def duplicate_canonical_count(self) -> int:
+        return len(self.duplicate_canonical_ids)
+
+    @property
+    def duplicate_canonical_returned_count(self) -> int:
+        return len(self.duplicate_canonical_returned_ids)
+
+    @property
+    def excluded_count(self) -> int:
+        return len(self.excluded_by_reason)
+
+    @property
+    def unexplained_count(self) -> int:
+        return len(self.unexplained_ids)
+
+
+def classify_linkedin_dom_job_ids(
+    *,
+    dom_job_ids: frozenset[str] | set[str],
+    parser_vacancies: list[Vacancy],
+    returned_vacancies: list[Vacancy],
+    excluded_by_reason: Mapping[str, str] | None = None,
+) -> LinkedInDomJobIdAccounting:
+    """Assign every observed DOM ID exactly one auditable terminal outcome."""
+
+    dom_ids = frozenset(str(job_id) for job_id in dom_job_ids)
+    parser_counts = Counter(
+        job_id
+        for vacancy in parser_vacancies
+        for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+        if job_id in dom_ids
+    )
+    parser_ids = frozenset(parser_counts)
+    duplicate_ids = frozenset(
+        job_id for job_id, count in parser_counts.items() if count > 1
+    )
+    returned_ids = frozenset(
+        job_id
+        for vacancy in returned_vacancies
+        for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+        if job_id in dom_ids
+    )
+    expected_excluded = parser_ids - duplicate_ids - returned_ids
+    provided_excluded = dict(excluded_by_reason or {})
+    if excluded_by_reason is None:
+        excluded = {
+            job_id: "role_filter" for job_id in sorted(expected_excluded)
+        }
+    else:
+        for reason in provided_excluded.values():
+            EXCLUSION_REASON_CATALOG.validate(reason)
+        if set(provided_excluded) != set(expected_excluded):
+            raise ValueError("excluded IDs do not match parser/qualification output")
+        excluded = provided_excluded
+    for reason in excluded.values():
+        EXCLUSION_REASON_CATALOG.validate(reason)
+
+    parsed_ids = parser_ids - duplicate_ids - frozenset(excluded)
+    unexplained_ids = dom_ids - parser_ids
+    if parsed_ids & duplicate_ids or parsed_ids & frozenset(excluded):
+        raise ValueError("LinkedIn DOM ID outcomes overlap")
+    outcome_by_id: dict[str, str] = {}
+    outcome_by_id.update({job_id: "parsed" for job_id in sorted(parsed_ids)})
+    outcome_by_id.update(
+        {job_id: "duplicate-canonical" for job_id in sorted(duplicate_ids)}
+    )
+    outcome_by_id.update({job_id: "excluded" for job_id in sorted(excluded)})
+    outcome_by_id.update(
+        {job_id: "unexplained" for job_id in sorted(unexplained_ids)}
+    )
+    if set(outcome_by_id) != set(dom_ids) or len(outcome_by_id) != len(dom_ids):
+        raise ValueError("LinkedIn DOM ID outcomes are not exhaustive")
+
+    duplicate_returned = duplicate_ids & returned_ids
+    returned_count = len(returned_ids)
+    vacancies_extracted = len(returned_vacancies)
+    if len(dom_ids) != (
+        len(parsed_ids)
+        + len(duplicate_ids)
+        + len(excluded)
+        + len(unexplained_ids)
+    ):
+        raise ValueError("LinkedIn DOM ID accounting does not close")
+    if len(parser_ids) != len(parsed_ids) + len(duplicate_ids) + len(excluded):
+        raise ValueError("LinkedIn parser accounting does not close")
+    if returned_count != len(parsed_ids) + len(duplicate_returned):
+        raise ValueError("LinkedIn returned accounting does not close")
+    if vacancies_extracted != returned_count:
+        raise ValueError("LinkedIn extraction accounting does not close")
+    return LinkedInDomJobIdAccounting(
+        outcome_by_id=outcome_by_id,
+        parsed_ids=parsed_ids,
+        duplicate_canonical_ids=duplicate_ids,
+        duplicate_canonical_returned_ids=duplicate_returned,
+        excluded_by_reason=excluded,
+        unexplained_ids=unexplained_ids,
+        parser_before_filter_count=len(parser_ids),
+        returned_count=returned_count,
+        vacancies_extracted=vacancies_extracted,
+    )
 
 
 class _LinkCapture(HTMLParser):
@@ -681,6 +844,18 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str, apply_role_f
             metadata={"source_url": page_url, "href": match.group("href")},
         ))
     return _dedupe_vacancies(vacancies)
+
+
+def _qualify_linkedin_vacancies(vacancies: list[Vacancy]) -> list[Vacancy]:
+    """Apply product qualification after the parser has yielded source rows."""
+
+    return _dedupe_vacancies(
+        [
+            vacancy
+            for vacancy in vacancies
+            if _looks_executive(vacancy.title, vacancy.description)
+        ]
+    )
 
 
 def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_override: str | None = None) -> list[Vacancy]:
@@ -1524,6 +1699,16 @@ class BrowserSourceClient:
             "planned_page_offsets": [],
             "completed_page_offsets": [],
             "scroll_checkpoints": [],
+            "extraction_counts": {
+                "dom": 0,
+                "parsed_before_filter": 0,
+                "returned": 0,
+                "duplicate_canonical": 0,
+                "duplicate_canonical_returned": 0,
+                "excluded": 0,
+                "unexplained": 0,
+                "vacancies_extracted": 0,
+            },
             "stop_reason": "",
             "failure_reason": None,
             "execution_plan_version": plan.version if plan is not None else None,
@@ -1596,8 +1781,6 @@ class BrowserSourceClient:
             html = page_result.html
             trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
             started = time.perf_counter()
-            page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
-            trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
             pre_filter_vacancies = _linkedin_card_vacancies_from_html(
                 html, page_url=page_url, apply_role_filter=False
             )
@@ -1605,37 +1788,89 @@ class BrowserSourceClient:
                 _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
                 for jobposting in _jobposting_objects(html)
             )
-            dom_ids = page_result.dom_unique_job_ids
-            returned_ids = {
-                job_id
-                for vacancy in page_vacancies
-                for job_id in [_linkedin_job_id_from_url(vacancy.url)]
-                if job_id
-            }
-            parsed_ids = sorted(
-                {
-                    job_id
-                    for vacancy in pre_filter_vacancies
-                    for job_id in [_linkedin_job_id_from_url(vacancy.url)]
-                    if job_id
-                } & dom_ids
+            page_vacancies = (
+                _qualify_linkedin_vacancies(pre_filter_vacancies)
+                if plan is not None
+                else extract_linkedin_vacancies_from_html(html, page_url=page_url)
             )
-            returned_ids &= dom_ids
-            excluded_by_reason = {
-                job_id: "role_filter"
-                for job_id in sorted(set(parsed_ids) - returned_ids)
-            }
-            unexplained_ids = sorted(dom_ids - set(parsed_ids) - set(excluded_by_reason))
+            trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
+            dom_ids = page_result.dom_unique_job_ids
+            accounting = (
+                classify_linkedin_dom_job_ids(
+                    dom_job_ids=dom_ids,
+                    parser_vacancies=pre_filter_vacancies,
+                    returned_vacancies=page_vacancies,
+                )
+                if plan is not None or dom_ids
+                else None
+            )
+            if accounting is None:
+                # Legacy fetch_html callers predate DOM-ID diagnostics. Their
+                # rows remain supported, but cannot claim a four-way DOM
+                # accounting proof that they did not provide.
+                trace_counts = {
+                    "dom": 0,
+                    "parsed_before_filter": 0,
+                    "returned": 0,
+                    "duplicate_canonical": 0,
+                    "duplicate_canonical_returned": 0,
+                    "excluded": 0,
+                    "unexplained": 0,
+                    "vacancies_extracted": len(page_vacancies),
+                }
+                page_outcomes: dict[str, str] = {}
+                parser_before_filter_ids: list[str] = []
+                returned_unique_ids: list[str] = []
+                parsed_ids: list[str] = []
+                duplicate_ids: list[str] = []
+                excluded_by_reason: dict[str, str] = {}
+                unexplained_ids: list[str] = []
+            else:
+                trace_counts = {
+                    "dom": accounting.dom_count,
+                    "parsed_before_filter": accounting.parser_before_filter_count,
+                    "returned": accounting.returned_count,
+                    "duplicate_canonical": accounting.duplicate_canonical_count,
+                    "duplicate_canonical_returned": accounting.duplicate_canonical_returned_count,
+                    "excluded": accounting.excluded_count,
+                    "unexplained": accounting.unexplained_count,
+                    "vacancies_extracted": accounting.vacancies_extracted,
+                }
+                page_outcomes = dict(sorted(accounting.outcome_by_id.items()))
+                parser_before_filter_ids = sorted(
+                    accounting.parsed_ids
+                    | accounting.duplicate_canonical_ids
+                    | accounting.excluded_by_reason.keys()
+                )
+                returned_unique_ids = sorted(
+                    set(
+                        job_id
+                        for vacancy in page_vacancies
+                        for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+                        if job_id
+                    )
+                    & dom_ids
+                )
+                parsed_ids = sorted(accounting.parsed_ids)
+                duplicate_ids = sorted(accounting.duplicate_canonical_ids)
+                excluded_by_reason = accounting.excluded_by_reason
+                unexplained_ids = sorted(accounting.unexplained_ids)
+            for name, count in trace_counts.items():
+                trace["extraction_counts"][name] += count
             trace["pages"].append(
                 {
                     "requested_url": page_result.requested_url,
                     "final_url": page_result.final_url,
                     "html_sha256": page_result.html_sha256,
                     "dom_unique_job_ids": sorted(page_result.dom_unique_job_ids),
-                    "parsed_unique_job_ids_before_role_filter": parsed_ids,
-                    "returned_unique_job_ids": sorted(returned_ids),
+                    "parsed_unique_job_ids_before_role_filter": parser_before_filter_ids,
+                    "returned_unique_job_ids": returned_unique_ids,
+                    "parsed_job_ids": parsed_ids,
+                    "duplicate_canonical_job_ids": duplicate_ids,
                     "excluded_job_ids_by_reason": excluded_by_reason,
                     "unexplained_dom_job_ids": unexplained_ids,
+                    "job_id_outcomes": page_outcomes,
+                    "extraction_counts": trace_counts,
                     "planned_scroll_steps": page_result.planned_scroll_steps,
                     "completed_scroll_steps": page_result.completed_scroll_steps,
                     "scroll_trace": list(page_result.scroll_trace),

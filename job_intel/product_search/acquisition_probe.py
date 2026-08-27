@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
+from ..browser_sourcing import EXCLUSION_REASON_CATALOG
 from .search_contract import SearchContract
 
 
@@ -880,6 +881,11 @@ def _inside(path: str, root: Path) -> bool:
 def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     if manifest.get("gate") != "gate-a" or manifest.get("environment_id") != "product-search-gate-a":
         raise ValueError("wrong gate or environment identity")
+    exclusion_catalog = dict(manifest.get("exclusion_reason_codes") or {})
+    if exclusion_catalog.get("version") != EXCLUSION_REASON_CATALOG.version:
+        raise ValueError("manifest exclusion reason catalog version is not current")
+    if exclusion_catalog.get("sha256") != EXCLUSION_REASON_CATALOG.sha256:
+        raise ValueError("manifest exclusion reason catalog hash is not current")
     root = Path(str(manifest.get("root") or ""))
     if not root.is_absolute():
         raise ValueError("experiment root must be absolute")
@@ -1028,6 +1034,10 @@ def build_experiment_manifest(
         "environment_id": "product-search-gate-a",
         "commit": commit,
         "root": str(root),
+        "exclusion_reason_codes": {
+            "version": EXCLUSION_REASON_CATALOG.version,
+            "sha256": EXCLUSION_REASON_CATALOG.sha256,
+        },
         "paths": paths,
         "python": {
             "executable_path": str(python_executable),
