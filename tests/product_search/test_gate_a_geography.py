@@ -166,8 +166,8 @@ def test_b2_mapping_rejects_country_code_overlap_at_load(tmp_path: Path) -> None
         "contamination_threshold": 0.6,
         "city_country_codes": {},
         "cells": {
-            "dach": {"location": "DACH", "status": "verified", "country_codes": ["DE"]},
-            "cee": {"location": "CEE", "status": "verified", "country_codes": ["DE"]},
+            "dach": {"location": "DACH", "status": "verified", "verified_at": "2026-08-26", "country_codes": ["DE"]},
+            "cee": {"location": "CEE", "status": "verified", "verified_at": "2026-08-26", "country_codes": ["DE"]},
         },
     }
     path = tmp_path / "overlap.yaml"
@@ -231,3 +231,47 @@ def test_b2_manifest_versions_must_match_mapping_contract() -> None:
             manifest_versions={"normalization_rule_version": "old"},
         )
 
+@pytest.mark.parametrize(
+    ("target", "error"),
+    [
+        (
+            {
+                "location": None,
+                "geoId": None,
+                "verified_at": "2026-08-27",
+                "status": "verified",
+                "country_codes": ["GB"],
+            },
+            "verified geography target requires location or geoId",
+        ),
+        (
+            {
+                "location": "United Kingdom",
+                "geoId": None,
+                "verified_at": None,
+                "status": "verified",
+                "country_codes": ["GB"],
+            },
+            "verified geography target requires verified_at",
+        ),
+    ],
+    ids=["missing-location-and-geoid", "missing-verified-at"],
+)
+def test_b2_verified_target_requires_evidence_and_timestamp(
+    tmp_path: Path, target: dict[str, object], error: str
+) -> None:
+    document = {
+        "version": "1.0",
+        "product_authority_id": "PS-SOT-2026-08-10-v1",
+        "search_contract_version": "1.0.0",
+        "normalization_rule_version": "1.0",
+        "contamination_formula_version": "jaccard_received_v1",
+        "contamination_threshold": 0.6,
+        "city_country_codes": {},
+        "cells": {"uk": target},
+    }
+    path = tmp_path / "verified-validation.yaml"
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=error):
+        acquisition_probe.load_linkedin_geography_mapping(path)

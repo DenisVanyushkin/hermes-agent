@@ -453,6 +453,18 @@ def load_linkedin_geography_mapping(
         str(cell_id): LinkedInGeographyTarget.model_validate(value)
         for cell_id, value in cells.items()
     }
+    for cell_id, target in parsed.items():
+        if target.status != "verified":
+            continue
+        if not (str(target.location or "").strip() or str(target.geo_id or "").strip()):
+            raise ValueError(
+                "verified geography target requires location or geoId: "
+                f"{cell_id}"
+            )
+        if not str(target.verified_at or "").strip():
+            raise ValueError(
+                f"verified geography target requires verified_at: {cell_id}"
+            )
     owners: dict[str, str] = {}
     for cell_id, target in parsed.items():
         for code in target.country_codes:

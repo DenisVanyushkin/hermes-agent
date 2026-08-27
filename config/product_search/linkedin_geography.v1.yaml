@@ -76,7 +76,8 @@ cells:
   kazakhstan:
     location: Kazakhstan
     geoId: null
-    status: unverified
+    verified_at: "2026-08-27"
+    status: verified
     country_codes: [KZ]
   kuwait:
     location: Kuwait
@@ -126,7 +127,8 @@ cells:
   singapore:
     location: Singapore
     geoId: null
-    status: unverified
+    verified_at: "2026-08-27"
+    status: verified
     country_codes: [SG]
   south_korea:
     location: South Korea
@@ -151,7 +153,8 @@ cells:
   uk:
     location: United Kingdom
     geoId: null
-    status: unverified
+    verified_at: "2026-08-27"
+    status: verified
     country_codes: [GB]
   united_arab_emirates:
     location: United Arab Emirates
