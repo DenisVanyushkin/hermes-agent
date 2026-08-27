@@ -190,6 +190,95 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
     return selection
 
 
+def _run_runner(world: Path, python: Path, **extra_env: str) -> subprocess.CompletedProcess:
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(python),
+        "HERMES_CONTROL_PYTHON": sys.executable,
+        "HERMES_UPSTREAM_SYNC_GATE": str(REPO_ROOT / "scripts" / "upstream_sync_gate.py"),
+        **extra_env,
+    }
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _checkout_fake_python(tmp_path: Path) -> Path:
+    interpreter = tmp_path / "checkouting-python"
+    interpreter.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, subprocess, sys\n"
+        "if sys.argv[1:3] == ['-m', 'pytest']:\n"
+        "    subprocess.run(['git', 'checkout', '-q', os.environ['FAKE_CHECKOUT_REF']], check=True)\n"
+    )
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def test_head_move_does_not_emit_a_final_receipt(world: Path, tmp_path: Path) -> None:
+    before = _git(world, "rev-parse", "HEAD")
+    result = _run_runner(
+        world,
+        _checkout_fake_python(tmp_path),
+        FAKE_CHECKOUT_REF="upstream-main",
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert f"head_before={before}" in output
+    assert "head_after=" in output
+    assert output.count("fork test receipt:") == 1
+    assert "stage=final" not in output
+
+
+def test_unchanged_clean_tree_emits_preliminary_and_final_receipts(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    result = _run_runner(world, fake_python[0], FAKE_ARGV_FILE=str(fake_python[1]))
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    assert output.count("fork test receipt:") == 2
+    assert "stage=final" in output
+    digests = re.findall(r"selection_sha256=([0-9a-f]{64})", output)
+    assert len(digests) == 2
+    assert len(set(digests)) == 1
+    before = _git(world, "rev-parse", "HEAD")
+    assert f"head_before={before} head_after={before}" in output
+
+
+@pytest.mark.parametrize("dirty_kind", ["tracked", "index", "untracked"])
+def test_dirty_tree_does_not_emit_a_final_receipt(
+    world: Path, fake_python: tuple[Path, Path], dirty_kind: str
+) -> None:
+    path = world / "tests" / "test_fork_only.py"
+    if dirty_kind == "tracked":
+        path.write_text("def test_fork_only():\n    assert True\n", encoding="utf-8")
+    elif dirty_kind == "index":
+        path.write_text("def test_fork_only():\n    assert True\n", encoding="utf-8")
+        _git(world, "add", "tests/test_fork_only.py")
+    else:
+        (world / "untracked-from-pytest.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = _run_runner(world, fake_python[0], FAKE_ARGV_FILE=str(fake_python[1]))
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert output.count("fork test receipt:") == 1
+    assert "stage=final" not in output
+
+
 def test_real_runner_reports_passed_nodes_from_rA(world: Path) -> None:
     path = "tests/test_runner_reports.py"
     _write(

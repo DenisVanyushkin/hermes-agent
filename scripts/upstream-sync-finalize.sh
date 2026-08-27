@@ -372,6 +372,7 @@ merge_passes_fork_tests() {
   local before_paths after_paths boundary_paths changed_paths
   local selection_report attempt_dir selection_manifest selection_digest
   local baseline_receipt_line post_receipt_line
+  local baseline_final_receipt_line post_final_receipt_line
   listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
   before_paths="$listing_dir/before.paths"
   after_paths="$listing_dir/after.paths"
@@ -424,6 +425,44 @@ merge_passes_fork_tests() {
     echo "could not format the expected runner receipt" >>"$DETAIL_LOG"
     return 1
   fi
+  if ! baseline_final_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side pre --stage final --digest "$selection_digest" 2>>"$DETAIL_LOG")" ||
+     ! post_final_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side post --stage final --digest "$selection_digest" 2>>"$DETAIL_LOG")"; then
+    echo "could not format the expected final runner receipt" >>"$DETAIL_LOG"
+    return 1
+  fi
+
+  record_unreadable_receipt() {
+    local source="$1"
+    local unreadable_classification="$attempt_dir/gate-classification.json"
+    local unreadable_legacy="$attempt_dir/gate-legacy-failures.txt"
+    "$py" - "$unreadable_classification" "$source" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+    "common_path": [],
+    "post_only_path": [],
+    "pre_existing": [],
+    "unknown": [],
+    "unreadable_runs": [{"source": sys.argv[2], "stage": "receipt"}],
+}), encoding="utf-8")
+PY
+    : >"$unreadable_legacy"
+    if ! "$py" "$gate" persist-gate-failures \
+      --classification "$unreadable_classification" \
+      --merge-sha "$after" --before "$before" \
+      --legacy-failures "$unreadable_legacy" \
+      --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
+      echo "could not persist unreadable gate receipt outcome" >>"$DETAIL_LOG"
+      return 1
+    fi
+    if [ "$GATE_MODE" = apply ]; then
+      cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
+    fi
+    GATE_OUTCOME=unknown
+    return 0
+  }
   printf 'gate selection report: %s\n' "$selection_report" >>"$DETAIL_LOG"
   wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
   baseline="$attempt_dir/gate-baseline.log"
@@ -435,10 +474,14 @@ merge_passes_fork_tests() {
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$baseline" 2>&1 || true
-  if ! grep -Fqx "$baseline_receipt_line" "$baseline"; then
+  if ! grep -Fqx "$baseline_receipt_line" "$baseline" ||
+     ! grep -Fqx "$baseline_final_receipt_line" "$baseline"; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
-    echo "runner receipt missing or mismatched in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    if ! record_unreadable_receipt baseline; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner final receipt missing or mismatched in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
     return 1
   fi
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
@@ -449,10 +492,14 @@ merge_passes_fork_tests() {
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$post" 2>&1 || true
-  if ! grep -Fqx "$post_receipt_line" "$post"; then
+  if ! grep -Fqx "$post_receipt_line" "$post" ||
+     ! grep -Fqx "$post_final_receipt_line" "$post"; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
-    echo "runner receipt missing or mismatched in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    if ! record_unreadable_receipt merged; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner final receipt missing or mismatched in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
     return 1
   fi
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true

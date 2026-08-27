@@ -76,10 +76,11 @@ PY
 )"
 DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
 "$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --stage final --digest "$DIGEST"
 '''
 
 
-def _manifest_receipt_after_parse() -> str:
+def _manifest_receipt_after_parse_pre_only() -> str:
     """Receipt command for doubles that already parsed and retained WT/SEL."""
     python = str(sys.executable)
     gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
@@ -87,6 +88,15 @@ def _manifest_receipt_after_parse() -> str:
 SIDE="$({python} -c 'import json,sys; m=json.load(open(sys.argv[1])); print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")' "$SEL" "$HEAD")"
 {python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk '{{print $1}}')"
 '''
+
+
+def _manifest_receipt_after_parse() -> str:
+    python = str(sys.executable)
+    gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+    return (
+        _manifest_receipt_after_parse_pre_only()
+        + f'''{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$(sha256sum "$SEL" | awk '{{print $1}}')"\n'''
+    )
 
 
 def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
@@ -1029,6 +1039,7 @@ class TestApplyMergeIsGatedOnForkTests:
             'PY\n'
             ')"\n'
             f'{python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
+            f'{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
             "echo 'FAILED tests/test_fork_only.py::test_fork_only - AssertionError'\n"
             'if [ -f "$WT/tests/test_upstream_added.py" ]; then\n'
             "  echo 'FAILED tests/test_upstream_added.py::test_added - AssertionError'\n"
@@ -1146,6 +1157,40 @@ class TestApplyMergeIsGatedOnForkTests:
         assert res["status"] == "failed", evidence
         assert res["failed_stage"] == "test-gate"
         assert "receipt" in evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_preliminary_receipt_without_final_receipt_is_unreadable(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        runner = scripts / "run-fork-tests.sh"
+        runner.write_text(
+            "#!/usr/bin/env bash\n"
+            'WT=""; SEL=""\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --attempt-root|--boundary) shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            "esac; done\n"
+            + _manifest_receipt_after_parse_pre_only()
+            + "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            + "echo '1 failed, 5 passed in 2.00s'\n"
+            + "exit 137\n"
+        )
+        runner.chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = proc.stderr + proc.stdout + res.get("detail", "")
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate"
+        failures = json.loads((state / "gate-failures.json").read_text())
+        assert failures["unreadable_runs"] == [
+            {"source": "baseline", "stage": "receipt"}
+        ]
+        assert failures["blocking_failures"] == []
         assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_mismatched_runner_receipt_blocks_landing(self, tmp_path, state):

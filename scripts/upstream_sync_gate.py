@@ -30,7 +30,9 @@ _RECEIPT_FIELDS = {
 }
 
 
-def fork_test_receipt(*, source: str, digest: str, side: str | None = None) -> str:
+def fork_test_receipt(
+    *, source: str, digest: str, side: str | None = None, stage: str | None = None
+) -> str:
     """Format the receipt shared by the runner and its enforcing caller."""
     try:
         field = _RECEIPT_FIELDS[source]
@@ -40,9 +42,13 @@ def fork_test_receipt(*, source: str, digest: str, side: str | None = None) -> s
         raise ValueError("fork-test receipt digest must be a lowercase SHA-256")
     if side is not None and side not in {"pre", "post"}:
         raise ValueError(f"unknown fork-test receipt side {side!r}")
+    if stage is not None and stage != "final":
+        raise ValueError(f"unknown fork-test receipt stage {stage!r}")
     side_field = f" side={side}" if side is not None else ""
+    stage_field = f" stage={stage}" if stage is not None else ""
     return (
-        f"fork test receipt: contract={RECEIPT_CONTRACT} source={source}{side_field} "
+        f"fork test receipt: contract={RECEIPT_CONTRACT} source={source}{side_field}"
+        f"{stage_field} "
         f"{field}={digest}"
     )
 
@@ -900,6 +906,7 @@ def _main(argv: list[str] | None = None) -> int:
     )
     p_receipt.add_argument("--source", choices=sorted(_RECEIPT_FIELDS), required=True)
     p_receipt.add_argument("--side", choices=("pre", "post"))
+    p_receipt.add_argument("--stage", choices=("final",))
     p_receipt.add_argument("--digest", required=True)
 
     p_failures = sub.add_parser(
@@ -1041,7 +1048,14 @@ def _main(argv: list[str] | None = None) -> int:
             )
             return 0
         else:
-            print(fork_test_receipt(source=args.source, side=args.side, digest=args.digest))
+            print(
+                fork_test_receipt(
+                    source=args.source,
+                    side=args.side,
+                    stage=args.stage,
+                    digest=args.digest,
+                )
+            )
             return 0
     except (ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)

@@ -281,6 +281,12 @@ if [ "${#TESTS[@]}" -eq 0 ]; then
   exit 2
 fi
 
+if ! HEAD_BEFORE="$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)" ||
+   [ -z "$HEAD_BEFORE" ]; then
+  echo "FAILED: could not record the worktree HEAD before pytest" >&2
+  exit 2
+fi
+
 if [ -n "$SELECTION_FROM" ]; then
   if ! SELECTION_DIGEST="$(sha256sum "$SELECTION_FROM" | awk '{print $1}')" || [ -z "$SELECTION_DIGEST" ]; then
     echo "FAILED: could not hash the consumed selection manifest" >&2
@@ -319,5 +325,51 @@ if [ "$PRINT_SELECTION" -eq 1 ]; then
 fi
 
 cd "$WT"
+pytest_rc=0
 nice -n 19 "$PYTHON_BIN" -m pytest "${TESTS[@]}" \
-  -q -p no:cacheprovider --timeout=90 -rA --continue-on-collection-errors
+  -q -p no:cacheprovider --timeout=90 -rA --continue-on-collection-errors || pytest_rc=$?
+
+if ! HEAD_AFTER="$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)" ||
+   [ -z "$HEAD_AFTER" ]; then
+  echo "FAILED: could not record the worktree HEAD after pytest" >&2
+  exit 2
+fi
+printf 'fork test tree: head_before=%s head_after=%s\n' \
+  "$HEAD_BEFORE" "$HEAD_AFTER" >&2
+if [ "$HEAD_BEFORE" != "$HEAD_AFTER" ]; then
+  echo "FAILED: worktree HEAD moved during pytest; the test run is unreadable" >&2
+  exit 2
+fi
+if ! git -C "$WT" diff --quiet; then
+  echo "FAILED: tracked worktree changes appeared during pytest; the test run is unreadable" >&2
+  exit 2
+fi
+if ! git -C "$WT" diff --cached --quiet; then
+  echo "FAILED: index changes appeared during pytest; the test run is unreadable" >&2
+  exit 2
+fi
+if [ -n "$(git -C "$WT" ls-files --others --exclude-standard)" ]; then
+  echo "FAILED: untracked worktree files appeared during pytest; the test run is unreadable" >&2
+  exit 2
+fi
+
+if [ -n "$RECEIPT_SIDE" ]; then
+  if ! FINAL_RECEIPT_LINE="$(
+    "$CONTROL_PYTHON" "$GATE_HELPER" receipt \
+      --source "$RECEIPT_SOURCE" --side "$RECEIPT_SIDE" --stage final \
+      --digest "$SELECTION_DIGEST"
+  )"; then
+    echo "FAILED: could not format the final fork test receipt" >&2
+    exit 2
+  fi
+else
+  if ! FINAL_RECEIPT_LINE="$(
+    "$CONTROL_PYTHON" "$GATE_HELPER" receipt \
+      --source "$RECEIPT_SOURCE" --stage final --digest "$SELECTION_DIGEST"
+  )"; then
+    echo "FAILED: could not format the final fork test receipt" >&2
+    exit 2
+  fi
+fi
+printf '%s\n' "$FINAL_RECEIPT_LINE" >&2
+exit "$pytest_rc"
