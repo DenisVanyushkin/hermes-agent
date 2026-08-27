@@ -536,6 +536,7 @@ class ProbeQuery(BaseModel):
     primary_geography: str | None = None
     geography_target: LinkedInGeographyTarget | None = None
     execution_plan: LinkedInExecutionPlan | None = None
+    is_synthetic_control: bool = False
     minimum_independent_families: int = Field(default=1, ge=1)
 
 
@@ -1281,6 +1282,10 @@ def run_probe(
         else:
             record["outcome"] = "degraded"
 
+    def _record_attempt_state(query: ProbeQuery, state: SourceState) -> None:
+        if not query.is_synthetic_control:
+            _record_source_state(source_states, query.source_family, state)
+
     for raw_query in queries:
         query = raw_query if isinstance(raw_query, ProbeQuery) else ProbeQuery.model_validate(raw_query)
         cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
@@ -1288,15 +1293,11 @@ def run_probe(
         source = sources.get(query.source_family)
         source_isolation = isolation.get(query.source_family)
         if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock", "api"}:
-            _record_source_state(
-                source_states, query.source_family, "blocked_no_safe_isolation"
-            )
+            _record_attempt_state(query, "blocked_no_safe_isolation")
             _set_pair_outcome(query, "blocked")
             continue
         if source is None:
-            _record_source_state(
-                source_states, query.source_family, "blocked_missing_public_interface"
-            )
+            _record_attempt_state(query, "blocked_missing_public_interface")
             _set_pair_outcome(query, "blocked")
             continue
 
@@ -1305,19 +1306,13 @@ def run_probe(
             if target is None or target.status != "verified" or not (
                 target.location or target.geo_id
             ):
-                _record_source_state(
-                    source_states,
-                    query.source_family,
-                    "blocked_unsupported_geography",
-                )
+                _record_attempt_state(query, "blocked_unsupported_geography")
                 _set_pair_outcome(query, "blocked")
                 continue
 
         capability = _capability(query.source_family, source_isolation)
         if capability.state == "runtime_capability_blocked":
-            _record_source_state(
-                source_states, query.source_family, "runtime_capability_blocked"
-            )
+            _record_attempt_state(query, "runtime_capability_blocked")
             _set_pair_outcome(query, "blocked")
             continue
 
@@ -1336,32 +1331,24 @@ def run_probe(
                     if tuple(getattr(source, "last_errors", ()) or ())
                     else "observed"
                 )
-                _record_source_state(source_states, query.source_family, state)
+                _record_attempt_state(query, state)
                 _set_pair_outcome(
                     query,
                     "degraded" if state == "observed_with_failures" else "completed",
                 )
                 break
             except ProbeSourceBlocked as exc:
-                _record_source_state(
-                    source_states, query.source_family, f"blocked_{exc.reason}"
-                )
+                _record_attempt_state(query, f"blocked_{exc.reason}")
                 _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except TimeoutError:
-                _record_source_state(
-                    source_states,
-                    query.source_family,
-                    "blocked_rate_limit_or_timeout",
-                )
+                _record_attempt_state(query, "blocked_rate_limit_or_timeout")
                 _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except Exception:
-                _record_source_state(
-                    source_states, query.source_family, "blocked_extraction_failure"
-                )
+                _record_attempt_state(query, "blocked_extraction_failure")
                 _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
@@ -1651,6 +1638,33 @@ def run_probe(
             ],
         )
     return result
+
+
+def resolve_runtime_capability_checks(
+    isolation: Mapping[str, SourceIsolation],
+) -> dict[str, Callable[[], RuntimeCapabilityResult]]:
+    from job_intel import browser_worker
+
+    checks: dict[str, Callable[[], RuntimeCapabilityResult]] = {}
+    for family, settings in isolation.items():
+        if settings.collection_method != "browser":
+            continue
+        profile = settings.path if settings.mode == "cloned_profile" else None
+
+        def check(
+            source_family: str = family,
+            source_settings: SourceIsolation = settings,
+            source_profile: Path | None = profile,
+        ) -> RuntimeCapabilityResult:
+            browser_worker._ensure_browser_desktop(
+                source_family,
+                cdp_url=source_settings.cdp_url,
+                profile=source_profile,
+            )
+            return RuntimeCapabilityResult(state="ready")
+
+        checks[family] = check
+    return checks
 
 
 def resolve_public_sources() -> dict[str, Callable[[Any], Iterable[Any]]]:
@@ -2127,6 +2141,7 @@ def main() -> int:
                     status="unsupported",
                     country_codes=(),
                 ),
+                is_synthetic_control=True,
                 minimum_independent_families=1,
             )
             queries = queries + (synthetic_query,)
@@ -2153,6 +2168,7 @@ def main() -> int:
             sources=resolve_public_sources(),
             output_dir=Path(manifest["root"]),
             isolation=isolation,
+            runtime_capability_checks=resolve_runtime_capability_checks(isolation),
             geography_mapping=mapping,
             environment=probe_environment,
         )

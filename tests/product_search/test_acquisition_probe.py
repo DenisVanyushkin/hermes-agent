@@ -33,6 +33,7 @@ from job_intel.product_search.acquisition_probe import (
 )
 from job_intel.product_search.search_contract import load_search_contract
 import job_intel.product_search.acquisition_probe as acquisition_probe
+import job_intel.browser_worker as browser_worker
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -181,17 +182,13 @@ def test_c1a_run_manifest_passes_mapping_and_preserves_bounded_artifact(
         "resolve_public_sources",
         lambda: {family: fake_source for family in source_families},
     )
-    real_run_probe = acquisition_probe.run_probe
     monkeypatch.setattr(
         acquisition_probe,
-        "run_probe",
-        lambda **kwargs: real_run_probe(
-            **kwargs,
-            runtime_capability_checks={
-                "linkedin": lambda: RuntimeCapabilityResult(state="ready"),
-                "duckduckgo": lambda: RuntimeCapabilityResult(state="ready"),
-            },
-        ),
+        "resolve_runtime_capability_checks",
+        lambda _isolation: {
+            "linkedin": lambda: RuntimeCapabilityResult(state="ready"),
+            "duckduckgo": lambda: RuntimeCapabilityResult(state="ready"),
+        },
     )
     monkeypatch.setattr(
         sys, "argv", ["acquisition_probe", "run-manifest", str(manifest_path)]
@@ -372,6 +369,128 @@ def test_write_manifest_and_run_manifest_are_ring_compatible(
 
     assert acquisition_probe.main() == 0
     assert captured["geography_mapping"] is mapping
+
+
+def test_run_manifest_wires_runtime_capability_checks_from_composition_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "experiment"
+    (root / "runtime/config/product_search").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "config/product_search/search_contract.v1.yaml",
+        root / "runtime/config/product_search/search_contract.v1.yaml",
+    )
+    manifest = _c1a_manifest(root)
+    manifest["source_isolation"] = {
+        "linkedin": {
+            **manifest["source_isolation"]["linkedin"],
+            "mode": "cloned_profile",
+            "path": str(root / "browser-profile"),
+            "cdp_url": "http://127.0.0.1:19222",
+        },
+    }
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8")
+
+    mapping = _c1a_mapping()
+    calls: list[tuple[str, str | None, Path | None]] = []
+    captured: dict[str, object] = {}
+
+    def fake_browser_ready(
+        source: str,
+        *,
+        cdp_url: str | None = None,
+        profile: Path | None = None,
+        force_recycle: bool = False,
+    ) -> str:
+        calls.append((source, cdp_url, profile))
+        return cdp_url or "http://127.0.0.1:19222"
+
+    monkeypatch.setattr(
+        acquisition_probe,
+        "verify_experiment_runtime",
+        lambda _manifest: None,
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "load_linkedin_geography_mapping",
+        lambda _path=None: mapping,
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "resolve_public_sources",
+        lambda: {"linkedin": lambda _request: []},
+    )
+    monkeypatch.setattr(browser_worker, "_ensure_browser_desktop", fake_browser_ready)
+
+    def capture_run_probe(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(acquisition_probe, "run_probe", capture_run_probe)
+    monkeypatch.setattr(
+        sys, "argv", ["acquisition_probe", "run-manifest", str(manifest_path)]
+    )
+
+    environment_before = dict(os.environ)
+    try:
+        assert acquisition_probe.main() == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(environment_before)
+
+    checks = captured["runtime_capability_checks"]
+    assert set(checks) == {"linkedin"}
+    assert checks["linkedin"]().state == "ready"
+    assert calls == [
+        ("linkedin", "http://127.0.0.1:19222", root / "browser-profile")
+    ]
+
+
+def test_synthetic_control_does_not_change_linkedin_source_state(tmp_path: Path) -> None:
+    isolation = {
+        "linkedin": SourceIsolation(
+            mode="exclusive_lock",
+            path=tmp_path / "locks/linkedin.lock",
+            collection_method="browser",
+        )
+    }
+    ordinary = ProbeQuery(
+        query_id="ordinary",
+        cell_id="uk",
+        source_family="linkedin",
+        query="VP Product United Kingdom",
+    )
+    control = ProbeQuery(
+        query_id="synthetic-control",
+        cell_id="synthetic_c1a_unsupported",
+        source_family="linkedin",
+        query="C1A nonexistent geography target",
+        primary_geography="C1A nonexistent geography target",
+        geography_target=LinkedInGeographyTarget(
+            location="C1A nonexistent geography target",
+            status="unsupported",
+        ),
+        is_synthetic_control=True,
+    )
+
+    def run(queries: tuple[ProbeQuery, ...]):
+        return run_probe(
+            run_id="synthetic-state-isolation",
+            queries=queries,
+            sources={"linkedin": lambda _request: []},
+            output_dir=tmp_path / ("with-control" if len(queries) == 2 else "without-control"),
+            runtime_capability_checks={
+                "linkedin": lambda: RuntimeCapabilityResult(state="ready")
+            },
+            isolation=isolation,
+            max_attempts=1,
+        )
+
+    without_control = run((ordinary,))
+    with_control = run((ordinary, control))
+
+    assert with_control.source_states["linkedin"] == without_control.source_states["linkedin"]
+    assert with_control.source_states == {"linkedin": "observed"}
 
 
 def test_experiment_manifest_binds_exclusion_reason_catalog(tmp_path: Path) -> None:
