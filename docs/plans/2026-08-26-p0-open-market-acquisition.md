@@ -1031,15 +1031,24 @@ IDs. Случайные detail/noise переходы дополнительно
 
 **DoD**
 
-- [ ] Два unit-прогона с одинаковым manifest дают побайтово одинаковый planned
-      page/scroll trace; Gate A path не зависит от probability `0.35`.
-- [ ] Для каждого attempt summary доказывает `planned == completed`; иначе family
+- [x] Два unit-прогона с одинаковым manifest дают побайтово одинаковый planned
+      page/scroll trace; Gate A path не зависит от probability `0.35`. Закрыто
+      `cc7d5b1716`; проверяется шпионом на модуле `random`, а не чтением
+      исходника. Мутация, возвращающая обращение к `random` в Gate A page-plan,
+      роняет два теста.
+- [x] Для каждого attempt summary доказывает `planned == completed`; иначе family
       state содержит named critical degradation и не участвует в честном нуле.
+      Проверка существовала в коде с самого начала среза, но **не была покрыта
+      тестом**: её отключение оставляло весь набор зелёным. Найдено мутацией при
+      приёмке, закрыто тестом на неполный обход — план из трёх offsets, login
+      wall после первого, и попытка обязана стать critical degradation, а не
+      честным нулём.
 - [ ] Bounded live proof показывает рост/насыщение unique DOM job IDs по
       checkpoint, а не только число wheel events.
-- [ ] Адресный набор
+- [x] Адресный набор
       `pytest -q tests/job_intel/test_browser_acquisition.py tests/product_search/test_acquisition_probe.py tests/product_search/test_search_contract.py`
       зелёный; исходный baseline на `dd901dfefc` зафиксирован как `32 passed`.
+      На `cc7d5b1716` этот набор даёт 67 passed.
 
 ### A4. Закрыть только измеренную parser gap и запретить немые потери
 
