@@ -452,12 +452,16 @@ def run_triage(
             "before": failures.get("before") or "",
             "reason": "no applicable triage evidence: " + "; ".join(mismatches),
             "proposals": [],
+            "suspected_rename": [],
             "created_at": _now(),
             "slack_ts": None,
         })
         return 0
     new_failures = _failure_nodeids_for_triage(failures)
-    if not new_failures:
+    suspected_rename = failures.get("suspected_rename") or []
+    if not isinstance(suspected_rename, list):
+        suspected_rename = []
+    if not new_failures and not suspected_rename:
         return 0
     merge_sha = failures.get("merge_sha") or ""
     prep = _read_json(state / "apply-prepare.json")
@@ -481,6 +485,7 @@ def run_triage(
         "merge_sha": merge_sha,
         "before": failures.get("before") or "",
         "proposals": proposals,
+        "suspected_rename": suspected_rename,
         "created_at": _now(),
         "slack_ts": None,
     })

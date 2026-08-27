@@ -438,6 +438,98 @@ def _node_ids(run: dict[str, Any], field: str) -> set[str]:
     return set(values)
 
 
+def _failure_trace(log: str, nodeid: str) -> str:
+    """Return the pytest failure block that names ``nodeid``."""
+    lines = log.splitlines()
+    end = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(f"FAILED {nodeid}")
+        ),
+        None,
+    )
+    if end is None:
+        return ""
+    test_name = nodeid.rsplit("::", 1)[-1]
+    heading = re.compile(r"^_+ .+ _+$")
+    target_heading = re.compile(rf"^_+ .*{re.escape(test_name)}.*_+$")
+    start = None
+    for index in range(end - 1, -1, -1):
+        if target_heading.match(lines[index]):
+            start = index
+            break
+    if start is None:
+        return lines[end].strip()
+    stop = next(
+        (index for index in range(start + 1, len(lines)) if heading.match(lines[index])),
+        end + 1,
+    )
+    return "\n".join(lines[start:stop]).strip()
+
+
+def build_suspected_renames(
+    *,
+    baseline: dict[str, Any],
+    merged: dict[str, Any],
+    baseline_log: str,
+    merged_log: str,
+) -> list[dict[str, Any]]:
+    """Pair one disappeared failure with one new failure in the same file.
+
+    This is an operator hint only.  A collection or probe that is not
+    trustworthy produces no hint, and the result never changes classification.
+    Pairing is intentionally one-to-one per path so unrelated new failures
+    cannot be greedily attached to an old failure.
+    """
+    if not all(
+        isinstance(run, dict)
+        and run.get("collect_ok") is True
+        and run.get("probe_ok") is True
+        for run in (baseline, merged)
+    ):
+        return []
+    baseline_collected = _node_ids(baseline, "collected_nodeids")
+    baseline_failed = _node_ids(baseline, "failed_nodeids")
+    merged_collected = _node_ids(merged, "collected_nodeids")
+    merged_failed = _node_ids(merged, "failed_nodeids")
+    if baseline_failed - baseline_collected:
+        raise ValueError("baseline failed nodeids are not a subset of collected nodeids")
+    if merged_failed - merged_collected:
+        raise ValueError("merged failed nodeids are not a subset of collected nodeids")
+
+    disappeared = baseline_failed - merged_collected
+    appeared = merged_failed - baseline_failed
+    old_by_path: dict[str, list[str]] = {}
+    new_by_path: dict[str, list[str]] = {}
+    for nodeid in disappeared:
+        old_by_path.setdefault(nodeid.split("::", 1)[0], []).append(nodeid)
+    for nodeid in appeared:
+        new_by_path.setdefault(nodeid.split("::", 1)[0], []).append(nodeid)
+
+    hints: list[dict[str, Any]] = []
+    for path in sorted(set(old_by_path) & set(new_by_path)):
+        old_nodes = sorted(old_by_path[path])
+        new_nodes = sorted(new_by_path[path])
+        if len(old_nodes) != 1 or len(new_nodes) != 1:
+            continue
+        old, new = old_nodes[0], new_nodes[0]
+        hints.append({
+            "path": path,
+            "disappeared": {
+                "nodeid": old,
+                "trace": _failure_trace(baseline_log, old),
+                "trace_source": "baseline",
+            },
+            "appeared": {
+                "nodeid": new,
+                "trace": _failure_trace(merged_log, new),
+                "trace_source": "merged",
+            },
+        })
+    return hints
+
+
 def _manifest_presence(manifest: dict[str, Any]) -> dict[str, tuple[bool, bool]]:
     entries = manifest.get("tests")
     if not isinstance(entries, list):
@@ -652,6 +744,10 @@ def build_gate_failures_payload(
     merge_sha: str,
     before: str,
     legacy_failures: list[str],
+    baseline: dict[str, Any] | None = None,
+    merged: dict[str, Any] | None = None,
+    baseline_log: str = "",
+    merged_log: str = "",
     created_at: str | None = None,
 ) -> dict[str, Any]:
     """Build the persisted v2 gate result from one classifier output.
@@ -710,6 +806,16 @@ def build_gate_failures_payload(
         ],
         "blocking_failures_by_class": dict(sorted(blocking_by_class.items())),
         "unknown_blocking_classifications": sorted(unknown_blocking_classifications),
+        "suspected_rename": (
+            build_suspected_renames(
+                baseline=baseline,
+                merged=merged,
+                baseline_log=baseline_log,
+                merged_log=merged_log,
+            )
+            if baseline is not None and merged is not None
+            else []
+        ),
         "new_failures": sorted({item for item in legacy_failures if item}),
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
     }
@@ -964,6 +1070,10 @@ def _main(argv: list[str] | None = None) -> int:
     p_failures.add_argument("--merge-sha", required=True)
     p_failures.add_argument("--before", required=True)
     p_failures.add_argument("--legacy-failures", required=True)
+    p_failures.add_argument("--baseline-nodes")
+    p_failures.add_argument("--merged-nodes")
+    p_failures.add_argument("--baseline-log")
+    p_failures.add_argument("--merged-log")
     p_failures.add_argument("--output", required=True)
 
     args = parser.parse_args(argv)
@@ -1085,6 +1195,16 @@ def _main(argv: list[str] | None = None) -> int:
                 .splitlines()
                 if line.strip()
             ]
+            baseline = (
+                json.loads(Path(args.baseline_nodes).read_text(encoding="utf-8"))
+                if args.baseline_nodes
+                else None
+            )
+            merged = (
+                json.loads(Path(args.merged_nodes).read_text(encoding="utf-8"))
+                if args.merged_nodes
+                else None
+            )
             write_json_atomic(
                 Path(args.output),
                 build_gate_failures_payload(
@@ -1092,6 +1212,18 @@ def _main(argv: list[str] | None = None) -> int:
                     merge_sha=args.merge_sha,
                     before=args.before,
                     legacy_failures=legacy,
+                    baseline=baseline,
+                    merged=merged,
+                    baseline_log=(
+                        Path(args.baseline_log).read_text(encoding="utf-8")
+                        if args.baseline_log
+                        else ""
+                    ),
+                    merged_log=(
+                        Path(args.merged_log).read_text(encoding="utf-8")
+                        if args.merged_log
+                        else ""
+                    ),
                 ),
             )
             return 0

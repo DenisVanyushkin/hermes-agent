@@ -695,6 +695,137 @@ def test_unknown_classification_is_blocking_and_explicitly_reported():
     assert payload["unknown_blocking_classifications"] == ["future_failure_class"]
 
 
+def test_payload_records_same_file_failure_rename_with_both_traces():
+    old = "tests/test_pricing.py::test_old_pricing"
+    new = "tests/test_pricing.py::test_new_pricing"
+    unrelated = {
+        "tests/test_windows.py::test_a",
+        "tests/test_windows.py::test_b",
+        "tests/test_windows.py::test_c",
+    }
+    classification = {
+        "common_path": [{
+            "path": "tests/test_pricing.py",
+            "nodeid": new,
+            "classification": "merge_resolution_or_local_introduced",
+        }],
+        "post_only_path": [],
+        "pre_existing": [],
+        "unknown": [],
+    }
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification=classification,
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[new],
+        baseline=_node_run(collected={old}, failed={old}),
+        merged=_node_run(collected={new, *unrelated}, failed={new, *unrelated}),
+        baseline_log=(
+            "_______ test_old_pricing _______\n"
+            "E   old assertion trace\n"
+            f"FAILED {old} - AssertionError: old\n"
+        ),
+        merged_log=(
+            "_______ test_new_pricing _______\n"
+            "E   new assertion trace\n"
+            f"FAILED {new} - AssertionError: new\n"
+        ),
+    )
+
+    assert payload["suspected_rename"] == [{
+        "path": "tests/test_pricing.py",
+        "disappeared": {
+            "nodeid": old,
+            "trace": (
+                "_______ test_old_pricing _______\n"
+                "E   old assertion trace\n"
+                f"FAILED {old} - AssertionError: old"
+            ),
+            "trace_source": "baseline",
+        },
+        "appeared": {
+            "nodeid": new,
+            "trace": (
+                "_______ test_new_pricing _______\n"
+                "E   new assertion trace\n"
+                f"FAILED {new} - AssertionError: new"
+            ),
+            "trace_source": "merged",
+        },
+    }]
+    assert payload["common_path"] == classification["common_path"]
+
+
+def test_collected_green_old_node_does_not_create_rename_hint():
+    old = "tests/test_pricing.py::test_old_pricing"
+    new = "tests/test_pricing.py::test_new_pricing"
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification={"common_path": [], "post_only_path": [], "pre_existing": [], "unknown": []},
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[new],
+        baseline=_node_run(collected={old}, failed={old}),
+        merged=_node_run(collected={old, new}, failed={new}),
+        baseline_log=f"FAILED {old} - AssertionError: old\n",
+        merged_log=f"FAILED {new} - AssertionError: new\n",
+    )
+
+    assert payload["suspected_rename"] == []
+
+
+def test_persist_cli_includes_suspected_rename_inputs(tmp_path):
+    old = "tests/test_pricing.py::test_old_pricing"
+    new = "tests/test_pricing.py::test_new_pricing"
+    classification = tmp_path / "classification.json"
+    classification.write_text(json.dumps({
+        "common_path": [{
+            "path": "tests/test_pricing.py",
+            "nodeid": new,
+            "classification": "merge_resolution_or_local_introduced",
+        }],
+        "post_only_path": [],
+        "pre_existing": [],
+        "unknown": [],
+    }))
+    baseline = tmp_path / "baseline.nodes.json"
+    baseline.write_text(json.dumps({
+        "collect_ok": True,
+        "probe_ok": True,
+        "collected_nodeids": [old],
+        "failed_nodeids": [old],
+    }))
+    merged = tmp_path / "merged.nodes.json"
+    merged.write_text(json.dumps({
+        "collect_ok": True,
+        "probe_ok": True,
+        "collected_nodeids": [new],
+        "failed_nodeids": [new],
+    }))
+    baseline_log = tmp_path / "baseline.log"
+    baseline_log.write_text(f"_______ test_old_pricing _______\nFAILED {old} - old\n")
+    merged_log = tmp_path / "merged.log"
+    merged_log.write_text(f"_______ test_new_pricing _______\nFAILED {new} - new\n")
+    legacy = tmp_path / "legacy.txt"
+    legacy.write_text(f"{new}\n")
+    output = tmp_path / "gate-failures.json"
+
+    result = _cli(
+        "persist-gate-failures",
+        "--classification", str(classification),
+        "--merge-sha", "a" * 40,
+        "--before", "b" * 40,
+        "--legacy-failures", str(legacy),
+        "--baseline-nodes", str(baseline),
+        "--merged-nodes", str(merged),
+        "--baseline-log", str(baseline_log),
+        "--merged-log", str(merged_log),
+        "--output", str(output),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(json.loads(output.read_text())["suspected_rename"]) == 1
+
+
 def test_failure_that_remains_in_merged_isolation_is_not_order_dependent():
     nodeid = "tests/test_common.py::test_still_fails"
     result = upstream_sync_gate.classify_node_failures(

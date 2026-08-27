@@ -313,6 +313,37 @@ class TestRunTriage:
         assert self._run(state, repo, sha) == 0
         assert not (state / "gate-triage.json").exists()
 
+    def test_transfers_suspected_renames_without_creating_a_proposal(
+        self, tmp_path, state
+    ):
+        repo, sha = self._world(tmp_path, state)
+        hint = {
+            "path": "tests/test_mod.py",
+            "disappeared": {
+                "nodeid": "tests/test_mod.py::test_old",
+                "trace": "old trace",
+                "trace_source": "baseline",
+            },
+            "appeared": {
+                "nodeid": "tests/test_mod.py::test_new",
+                "trace": "new trace",
+                "trace_source": "merged",
+            },
+        }
+        (state / "gate-failures.json").write_text(json.dumps({
+            "schema_version": "upstream-sync-gate-failures/v2",
+            "merge_sha": sha,
+            "before": sha,
+            "blocking_failures": [],
+            "new_failures": [],
+            "suspected_rename": [hint],
+        }))
+
+        assert self._run(state, repo, sha) == 0
+        out = json.loads((state / "gate-triage.json").read_text())
+        assert out["suspected_rename"] == [hint]
+        assert out["proposals"] == []
+
     def test_v2_blocking_failures_preserve_legacy_triage_count(
         self, tmp_path, monkeypatch
     ):

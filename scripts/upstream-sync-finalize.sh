@@ -686,6 +686,10 @@ PY
     --merge-sha "$after" \
     --before "$before" \
     --legacy-failures "$t11_failures_file" \
+    --baseline-nodes "$baseline_nodes" \
+    --merged-nodes "$merged_nodes" \
+    --baseline-log "$baseline" \
+    --merged-log "$post" \
     --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
     echo "could not persist normalized gate-failures.json" >>"$DETAIL_LOG"
     rm -f "$t11_failures_file"
