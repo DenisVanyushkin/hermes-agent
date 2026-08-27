@@ -44,6 +44,111 @@ SourceState = Literal[
     "blocked_unsupported_geography",
 ]
 
+AcquisitionOutcome = Literal[
+    "not_attempted",
+    "blocked",
+    "degraded",
+    "insufficient_breadth",
+    "candidate_records_found",
+    "no_candidate_records",
+]
+ProductObservabilityState = Literal["blocked", "not_observed"]
+CreditedRecordsProvenance = Literal["attributed", "received_rows_fallback"]
+
+
+@dataclass(frozen=True)
+class AcquisitionOutcomeDecision:
+    acquisition_outcome: AcquisitionOutcome
+    product_observability_state: ProductObservabilityState | None
+    product_observability_reason: str | None
+
+
+def matching_acquisition_rules(
+    *,
+    completed: int,
+    blocked: int,
+    degraded: int,
+    minimum_independent_families: int,
+    credited: int = 0,
+) -> tuple[AcquisitionOutcome, ...]:
+    rules: tuple[tuple[AcquisitionOutcome, bool], ...] = (
+        (
+            "not_attempted",
+            completed == 0 and blocked == 0 and degraded == 0,
+        ),
+        (
+            "blocked",
+            completed == 0 and degraded == 0 and blocked > 0,
+        ),
+        (
+            "degraded",
+            completed < minimum_independent_families and degraded > 0,
+        ),
+        (
+            "blocked",
+            0 < completed < minimum_independent_families
+            and degraded == 0
+            and blocked > 0,
+        ),
+        (
+            "insufficient_breadth",
+            0 < completed < minimum_independent_families
+            and degraded == 0
+            and blocked == 0,
+        ),
+        (
+            "candidate_records_found",
+            completed >= minimum_independent_families and credited > 0,
+        ),
+        (
+            "no_candidate_records",
+            completed >= minimum_independent_families and credited == 0,
+        ),
+    )
+    return tuple(outcome for outcome, applies in rules if applies)
+
+
+def resolve_acquisition_outcome(
+    *,
+    completed: int,
+    blocked: int,
+    degraded: int,
+    minimum_independent_families: int,
+    credited: int = 0,
+) -> AcquisitionOutcomeDecision:
+    counts = (completed, blocked, degraded, credited)
+    if any(value < 0 for value in counts):
+        raise ValueError("acquisition counts must be non-negative")
+    if minimum_independent_families < 1:
+        raise ValueError("minimum independent families must be positive")
+    matches = matching_acquisition_rules(
+        completed=completed,
+        blocked=blocked,
+        degraded=degraded,
+        minimum_independent_families=minimum_independent_families,
+        credited=credited,
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            "acquisition transition table is not total and disjoint: "
+            f"{completed=}, {blocked=}, {degraded=}, {minimum_independent_families=}, {credited=}"
+        )
+    outcome = matches[0]
+    if outcome in {"candidate_records_found", "no_candidate_records"}:
+        return AcquisitionOutcomeDecision(
+            acquisition_outcome=outcome,
+            product_observability_state=None,
+            product_observability_reason="stage_4_evidence_absent",
+        )
+    state: ProductObservabilityState = (
+        "blocked" if outcome in {"blocked", "degraded"} else "not_observed"
+    )
+    return AcquisitionOutcomeDecision(
+        acquisition_outcome=outcome,
+        product_observability_state=state,
+        product_observability_reason=None,
+    )
+
 OBSERVED_SOURCE_STATES = frozenset({"observed", "observed_with_failures"})
 
 # These are source outcomes that mean the market was not observed. Keep this
@@ -232,6 +337,7 @@ class ProbeQuery(BaseModel):
     primary_geography: str | None = None
     geography_target: LinkedInGeographyTarget | None = None
     execution_plan: LinkedInExecutionPlan | None = None
+    minimum_independent_families: int = Field(default=1, ge=1)
 
 
 def build_isolated_probe_environment(
@@ -331,12 +437,18 @@ class ProbeResult(BaseModel):
     stage_counts: dict[str, int]
     provisional_labels: dict[str, int]
     source_states: dict[str, SourceState]
-    cell_states: dict[str, str]
+    acquisition_outcomes: dict[str, AcquisitionOutcome]
+    product_observability_state: dict[str, ProductObservabilityState | None]
+    product_observability_reason: dict[str, str | None]
+    credited_records_provenance: dict[str, CreditedRecordsProvenance]
+    degraded_families: dict[str, tuple[str, ...]]
+    blocked_families: dict[str, tuple[str, ...]]
     duplicates: int
     evidence: tuple[EvidencePackage, ...]
     cost: dict[str, float]
     latency_seconds: float
     family_attempts: tuple[dict[str, Any], ...] = ()
+    cell_family_attempts: tuple[dict[str, Any], ...] = ()
 
 
 def expand_queries(
@@ -383,6 +495,7 @@ def expand_queries(
                             ),
                             geography_target=target,
                             execution_plan=execution_plan if family == "linkedin" else None,
+                            minimum_independent_families=cell.minimum_independent_families,
                         )
                     )
     return tuple(sorted(expanded, key=lambda item: item.query_id))
@@ -493,6 +606,8 @@ def run_probe(
     output_dir: Path | str,
     runtime_capability_checks: Mapping[str, Callable[[], Any]] | None = None,
     isolation: Mapping[str, SourceIsolation],
+    minimum_independent_families_by_cell: Mapping[str, int] | None = None,
+    credited_records_by_cell: Mapping[str, int] | None = None,
     max_attempts: int = 2,
     environment: Mapping[str, str] | None = None,
     now: Callable[[], datetime] | None = None,
@@ -595,21 +710,65 @@ def run_probe(
     observations: list[dict[str, Any]] = []
     source_states: dict[str, SourceState] = {}
     cell_attempts: dict[str, list[str]] = {}
+    cell_minimums: dict[str, int] = dict(minimum_independent_families_by_cell or {})
+    pair_attempts: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def _ensure_pair(query: ProbeQuery) -> dict[str, Any]:
+        key = (query.cell_id, query.source_family)
+        record = pair_attempts.setdefault(
+            key,
+            {
+                "cell_id": query.cell_id,
+                "source_family": query.source_family,
+                "outcome": "not_attempted",
+            },
+        )
+        configured = cell_minimums.get(query.cell_id)
+        expected = (
+            query.minimum_independent_families
+            if configured is None
+            else configured
+        )
+        if (
+            configured is not None
+            and query.minimum_independent_families != 1
+            and configured != query.minimum_independent_families
+        ):
+            raise ValueError(
+                f"inconsistent minimum independent families for {query.cell_id}"
+            )
+        cell_minimums[query.cell_id] = expected
+        return record
+
+    def _set_pair_outcome(query: ProbeQuery, outcome: AcquisitionOutcome) -> None:
+        record = _ensure_pair(query)
+        current = record["outcome"]
+        if current == "not_attempted" or current == outcome:
+            record["outcome"] = outcome
+        elif "degraded" in {current, outcome}:
+            record["outcome"] = "degraded"
+        elif "blocked" in {current, outcome}:
+            record["outcome"] = "blocked"
+        else:
+            record["outcome"] = "degraded"
 
     for raw_query in queries:
         query = raw_query if isinstance(raw_query, ProbeQuery) else ProbeQuery.model_validate(raw_query)
         cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
+        _ensure_pair(query)
         source = sources.get(query.source_family)
         source_isolation = isolation.get(query.source_family)
         if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock", "api"}:
             _record_source_state(
                 source_states, query.source_family, "blocked_no_safe_isolation"
             )
+            _set_pair_outcome(query, "blocked")
             continue
         if source is None:
             _record_source_state(
                 source_states, query.source_family, "blocked_missing_public_interface"
             )
+            _set_pair_outcome(query, "blocked")
             continue
 
         if query.source_family == "linkedin" and query.primary_geography is not None:
@@ -622,6 +781,7 @@ def run_probe(
                     query.source_family,
                     "blocked_unsupported_geography",
                 )
+                _set_pair_outcome(query, "blocked")
                 continue
 
         capability = _capability(query.source_family, source_isolation)
@@ -629,6 +789,7 @@ def run_probe(
             _record_source_state(
                 source_states, query.source_family, "runtime_capability_blocked"
             )
+            _set_pair_outcome(query, "blocked")
             continue
 
         records: list[Any] | None = None
@@ -647,11 +808,16 @@ def run_probe(
                     else "observed"
                 )
                 _record_source_state(source_states, query.source_family, state)
+                _set_pair_outcome(
+                    query,
+                    "degraded" if state == "observed_with_failures" else "completed",
+                )
                 break
             except ProbeSourceBlocked as exc:
                 _record_source_state(
                     source_states, query.source_family, f"blocked_{exc.reason}"
                 )
+                _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except TimeoutError:
@@ -660,12 +826,14 @@ def run_probe(
                     query.source_family,
                     "blocked_rate_limit_or_timeout",
                 )
+                _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except Exception:
                 _record_source_state(
                     source_states, query.source_family, "blocked_extraction_failure"
                 )
+                _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
         if records is None:
@@ -728,19 +896,57 @@ def run_probe(
             label = "unresolved_for_decision_v2"
         labels[label] = labels.get(label, 0) + 1
 
-    cell_states: dict[str, str] = {}
+    acquisition_outcomes: dict[str, AcquisitionOutcome] = {}
+    product_observability_state: dict[str, ProductObservabilityState | None] = {}
+    product_observability_reason: dict[str, str | None] = {}
+    credited_records_provenance: dict[str, CreditedRecordsProvenance] = {}
+    degraded_families: dict[str, tuple[str, ...]] = {}
+    blocked_families: dict[str, tuple[str, ...]] = {}
     for cell_id in cell_attempts:
-        cell_records = [record for record in observations if record.get("cell_id") == cell_id]
-        cell_blocked = all(
-            source_states.get(family) in UNOBSERVED_SOURCE_STATES
-            for family in cell_attempts[cell_id]
-        )
-        if cell_records:
-            cell_states[cell_id] = "qualified_results_found"
-        elif cell_blocked:
-            cell_states[cell_id] = "blocked"
+        pair_records = [
+            record
+            for (record_cell_id, _), record in pair_attempts.items()
+            if record_cell_id == cell_id
+        ]
+        counts = {
+            outcome: sum(record["outcome"] == outcome for record in pair_records)
+            for outcome in ("completed", "blocked", "degraded")
+        }
+        cell_records = [
+            record for record in canonical_records.values()
+            if record.get("cell_id") == cell_id
+        ]
+        credited_by_cell = dict(credited_records_by_cell or {})
+        if cell_id in credited_by_cell:
+            credited = credited_by_cell[cell_id]
+            credited_records_provenance[cell_id] = "attributed"
         else:
-            cell_states[cell_id] = "searched_no_qualified_results"
+            credited = len(cell_records)
+            credited_records_provenance[cell_id] = "received_rows_fallback"
+        decision = resolve_acquisition_outcome(
+            completed=counts["completed"],
+            blocked=counts["blocked"],
+            degraded=counts["degraded"],
+            minimum_independent_families=cell_minimums[cell_id],
+            credited=credited,
+        )
+        acquisition_outcomes[cell_id] = decision.acquisition_outcome
+        product_observability_state[cell_id] = decision.product_observability_state
+        product_observability_reason[cell_id] = decision.product_observability_reason
+        degraded_families[cell_id] = tuple(
+            sorted(
+                record["source_family"]
+                for record in pair_records
+                if record["outcome"] == "degraded"
+            )
+        )
+        blocked_families[cell_id] = tuple(
+            sorted(
+                record["source_family"]
+                for record in pair_records
+                if record["outcome"] == "blocked"
+            )
+        )
 
     result = ProbeResult(
         run_id=run_id,
@@ -751,7 +957,12 @@ def run_probe(
         },
         provisional_labels=dict(sorted(labels.items())),
         source_states=dict(sorted(source_states.items())),
-        cell_states=dict(sorted(cell_states.items())),
+        acquisition_outcomes=dict(sorted(acquisition_outcomes.items())),
+        product_observability_state=dict(sorted(product_observability_state.items())),
+        product_observability_reason=dict(sorted(product_observability_reason.items())),
+        credited_records_provenance=dict(sorted(credited_records_provenance.items())),
+        degraded_families=dict(sorted(degraded_families.items())),
+        blocked_families=dict(sorted(blocked_families.items())),
         duplicates=len(observations) - len(canonical_records),
         evidence=tuple(evidence),
         cost={
@@ -775,6 +986,10 @@ def run_probe(
                 "bootstrap_traffic_events": capability.bootstrap_traffic_events,
             }
             for family, capability in sorted(capability_by_family.items())
+        ),
+        cell_family_attempts=tuple(
+            pair_attempts[key]
+            for key in sorted(pair_attempts)
         ),
     )
     (output / "summary.json").write_text(
@@ -953,6 +1168,29 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
                 raise ValueError(f"invalid identity hash: {section}.{key}")
 
 
+def classify_legacy_attempt_evidence(summary_path: Path | str) -> dict[str, Any]:
+    """Refuse to infer pair outcomes from the pre-B1 summary format."""
+    path = Path(summary_path)
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    cell_states = dict(summary.get("cell_states") or {})
+    if not cell_states:
+        raise ValueError("legacy summary has no cell states")
+    cell_outcomes = {
+        cell_id: "legacy_attempt_evidence_insufficient"
+        for cell_id in sorted(cell_states)
+    }
+    return {
+        "run_id": summary.get("run_id"),
+        "cell_outcomes": cell_outcomes,
+        "acquisition_outcomes": {},
+        "product_observability_state": {},
+        "product_observability_reason": {
+            cell_id: "legacy_attempt_evidence_insufficient"
+            for cell_id in sorted(cell_states)
+        },
+    }
+
+
 def validate_gate_a_run_evidence(evidence: Mapping[str, Any]) -> None:
     allowed_stages = {
         "raw_observed",
@@ -979,8 +1217,10 @@ def validate_gate_a_run_evidence(evidence: Mapping[str, Any]) -> None:
         raise ValueError("attempt accounting does not close")
     if not dict(evidence.get("family_attempts") or {}):
         raise ValueError("family attempts are required")
-    if not dict(evidence.get("cell_states") or {}):
-        raise ValueError("cell states are required")
+    if "cell_states" in evidence:
+        raise ValueError("legacy cell_states are forbidden")
+    if not dict(evidence.get("acquisition_outcomes") or {}):
+        raise ValueError("acquisition outcomes are required")
     if evidence.get("evidence_hashes_verified") is not True:
         raise ValueError("evidence hashes must be verified")
     for name, path in dict(evidence.get("isolated_paths") or {}).items():

@@ -249,7 +249,7 @@ def test_a_blocked_family_is_not_completed_for_the_cell(tmp_path) -> None:
     result = _run(tmp_path, source)
 
     assert result.source_states["linkedin"] == "runtime_capability_blocked"
-    assert result.cell_states["uk"] == "blocked"
+    assert result.acquisition_outcomes["uk"] == "blocked"
 
 
 def test_a_ready_runtime_with_empty_results_is_an_honest_zero(tmp_path) -> None:
@@ -257,7 +257,7 @@ def test_a_ready_runtime_with_empty_results_is_an_honest_zero(tmp_path) -> None:
 
     result = _run(tmp_path, source)
 
-    assert result.cell_states["uk"] == "searched_no_qualified_results"
+    assert result.acquisition_outcomes["uk"] == "no_candidate_records"
 
 
 def test_the_fixture_actually_reaches_the_source(tmp_path) -> None:
