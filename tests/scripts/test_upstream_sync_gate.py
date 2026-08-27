@@ -767,6 +767,22 @@ def test_outcomes_parser_preserves_plural_collection_errors():
     }
 
 
+def test_outcomes_parser_collects_passed_nodes_for_classification():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    assert callable(parser), "outcomes parser is not implemented"
+
+    outcome = parser(
+        "PASSED tests/fork.py::test_regression\n"
+        "PASSED tests/fork.py::test_untouched\n"
+        "FAILED tests/fork.py::test_regression_after_merge - AssertionError\n"
+        "2 passed, 1 failed in 0.05s\n"
+    )
+
+    assert len(outcome["collected_nodeids"]) == 3
+    assert len(outcome["failed_nodeids"]) == 1
+    assert set(outcome["failed_nodeids"]).issubset(outcome["collected_nodeids"])
+
+
 def test_passed_baseline_node_is_classified_as_fork_regression(tmp_path):
     nodeid = "tests/test_scheduler.py::test_delivery_targets"
     pre_existing_nodeid = "tests/test_scheduler.py::test_already_broken"

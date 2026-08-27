@@ -190,6 +190,18 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
     return selection
 
 
+def test_runner_uses_a_summary_capable_pytest_report_flag(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    _selection(world, fake_python)
+    argv = json.loads(fake_python[1].read_text(encoding="utf-8").splitlines()[0])
+
+    assert "-rA" in argv, (
+        "pytest must emit PASSED/FAILED node lines so the gate can distinguish "
+        f"collected nodes from failures; argv={argv}"
+    )
+
+
 def _run_runner(world: Path, python: Path, **extra_env: str) -> subprocess.CompletedProcess:
     env = {
         **os.environ,
