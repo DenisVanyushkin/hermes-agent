@@ -533,6 +533,28 @@ def test_source_state_groups_partition_the_closed_source_state_vocabulary() -> N
     assert OBSERVED_SOURCE_STATES | UNOBSERVED_SOURCE_STATES == declared
     assert OBSERVED_SOURCE_STATES.isdisjoint(UNOBSERVED_SOURCE_STATES)
 
+def test_runtime_units_disable_user_site_and_bytecode() -> None:
+    root = Path(__file__).resolve().parents[2]
+    unit_paths = sorted(
+        (root / "deploy/systemd/experiments").rglob("*.service")
+    )
+    runtime_units = []
+    for path in unit_paths:
+        text = path.read_text(encoding="utf-8")
+        executes_runtime = any(
+            line.startswith(("ExecStart=", "ExecStartPre=", "ExecStartPost="))
+            and "PRODUCT_SEARCH_RUNTIME_ROOT" in line
+            for line in text.splitlines()
+        )
+        if executes_runtime:
+            runtime_units.append((path, text))
+
+    assert runtime_units, "no systemd unit executes the pinned runtime root"
+    for path, text in runtime_units:
+        assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text, path
+        assert "Environment=PYTHONNOUSERSITE=1" in text, path
+
+
 def test_bootstrap_unit_is_clone_and_namespace_parameterized() -> None:
     root = Path(__file__).resolve().parents[2]
     unit_path = (

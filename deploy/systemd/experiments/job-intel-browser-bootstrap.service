@@ -8,6 +8,8 @@ StopWhenUnneeded=yes
 Type=notify
 User=root
 Group=root
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/job-intel/product-search-probe-experiment.env
 ExecStart=/usr/bin/env ${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --source linkedin --profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH} --network-namespace ${PRODUCT_SEARCH_BROWSER_NETWORK_NAMESPACE} --cdp-url ${PRODUCT_SEARCH_BROWSER_CDP_URL} --bootstrap-script ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/browser-desktop-bootstrap.sh --lock-path ${PRODUCT_SEARCH_BROWSER_LOCK_PATH}
 # Explicitly stop the managed endpoint; systemd also tears down the foreground
