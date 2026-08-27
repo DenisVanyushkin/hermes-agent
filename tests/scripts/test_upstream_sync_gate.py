@@ -655,10 +655,55 @@ def test_outcomes_parser_preserves_plural_collection_errors():
     )
 
     assert outcome == {
+        "collected_nodeids": [],
         "failed_nodeids": [],
         "error_count": 2,
         "collection_error_paths": ["tests/broken.py"],
     }
+
+
+def test_passed_baseline_node_is_classified_as_fork_regression(tmp_path):
+    nodeid = "tests/test_scheduler.py::test_delivery_targets"
+    pre_existing_nodeid = "tests/test_scheduler.py::test_already_broken"
+    baseline_log = tmp_path / "baseline.log"
+    merged_log = tmp_path / "merged.log"
+    baseline_log.write_text(
+        f"PASSED {nodeid}\n"
+        f"FAILED {pre_existing_nodeid} - AssertionError: old\n"
+        "1 passed, 1 failed in 0.01s\n"
+    )
+    merged_log.write_text(
+        f"FAILED {nodeid} - AssertionError: boom\n"
+        f"FAILED {pre_existing_nodeid} - AssertionError: old\n"
+        "2 failed in 0.01s\n"
+    )
+
+    baseline_result = _cli("node-outcome", "--log", str(baseline_log))
+    merged_result = _cli("node-outcome", "--log", str(merged_log))
+    assert baseline_result.returncode == 0, baseline_result.stderr
+    assert merged_result.returncode == 0, merged_result.stderr
+
+    classification = upstream_sync_gate.classify_node_failures(
+        baseline=json.loads(baseline_result.stdout),
+        upstream_parent=_node_run(collected=set(), failed=set()),
+        merged=json.loads(merged_result.stdout),
+        manifest=_manifest(("tests/test_scheduler.py", True, True)),
+    )
+
+    assert classification["common_path"] == [
+        {
+            "path": "tests/test_scheduler.py",
+            "nodeid": nodeid,
+            "classification": "fork_regression",
+        }
+    ]
+    assert classification["pre_existing"] == [
+        {
+            "path": "tests/test_scheduler.py",
+            "nodeid": pre_existing_nodeid,
+            "classification": "pre_existing_failure",
+        }
+    ]
 
 
 def test_outcomes_parser_reads_real_pytest_collection_summary(tmp_path):
@@ -675,7 +720,7 @@ def test_outcomes_parser_reads_real_pytest_collection_summary(tmp_path):
             "-q",
             "-p",
             "no:cacheprovider",
-            "-rEf",
+            "-rA",
             "--continue-on-collection-errors",
         ],
         cwd=tmp_path,
@@ -688,6 +733,42 @@ def test_outcomes_parser_reads_real_pytest_collection_summary(tmp_path):
     outcome = upstream_sync_gate.parse_test_outcomes(proc.stdout + proc.stderr)
     assert outcome["error_count"] == 1
     assert outcome["collection_error_paths"] == ["test_broken.py"]
+
+
+def test_outcomes_parser_reads_real_passed_and_failed_nodeids(tmp_path):
+    suite = tmp_path / "test_real_outcomes.py"
+    suite.write_text(
+        "def test_passed():\n"
+        "    assert True\n"
+        "\n"
+        "def test_failed():\n"
+        "    assert False\n"
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(suite),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode != 0
+    outcome = upstream_sync_gate.parse_test_outcomes(proc.stdout + proc.stderr)
+    assert outcome["collected_nodeids"] == [
+        "test_real_outcomes.py::test_failed",
+        "test_real_outcomes.py::test_passed",
+    ]
+    assert outcome["failed_nodeids"] == ["test_real_outcomes.py::test_failed"]
 
 
 @pytest.mark.parametrize(

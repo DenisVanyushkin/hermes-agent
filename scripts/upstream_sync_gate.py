@@ -719,6 +719,7 @@ def filter_probe_request(
 
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
+_COLLECTED_LINE = re.compile(r"^(?:PASSED|FAILED|SKIPPED|XFAIL|XPASS|RERUN)\s+(\S+)")
 _COLLECTION_ERROR_LINE = re.compile(
     r"^ERROR\s+(?!collecting\b)(\S+)(?:\s+-.*)?$"
 )
@@ -755,6 +756,13 @@ def parse_test_outcomes(log: str) -> dict[str, Any]:
         elif label == "errors":
             label = "error"
         counts[label] = counts.get(label, 0) + int(match.group("count"))
+    collected_nodeids = sorted(
+        {
+            match.group(1)
+            for line in log.splitlines()
+            if (match := _COLLECTED_LINE.match(line))
+        }
+    )
     failed_nodeids = sorted(
         match.group(1)
         for line in log.splitlines()
@@ -768,6 +776,7 @@ def parse_test_outcomes(log: str) -> dict[str, Any]:
         }
     )
     return {
+        "collected_nodeids": collected_nodeids,
         "failed_nodeids": failed_nodeids,
         "error_count": counts.get("error", 0),
         "collection_error_paths": collection_error_paths,
@@ -958,7 +967,7 @@ def _main(argv: list[str] | None = None) -> int:
                     isinstance(item, str) for item in expected
                 ):
                     raise ValueError("expected nodeids must be a JSON string list")
-            collected = sorted(set(expected if expected is not None else failed))
+            collected = sorted(set(expected if expected is not None else parsed["collected_nodeids"]))
             unexpected = sorted(set(failed) - set(collected))
             print(json.dumps({
                 "collect_ok": not unexpected and parsed["error_count"] == 0,
