@@ -58,6 +58,83 @@ def _stop_profile(profile: Path) -> int:
     ).returncode
 
 
+def _lock_holder_pids(lock_path: Path) -> list[int]:
+    lock_script = Path(__file__).with_name("job_intel_profile_lock.sh")
+    expected_tail = (str(lock_script), "--path", str(lock_path))
+    holder_pids: list[int] = []
+    for process_dir in Path("/proc").iterdir():
+        if not process_dir.name.isdigit():
+            continue
+        pid = int(process_dir.name)
+        if pid == os.getpid():
+            continue
+        try:
+            argv = [
+                part.decode(errors="surrogateescape")
+                for part in (process_dir / "cmdline").read_bytes().split(b"\0")
+                if part
+            ]
+        except (OSError, ValueError):
+            continue
+        if len(argv) >= len(expected_tail) and tuple(argv[-len(expected_tail) :]) == expected_tail:
+            holder_pids.append(pid)
+    return holder_pids
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+    except OSError:
+        return False
+    try:
+        state = stat.rsplit(")", 1)[1].lstrip().split(maxsplit=1)[0]
+    except IndexError:
+        return False
+    return state != "Z"
+
+
+def _terminate_lock_holder(pid: int) -> None:
+    try:
+        process_group = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    try:
+        if process_group == os.getpgrp():
+            os.kill(pid, signal.SIGTERM)
+        else:
+            os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return
+        time.sleep(0.05)
+    try:
+        if process_group == os.getpgrp():
+            os.kill(pid, signal.SIGKILL)
+        else:
+            os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"profile lock holder did not exit: pid={pid}")
+
+
+def _release_profile_lock(lock_path: Path) -> None:
+    for pid in _lock_holder_pids(lock_path):
+        _terminate_lock_holder(pid)
+    remaining = _lock_holder_pids(lock_path)
+    if remaining:
+        raise RuntimeError(
+            f"profile lock holders remained after stop: {', '.join(map(str, remaining))}"
+        )
+
+
 def _target_for_source(source: str) -> dict[str, object]:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
@@ -79,6 +156,23 @@ def _run(args: argparse.Namespace) -> int:
         raise RuntimeError("profile or URL overrides require explicit --cdp-url")
     cdp_url = args.cdp_url or str(target["cdp_url"])
     lock_holder: subprocess.Popen[str] | None = None
+    cleanup_done = False
+
+    def cleanup() -> None:
+        nonlocal cleanup_done
+        if cleanup_done:
+            return
+        cleanup_done = True
+        _terminate(lock_holder)
+
+    def handle_shutdown(_signum: int, _frame: object) -> None:
+        cleanup()
+        raise SystemExit(0)
+
+    previous_handlers = {
+        signum: signal.signal(signum, handle_shutdown)
+        for signum in (signal.SIGTERM, signal.SIGINT)
+    }
     try:
         lock_holder = subprocess.Popen(
             ["bash", str(lock_script), "--path", str(args.lock_path)],
@@ -92,15 +186,18 @@ def _run(args: argparse.Namespace) -> int:
             stderr = lock_holder.stderr.read().strip() if lock_holder.stderr else ""
             raise RuntimeError(f"profile lock was not acquired: {stderr or acquired.strip()}")
 
+        bootstrap_command = [
+            "bash",
+            str(args.bootstrap_script),
+            "--profile",
+            args.profile.name,
+            "--url",
+            args.url or str(target["start_url"]),
+        ]
+        if args.network_namespace:
+            bootstrap_command.extend(["--network-namespace", args.network_namespace])
         bootstrap_result = subprocess.run(
-            [
-                "bash",
-                str(args.bootstrap_script),
-                "--profile",
-                args.profile.name,
-                "--url",
-                args.url or str(target["start_url"]),
-            ],
+            bootstrap_command,
             capture_output=True,
             text=True,
             timeout=args.bootstrap_timeout,
@@ -124,7 +221,9 @@ def _run(args: argparse.Namespace) -> int:
             if not _cdp_ready(cdp_url):
                 raise RuntimeError(f"CDP endpoint stopped responding: {cdp_url}")
     finally:
-        _terminate(lock_holder)
+        cleanup()
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,13 +237,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-interval", type=float, default=0.2)
     parser.add_argument("--monitor-interval", type=float, default=5.0)
     parser.add_argument("--bootstrap-script", type=Path, default=Path(__file__).with_name("browser-desktop-bootstrap.sh"))
+    parser.add_argument("--network-namespace")
     parser.add_argument("--bootstrap-timeout", type=float, default=600.0)
     parser.add_argument("--stop", action="store_true")
     args = parser.parse_args(argv)
 
     try:
         if args.stop:
-            return _stop_profile(args.profile)
+            stop_returncode = _stop_profile(args.profile)
+            _release_profile_lock(args.lock_path)
+            return stop_returncode
         return _run(args)
     except (OSError, RuntimeError, TimeoutError) as exc:
         print(f"browser supervisor failed: {exc}", file=os.sys.stderr)

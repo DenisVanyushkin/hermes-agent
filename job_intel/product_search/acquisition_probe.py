@@ -61,6 +61,7 @@ UNOBSERVED_SOURCE_STATES = frozenset(
 SHARED_BROWSER_PROFILES = {
     "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
 }
+BROWSER_PROFILE_ROOT = Path("/var/lib/browser-desktop/profiles")
 
 
 class ProbeSourceBlocked(RuntimeError):
@@ -112,6 +113,28 @@ class SourceIsolation:
     # isolation modes require this explicit classification; None is rejected
     # by the pre-dispatch gate instead of silently becoming ready.
     collection_method: SourceCollectionMethod | None = None
+    cdp_url: str | None = None
+
+
+def _valid_cdp_url(value: object) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and port is not None
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 class ProbeQuery(BaseModel):
@@ -153,7 +176,11 @@ def build_isolated_probe_environment(
     for family, settings, profile in (("linkedin", linkedin_settings, linkedin),):
         shared = settings.get("shared_profile_path")
         if not shared:
-            if not _inside(str(profile), root):
+            mode = str(settings.get("mode") or "")
+            allowed_clone = mode == "cloned_profile" and _inside(
+                str(profile), BROWSER_PROFILE_ROOT
+            )
+            if not _inside(str(profile), root) and not allowed_clone:
                 raise ValueError(f"isolated environment path outside experiment root: {family}")
             continue
         if profile != SHARED_BROWSER_PROFILES[family]:
@@ -163,6 +190,12 @@ def build_isolated_probe_environment(
             raise ValueError(f"shared profile backup is missing: {family}")
 
     environment = dict(ambient or {})
+    if str(linkedin_settings.get("mode") or "") == "cloned_profile":
+        environment["JOB_INTEL_BROWSER_CDP_URL"] = str(
+            linkedin_settings.get("cdp_url") or ""
+        ).strip()
+    else:
+        environment.pop("JOB_INTEL_BROWSER_CDP_URL", None)
     browser_profile = required["browser-profile"]
     environment.update(
         {
@@ -378,7 +411,21 @@ def run_probe(
         collection_method = source_isolation.collection_method
         if collection_method is None and source_isolation.mode == "api":
             collection_method = "api"
-        if collection_method not in {"browser", "api"}:
+        if source_isolation.mode == "cloned_profile" and source_isolation.cdp_url == "":
+            result = _blocked(
+                "missing_clone_cdp_url",
+                f"cloned profile has no cdp_url for {family}",
+            )
+        elif (
+            source_isolation.mode == "cloned_profile"
+            and source_isolation.cdp_url is not None
+            and not _valid_cdp_url(source_isolation.cdp_url)
+        ):
+            result = _blocked(
+                "invalid_clone_cdp_url",
+                f"cloned profile has invalid cdp_url for {family}",
+            )
+        elif collection_method not in {"browser", "api"}:
             result = _blocked(
                 "unclassified_collection_method",
                 f"no collection method for {family}",
@@ -713,9 +760,23 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
             continue
         if mode not in {"cloned_profile", "exclusive_lock"}:
             raise ValueError(f"invalid source isolation mode: {family}")
-        if not _inside(path, root):
-            raise ValueError(f"source isolation path outside experiment root: {family}")
         shared_profile = dict(settings).get("shared_profile_path")
+        if mode == "cloned_profile":
+            if shared_profile:
+                raise ValueError(f"cloned profile cannot use shared profile: {family}")
+            if Path(path) == SHARED_BROWSER_PROFILES.get(family):
+                raise ValueError(
+                    "cloned profile path must differ from the shared LinkedIn profile"
+                )
+            if not _inside(path, root) and not _inside(path, BROWSER_PROFILE_ROOT):
+                raise ValueError(f"source isolation path outside allowed clone roots: {family}")
+            cdp_url = str(settings_dict.get("cdp_url") or "").strip()
+            if not cdp_url:
+                raise ValueError(f"cloned profile requires cdp_url: {family}")
+            if not _valid_cdp_url(cdp_url):
+                raise ValueError(f"invalid cloned profile cdp_url: {family}")
+        elif not _inside(path, root):
+            raise ValueError(f"source isolation path outside experiment root: {family}")
         if shared_profile:
             if family not in SHARED_BROWSER_PROFILES:
                 raise ValueError(f"shared browser profile forbidden for source: {family}")
@@ -1036,6 +1097,11 @@ def main() -> int:
                 collection_method=(
                     str(settings["collection_method"])
                     if settings.get("collection_method")
+                    else None
+                ),
+                cdp_url=(
+                    str(settings["cdp_url"])
+                    if settings.get("cdp_url")
                     else None
                 ),
             )

@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -25,6 +27,7 @@ def _start_holder(lock_path: Path) -> subprocess.Popen[bytes]:
             [str(LOCK_SCRIPT), "--path", str(lock_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         pytest.fail(f"profile lock implementation is missing: {exc}")
@@ -41,11 +44,11 @@ def _wait_for_acquisition(holder: subprocess.Popen[bytes]) -> None:
 
 def _stop_holder(holder: subprocess.Popen[bytes]) -> None:
     if holder.poll() is None:
-        holder.terminate()
+        os.killpg(holder.pid, signal.SIGTERM)
     try:
         holder.wait(timeout=3)
     except subprocess.TimeoutExpired:
-        holder.kill()
+        os.killpg(holder.pid, signal.SIGKILL)
         holder.wait(timeout=3)
 
 

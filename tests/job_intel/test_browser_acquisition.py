@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
+import json
 import os
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import sys
 import threading
+import time
 import types
 
 import pytest
 
 from job_intel import browser_worker
+from job_intel.product_search.acquisition_probe import (
+    ProbeQuery,
+    RuntimeCapabilityResult,
+    SourceIsolation,
+    build_isolated_probe_environment,
+    run_probe,
+    validate_experiment_manifest,
+)
 
 from job_intel.browser_sourcing import (
     AcquisitionMetrics,
@@ -24,6 +36,62 @@ from job_intel.browser_sourcing import (
     metrics_from_counts,
     resolve_browser_config,
 )
+
+
+def _load_browser_supervisor():
+    script = Path(__file__).parents[2] / "scripts/job_intel_browser_supervisor.py"
+    spec = importlib.util.spec_from_file_location("job_intel_browser_supervisor", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _manifest_with_source_isolation(root: Path, settings: dict[str, object]) -> dict[str, object]:
+    return {
+        "gate": "gate-a",
+        "environment_id": "product-search-gate-a",
+        "root": str(root),
+        "paths": {
+            name: str(root / name)
+            for name in (
+                "runtime",
+                "experiment.sqlite3",
+                "raw-evidence",
+                "logs",
+                "locks",
+                "browser-profile",
+                "cache",
+                "tmp",
+            )
+        },
+        "python": {
+            "executable_path": str(root / "python-runtime/bin/python"),
+            "executable_sha256": "a" * 64,
+            "stdlib_tree_sha256": "b" * 64,
+        },
+        "environment": {
+            "import_root": str(root / "runtime"),
+            "dependency_lock_sha256": "c" * 64,
+            "installed_distributions_sha256": "d" * 64,
+            "sys_path_sha256": "e" * 64,
+        },
+        "source_isolation": {"linkedin": settings},
+    }
+
+
+def test_browser_probe_reports_actual_dispatch_counters(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(
+        browser_worker,
+        "_probe",
+        lambda _source: ([], {"status": "ok"}, {"browser_start_ms": 3}),
+    )
+
+    assert browser_worker.main(["probe", "linkedin"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["market_query_dispatch_count"] == 0
+    assert payload["sudo_dispatch_count"] == 0
 
 
 def test_extract_linkedin_vacancies_from_html_uses_jobposting_data() -> None:
@@ -237,6 +305,121 @@ def test_acquisition_warm_and_cold_paths_never_dispatch_sudo(monkeypatch) -> Non
     assert all(command[:1] != ["sudo"] for command in calls)
 
 
+def test_cloned_profile_manifest_requires_cdp_url(tmp_path: Path) -> None:
+    manifest = _manifest_with_source_isolation(
+        tmp_path / "experiment",
+        {
+            "mode": "cloned_profile",
+            "collection_method": "browser",
+            "path": str(tmp_path / "experiment" / "clone"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="cdp_url"):
+        validate_experiment_manifest(manifest)
+
+
+def test_cloned_profile_manifest_rejects_invalid_cdp_url(tmp_path: Path) -> None:
+    manifest = _manifest_with_source_isolation(
+        tmp_path / "experiment",
+        {
+            "mode": "cloned_profile",
+            "collection_method": "browser",
+            "path": str(tmp_path / "experiment" / "clone"),
+            "cdp_url": "not-a-url",
+        },
+    )
+
+    with pytest.raises(ValueError, match="invalid cloned profile cdp_url"):
+        validate_experiment_manifest(manifest)
+
+
+def test_cloned_profile_cannot_point_at_the_shared_linkedin_profile(tmp_path: Path) -> None:
+    manifest = _manifest_with_source_isolation(
+        tmp_path / "experiment",
+        {
+            "mode": "cloned_profile",
+            "collection_method": "browser",
+            "path": "/var/lib/browser-desktop/profiles/linkedin",
+            "cdp_url": "http://169.254.77.2:19222",
+        },
+    )
+
+    with pytest.raises(ValueError, match="must differ from the shared LinkedIn profile"):
+        validate_experiment_manifest(manifest)
+
+
+def test_cloned_profile_without_cdp_fails_before_market_dispatch(tmp_path: Path) -> None:
+    calls: list[str] = []
+    result = run_probe(
+        run_id="clone-without-cdp",
+        queries=[
+            ProbeQuery(
+                query_id="query-1",
+                cell_id="cell-1",
+                source_family="linkedin",
+                query="VP Product Almaty",
+            )
+        ],
+        sources={"linkedin": lambda query: calls.append(query) or []},
+        output_dir=tmp_path / "evidence",
+        runtime_capability_checks={
+            "linkedin": lambda: RuntimeCapabilityResult(state="ready")
+        },
+        isolation={
+            "linkedin": SourceIsolation(
+                mode="cloned_profile",
+                path=tmp_path / "clone",
+                collection_method="browser",
+                cdp_url="",
+            )
+        },
+        max_attempts=1,
+    )
+
+    assert calls == []
+    assert result.family_attempts[0]["market_query_dispatch_count"] == 0
+    assert result.source_states["linkedin"] == "runtime_capability_blocked"
+
+
+def test_browser_worker_uses_manifest_cdp_override_without_changing_exclusive_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path("/tmp/experiment")
+    manifest = _manifest_with_source_isolation(
+        root,
+        {
+            "mode": "cloned_profile",
+            "collection_method": "browser",
+            "path": str(root / "clone"),
+            "cdp_url": "http://127.0.0.1:19223",
+        },
+    )
+    environment = build_isolated_probe_environment(
+        manifest, ambient={"JOB_INTEL_BROWSER_CDP_URL": "http://127.0.0.1:1"}
+    )
+    assert environment["JOB_INTEL_BROWSER_CDP_URL"] == "http://127.0.0.1:19223"
+    assert environment["JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN"] == str(root / "clone")
+
+    seen: list[str] = []
+
+    def fake_ready(url: str, **_kwargs: object) -> bool:
+        seen.append(url)
+        return False
+
+    monkeypatch.setattr(browser_worker, "_cdp_ready", fake_ready)
+    monkeypatch.setenv("JOB_INTEL_BROWSER_CDP_URL", "http://127.0.0.1:19223")
+    with pytest.raises(browser_worker.BrowserNativeUnavailable):
+        browser_worker._ensure_browser_desktop("linkedin")
+    assert seen == ["http://127.0.0.1:19223"]
+
+    seen.clear()
+    monkeypatch.delenv("JOB_INTEL_BROWSER_CDP_URL")
+    with pytest.raises(browser_worker.BrowserNativeUnavailable):
+        browser_worker._ensure_browser_desktop("linkedin")
+    assert seen == ["http://169.254.77.2:19222"]
+
+
 def test_browser_process_age_check_stays_unprivileged_and_semantic(monkeypatch) -> None:
     calls: list[list[str]] = []
 
@@ -278,6 +461,150 @@ def test_supervisor_rejects_profile_override_without_explicit_cdp(tmp_path: Path
     assert "--cdp-url" in result.stderr
 
 
+def test_supervisor_stop_releases_the_profile_lock_holder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = _load_browser_supervisor()
+    lock_script = Path(__file__).parents[2] / "scripts/job_intel_profile_lock.sh"
+    lock_path = tmp_path / "profile.lock"
+    holder = subprocess.Popen(
+        [str(lock_script), "--path", str(lock_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert b"profile lock acquired:" in holder.stdout.readline()
+        holder_process_group = os.getpgid(holder.pid)
+        monkeypatch.setattr(supervisor, "_stop_profile", lambda _profile: 0)
+
+        result = supervisor.main(
+            [
+                "--stop",
+                "--source",
+                "linkedin",
+                "--profile",
+                str(tmp_path / "linkedin"),
+                "--lock-path",
+                str(lock_path),
+            ]
+        )
+
+        assert result == 0
+        assert holder.wait(timeout=3) is not None
+        assert subprocess.run(
+            ["flock", "-n", str(lock_path), "true"], check=False
+        ).returncode == 0
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            group_pids = []
+            for process_dir in Path("/proc").iterdir():
+                if not process_dir.name.isdigit():
+                    continue
+                try:
+                    stat = (process_dir / "stat").read_text(encoding="ascii")
+                    process_group = int(stat.rsplit(")", 1)[1].split()[2])
+                except (OSError, ValueError, IndexError):
+                    continue
+                if process_group == holder_process_group:
+                    group_pids.append(int(process_dir.name))
+            if not group_pids:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"profile lock process group survived stop: {group_pids}")
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=3)
+
+
+def test_supervisor_sigterm_releases_the_profile_lock_holder(tmp_path: Path) -> None:
+    supervisor = _load_browser_supervisor()
+    lock_path = tmp_path / "profile.lock"
+    bootstrap_script = tmp_path / "hanging-bootstrap.sh"
+    bootstrap_started = tmp_path / "bootstrap-started"
+    bootstrap_script.write_text(
+        "#!/bin/sh\n"
+        f"touch {str(bootstrap_started)!r}\n"
+        "while :; do sleep 1; done\n",
+        encoding="utf-8",
+    )
+    bootstrap_script.chmod(0o755)
+    command = [
+        sys.executable,
+        str(Path(__file__).parents[2] / "scripts/job_intel_browser_supervisor.py"),
+        "--source",
+        "linkedin",
+        "--profile",
+        str(tmp_path / "linkedin"),
+        "--cdp-url",
+        "http://127.0.0.1:1",
+        "--lock-path",
+        str(lock_path),
+        "--bootstrap-script",
+        str(bootstrap_script),
+        "--bootstrap-timeout",
+        "30",
+        "--startup-timeout",
+        "30",
+    ]
+    process = subprocess.Popen(command, start_new_session=True)
+    holder_process_group: int | None = None
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if bootstrap_started.exists():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("supervisor never started the bootstrap after acquiring the profile lock")
+
+        holder_pids = supervisor._lock_holder_pids(lock_path)
+        assert len(holder_pids) == 1
+        holder_process_group = os.getpgid(holder_pids[0])
+
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=5) == 0
+        assert subprocess.run(
+            ["flock", "-n", str(lock_path), "true"], check=False
+        ).returncode == 0
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            group_pids = []
+            for process_dir in Path("/proc").iterdir():
+                if not process_dir.name.isdigit():
+                    continue
+                try:
+                    stat = (process_dir / "stat").read_text(encoding="ascii")
+                    process_group = int(stat.rsplit(")", 1)[1].split()[2])
+                except (OSError, ValueError, IndexError):
+                    continue
+                if process_group == holder_process_group:
+                    group_pids.append(int(process_dir.name))
+            if not group_pids:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"lock-holder process group survived SIGTERM: {group_pids}")
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
+        for pid in supervisor._lock_holder_pids(lock_path):
+            try:
+                process_group = os.getpgid(pid)
+            except ProcessLookupError:
+                continue
+            subprocess.run(["kill", "-TERM", f"-{process_group}"], check=False)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and supervisor._pid_is_running(pid):
+                time.sleep(0.02)
+            if supervisor._pid_is_running(pid):
+                subprocess.run(["kill", "-KILL", f"-{process_group}"], check=False)
+
+
 def _notify_socket(path: Path) -> socket.socket:
     receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     receiver.bind(str(path))
@@ -286,7 +613,13 @@ def _notify_socket(path: Path) -> socket.socket:
 
 
 def _supervisor_command(
-    *, profile: Path, cdp_url: str, lock_path: Path, notify_path: Path, timeout: str
+    *,
+    profile: Path,
+    cdp_url: str,
+    lock_path: Path,
+    notify_path: Path,
+    timeout: str,
+    network_namespace: str | None = None,
 ) -> tuple[list[str], dict[str, str], Path]:
     bootstrap_script = profile.parent / "fake-browser-desktop-bootstrap.sh"
     bootstrap_log = profile.parent / "bootstrap-argv.log"
@@ -316,6 +649,8 @@ def _supervisor_command(
         "--bootstrap-script",
         str(bootstrap_script),
     ]
+    if network_namespace:
+        command.extend(["--network-namespace", network_namespace])
     return command, {**os.environ, "NOTIFY_SOCKET": str(notify_path)}, bootstrap_log
 
 
@@ -351,10 +686,18 @@ def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Pat
         lock_path=tmp_path / "profile.lock",
         notify_path=notify_path,
         timeout="30",
+        network_namespace="ln-eg",
     )
     process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        message, _ = receiver.recvfrom(128)
+        try:
+            message, _ = receiver.recvfrom(128)
+        except socket.timeout:
+            stdout, stderr = process.communicate(timeout=3)
+            pytest.fail(
+                "supervisor did not notify READY: "
+                f"returncode={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+            )
         assert message == b"READY=1\n"
         assert events == ["json/version"]
         assert bootstrap_log.read_text(encoding="utf-8").splitlines() == [
@@ -362,6 +705,8 @@ def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Pat
             "linkedin",
             "--url",
             "https://www.linkedin.com/",
+            "--network-namespace",
+            "ln-eg",
         ]
         assert process.poll() is None
     finally:
