@@ -7,6 +7,7 @@ from html import unescape
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import time
 from typing import Any, Callable, Iterable, Literal, Mapping
@@ -254,6 +255,7 @@ class LinkedInGeographyTarget(BaseModel):
     geo_id: str | None = Field(default=None, alias="geoId")
     verified_at: str | None = None
     status: GeographyStatus
+    country_codes: tuple[str, ...] = ()
 
     @property
     def canonical_key(self) -> str:
@@ -263,10 +265,38 @@ class LinkedInGeographyTarget(BaseModel):
                 "location": self.location,
                 "status": self.status,
                 "verified_at": self.verified_at,
+                "country_codes": self.country_codes,
             },
             sort_keys=True,
             separators=(",", ":"),
         )
+
+
+GEOGRAPHY_MAPPING_VERSION = "1.0"
+GEOGRAPHY_NORMALIZATION_RULE_VERSION = "1.0"
+GEOGRAPHY_CONTAMINATION_FORMULA_VERSION = "jaccard_received_v1"
+GEOGRAPHY_CONTAMINATION_THRESHOLD = 0.6
+
+
+class LinkedInGeographyMapping(dict[str, LinkedInGeographyTarget]):
+    """Country ownership mapping plus the versions used to interpret it."""
+
+    def __init__(
+        self,
+        cells: Mapping[str, LinkedInGeographyTarget],
+        *,
+        version: str,
+        normalization_rule_version: str,
+        contamination_formula_version: str,
+        contamination_threshold: float,
+        city_country_codes: Mapping[str, str],
+    ) -> None:
+        super().__init__(cells)
+        self.version = version
+        self.normalization_rule_version = normalization_rule_version
+        self.contamination_formula_version = contamination_formula_version
+        self.contamination_threshold = contamination_threshold
+        self.city_country_codes = dict(city_country_codes)
 
 
 def load_linkedin_geography_mapping(
@@ -285,13 +315,62 @@ def load_linkedin_geography_mapping(
         raise ValueError("LinkedIn geography mapping has wrong product authority")
     if document.get("search_contract_version") != "1.0.0":
         raise ValueError("LinkedIn geography mapping has wrong contract version")
+    normalization_rule_version = str(document.get("normalization_rule_version") or "")
+    if normalization_rule_version != GEOGRAPHY_NORMALIZATION_RULE_VERSION:
+        raise ValueError("unsupported geography normalization rule version")
+    contamination_formula_version = str(
+        document.get("contamination_formula_version") or ""
+    )
+    if contamination_formula_version != GEOGRAPHY_CONTAMINATION_FORMULA_VERSION:
+        raise ValueError("unsupported geography contamination formula version")
+    try:
+        contamination_threshold = float(document.get("contamination_threshold"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid geography contamination threshold") from None
+    if contamination_threshold != GEOGRAPHY_CONTAMINATION_THRESHOLD:
+        raise ValueError("unsupported geography contamination threshold")
+    city_country_codes = document.get("city_country_codes")
+    if not isinstance(city_country_codes, Mapping):
+        raise ValueError("geography city country mapping is required")
+    normalized_city_country_codes: dict[str, str] = {}
+    for city, code in city_country_codes.items():
+        normalized_code = str(code).upper()
+        if not str(city).strip() or not re.fullmatch(r"[A-Z]{2}", normalized_code):
+            raise ValueError(f"invalid city country mapping entry: {city}")
+        normalized_city_country_codes[str(city)] = normalized_code
     cells = document.get("cells")
     if not isinstance(cells, Mapping):
         raise ValueError("LinkedIn geography mapping cells are required")
-    return {
+    parsed = {
         str(cell_id): LinkedInGeographyTarget.model_validate(value)
         for cell_id, value in cells.items()
     }
+    owners: dict[str, str] = {}
+    for cell_id, target in parsed.items():
+        for code in target.country_codes:
+            normalized_code = str(code).upper()
+            if not re.fullmatch(r"[A-Z]{2}", normalized_code):
+                raise ValueError(f"invalid country code in geography mapping: {code}")
+            previous = owners.get(normalized_code)
+            if previous is not None:
+                raise ValueError(
+                    f"country code overlap in geography mapping: {normalized_code} "
+                    f"belongs to {previous} and {cell_id}"
+                )
+            owners[normalized_code] = cell_id
+    for city, code in normalized_city_country_codes.items():
+        if code not in owners:
+            raise ValueError(
+                f"city country mapping points to unmapped country: {city} -> {code}"
+            )
+    return LinkedInGeographyMapping(
+        parsed,
+        version=str(document["version"]),
+        normalization_rule_version=normalization_rule_version,
+        contamination_formula_version=contamination_formula_version,
+        contamination_threshold=contamination_threshold,
+        city_country_codes=normalized_city_country_codes,
+    )
 
 
 @dataclass(frozen=True)
@@ -449,6 +528,7 @@ class ProbeResult(BaseModel):
     latency_seconds: float
     family_attempts: tuple[dict[str, Any], ...] = ()
     cell_family_attempts: tuple[dict[str, Any], ...] = ()
+    geography_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 def expand_queries(
@@ -586,6 +666,328 @@ def _canonical_url(raw: str) -> str:
     )
 
 
+GeographyNormalizationSource = Literal["structured_field", "parsed_content", "unresolved"]
+RemoteScope = Literal["none", "country_remote", "location_independent"]
+
+
+class GeographyEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    raw_location_text: str | None
+    mentioned_countries: tuple[str, ...]
+    primary_country: str | None
+    normalization_source: GeographyNormalizationSource
+    normalization_rule_version: str
+    mapping_version: str
+    remote_scope: RemoteScope
+
+    @model_validator(mode="after")
+    def _validate_primary_country(self) -> "GeographyEvidence":
+        if self.normalization_source == "unresolved" and self.primary_country is not None:
+            raise ValueError("unresolved geography cannot have a primary country")
+        if len(set(self.mentioned_countries)) != len(self.mentioned_countries):
+            raise ValueError("mentioned countries must be unique")
+        if self.primary_country is not None and self.primary_country not in self.mentioned_countries:
+            raise ValueError("primary country must be among mentioned countries")
+        if self.remote_scope == "location_independent" and (
+            self.primary_country is not None or self.mentioned_countries
+        ):
+            raise ValueError("location-independent geography must have no country")
+        return self
+
+
+_COUNTRY_ALIASES: tuple[tuple[str, str], ...] = (
+    ("united arab emirates", "AE"),
+    ("united kingdom", "GB"),
+    ("united states", "US"),
+    ("south korea", "KR"),
+    ("new zealand", "NZ"),
+    ("australia", "AU"),
+    ("austria", "AT"),
+    ("bahrain", "BH"),
+    ("belgium", "BE"),
+    ("canada", "CA"),
+    ("china", "CN"),
+    ("denmark", "DK"),
+    ("finland", "FI"),
+    ("france", "FR"),
+    ("germany", "DE"),
+    ("india", "IN"),
+    ("italy", "IT"),
+    ("japan", "JP"),
+    ("kazakhstan", "KZ"),
+    ("kyrgyzstan", "KG"),
+    ("kuwait", "KW"),
+    ("luxembourg", "LU"),
+    ("netherlands", "NL"),
+    ("new zealand", "NZ"),
+    ("norway", "NO"),
+    ("oman", "OM"),
+    ("poland", "PL"),
+    ("qatar", "QA"),
+    ("saudi arabia", "SA"),
+    ("singapore", "SG"),
+    ("south africa", "ZA"),
+    ("south korea", "KR"),
+    ("spain", "ES"),
+    ("sweden", "SE"),
+    ("switzerland", "CH"),
+    ("tajikistan", "TJ"),
+    ("turkmenistan", "TM"),
+    ("ukraine", "UA"),
+    ("united states", "US"),
+    ("uzbekistan", "UZ"),
+    ("vietnam", "VN"),
+    ("uk", "GB"),
+    ("uae", "AE"),
+    ("usa", "US"),
+)
+_CITY_COUNTRY_ALIASES: dict[str, str] = {}
+
+
+def normalize_geography_evidence(
+    raw_location_text: str | None,
+    *,
+    mapping_version: str = GEOGRAPHY_MAPPING_VERSION,
+    city_country_codes: Mapping[str, str] | None = None,
+) -> GeographyEvidence:
+    raw = None if raw_location_text is None else str(raw_location_text).strip()
+    text = raw or ""
+    if not text or text.casefold() == "unknown":
+        return GeographyEvidence(
+            raw_location_text=raw,
+            mentioned_countries=(),
+            primary_country=None,
+            normalization_source="unresolved",
+            normalization_rule_version=GEOGRAPHY_NORMALIZATION_RULE_VERSION,
+            mapping_version=mapping_version,
+            remote_scope="none",
+        )
+
+    found: dict[str, int] = {}
+    folded = text.casefold()
+    for alias, code in sorted(_COUNTRY_ALIASES, key=lambda item: len(item[0]), reverse=True):
+        match = re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", folded)
+        if match is not None:
+            found.setdefault(code, match.start())
+    for match in re.finditer(r"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])", text):
+        found.setdefault(match.group(1), match.start())
+    if not found:
+        aliases = dict(_CITY_COUNTRY_ALIASES)
+        aliases.update(
+            {str(city).casefold(): str(code).upper() for city, code in (city_country_codes or {}).items()}
+        )
+        city_token = folded.split(",", 1)[0].strip()
+        for city, code in aliases.items():
+            if city_token == city:
+                found[code] = 0
+
+    mentioned = tuple(code for code, _ in sorted(found.items(), key=lambda item: item[1]))
+    primary = mentioned[0] if len(mentioned) == 1 else None
+    if len(mentioned) > 1:
+        primary = None
+    remote = bool(re.search(r"\bremote\b", folded))
+    remote_scope: RemoteScope = (
+        "country_remote" if remote and primary is not None
+        else "location_independent" if remote and not mentioned
+        else "none"
+    )
+    return GeographyEvidence(
+        raw_location_text=raw,
+        mentioned_countries=mentioned,
+        primary_country=primary,
+        normalization_source="structured_field",
+        normalization_rule_version=GEOGRAPHY_NORMALIZATION_RULE_VERSION,
+        mapping_version=mapping_version,
+        remote_scope=remote_scope,
+    )
+
+
+def _mapping_metadata(mapping: Mapping[str, Any]) -> tuple[str, str, str, float]:
+    return (
+        str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION)),
+        str(
+            getattr(
+                mapping,
+                "normalization_rule_version",
+                GEOGRAPHY_NORMALIZATION_RULE_VERSION,
+            )
+        ),
+        str(
+            getattr(
+                mapping,
+                "contamination_formula_version",
+                GEOGRAPHY_CONTAMINATION_FORMULA_VERSION,
+            )
+        ),
+        float(
+            getattr(
+                mapping,
+                "contamination_threshold",
+                GEOGRAPHY_CONTAMINATION_THRESHOLD,
+            )
+        ),
+    )
+
+
+def _mapping_city_country_codes(mapping: Mapping[str, Any]) -> Mapping[str, str]:
+    return getattr(mapping, "city_country_codes", {})
+
+
+def _mapping_country_codes(target: Any) -> tuple[str, ...]:
+    if isinstance(target, LinkedInGeographyTarget):
+        return tuple(target.country_codes)
+    if isinstance(target, Mapping):
+        return tuple(str(code).upper() for code in target.get("country_codes", ()))
+    raise TypeError(f"unsupported geography mapping target: {type(target).__name__}")
+
+
+def _validate_mapping_country_ownership(mapping: Mapping[str, Any]) -> dict[str, str]:
+    owners: dict[str, str] = {}
+    for cell_id, target in mapping.items():
+        for code in _mapping_country_codes(target):
+            if not re.fullmatch(r"[A-Z]{2}", code):
+                raise ValueError(f"invalid country code in geography mapping: {code}")
+            previous = owners.get(code)
+            if previous is not None:
+                raise ValueError(
+                    f"country code overlap in geography mapping: {code} "
+                    f"belongs to {previous} and {cell_id}"
+                )
+            owners[code] = str(cell_id)
+    return owners
+
+
+def build_geography_summary(
+    records: Iterable[Mapping[str, Any]],
+    mapping: Mapping[str, Any],
+    *,
+    manifest_versions: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    mapping_version, normalization_version, formula_version, threshold = _mapping_metadata(mapping)
+    expected = {
+        "mapping_version": mapping_version,
+        "normalization_rule_version": normalization_version,
+        "contamination_formula_version": formula_version,
+        "contamination_threshold": threshold,
+    }
+    for name, value in dict(manifest_versions or {}).items():
+        if name in expected and value != expected[name]:
+            label = name.replace("_", " ")
+            raise ValueError(f"{label} does not match geography mapping contract")
+    owners = _validate_mapping_country_ownership(mapping)
+    cells: dict[str, dict[str, Any]] = {
+        str(cell_id): {
+            "received": set(),
+            "credited": set(),
+            "rejected_country_mismatch": 0,
+            "geography_unknown": 0,
+        }
+        for cell_id in mapping
+    }
+    evidence_by_identity: dict[str, GeographyEvidence] = {}
+    evidence_by_source_id: dict[str, dict[str, Any]] = {}
+    received_seen: set[tuple[str, str]] = set()
+    credited_identity_owners: dict[str, str] = {}
+
+    for raw_record in records:
+        record = dict(raw_record)
+        query_cell = str(record.get("cell_id") or "")
+        if query_cell == "ats_global_snapshot":
+            # This seeded snapshot is intentionally outside the geographic
+            # denominator; it is a source-breadth control, not a lane.
+            continue
+        cells.setdefault(
+            query_cell,
+            {
+                "received": set(),
+                "credited": set(),
+                "rejected_country_mismatch": 0,
+                "geography_unknown": 0,
+            },
+        )
+        identity = _canonical_url(str(record.get("url") or ""))
+        if not identity:
+            identity = hashlib.sha256(
+                f"{record.get('company')}\0{record.get('title')}".encode()
+            ).hexdigest()
+        geography = normalize_geography_evidence(
+            record.get("location"),
+            mapping_version=mapping_version,
+            city_country_codes=_mapping_city_country_codes(mapping),
+        )
+        previous = evidence_by_identity.get(identity)
+        if previous is not None and previous != geography:
+            raise ValueError(f"conflicting geography evidence for {identity}")
+        evidence_by_identity[identity] = geography
+        source_id = str(record.get("source_id") or identity)
+        evidence_by_source_id[source_id] = geography.model_dump(mode="json")
+        if (query_cell, identity) in received_seen:
+            continue
+        received_seen.add((query_cell, identity))
+        cells[query_cell]["received"].add(identity)
+
+        owner: str | None = None
+        if geography.remote_scope == "location_independent":
+            if "genuinely_location_independent" in cells:
+                owner = "genuinely_location_independent"
+        elif geography.primary_country is None:
+            cells[query_cell]["geography_unknown"] += 1
+        else:
+            owner = owners.get(geography.primary_country)
+        if owner is None:
+            if geography.primary_country is not None:
+                cells[query_cell]["rejected_country_mismatch"] += 1
+        elif owner != query_cell:
+            cells[query_cell]["rejected_country_mismatch"] += 1
+        if owner is not None:
+            existing_owner = credited_identity_owners.get(identity)
+            if existing_owner is not None and existing_owner != owner:
+                raise ValueError(f"geography identity credited to multiple cells: {identity}")
+            credited_identity_owners[identity] = owner
+            cells[owner]["credited"].add(identity)
+
+    cell_ids = sorted(cells)
+    pairwise: dict[str, dict[str, Any]] = {}
+    for index, left in enumerate(cell_ids):
+        for right in cell_ids[index + 1 :]:
+            left_ids = {
+                identity
+                for identity in cells[left]["received"]
+                if len(evidence_by_identity[identity].mentioned_countries) <= 1
+            }
+            right_ids = {
+                identity
+                for identity in cells[right]["received"]
+                if len(evidence_by_identity[identity].mentioned_countries) <= 1
+            }
+            union = left_ids | right_ids
+            jaccard = len(left_ids & right_ids) / len(union) if union else 0.0
+            pairwise[f"{left}|{right}"] = {
+                "jaccard": jaccard,
+                "contamination_suspected": jaccard >= threshold,
+            }
+
+    return {
+        "mapping_version": mapping_version,
+        "normalization_rule_version": normalization_version,
+        "contamination_formula_version": formula_version,
+        "contamination_threshold": threshold,
+        "records": dict(sorted(evidence_by_source_id.items())),
+        "cells": {
+            cell_id: {
+                "received": sorted(cells[cell_id]["received"]),
+                "credited": sorted(cells[cell_id]["credited"]),
+                "rejected_country_mismatch": cells[cell_id]["rejected_country_mismatch"],
+                "geography_unknown": cells[cell_id]["geography_unknown"],
+            }
+            for cell_id in cell_ids
+        },
+        "credited_identity_owners": dict(sorted(credited_identity_owners.items())),
+        "pairwise": pairwise,
+    }
+
+
 def _as_mapping(record: Any) -> dict[str, Any]:
     if isinstance(record, Mapping):
         return dict(record)
@@ -608,6 +1010,7 @@ def run_probe(
     isolation: Mapping[str, SourceIsolation],
     minimum_independent_families_by_cell: Mapping[str, int] | None = None,
     credited_records_by_cell: Mapping[str, int] | None = None,
+    geography_mapping: Mapping[str, Any] | None = None,
     max_attempts: int = 2,
     environment: Mapping[str, str] | None = None,
     now: Callable[[], datetime] | None = None,
@@ -848,6 +1251,12 @@ def run_probe(
             normalized["query_id"] = query.query_id
             normalized["cell_id"] = query.cell_id
             normalized["source_family"] = query.source_family
+            if geography_mapping is not None:
+                normalized["geography_evidence"] = normalize_geography_evidence(
+                    record.get("location"),
+                    mapping_version=_mapping_metadata(geography_mapping)[0],
+                    city_country_codes=_mapping_city_country_codes(geography_mapping),
+                ).model_dump(mode="json")
             raw_bytes = json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str).encode()
             content_hash = hashlib.sha256(raw_bytes).hexdigest()
             relative = Path("raw-evidence") / f"{content_hash}.json"
@@ -896,6 +1305,16 @@ def run_probe(
             label = "unresolved_for_decision_v2"
         labels[label] = labels.get(label, 0) + 1
 
+    geography_summary = (
+        build_geography_summary(observations, geography_mapping)
+        if geography_mapping is not None
+        else {}
+    )
+    attributed_credited_by_cell = {
+        cell_id: len(details["credited"])
+        for cell_id, details in geography_summary.get("cells", {}).items()
+    }
+
     acquisition_outcomes: dict[str, AcquisitionOutcome] = {}
     product_observability_state: dict[str, ProductObservabilityState | None] = {}
     product_observability_reason: dict[str, str | None] = {}
@@ -916,8 +1335,15 @@ def run_probe(
             record for record in canonical_records.values()
             if record.get("cell_id") == cell_id
         ]
-        credited_by_cell = dict(credited_records_by_cell or {})
-        if cell_id in credited_by_cell:
+        credited_by_cell = (
+            attributed_credited_by_cell
+            if geography_mapping is not None
+            else dict(credited_records_by_cell or {})
+        )
+        if geography_mapping is not None:
+            credited = credited_by_cell.get(cell_id, 0)
+            credited_records_provenance[cell_id] = "attributed"
+        elif cell_id in credited_by_cell:
             credited = credited_by_cell[cell_id]
             credited_records_provenance[cell_id] = "attributed"
         else:
@@ -991,6 +1417,7 @@ def run_probe(
             pair_attempts[key]
             for key in sorted(pair_attempts)
         ),
+        geography_summary=geography_summary,
     )
     (output / "summary.json").write_text(
         result.model_dump_json(indent=2), encoding="utf-8"

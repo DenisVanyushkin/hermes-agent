@@ -1,124 +1,170 @@
 version: "1.0"
 product_authority_id: PS-SOT-2026-08-10-v1
 search_contract_version: "1.0.0"
+normalization_rule_version: "1.0"
+contamination_formula_version: jaccard_received_v1
+contamination_threshold: 0.6
+city_country_codes:
+  "Krishnagiri": IN
+  "Paramaribo": SR
+  "Tadworth": GB
+  "Temecula": US
+  "Алматы": KZ
+  "Астана": KZ
+  "Самарканд": UZ
+  "Ташкент": UZ
 cells:
+  genuinely_location_independent:
+    location: Global remote
+    geoId: null
+    verified_at: null
+    status: unverified
+    country_codes: []
   australia:
     location: Australia
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [AU]
   bahrain:
     location: Bahrain
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [BH]
   benelux:
     location: Benelux
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [BE, LU, NL]
   canada:
     location: Canada
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [CA]
   cee:
     location: Central and Eastern Europe
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [BG, HR, CZ, HU, PL, RO, SK, SI]
   dach:
     location: DACH
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [AT, CH, DE, LI]
   east_asia_other:
     location: East Asia excluding Japan and South Korea
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [CN, HK, MO, TW]
   india:
     location: India
     geoId: null
     verified_at: null
     status: unverified
+    country_codes: [IN]
   japan:
     location: Japan
     geoId: null
     status: unverified
+    country_codes: [JP]
   kazakhstan:
     location: Kazakhstan
     geoId: null
     status: unverified
+    country_codes: [KZ]
   kuwait:
     location: Kuwait
     geoId: null
     status: unverified
+    country_codes: [KW]
   kyrgyzstan:
     location: Kyrgyzstan
     geoId: null
     status: unverified
+    country_codes: [KG]
   latin_america:
     location: Latin America
     geoId: null
     status: unverified
+    country_codes: [AR, BO, BR, CL, CO, CR, DO, EC, GT, HN, MX, NI, PA, PE, PY, SR, SV, UY, VE]
   new_zealand:
     location: New Zealand
     geoId: null
     status: unverified
+    country_codes: [NZ]
   nordics:
     location: Nordics
     geoId: null
     status: unverified
+    country_codes: [DK, FI, IS, "NO", SE]
   oman:
     location: Oman
     geoId: null
     status: unverified
+    country_codes: [OM]
   qatar:
     location: Qatar
     geoId: null
     status: unverified
+    country_codes: [QA]
   remaining_europe:
     location: Remaining Europe
     geoId: null
     status: unverified
+    country_codes: [AD, AL, BA, BY, CY, EE, ES, FR, GR, IE, IT, LT, LV, MC, MD, ME, MK, MT, PT, RS, RU, UA, VA]
   saudi_arabia:
     location: Saudi Arabia
     geoId: null
     status: unverified
+    country_codes: [SA]
   singapore:
     location: Singapore
     geoId: null
     status: unverified
+    country_codes: [SG]
   south_korea:
     location: South Korea
     geoId: null
     status: unverified
+    country_codes: [KR]
   southeast_asia_other:
     location: Southeast Asia excluding Singapore
     geoId: null
     status: unverified
+    country_codes: [BN, ID, KH, LA, MY, MM, PH, TH, TL, VN]
   tajikistan:
     location: Tajikistan
     geoId: null
     status: unverified
+    country_codes: [TJ]
   turkmenistan:
     location: Turkmenistan
     geoId: null
     status: unverified
+    country_codes: [TM]
   uk:
     location: United Kingdom
     geoId: null
     status: unverified
+    country_codes: [GB]
   united_arab_emirates:
     location: United Arab Emirates
     geoId: null
     status: unverified
+    country_codes: [AE]
   us_feasibility:
     location: United States with remote eligibility or sponsorship evidence
     geoId: null
     status: unverified
+    country_codes: [US]
   uzbekistan:
     location: Uzbekistan
     geoId: null
     status: unverified
+    country_codes: [UZ]
