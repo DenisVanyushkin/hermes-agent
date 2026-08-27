@@ -3,7 +3,9 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
+import sqlite3
 
 import pytest
 import job_intel.product_search.gate_b as gate_b
@@ -171,3 +173,27 @@ def test_forbidden_side_effect_mutation_fails_closed(tmp_path: Path) -> None:
     protected.write_bytes(b"after")
     with pytest.raises(GateBPreflightError, match="forbidden_side_effect_mutation"):
         assert_paths_unchanged(before, snapshot_paths([protected]))
+
+
+def test_real_dry_preflight_denies_live_job_intel_database_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolation must not turn a live production DB open into an allowed read."""
+    monkeypatch.setattr(gate_b, "GATE_B_EXPERIMENT_ROOT", tmp_path / "output")
+
+    def attempt(_: object) -> None:
+        sqlite3.connect("/var/lib/job-intel/state/job_intel.sqlite3")
+
+    with pytest.raises(
+        GateBPreflightError,
+        match="dry_run_io_denied:production_write:sqlite3.connect",
+    ):
+        build_dry_run_preflight(gate_a_root=GATE_A_ROOT, boundary_attempt=attempt)
+
+
+def test_gate_b_product_search_tests_use_isolated_job_intel_database() -> None:
+    """The sensor must not let product-search tests inherit the live DB."""
+    configured = Path(os.environ["JOB_INTEL_DB_PATH"])
+
+    assert configured != Path("/var/lib/job-intel/state/job_intel.sqlite3")
+    assert gate_b.PRODUCTION_DATABASE_PATH == configured

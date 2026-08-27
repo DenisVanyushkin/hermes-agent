@@ -2437,6 +2437,23 @@ class TestCronDeliveryTargets:
 
         assert cron_delivery_targets() == []
 
+    def test_gateway_config_failure_short_circuits_target_enumeration(self, monkeypatch):
+        from cron import scheduler
+        from gateway import config as gateway_config
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        def _must_not_enumerate(*args, **kwargs):
+            pytest.fail("target enumeration must not run after gateway config failure")
+
+        monkeypatch.setattr(gateway_config, "load_gateway_config", _boom)
+        monkeypatch.setattr(
+            scheduler, "_iter_home_target_platforms", _must_not_enumerate
+        )
+
+        assert scheduler.cron_delivery_targets() == []
+
 
 class TestHomeTargetEnvVarRegistry:
     """Regression: ``_HOME_TARGET_ENV_VARS`` must include every gateway
