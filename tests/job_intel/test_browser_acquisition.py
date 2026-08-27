@@ -281,6 +281,192 @@ def test_browser_client_fetch_html_wraps_runtime_failures() -> None:
         raise AssertionError("expected BrowserNativeUnavailable")
 
 
+def test_linkedin_fetch_result_keeps_redirect_and_protected_diagnostic_artifact(monkeypatch, tmp_path: Path) -> None:
+    html = """
+    <html><body>
+      <a class="changed-card-class" href="/jobs/view/101">VP Product</a>
+      <a class="another-changed-class" href="/jobs/view/202">Director Product</a>
+    </body></html>
+    """
+    diagnostics_dir = tmp_path / "diagnostics"
+    monkeypatch.setenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", str(diagnostics_dir))
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", max_scrolls=1))
+
+    class _Locator:
+        def evaluate_all(self, _script: str) -> list[str]:
+            return [
+                "https://www.linkedin.com/jobs/view/101",
+                "https://www.linkedin.com/jobs/view/202",
+            ]
+
+    class _Page:
+        url = "https://www.linkedin.com/login"
+        mouse = types.SimpleNamespace(wheel=lambda *_args: None)
+
+        def goto(self, _url: str, **_kwargs) -> None:
+            self.url = "https://www.linkedin.com/login"
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return html
+
+        def locator(self, selector: str) -> _Locator:
+            assert selector == "a[href*='/jobs/view/']"
+            return _Locator()
+
+        def screenshot(self, *, path: str, full_page: bool) -> None:
+            assert full_page
+            Path(path).write_bytes(b"png")
+
+        def title(self) -> str:
+            return "Sign in"
+
+        def close(self) -> None:
+            return None
+
+    client._context = types.SimpleNamespace(new_page=lambda: _Page())  # type: ignore[attr-defined]
+    result = client.fetch_page(
+        "https://www.linkedin.com/jobs/search/?keywords=product",
+        scrolls=1,
+        page_offset=1,
+        capture_label="run-1-query-2-cell-uk-page-1",
+    )
+
+    assert result.requested_url == "https://www.linkedin.com/jobs/search/?keywords=product"
+    assert result.final_url == "https://www.linkedin.com/login"
+    assert result.html == html
+    assert len(result.html_sha256) == 64
+    assert result.page_offset == 1
+    assert result.completed_scroll_steps == 1
+    assert result.dom_unique_job_ids == frozenset({"101", "202"})
+    assert result.artifact_ref and "run-1-query-2-cell-uk-page-1" in result.artifact_ref
+    artifacts = list(diagnostics_dir.iterdir())
+    page_artifacts = [path for path in artifacts if "run-1-query-2-cell-uk-page-1." in path.name]
+    assert {path.suffix for path in page_artifacts} == {".html", ".json", ".png"}
+    assert all((path.stat().st_mode & 0o777) == 0o600 for path in page_artifacts)
+    summary = json.loads(next(path for path in page_artifacts if path.suffix == ".json").read_text())
+    assert "html_excerpt" not in summary
+    assert summary["html_sha256"] == result.html_sha256
+
+
+def test_linkedin_trace_reconciles_dom_ids_independently_from_card_parser(monkeypatch, tmp_path: Path) -> None:
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"JobPosting","title":"VP Product",
+       "description":"Own monetization","url":"https://www.linkedin.com/jobs/view/101",
+       "hiringOrganization":{"name":"Spark"}}
+      </script>
+      <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"JobPosting","title":"Director Product",
+       "description":"Lead growth","url":"https://www.linkedin.com/jobs/view/202",
+       "hiringOrganization":{"name":"Spark"}}
+      </script>
+    </head><body>
+      <a class="class-name-changed-again" href="/jobs/view/101">one</a>
+      <a class="class-name-changed-again" href="/jobs/view/202">two</a>
+      <a class="class-name-changed-again" href="/jobs/view/303">unparsed</a>
+    </body></html>
+    """
+    diagnostics_dir = tmp_path / "diagnostics"
+    monkeypatch.setenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", str(diagnostics_dir))
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", max_scrolls=0, noise_probability=0.0))
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda: None)
+
+    class _Locator:
+        def evaluate_all(self, _script: str) -> list[str]:
+            return [
+                "https://www.linkedin.com/jobs/view/101",
+                "https://www.linkedin.com/jobs/view/202",
+                "https://www.linkedin.com/jobs/view/303",
+            ]
+
+    class _Page:
+        url = ""
+        mouse = types.SimpleNamespace(wheel=lambda *_args: None)
+
+        def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return html
+
+        def locator(self, selector: str) -> _Locator:
+            assert selector == "a[href*='/jobs/view/']"
+            return _Locator()
+
+        def screenshot(self, *, path: str, full_page: bool) -> None:
+            assert full_page
+            Path(path).write_bytes(b"png")
+
+        def title(self) -> str:
+            return "Search"
+
+        def close(self) -> None:
+            return None
+
+    client._context = types.SimpleNamespace(new_page=lambda: _Page())  # type: ignore[attr-defined]
+    vacancies = client.search_linkedin(
+        "product",
+        run_id="run-1",
+        query_id="query-2",
+        cell_id="uk",
+    )
+    page_trace = client.last_search_trace_snapshot()["pages"][0]
+
+    assert {vacancy.url.rsplit("/", 1)[-1] for vacancy in vacancies} == {"101", "202"}
+    assert page_trace["dom_unique_job_ids"] == ["101", "202", "303"]
+    assert page_trace["parsed_unique_job_ids_before_role_filter"] == ["101", "202"]
+    assert page_trace["returned_unique_job_ids"] == ["101", "202"]
+    assert page_trace["excluded_job_ids_by_reason"] == {}
+    assert page_trace["unexplained_dom_job_ids"] == ["303"]
+    assert set(page_trace["dom_unique_job_ids"]) == (
+        set(page_trace["parsed_unique_job_ids_before_role_filter"])
+        | set(page_trace["excluded_job_ids_by_reason"])
+        | set(page_trace["unexplained_dom_job_ids"])
+    )
+    assert "run-1-query-2-cell-uk-page-0" in page_trace["artifact_ref"]
+
+
+def test_linkedin_search_fails_closed_when_diagnostic_artifact_is_unavailable(monkeypatch, tmp_path: Path) -> None:
+    diagnostics_path = tmp_path / "diagnostics-not-a-directory"
+    diagnostics_path.write_text("not a directory")
+    monkeypatch.setenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", str(diagnostics_path))
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda: None)
+
+    class _Page:
+        url = "https://www.linkedin.com/jobs/search"
+        mouse = types.SimpleNamespace(wheel=lambda *_args: None)
+
+        def goto(self, _url: str, **_kwargs) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html><body>results</body></html>"
+
+        def locator(self, _selector: str):
+            return types.SimpleNamespace(evaluate_all=lambda _script: [])
+
+        def close(self) -> None:
+            return None
+
+    client._context = types.SimpleNamespace(new_page=lambda: _Page())  # type: ignore[attr-defined]
+    with pytest.raises(BrowserNativeUnavailable, match="diagnostic"):
+        client.search_linkedin("product")
+    health = client.session_health_snapshot()
+    assert health["critical_degradation"] is True
+    assert health["status"] == "blocked"
+
+
 def test_acquisition_warm_and_cold_paths_never_dispatch_sudo(monkeypatch) -> None:
     calls: list[list[str]] = []
 

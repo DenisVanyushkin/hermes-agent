@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -105,6 +106,8 @@ class BrowserSessionHealth:
     session_state: str = "unknown"
     cookie_mismatch: bool = False
     page_unrecognised: bool = False
+    critical_degradation: bool = False
+    critical_degradation_reason: str | None = None
     status: str = "healthy"
 
     def snapshot(self) -> dict[str, Any]:
@@ -175,6 +178,25 @@ class AcquisitionMetrics:
 
 class BrowserNativeUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class BrowserFetchResult:
+    requested_url: str
+    final_url: str
+    html: str
+    html_sha256: str
+    page_offset: int
+    planned_scroll_steps: int
+    completed_scroll_steps: int
+    scroll_trace: tuple[dict[str, Any], ...]
+    dom_unique_job_ids: frozenset[str]
+    artifact_ref: str | None
+
+
+def _linkedin_job_id_from_url(url: str) -> str | None:
+    match = re.search(r"/jobs/view/([^/?#]+)", urlparse(url).path, flags=re.I)
+    return match.group(1) if match else None
 
 
 class _LinkCapture(HTMLParser):
@@ -536,6 +558,8 @@ def apply_linkedin_verdict(health: BrowserSessionHealth, verdict: Any) -> None:
 
 
 def _session_status(health: BrowserSessionHealth) -> str:
+    if health.critical_degradation:
+        return "blocked"
     if health.login_walls >= 2 or health.auth_redirects >= 3:
         return "blocked"
     if health.login_walls >= 1 or health.auth_redirects >= 1:
@@ -610,7 +634,7 @@ def _merge_vacancy_lists(primary: list[Vacancy], secondary: list[Vacancy]) -> li
     return _dedupe_vacancies(list(merged.values()))
 
 
-def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+def _linkedin_card_vacancies_from_html(html: str, *, page_url: str, apply_role_filter: bool = True) -> list[Vacancy]:
     vacancies: list[Vacancy] = []
     pattern = re.compile(
         r'<a[^>]+href="(?P<href>/jobs/view/[^"]+)"[^>]*class="[^"]*job-card-container__link[^"]*"[^>]*>.*?<strong><!---->(?P<title>.*?)<!----></strong>.*?</a>(?P<tail>.{0,2500}?)job-card-list__footer-wrapper',
@@ -618,7 +642,7 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vaca
     )
     for match in pattern.finditer(html):
         title = _clean_html_text(match.group("title"))
-        if not title or not _looks_executive(title):
+        if not title or (apply_role_filter and not _looks_executive(title)):
             continue
         tail = match.group("tail")
         company_match = re.search(r'artdeco-entity-lockup__subtitle[^>]*>.*?<span[^>]*>\s*<!---->(?P<company>.*?)<!---->\s*</span>', tail, flags=re.S)
@@ -838,29 +862,23 @@ class BrowserSourceClient:
         with suppress(Exception):
             meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
 
-    def _capture_page_diagnostics(self, *, page: Any, label: str, html: str | None = None, extra: dict[str, Any] | None = None) -> None:
+    def _capture_page_diagnostics(self, *, page: Any, label: str, html: str | None = None, extra: dict[str, Any] | None = None) -> str | None:
         if self._diagnostics_dir is None:
-            return
-        try:
-            self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            return
+            return None
+        self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        self._diagnostics_dir.chmod(0o700)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         slug = self._diagnostic_slug(label)
         base = self._diagnostics_dir / f"{timestamp}-{slug}"
-        screenshot_path = base.with_suffix(".png")
-        html_path = base.with_suffix(".html")
-        meta_path = base.with_suffix(".json")
-        try:
-            page.screenshot(path=str(screenshot_path), full_page=True)
-        except Exception:
-            screenshot_path = None
+        screenshot_path = base.with_name(base.name + ".png")
+        html_path = base.with_name(base.name + ".html")
+        meta_path = base.with_name(base.name + ".json")
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        screenshot_path.chmod(0o600)
         if html is None:
-            with suppress(Exception):
-                html = page.content()
-        if html is not None:
-            with suppress(Exception):
-                html_path.write_text(html)
+            html = page.content()
+        html_path.write_text(html, encoding="utf-8")
+        html_path.chmod(0o600)
         payload: dict[str, Any] = {
             "label": label,
             "source": self.config.source_name or self._health.source,
@@ -868,9 +886,9 @@ class BrowserSourceClient:
             "page_url": getattr(page, "url", ""),
             "page_title": "",
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "screenshot_path": str(screenshot_path) if screenshot_path else None,
-            "html_path": str(html_path) if html is not None else None,
-            "diagnostics_dir": str(self._diagnostics_dir),
+            "screenshot_ref": screenshot_path.name,
+            "html_ref": html_path.name,
+            "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
         }
         with suppress(Exception):
             payload["page_title"] = page.title()
@@ -886,11 +904,11 @@ class BrowserSourceClient:
                 "gmail": "gmail" in lowered,
                 "hermes_at_vanyushk": "hermes@vanyushk.in" in lowered,
             }
-            payload["html_excerpt"] = html[:4000]
         if extra:
             payload["extra"] = extra
-        with suppress(Exception):
-            meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
+        meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        meta_path.chmod(0o600)
+        return meta_path.name
 
     def _browser_state_snapshot(self) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
@@ -1095,7 +1113,32 @@ class BrowserSourceClient:
         )
         return keep
 
-    def fetch_html(self, url: str, *, scrolls: int | None = None, capture_label: str | None = None) -> str:
+    def _mark_critical_degradation(self, reason: str) -> None:
+        self._health.critical_degradation = True
+        self._health.critical_degradation_reason = reason
+        self._health.status = "blocked"
+
+    def _linkedin_dom_unique_job_ids(self, page: Any) -> frozenset[str]:
+        locator = page.locator("a[href*='/jobs/view/']")
+        hrefs = locator.evaluate_all(
+            "(anchors) => anchors.map(anchor => anchor.href || anchor.getAttribute('href'))"
+        )
+        return frozenset(
+            job_id
+            for href in hrefs
+            if isinstance(href, str)
+            for job_id in [_linkedin_job_id_from_url(href)]
+            if job_id
+        )
+
+    def fetch_page(
+        self,
+        url: str,
+        *,
+        scrolls: int | None = None,
+        page_offset: int = 0,
+        capture_label: str | None = None,
+    ) -> BrowserFetchResult:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
         scroll_count = self.config.max_scrolls if scrolls is None else max(0, scrolls)
@@ -1103,9 +1146,10 @@ class BrowserSourceClient:
         source_key = (self.config.source_name or "").strip().lower()
         fetch_label = capture_label or "fetch"
 
-        def _attempt_fetch() -> str:
+        def _attempt_fetch() -> BrowserFetchResult:
             page = None
             reuse_existing = False
+            scroll_trace: list[dict[str, Any]] = []
             try:
                 if source_key == "linkedin":
                     # For LinkedIn search pages we prefer a fresh tab. Reusing the feed tab sometimes
@@ -1147,11 +1191,47 @@ class BrowserSourceClient:
                 for _ in range(scroll_count):
                     page.mouse.wheel(0, 1800)
                     page.wait_for_timeout(self.config.scroll_pause_ms)
+                    scroll_trace.append({"step": len(scroll_trace) + 1, "completed": True})
                 html = page.content()
                 self._write_attach_diagnostics(label=f"{fetch_label}-content-read", extra={"requested_url": url, "html_length": len(html), "reused_page": reuse_existing})
+                final_url = str(getattr(page, "url", "") or url)
+                dom_ids = self._linkedin_dom_unique_job_ids(page) if source_key == "linkedin" else frozenset()
+                artifact_ref = None
                 if capture_label:
-                    self._capture_page_diagnostics(page=page, label=capture_label, html=html, extra={"requested_url": url, "scroll_count": scroll_count, "reused_page": reuse_existing})
-                return html
+                    try:
+                        artifact_ref = self._capture_page_diagnostics(
+                            page=page,
+                            label=capture_label,
+                            html=html,
+                            extra={
+                                "requested_url": url,
+                                "final_url": final_url,
+                                "page_offset": page_offset,
+                                "planned_scroll_steps": scroll_count,
+                                "completed_scroll_steps": len(scroll_trace),
+                                "reused_page": reuse_existing,
+                            },
+                        )
+                    except Exception as exc:
+                        reason = f"diagnostic artifact unavailable: {exc}"
+                        self._mark_critical_degradation(reason)
+                        raise BrowserNativeUnavailable(reason) from exc
+                    if artifact_ref is None:
+                        reason = "diagnostic artifact unavailable: no diagnostics directory"
+                        self._mark_critical_degradation(reason)
+                        raise BrowserNativeUnavailable(reason)
+                return BrowserFetchResult(
+                    requested_url=url,
+                    final_url=final_url,
+                    html=html,
+                    html_sha256=hashlib.sha256(html.encode("utf-8")).hexdigest(),
+                    page_offset=page_offset,
+                    planned_scroll_steps=scroll_count,
+                    completed_scroll_steps=len(scroll_trace),
+                    scroll_trace=tuple(scroll_trace),
+                    dom_unique_job_ids=dom_ids,
+                    artifact_ref=artifact_ref,
+                )
             finally:
                 if page is not None and not reuse_existing:
                     with suppress(Exception):
@@ -1159,6 +1239,8 @@ class BrowserSourceClient:
 
         try:
             return _attempt_fetch()
+        except BrowserNativeUnavailable:
+            raise
         except Exception as exc:
             page_obj = locals().get("page")
             html_obj = locals().get("html")
@@ -1172,6 +1254,12 @@ class BrowserSourceClient:
             raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
         finally:
             self._last_fetch_seconds = max(0.0, time.perf_counter() - start)
+
+    def fetch_html(self, url: str, *, scrolls: int | None = None, capture_label: str | None = None) -> str:
+        result = self.fetch_page(url, scrolls=scrolls, capture_label=capture_label)
+        self._last_fetch_result = result
+        return result.html
+
 
     def _sleep(self, *, source: str | None = None, extra_bias_ms: tuple[int, int] | None = None) -> None:
         source_key = (source or self.config.source_name or "").strip().lower()
@@ -1269,7 +1357,15 @@ class BrowserSourceClient:
             plan.extend(followups[:1])
         return plan
 
-    def search_linkedin(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
+    def search_linkedin(
+        self,
+        query: str,
+        *,
+        max_pages: int = 1,
+        run_id: str | None = None,
+        query_id: str | None = None,
+        cell_id: str | None = None,
+    ) -> list[Vacancy]:
         url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}"
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
@@ -1288,6 +1384,7 @@ class BrowserSourceClient:
             "login_wall_hits": 0,
             "auth_redirects": 0,
             "anti_bot_events": 0,
+            "pages": [],
             "zero_result_reason": "",
         }
         started = time.perf_counter()
@@ -1298,11 +1395,71 @@ class BrowserSourceClient:
             self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
             page_url = f"{url}&start={page_index * 25}" if page_index else url
             started = time.perf_counter()
-            html = self.fetch_html(page_url)
+            capture_label = f"{run_id or 'run-unknown'}-{query_id or 'query-unknown'}-cell-{cell_id or 'unknown'}-page-{page_index}"
+            fetched = self.fetch_html(page_url, capture_label=capture_label)
+            page_result = getattr(self, "_last_fetch_result", None)
+            if not isinstance(page_result, BrowserFetchResult) or page_result.requested_url != page_url or page_result.html != fetched:
+                page_result = BrowserFetchResult(
+                    requested_url=page_url,
+                    final_url=page_url,
+                    html=fetched,
+                    html_sha256=hashlib.sha256(fetched.encode("utf-8")).hexdigest(),
+                    page_offset=page_index,
+                    planned_scroll_steps=0,
+                    completed_scroll_steps=0,
+                    scroll_trace=(),
+                    dom_unique_job_ids=frozenset(),
+                    artifact_ref=None,
+                )
+            html = page_result.html
             trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
             started = time.perf_counter()
             page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
             trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
+            pre_filter_vacancies = _linkedin_card_vacancies_from_html(
+                html, page_url=page_url, apply_role_filter=False
+            )
+            pre_filter_vacancies.extend(
+                _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
+                for jobposting in _jobposting_objects(html)
+            )
+            dom_ids = page_result.dom_unique_job_ids
+            returned_ids = {
+                job_id
+                for vacancy in page_vacancies
+                for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+                if job_id
+            }
+            parsed_ids = sorted(
+                {
+                    job_id
+                    for vacancy in pre_filter_vacancies
+                    for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+                    if job_id
+                } & dom_ids
+            )
+            returned_ids &= dom_ids
+            excluded_by_reason = {
+                job_id: "role_filter"
+                for job_id in sorted(set(parsed_ids) - returned_ids)
+            }
+            unexplained_ids = sorted(dom_ids - set(parsed_ids) - set(excluded_by_reason))
+            trace["pages"].append(
+                {
+                    "requested_url": page_result.requested_url,
+                    "final_url": page_result.final_url,
+                    "html_sha256": page_result.html_sha256,
+                    "dom_unique_job_ids": sorted(page_result.dom_unique_job_ids),
+                    "parsed_unique_job_ids_before_role_filter": parsed_ids,
+                    "returned_unique_job_ids": sorted(returned_ids),
+                    "excluded_job_ids_by_reason": excluded_by_reason,
+                    "unexplained_dom_job_ids": unexplained_ids,
+                    "planned_scroll_steps": page_result.planned_scroll_steps,
+                    "completed_scroll_steps": page_result.completed_scroll_steps,
+                    "scroll_trace": list(page_result.scroll_trace),
+                    "artifact_ref": page_result.artifact_ref,
+                }
+            )
             self._observe_page(page_url, html, len(page_vacancies))
             trace["vacancies_extracted"] += len(page_vacancies)
             vacancies.extend(page_vacancies)
