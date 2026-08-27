@@ -677,6 +677,8 @@ PY
 SELECTION_DIGEST="$(sha256sum "$SELECTION_MANIFEST" | awk '{print $1}')"
 PRE_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side pre --digest "$SELECTION_DIGEST")"
 POST_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side post --digest "$SELECTION_DIGEST")"
+PRE_FINAL_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side pre --stage final --digest "$SELECTION_DIGEST")"
+POST_FINAL_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side post --stage final --digest "$SELECTION_DIGEST")"
 rm -f "$SELECTION_BEFORE_PATHS" "$SELECTION_AFTER_PATHS" "$SELECTION_BOUNDARY_PATHS" \
   "$SELECTION_CHANGED_PATHS" "$SELECTION_REPORT_FILE"
 
@@ -687,8 +689,9 @@ if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
   >"$BASELINE_LOG_FILE" 2>&1; then
   :
 fi
-if ! grep -Fqx "$PRE_RECEIPT" "$BASELINE_LOG_FILE"; then
-  echo "FAILED: baseline runner receipt missing or measured the wrong manifest side." >&2
+if ! grep -Fqx "$PRE_RECEIPT" "$BASELINE_LOG_FILE" ||
+   ! grep -Fqx "$PRE_FINAL_RECEIPT" "$BASELINE_LOG_FILE"; then
+  echo "FAILED: baseline runner final receipt missing; test run unreadable, refusing to land the merge." >&2
   tail -n 5 "$BASELINE_LOG_FILE" >&2
   exit 1
 fi
@@ -698,8 +701,9 @@ if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
   >"$POST_LOG_FILE" 2>&1; then
   :
 fi
-if ! grep -Fqx "$POST_RECEIPT" "$POST_LOG_FILE"; then
-  echo "FAILED: post runner receipt missing or measured the wrong manifest side." >&2
+if ! grep -Fqx "$POST_RECEIPT" "$POST_LOG_FILE" ||
+   ! grep -Fqx "$POST_FINAL_RECEIPT" "$POST_LOG_FILE"; then
+  echo "FAILED: post runner final receipt missing; test run unreadable, refusing to land the merge." >&2
   tail -n 5 "$POST_LOG_FILE" >&2
   exit 1
 fi

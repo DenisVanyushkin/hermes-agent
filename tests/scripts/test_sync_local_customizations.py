@@ -90,6 +90,19 @@ def _inert_test_cmd(world) -> Path:
     return script
 
 
+def _pre_only_test_cmd(world) -> Path:
+    """Runner double that leaves only the receipt emitted before pytest."""
+    script = world["fork"].parent / "pre-only-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        + _manifest_receipt_pre_only()
+        + "echo '1 failed, 5 passed in 2.00s'\n"
+        + "exit 137\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
 def _stub_hermes_bin(world) -> Path:
     """Заглушка вместо настоящего hermes.
 
@@ -103,8 +116,7 @@ def _stub_hermes_bin(world) -> Path:
     return script
 
 
-def _manifest_receipt_preamble() -> str:
-    """Make test doubles emit the same side-bound receipt as the real runner."""
+def _manifest_receipt_pre_only() -> str:
     return f'''PYTHON={sys.executable!r}
 GATE={str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")!r}
 SEL=""
@@ -125,6 +137,17 @@ PY
 DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
 "$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
 '''
+
+
+def _manifest_receipt_preamble() -> str:
+    """Make test doubles emit both receipts from the real runner contract."""
+    python = str(sys.executable)
+    gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+    return (
+        _manifest_receipt_pre_only()
+        + f'''{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$DIGEST"
+'''
+    )
 
 
 def _run_sync(world, extra_env=None, argv=()) -> subprocess.CompletedProcess:
@@ -209,6 +232,19 @@ def test_upstream_commits_arrive_as_a_merge_not_a_replay(world):
     assert (fork / "local_feature.py").exists(), "локальная правка обязана уцелеть"
     merges = _git(fork, "rev-list", "--merges", "--count", "origin/main..HEAD")
     assert merges == "1", "обновление должно приезжать merge-коммитом"
+
+
+def test_unreadable_runner_does_not_land_the_merge(world):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    fork = world["fork"]
+    before = _git(fork, "rev-parse", "HEAD")
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(_pre_only_test_cmd(world))})
+
+    assert result.returncode != 0
+    assert "unreadable" in result.stderr.lower()
+    assert "new failures" not in result.stdout.lower()
+    assert _git(fork, "rev-parse", "HEAD") == before
 
 
 def _boundary_recording_test_cmd(world) -> tuple[Path, Path]:
