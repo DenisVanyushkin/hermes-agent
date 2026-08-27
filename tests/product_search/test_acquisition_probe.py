@@ -676,6 +676,181 @@ def _b1_run(
     )
 
 
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    (
+        (("completed", "blocked"), "blocked"),
+        (("completed", "degraded"), "degraded"),
+        (("blocked", "degraded"), "degraded"),
+        (("completed", "completed"), "completed"),
+        (("blocked", "blocked"), "blocked"),
+        (("degraded", "degraded"), "degraded"),
+    ),
+)
+def test_b3_pair_outcome_conflict_resolution_reaches_summary(
+    tmp_path: Path,
+    events: tuple[str, str],
+    expected: str,
+) -> None:
+    class SequenceSource:
+        def __init__(self) -> None:
+            self._events = list(events)
+            self.last_errors: tuple[str, ...] = ()
+
+        def __call__(self, _query: str) -> list[dict[str, str]]:
+            event = self._events.pop(0)
+            if event == "blocked":
+                raise ProbeSourceBlocked("anti_bot", "challenge page")
+            self.last_errors = ("planned page failed",) if event == "degraded" else ()
+            return [_b1_record(f"row-{event}-{len(self._events)}")]
+
+    run_probe(
+        run_id="b3-conflicts",
+        queries=(
+            {
+                "query_id": "q-one",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "first role",
+            },
+            {
+                "query_id": "q-two",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "second role",
+            },
+        ),
+        sources={"alpha": SequenceSource()},
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api",
+                path=tmp_path / "alpha.lock",
+                collection_method="api",
+            )
+        },
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+
+    assert summary["cell_family_attempts"] == [
+        {
+            **summary["cell_family_attempts"][0],
+            "outcome": expected,
+        }
+    ]
+
+
+def test_b3_pair_attempt_round_trips_from_summary_file(tmp_path: Path) -> None:
+    class DegradedSource:
+        last_errors = ("second planned page failed",)
+
+        def __call__(self, _query: str) -> list[dict[str, str]]:
+            return [_b1_record("alpha-1"), _b1_record("alpha-2")]
+
+    run_probe(
+        run_id="b3-run",
+        queries=(
+            {
+                "query_id": "q-alpha",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "Head of Product",
+            },
+        ),
+        sources={"alpha": DegradedSource()},
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api",
+                path=tmp_path / "alpha.lock",
+                collection_method="api",
+            )
+        },
+        minimum_independent_families_by_cell={"b3-cell": 1},
+        credited_records_by_cell={"b3-cell": 1},
+        max_attempts=1,
+        now=lambda: datetime(2026, 8, 27, 12, 34, 56, tzinfo=timezone.utc),
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    pair = summary["cell_family_attempts"][0]
+
+    assert pair["cell_id"] == "b3-cell"
+    assert pair["source_family"] == "alpha"
+    assert pair["outcome"] == "degraded"
+    assert pair["timestamp"] == "2026-08-27T12:34:56+00:00"
+    assert pair["received_records"] == 2
+    assert pair["credited_records"] == 1
+    assert pair["credited_records_status"] == "determined"
+    assert pair["credited_records_reason"] is None
+    assert len(pair["artifact_references"]) == 2
+    assert all((tmp_path / reference).is_file() for reference in pair["artifact_references"])
+
+
+def test_b3_pair_credited_records_come_from_b2_attribution(tmp_path: Path) -> None:
+    run_probe(
+        run_id="b3-b2-run",
+        queries=(
+            {
+                "query_id": "q-alpha",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "Head of Product",
+            },
+        ),
+        sources={
+            "alpha": lambda _query: [
+                {
+                    **_b1_record("alpha-1"),
+                    "location": "Kazakhstan",
+                }
+            ]
+        },
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api",
+                path=tmp_path / "alpha.lock",
+                collection_method="api",
+            )
+        },
+        geography_mapping={
+            "b3-cell": {
+                "location": "Kazakhstan",
+                "status": "verified",
+                "country_codes": ["KZ"],
+            }
+        },
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+
+    assert summary["cell_family_attempts"][0]["credited_records"] == 1
+
+
+def test_b3_summary_keeps_pair_fields_in_one_record(tmp_path: Path) -> None:
+    result = _b1_run(tmp_path, {"alpha": [_b1_record("alpha-1")]})
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+
+    assert result.cell_family_attempts
+    assert len(summary["cell_family_attempts"]) == 1
+    pair = summary["cell_family_attempts"][0]
+    assert {
+        "cell_id",
+        "source_family",
+        "outcome",
+        "timestamp",
+        "received_records",
+        "credited_records",
+        "artifact_references",
+    } <= set(pair)
+    assert "cell_attempts" not in summary
+    assert "source_family_attempts" not in summary
+
+
 def test_b1_one_completed_family_below_minimum_is_insufficient_breadth(tmp_path: Path) -> None:
     result = _b1_run(tmp_path, {"alpha": [_b1_record("alpha-1")]})
 
@@ -892,6 +1067,7 @@ def test_b1_legacy_summary_refuses_to_reconstruct_attempt_outcomes() -> None:
         "legacy_attempt_evidence_insufficient"
     }
     assert len(report["cell_outcomes"]) == 30
+    assert report["attempt_evidence_criterion"] == "legacy_pre_b1_cell_states"
 
 
 def test_b1_rejects_legacy_cell_states_even_next_to_new_outcomes() -> None:
@@ -930,8 +1106,34 @@ def test_b1_summary_exposes_credited_records_provenance(tmp_path: Path) -> None:
         "b1-cell": "received_rows_fallback"
     }
     assert attributed.credited_records_provenance == {
-        "b1-cell": "attributed"
+        "b1-cell": "caller_supplied"
     }
+
+
+def test_b3_multi_pair_cell_credit_is_unknown_not_zero(tmp_path: Path) -> None:
+    families = {
+        "linkedin": [_b1_record("linkedin-1")],
+        "duckduckgo": [_b1_record("duckduckgo-1")],
+    }
+
+    result = _b1_run(tmp_path, families, credited=2)
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    pairs = summary["cell_family_attempts"]
+
+    assert result.credited_records_provenance == {
+        "b1-cell": "caller_supplied"
+    }
+    assert len(pairs) == 2
+    assert all(pair["credited_records"] is None for pair in pairs)
+    assert all(
+        pair["credited_records_status"] == "undetermined"
+        and pair["credited_records_reason"]
+        == "cell_level_credit_not_attributable_to_multiple_pairs"
+        for pair in pairs
+    )
+    assert all(
+        pair["credited_records"] is None for pair in pairs
+    ) or sum(pair["credited_records"] for pair in pairs) == 2
 
 
 def test_gate_a_query_carries_the_versioned_execution_plan() -> None:

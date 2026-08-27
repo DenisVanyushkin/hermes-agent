@@ -54,7 +54,8 @@ AcquisitionOutcome = Literal[
     "no_candidate_records",
 ]
 ProductObservabilityState = Literal["blocked", "not_observed"]
-CreditedRecordsProvenance = Literal["attributed", "received_rows_fallback"]
+CreditedRecordsProvenance = Literal["attributed", "caller_supplied", "received_rows_fallback"]
+LEGACY_ATTEMPT_EVIDENCE_CRITERION = "legacy_pre_b1_cell_states"
 
 
 @dataclass(frozen=True)
@@ -1123,7 +1124,13 @@ def run_probe(
             {
                 "cell_id": query.cell_id,
                 "source_family": query.source_family,
+                "timestamp": clock().isoformat(),
                 "outcome": "not_attempted",
+                "received_records": 0,
+                "credited_records": None,
+                "credited_records_status": "undetermined",
+                "credited_records_reason": "b2_attribution_unavailable",
+                "artifact_references": [],
             },
         )
         configured = cell_minimums.get(query.cell_id)
@@ -1263,6 +1270,9 @@ def run_probe(
             target = output / relative
             if not target.exists():
                 target.write_bytes(raw_bytes)
+            pair_record = _ensure_pair(query)
+            pair_record["received_records"] += 1
+            pair_record["artifact_references"].append(relative.as_posix())
             source_id = str(record.get("source_id") or content_hash[:20])
             evidence.append(
                 EvidencePackage(
@@ -1314,6 +1324,43 @@ def run_probe(
         cell_id: len(details["credited"])
         for cell_id, details in geography_summary.get("cells", {}).items()
     }
+    credited_identities_by_pair: dict[tuple[str, str], set[str]] = {
+        key: set() for key in pair_attempts
+    }
+    credited_counts_by_pair: dict[tuple[str, str], int] = {}
+    credited_unknown_reasons_by_pair: dict[tuple[str, str], str] = {
+        key: "b2_attribution_unavailable" for key in pair_attempts
+    }
+    if geography_mapping is not None:
+        credited_identity_owners = geography_summary.get("credited_identity_owners", {})
+        credited_identity_pairs: dict[str, set[tuple[str, str]]] = {}
+        for observed in observations:
+            identity = str(observed.get("canonical_url") or "")
+            pair_key = (
+                str(observed.get("cell_id") or ""),
+                str(observed.get("source_family") or ""),
+            )
+            if identity and credited_identity_owners.get(identity) == pair_key[0]:
+                credited_identity_pairs.setdefault(identity, set()).add(pair_key)
+        for identity, pair_keys in credited_identity_pairs.items():
+            credited_identities_by_pair[sorted(pair_keys)[0]].add(identity)
+        credited_counts_by_pair = {
+            key: len(credited_identities_by_pair[key]) for key in pair_attempts
+        }
+    else:
+        pair_keys_by_cell: dict[str, list[tuple[str, str]]] = {}
+        for key in pair_attempts:
+            pair_keys_by_cell.setdefault(key[0], []).append(key)
+        for cell_id, keys in pair_keys_by_cell.items():
+            if len(keys) == 1 and cell_id in (credited_records_by_cell or {}):
+                credited_counts_by_pair[keys[0]] = int(
+                    (credited_records_by_cell or {})[cell_id]
+                )
+            elif len(keys) > 1 and cell_id in (credited_records_by_cell or {}):
+                for key in keys:
+                    credited_unknown_reasons_by_pair[key] = (
+                        "cell_level_credit_not_attributable_to_multiple_pairs"
+                    )
 
     acquisition_outcomes: dict[str, AcquisitionOutcome] = {}
     product_observability_state: dict[str, ProductObservabilityState | None] = {}
@@ -1331,6 +1378,21 @@ def run_probe(
             outcome: sum(record["outcome"] == outcome for record in pair_records)
             for outcome in ("completed", "blocked", "degraded")
         }
+        pair_record_by_key = {
+            (record["cell_id"], record["source_family"]): record
+            for record in pair_records
+        }
+        for pair_key, pair_record in pair_record_by_key.items():
+            if pair_key in credited_counts_by_pair:
+                pair_record["credited_records"] = credited_counts_by_pair[pair_key]
+                pair_record["credited_records_status"] = "determined"
+                pair_record["credited_records_reason"] = None
+            else:
+                pair_record["credited_records"] = None
+                pair_record["credited_records_status"] = "undetermined"
+                pair_record["credited_records_reason"] = (
+                    credited_unknown_reasons_by_pair[pair_key]
+                )
         cell_records = [
             record for record in canonical_records.values()
             if record.get("cell_id") == cell_id
@@ -1345,7 +1407,7 @@ def run_probe(
             credited_records_provenance[cell_id] = "attributed"
         elif cell_id in credited_by_cell:
             credited = credited_by_cell[cell_id]
-            credited_records_provenance[cell_id] = "attributed"
+            credited_records_provenance[cell_id] = "caller_supplied"
         else:
             credited = len(cell_records)
             credited_records_provenance[cell_id] = "received_rows_fallback"
@@ -1615,6 +1677,7 @@ def classify_legacy_attempt_evidence(summary_path: Path | str) -> dict[str, Any]
             cell_id: "legacy_attempt_evidence_insufficient"
             for cell_id in sorted(cell_states)
         },
+        "attempt_evidence_criterion": LEGACY_ATTEMPT_EVIDENCE_CRITERION,
     }
 
 
