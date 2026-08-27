@@ -706,6 +706,59 @@ def test_passed_baseline_node_is_classified_as_fork_regression(tmp_path):
     ]
 
 
+def test_fixture_error_is_a_failed_collected_node_not_a_collection_error(tmp_path):
+    suite = tmp_path / "test_fixture_error.py"
+    suite.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.fixture\n"
+        "def broken_fixture():\n"
+        "    raise RuntimeError('fixture boom')\n"
+        "\n"
+        "def test_uses_broken_fixture(broken_fixture):\n"
+        "    pass\n"
+        "\n"
+        "def test_passed():\n"
+        "    assert True\n"
+    )
+    log = tmp_path / "fixture-error.log"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(suite),
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+            "--continue-on-collection-errors",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    log.write_text(proc.stdout + proc.stderr, encoding="utf-8")
+    assert proc.returncode != 0
+
+    nodeid = "test_fixture_error.py::test_uses_broken_fixture"
+    outcome = upstream_sync_gate.parse_test_outcomes(log.read_text(encoding="utf-8"))
+    assert nodeid in outcome["collected_nodeids"]
+    assert outcome["failed_nodeids"] == [nodeid]
+    assert outcome["collection_error_paths"] == []
+
+    result = _cli("node-outcome", "--log", str(log))
+    assert result.returncode == 0, result.stderr
+    node_outcome = json.loads(result.stdout)
+    assert node_outcome["collect_ok"] is True
+    assert node_outcome["probe_ok"] is True
+    assert node_outcome["collected_nodeids"] == sorted(
+        ["test_fixture_error.py::test_passed", nodeid]
+    )
+    assert node_outcome["failed_nodeids"] == [nodeid]
+
+
 def test_outcomes_parser_reads_real_pytest_collection_summary(tmp_path):
     """The parser consumes pytest's real short summary, not its banner."""
     broken = tmp_path / "test_broken.py"

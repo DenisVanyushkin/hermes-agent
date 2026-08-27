@@ -190,6 +190,40 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
     return selection
 
 
+def test_real_runner_reports_passed_nodes_from_rA(world: Path) -> None:
+    path = "tests/test_runner_reports.py"
+    _write(
+        world,
+        path,
+        "def test_passed():\n"
+        "    assert True\n"
+        "\n"
+        "def test_failed():\n"
+        "    assert False\n",
+    )
+    _commit(world, "add a mixed-outcome runner fixture")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env={**os.environ, "HERMES_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert "PASSED tests/test_runner_reports.py::test_passed" in output
+    assert "FAILED tests/test_runner_reports.py::test_failed" in output
+
+
 def test_deleted_path_not_selected(world: Path, fake_python: tuple[Path, Path]) -> None:
     """Путь, удалённый мержем, не имеет права попасть в набор.
 

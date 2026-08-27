@@ -720,8 +720,9 @@ def filter_probe_request(
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
 _COLLECTED_LINE = re.compile(r"^(?:PASSED|FAILED|SKIPPED|XFAIL|XPASS|RERUN)\s+(\S+)")
+_ERROR_NODE_LINE = re.compile(r"^ERROR\s+(\S+::\S+)(?:\s+-.*)?$")
 _COLLECTION_ERROR_LINE = re.compile(
-    r"^ERROR\s+(?!collecting\b)(\S+)(?:\s+-.*)?$"
+    r"^ERROR\s+(?!collecting\b)(?!\S+::)(\S+)(?:\s+-.*)?$"
 )
 _NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
@@ -756,18 +757,23 @@ def parse_test_outcomes(log: str) -> dict[str, Any]:
         elif label == "errors":
             label = "error"
         counts[label] = counts.get(label, 0) + int(match.group("count"))
-    collected_nodeids = sorted(
-        {
-            match.group(1)
-            for line in log.splitlines()
-            if (match := _COLLECTED_LINE.match(line))
-        }
-    )
-    failed_nodeids = sorted(
+    collected_nodeids = {
+        match.group(1)
+        for line in log.splitlines()
+        if (match := _COLLECTED_LINE.match(line))
+    }
+    error_nodeids = {
+        match.group(1)
+        for line in log.splitlines()
+        if (match := _ERROR_NODE_LINE.match(line))
+    }
+    collected_nodeids.update(error_nodeids)
+    failed_nodeids = {
         match.group(1)
         for line in log.splitlines()
         if (match := _FAILED_LINE.match(line))
-    )
+    }
+    failed_nodeids.update(error_nodeids)
     collection_error_paths = sorted(
         {
             match.group(1)
@@ -776,8 +782,8 @@ def parse_test_outcomes(log: str) -> dict[str, Any]:
         }
     )
     return {
-        "collected_nodeids": collected_nodeids,
-        "failed_nodeids": failed_nodeids,
+        "collected_nodeids": sorted(collected_nodeids),
+        "failed_nodeids": sorted(failed_nodeids),
         "error_count": counts.get("error", 0),
         "collection_error_paths": collection_error_paths,
     }
@@ -970,8 +976,8 @@ def _main(argv: list[str] | None = None) -> int:
             collected = sorted(set(expected if expected is not None else parsed["collected_nodeids"]))
             unexpected = sorted(set(failed) - set(collected))
             print(json.dumps({
-                "collect_ok": not unexpected and parsed["error_count"] == 0,
-                "probe_ok": not unexpected and parsed["error_count"] == 0,
+                "collect_ok": not unexpected and not parsed["collection_error_paths"],
+                "probe_ok": not unexpected and not parsed["collection_error_paths"],
                 "collected_nodeids": collected,
                 "failed_nodeids": sorted(set(failed) & set(collected)),
                 "error_count": parsed["error_count"],
