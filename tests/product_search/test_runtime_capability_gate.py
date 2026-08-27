@@ -569,3 +569,17 @@ def test_bootstrap_unit_exec_tokens_are_absolute_binaries() -> None:
     assert commands
     for command in commands.values():
         assert command.split(maxsplit=1)[0].startswith("/")
+
+def test_bootstrap_unit_parameterized_profile_has_explicit_cdp_url() -> None:
+    root = Path(__file__).resolve().parents[2]
+    unit = (
+        root / "deploy/systemd/experiments/job-intel-browser-bootstrap.service"
+    ).read_text(encoding="utf-8")
+    start_line = next(
+        line for line in unit.splitlines() if line.startswith("ExecStart=")
+    )
+    tokens = start_line.split("=", 1)[1].split()
+    profile_index = tokens.index("--profile")
+    assert tokens[profile_index + 1] == "${PRODUCT_SEARCH_BROWSER_PROFILE_PATH}"
+    cdp_index = tokens.index("--cdp-url")
+    assert tokens[cdp_index + 1] == "${PRODUCT_SEARCH_BROWSER_CDP_URL}"

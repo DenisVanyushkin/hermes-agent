@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--cdp-url", help="test-only endpoint override; production resolves it from --source")
+    parser.add_argument("--cdp-url", help="explicit CDP endpoint; required for profile or URL overrides (otherwise resolved from --source)")
     parser.add_argument("--url")
     parser.add_argument("--lock-path", type=Path, default=Path("/run/job-intel/linkedin-profile.lock"))
     parser.add_argument("--startup-timeout", type=float, default=120.0)
