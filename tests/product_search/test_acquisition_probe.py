@@ -13,6 +13,7 @@ import yaml
 
 from job_intel.product_search.acquisition_probe import (
     LinkedInGeographyMapping,
+    LinkedInGeographyTarget,
     ProbeSourceBlocked,
     SourceIsolation,
     EXCLUSION_REASON_CATALOG,
@@ -299,6 +300,78 @@ def test_c1a_synthetic_negative_control_is_deterministic_and_has_zero_transport(
     )
     assert selected == control
     assert selected["cell_id"] == "synthetic_c1a_unsupported"
+
+
+
+def test_write_manifest_and_run_manifest_are_ring_compatible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "experiment"
+    (root / "runtime/config/product_search").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "config/product_search/search_contract.v1.yaml",
+        root / "runtime/config/product_search/search_contract.v1.yaml",
+    )
+    mapping = _c1a_mapping()
+    mapping = LinkedInGeographyMapping(
+        {
+            **mapping,
+            "aaa_control": LinkedInGeographyTarget(
+                location="Synthetic unsupported target",
+                status="unsupported",
+                country_codes=(),
+            ),
+        },
+        version=mapping.version,
+        normalization_rule_version=mapping.normalization_rule_version,
+        contamination_formula_version=mapping.contamination_formula_version,
+        contamination_threshold=mapping.contamination_threshold,
+        city_country_codes=mapping.city_country_codes,
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "load_linkedin_geography_mapping",
+        lambda _path=None: mapping,
+    )
+    monkeypatch.setattr(sys, "executable", str(root / "python-runtime/bin/python"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["acquisition_probe", "write-manifest", str(root), "a" * 40],
+    )
+
+    assert acquisition_probe.main() == 0
+    generated_path = root / "manifest.yaml"
+    generated = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
+    assert generated["bounded_proof"]["cell_ids"] == ["uk", "singapore", "kazakhstan"]
+    assert generated["bounded_proof"]["include_ats_snapshot"] is False
+    assert generated["bounded_proof"]["negative_control"]["cell_id"] == "aaa_control"
+    assert generated["bounded_proof"]["negative_control"]["mapping_version"] == "1.0"
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        acquisition_probe,
+        "verify_experiment_runtime",
+        lambda _manifest: None,
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "build_isolated_probe_environment",
+        lambda _manifest, ambient: {},
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "run_probe",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["acquisition_probe", "run-manifest", str(generated_path)],
+    )
+
+    assert acquisition_probe.main() == 0
+    assert captured["geography_mapping"] is mapping
 
 
 def test_experiment_manifest_binds_exclusion_reason_catalog(tmp_path: Path) -> None:

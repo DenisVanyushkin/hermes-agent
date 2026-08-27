@@ -532,3 +532,25 @@ def test_source_state_groups_partition_the_closed_source_state_vocabulary() -> N
 
     assert OBSERVED_SOURCE_STATES | UNOBSERVED_SOURCE_STATES == declared
     assert OBSERVED_SOURCE_STATES.isdisjoint(UNOBSERVED_SOURCE_STATES)
+
+def test_bootstrap_unit_is_clone_and_namespace_parameterized() -> None:
+    root = Path(__file__).resolve().parents[2]
+    unit_path = (
+        root / "deploy/systemd/experiments/job-intel-browser-bootstrap.service"
+    )
+    unit = unit_path.read_text(encoding="utf-8")
+    assert "EnvironmentFile=/etc/job-intel/product-search-probe-experiment.env" in unit
+    assert "Type=notify" in unit
+    assert "KillMode=control-group" in unit
+    assert "RemainAfterExit=yes" not in unit
+    assert "ExecStop=" in unit
+    assert "--profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH}" in unit
+    assert "--network-namespace ${PRODUCT_SEARCH_BROWSER_NETWORK_NAMESPACE}" in unit
+    assert "/var/lib/browser-desktop/profiles/linkedin" not in unit
+
+    acquisition_unit = (
+        root / "deploy/systemd/experiments/job-intel-product-search-probe-experiment.service"
+    ).read_text(encoding="utf-8")
+    assert "BindsTo=job-intel-browser-bootstrap.service" in acquisition_unit
+    assert "After=job-intel-browser-bootstrap.service" in acquisition_unit
+    assert "sudo" not in acquisition_unit

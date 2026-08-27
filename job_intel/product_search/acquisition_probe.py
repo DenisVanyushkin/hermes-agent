@@ -368,6 +368,45 @@ def _bounded_proof_configuration(
     return cell_ids, control
 
 
+def build_bounded_proof_configuration(
+    mapping: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the predeclared bounded proof from the current mapping."""
+    mapping_version = str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION))
+    excluded = set(BOUNDED_PROOF_CELL_IDS)
+    unsupported = sorted(
+        str(cell_id)
+        for cell_id, target in mapping.items()
+        if (
+            (
+                target.status
+                if isinstance(target, LinkedInGeographyTarget)
+                else str(target.get("status", ""))
+            )
+            == "unsupported"
+            and str(cell_id) not in excluded
+        )
+    )
+    negative_control: dict[str, Any] = {
+        "selection_rule": BOUNDED_PROOF_SELECTION_RULE,
+        "cell_id": unsupported[0] if unsupported else SYNTHETIC_BOUNDED_CONTROL_ID,
+        "status": "unsupported",
+        "mapping_version": mapping_version,
+    }
+    if not unsupported:
+        negative_control["location"] = SYNTHETIC_BOUNDED_CONTROL_LOCATION
+    validated_control = select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=BOUNDED_PROOF_CELL_IDS,
+        declared=negative_control,
+    )
+    return {
+        "cell_ids": list(BOUNDED_PROOF_CELL_IDS),
+        "include_ats_snapshot": False,
+        "negative_control": validated_control,
+    }
+
+
 def load_linkedin_geography_mapping(
     path: Path | str | None = None,
 ) -> dict[str, LinkedInGeographyTarget]:
@@ -1816,6 +1855,9 @@ def build_experiment_manifest(
     python_runtime = root / "python-runtime"
     installed = python_runtime / "installed-distributions.txt"
     lock = runtime / "uv.lock"
+    bounded_proof = build_bounded_proof_configuration(
+        load_linkedin_geography_mapping()
+    )
     paths = {
         "runtime": str(runtime),
         "experiment.sqlite3": str(root / "experiment.sqlite3"),
@@ -1836,6 +1878,7 @@ def build_experiment_manifest(
             "version": EXCLUSION_REASON_CATALOG.version,
             "sha256": EXCLUSION_REASON_CATALOG.sha256,
         },
+        "bounded_proof": bounded_proof,
         "paths": paths,
         "python": {
             "executable_path": str(python_executable),
