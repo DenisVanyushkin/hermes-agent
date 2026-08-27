@@ -969,16 +969,23 @@ hold exclusive execution ownership»).
 
 **DoD**
 
-- [ ] Ни один Gate A LinkedIn request не полагается только на название рынка в
+- [x] Ни один Gate A LinkedIn request не полагается только на название рынка в
       `keywords`; generated и final URL доказывают структурный location/geoId
-      либо UI-equivalent.
-- [ ] Для UK, Singapore, Kazakhstan и отрицательного контроля запросы имеют
+      либо UI-equivalent. Закрыто `937c17d86f`: URL собирается через `urlencode`
+      с независимыми параметрами, keywords-only отката нет — мутация, заменяющая
+      named block на успех, роняет тест.
+- [x] Для UK, Singapore, Kazakhstan и отрицательного контроля запросы имеют
       разные структурные geography identities; unit tests проверяют точные URL.
-- [ ] Каждая LinkedIn-enabled cell покрыта versioned mapping или честным named
-      block; completeness test не позволяет неявный fallback.
-- [ ] `query_id` хеширует cell, family, keywords и canonical geography target,
+- [x] Каждая LinkedIn-enabled cell покрыта versioned mapping или честным named
+      block; completeness test не позволяет неявный fallback. Все 28 ячеек есть в
+      `config/product_search/linkedin_geography.v1.yaml` со статусом
+      `unverified` и `geoId: null`; ни один идентификатор не выдуман. Значит
+      сегодня каждая ячейка честно блокирована — подтверждение через LinkedIn UI
+      идёт в C.1.
+- [x] `query_id` хеширует cell, family, keywords и canonical geography target,
       поэтому изменение geo mapping меняет identity попытки и не смешивает
-      старое evidence с новым.
+      старое evidence с новым. Проверено мутацией: удаление географии из состава
+      хеша роняет тест identity.
 
 ### A3. Заменить вероятностную глубину на детерминированный page/scroll contract
 
