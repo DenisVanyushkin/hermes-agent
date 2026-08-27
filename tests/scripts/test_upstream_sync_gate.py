@@ -773,6 +773,53 @@ def test_collected_green_old_node_does_not_create_rename_hint():
     assert payload["suspected_rename"] == []
 
 
+def test_suspected_rename_requires_exactly_one_candidate_per_file():
+    def hint(old_nodes: set[str], new_nodes: set[str]) -> list[dict]:
+        return upstream_sync_gate.build_suspected_renames(
+            baseline=_node_run(collected=old_nodes, failed=old_nodes),
+            merged=_node_run(collected=new_nodes, failed=new_nodes),
+            baseline_log="",
+            merged_log="",
+        )
+
+    assert hint(
+        {
+            "tests/test_same.py::test_old_a",
+            "tests/test_same.py::test_old_b",
+        },
+        {
+            "tests/test_same.py::test_new_a",
+            "tests/test_same.py::test_new_b",
+        },
+    ) == []
+    assert hint(
+        {"tests/test_same.py::test_old"},
+        {
+            "tests/test_same.py::test_new_a",
+            "tests/test_same.py::test_new_b",
+        },
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("bad_side", "bad_flag"),
+    [("baseline", "collect_ok"), ("merged", "probe_ok")],
+)
+def test_suspected_rename_requires_trustworthy_runs(bad_side, bad_flag):
+    old = "tests/test_same.py::test_old"
+    new = "tests/test_same.py::test_new"
+    baseline = _node_run(collected={old}, failed={old})
+    merged = _node_run(collected={new}, failed={new})
+    (baseline if bad_side == "baseline" else merged)[bad_flag] = False
+
+    assert upstream_sync_gate.build_suspected_renames(
+        baseline=baseline,
+        merged=merged,
+        baseline_log="",
+        merged_log="",
+    ) == []
+
+
 def test_persist_cli_includes_suspected_rename_inputs(tmp_path):
     old = "tests/test_pricing.py::test_old_pricing"
     new = "tests/test_pricing.py::test_new_pricing"
