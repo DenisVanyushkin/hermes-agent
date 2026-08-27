@@ -295,6 +295,34 @@ class TestGateReport:
         assert "fork_regression" in text
         assert "upstream_red_admission_failure" in text
 
+    def test_report_prints_blocking_class_breakdown_and_unknown_class(self):
+        text = slack.gate_report_text(
+            _gate_failures(
+                blocking_failures=[
+                    {
+                        "path": "tests/common.py",
+                        "nodeid": "tests/common.py::test_common",
+                        "classification": "fork_regression",
+                    },
+                    {
+                        "path": "tests/common.py",
+                        "nodeid": "tests/common.py::test_future",
+                        "classification": "future_failure_class",
+                    },
+                ],
+                blocking_failures_by_class={
+                    "fork_regression": 1,
+                    "future_failure_class": 1,
+                },
+                unknown_blocking_classifications=["future_failure_class"],
+            )
+        )
+
+        assert "blocking_failures: 2" in text
+        assert "`fork_regression`: 1" in text
+        assert "`future_failure_class`: 1" in text
+        assert "unknown blocking classification" in text.lower()
+
 
 class TestTriageText:
     def test_shows_the_verdict_explanation_and_patch(self):

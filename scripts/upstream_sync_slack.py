@@ -22,6 +22,7 @@ import re
 import shlex
 import subprocess
 import sys
+from collections import Counter
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -312,6 +313,12 @@ def gate_report_text(failures: dict) -> str:
     unknown = failures.get("unknown") or []
     unreadable = failures.get("unreadable_runs") or []
     blocking = failures.get("blocking_failures") or []
+    blocking_by_class = failures.get("blocking_failures_by_class") or {}
+    if not blocking_by_class and blocking:
+        blocking_by_class = dict(
+            Counter(item.get("classification") or "<missing>" for item in blocking)
+        )
+    unknown_blocking = failures.get("unknown_blocking_classifications") or []
 
     lines = [
         "*Fork test gate*",
@@ -320,7 +327,17 @@ def gate_report_text(failures: dict) -> str:
         f"- common_path: {len(common)}",
         f"- post_only_path: {len(post_only)}",
         f"- pre_existing: {len(pre_existing)} (informational)",
+        f"- blocking_failures: {len(blocking)}",
     ]
+    if blocking_by_class:
+        lines.append("- blocking failures by class:")
+        for classification, count in sorted(blocking_by_class.items()):
+            lines.append(f"  - `{classification}`: {count}")
+    if unknown_blocking:
+        lines.append(
+            "- unknown blocking classification(s): "
+            + ", ".join(f"`{classification}`" for classification in unknown_blocking)
+        )
     for label, items in (("common_path", common), ("post_only_path", post_only)):
         if items:
             lines.append(f"- {label} failures:")

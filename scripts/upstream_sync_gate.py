@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+from collections import Counter
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +25,19 @@ SELECTION_MANIFEST_SCHEMA = "upstream-sync-test-selection/v1"
 ATTEMPT_SCHEMA = "upstream-sync-gate-attempt/v1"
 GATE_FAILURES_SCHEMA = "upstream-sync-gate-failures/v2"
 RECEIPT_CONTRACT = "v1"
+BLOCKING_CLASSIFICATIONS = frozenset(
+    {
+        "fork_regression",
+        "fork_compatibility_failure",
+        "upstream_red_admission_failure",
+        "merge_resolution_or_local_introduced",
+        "order_dependent_failure",
+    }
+)
+# The owner decision is still pending for upstream_red_admission_failure:
+# preserve the current blocking behavior until the repository owner decides.
+# In the 2026-08-26 rerun, five such nodes passed and one remained.
+INFORMATIONAL_CLASSIFICATIONS = frozenset({"pre_existing_failure"})
 _RECEIPT_FIELDS = {
     "manifest": "manifest_sha256",
     "legacy": "selection_sha256",
@@ -466,6 +480,19 @@ def _unknown_nodes(
     ]
 
 
+def _classification_without_isolation(
+    *, nodeid: str, collected: dict[str, set[str]], failed: dict[str, set[str]]
+) -> str:
+    """Return the classification that would precede the isolation probe."""
+    if nodeid in collected["baseline"]:
+        return "fork_regression"
+    if nodeid in collected["upstream_parent"]:
+        if nodeid in failed["upstream_parent"]:
+            return "upstream_red_admission_failure"
+        return "fork_compatibility_failure"
+    return "merge_resolution_or_local_introduced"
+
+
 def _empty_classification() -> dict[str, list[dict[str, str]]]:
     return {
         "common_path": [],
@@ -562,6 +589,9 @@ def classify_node_failures(
                 }
             )
             continue
+        classification_without_isolation = _classification_without_isolation(
+            nodeid=nodeid, collected=collected, failed=failed
+        )
         if nodeid in failed["baseline"]:
             if not path_presence[0]:
                 result["unknown"].append(
@@ -602,13 +632,14 @@ def classify_node_failures(
         else:
             classification = "merge_resolution_or_local_introduced"
             bucket = "post_only_path" if not path_presence[0] else "common_path"
-        result[bucket].append(
-            {
-                "path": path,
-                "nodeid": nodeid,
-                "classification": classification,
-            }
-        )
+        entry = {
+            "path": path,
+            "nodeid": nodeid,
+            "classification": classification,
+        }
+        if classification == "order_dependent_failure":
+            entry["classification_without_isolation"] = classification_without_isolation
+        result[bucket].append(entry)
 
     for key in ("common_path", "post_only_path", "pre_existing", "unknown"):
         result[key].sort(key=lambda item: (item["path"], item["nodeid"]))
@@ -632,6 +663,8 @@ def build_gate_failures_payload(
     """
     buckets = ("common_path", "post_only_path")
     blocking: dict[tuple[str, str], dict[str, Any]] = {}
+    blocking_by_class: Counter[str] = Counter()
+    unknown_blocking_classifications: set[str] = set()
     for bucket in buckets:
         entries = classification.get(bucket, [])
         if not isinstance(entries, list):
@@ -643,7 +676,20 @@ def build_gate_failures_payload(
             nodeid = item.get("nodeid")
             if not isinstance(path, str) or not path or not isinstance(nodeid, str) or not nodeid:
                 raise ValueError(f"classification bucket {bucket} contains an invalid failure")
-            blocking.setdefault((path, nodeid), dict(item))
+            item_classification = item.get("classification")
+            classification_label = (
+                item_classification
+                if isinstance(item_classification, str) and item_classification
+                else "<missing>"
+            )
+            if classification_label in INFORMATIONAL_CLASSIFICATIONS:
+                continue
+            if classification_label not in BLOCKING_CLASSIFICATIONS:
+                unknown_blocking_classifications.add(classification_label)
+            key = (path, nodeid)
+            if key not in blocking:
+                blocking[key] = dict(item)
+                blocking_by_class[classification_label] += 1
 
     payload: dict[str, Any] = {
         "schema_version": GATE_FAILURES_SCHEMA,
@@ -662,6 +708,8 @@ def build_gate_failures_payload(
         "blocking_failures": [
             blocking[key] for key in sorted(blocking)
         ],
+        "blocking_failures_by_class": dict(sorted(blocking_by_class.items())),
+        "unknown_blocking_classifications": sorted(unknown_blocking_classifications),
         "new_failures": sorted({item for item in legacy_failures if item}),
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
     }

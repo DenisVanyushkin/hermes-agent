@@ -521,6 +521,7 @@ def test_merged_failure_that_passes_in_merged_isolation_is_order_dependent():
             "path": "tests/test_common.py",
             "nodeid": nodeid,
             "classification": "order_dependent_failure",
+            "classification_without_isolation": "fork_compatibility_failure",
         }
     ]
 
@@ -545,6 +546,153 @@ def test_order_dependent_failure_is_blocking_without_human_decision():
     )
 
     assert payload["blocking_failures"] == [node]
+
+
+def test_order_dependent_failure_preserves_unshadowed_upstream_classification():
+    nodeid = "tests/test_common.py::test_order_dependent_upstream_red"
+    result = upstream_sync_gate.classify_node_failures(
+        baseline=_node_run(collected=set(), failed=set()),
+        upstream_parent=_node_run(collected={nodeid}, failed={nodeid}),
+        merged=_node_run(collected={nodeid}, failed={nodeid}),
+        merged_isolated=_node_run(collected={nodeid}, failed=set()),
+        manifest=_manifest(("tests/test_common.py", True, True)),
+    )
+
+    assert result["common_path"] == [
+        {
+            "path": "tests/test_common.py",
+            "nodeid": nodeid,
+            "classification": "order_dependent_failure",
+            "classification_without_isolation": "upstream_red_admission_failure",
+        }
+    ]
+
+
+def test_payload_blocks_exactly_the_explicit_blocking_class_set():
+    blocking_classes = sorted(upstream_sync_gate.BLOCKING_CLASSIFICATIONS)
+    entries = [
+        {
+            "path": f"tests/test_{index}.py",
+            "nodeid": f"tests/test_{index}.py::test_failure",
+            "classification": classification,
+        }
+        for index, classification in enumerate(blocking_classes)
+    ]
+    informational = {
+        "path": "tests/test_existing.py",
+        "nodeid": "tests/test_existing.py::test_failure",
+        "classification": "pre_existing_failure",
+    }
+
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification={
+            "common_path": entries,
+            "post_only_path": [],
+            "pre_existing": [informational],
+            "unknown": [],
+        },
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[],
+    )
+
+    assert payload["blocking_failures"] == entries
+    assert payload["blocking_failures_by_class"] == {
+        classification: 1 for classification in blocking_classes
+    }
+    assert informational not in payload["blocking_failures"]
+
+
+def test_removing_a_class_from_blocking_set_can_make_it_informational(monkeypatch):
+    node = {
+        "path": "tests/test_upstream.py",
+        "nodeid": "tests/test_upstream.py::test_red_admission",
+        "classification": "upstream_red_admission_failure",
+    }
+    monkeypatch.setattr(
+        upstream_sync_gate,
+        "BLOCKING_CLASSIFICATIONS",
+        frozenset({"order_dependent_failure"}),
+    )
+    monkeypatch.setattr(
+        upstream_sync_gate,
+        "INFORMATIONAL_CLASSIFICATIONS",
+        frozenset({"pre_existing_failure", "upstream_red_admission_failure"}),
+        raising=False,
+    )
+
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification={
+            "common_path": [node],
+            "post_only_path": [],
+            "pre_existing": [],
+            "unknown": [],
+        },
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[],
+    )
+
+    assert payload["blocking_failures"] == []
+    assert payload["blocking_failures_by_class"] == {}
+    assert payload["unknown_blocking_classifications"] == []
+
+
+def test_removed_class_without_informational_policy_remains_fail_closed(monkeypatch):
+    node = {
+        "path": "tests/test_future.py",
+        "nodeid": "tests/test_future.py::test_future_policy",
+        "classification": "upstream_red_admission_failure",
+    }
+    monkeypatch.setattr(
+        upstream_sync_gate,
+        "BLOCKING_CLASSIFICATIONS",
+        frozenset({"order_dependent_failure"}),
+    )
+
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification={
+            "common_path": [node],
+            "post_only_path": [],
+            "pre_existing": [],
+            "unknown": [],
+        },
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[],
+    )
+
+    assert payload["blocking_failures"] == [node]
+    assert payload["blocking_failures_by_class"] == {
+        "upstream_red_admission_failure": 1
+    }
+    assert payload["unknown_blocking_classifications"] == [
+        "upstream_red_admission_failure"
+    ]
+
+
+def test_unknown_classification_is_blocking_and_explicitly_reported():
+    unknown = {
+        "path": "tests/test_future.py",
+        "nodeid": "tests/test_future.py::test_future_failure",
+        "classification": "future_failure_class",
+    }
+
+    payload = upstream_sync_gate.build_gate_failures_payload(
+        classification={
+            "common_path": [],
+            "post_only_path": [unknown],
+            "pre_existing": [],
+            "unknown": [],
+        },
+        merge_sha="a" * 40,
+        before="b" * 40,
+        legacy_failures=[],
+    )
+
+    assert payload["blocking_failures"] == [unknown]
+    assert payload["blocking_failures_by_class"] == {"future_failure_class": 1}
+    assert payload["unknown_blocking_classifications"] == ["future_failure_class"]
 
 
 def test_failure_that_remains_in_merged_isolation_is_not_order_dependent():
