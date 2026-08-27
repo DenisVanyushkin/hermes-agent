@@ -890,19 +890,26 @@ hold exclusive execution ownership»).
 
 **DoD**
 
-- [ ] RED-тесты падают на `dd901dfefc` по заявленным причинам и проходят после
+- [x] RED-тесты падают на `dd901dfefc` по заявленным причинам и проходят после
       правки; вывод обеих фаз сохранён.
 - [ ] Для каждой страницы bounded proof есть readable manifest, protected raw
       HTML и screenshot, точные requested/final URL, SHA-256 и page identity;
       manifest однозначно связывается с `run_id/query_id/cell_id/family`.
-- [ ] Для каждой страницы выполняется равенство:
+- [x] Для каждой страницы выполняется равенство:
       `DOM IDs = parsed-before-filter IDs ∪ excluded-by-reason IDs ∪ unexplained IDs`;
-      ни один DOM ID не исчезает между счётчиками молча.
-- [ ] Ошибка сохранения обязательного diagnostic artifact переводит attempt в
+      ни один DOM ID не исчезает между счётчиками молча. Инвариант реализован и
+      проверен на фикстурах коммитом `6f9c1852b9`; множество DOM ID читается
+      независимым селектором, а не парсером. Проверено двумя мутациями: сужение
+      селектора до parser-образного и обнуление `unexplained` — каждая роняет
+      тест сверки. На живых страницах равенство проверяется в C.1.
+- [x] Ошибка сохранения обязательного diagnostic artifact переводит attempt в
       critical degradation; `observed`/`qualified_results_found` из такого
       attempt получить нельзя.
 - [ ] Artifact scan не находит cookies, Slack credentials или auth headers в
-      summary; raw HTML имеет mode `0600` и не попадает в Git.
+      summary; raw HTML имеет mode `0600` и не попадает в Git. **Половина
+      закрыта:** тест требует mode `0600` на артефактах страницы и отсутствия
+      `html_excerpt` в summary. Сам скан на cookies и учётные данные идёт по
+      артефактам живого прогона и остаётся до C.1.
 
 ### A2. Передавать географию в LinkedIn структурно, а не только как keyword
 
