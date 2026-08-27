@@ -4,6 +4,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
+import random
 from pathlib import Path
 import socket
 import signal
@@ -18,6 +19,7 @@ import pytest
 from job_intel import browser_worker
 from job_intel.product_search.acquisition_probe import (
     ProbeQuery,
+    LinkedInExecutionPlan,
     RuntimeCapabilityResult,
     SourceIsolation,
     build_isolated_probe_environment,
@@ -28,6 +30,7 @@ from job_intel.product_search.acquisition_probe import (
 from job_intel.browser_sourcing import (
     AcquisitionMetrics,
     BrowserAcquisitionConfig,
+    BrowserFetchResult,
     BrowserNativeUnavailable,
     BrowserSourceClient,
     browser_native_available,
@@ -1207,3 +1210,238 @@ def test_linkedin_without_confirmed_geography_is_named_block_not_keywords_fallba
 
     with pytest.raises(BrowserNativeUnavailable, match="blocked_unsupported_geography"):
         client.search_linkedin("VP Product")
+
+
+def test_gate_a_page_plan_is_deterministic_without_random_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    plan = LinkedInExecutionPlan(page_offsets=(0, 25, 50), max_scroll_checkpoints=3)
+    selection_calls: list[str] = []
+
+    monkeypatch.setattr(random, "random", lambda: selection_calls.append("random") or 0.0)
+    monkeypatch.setattr(random, "shuffle", lambda _items: selection_calls.append("shuffle"))
+    monkeypatch.setattr(random, "choice", lambda _items: selection_calls.append("choice"))
+
+    assert client._linkedin_page_plan(3, execution_plan=plan) == [0, 25, 50]
+    assert client._linkedin_page_plan(3, execution_plan=plan) == [0, 25, 50]
+    assert selection_calls == []
+
+
+def test_gate_a_search_plan_does_not_traverse_random_detail_or_noise(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    plan = LinkedInExecutionPlan(page_offsets=(0,), max_scroll_checkpoints=1)
+    selection_calls: list[str] = []
+    monkeypatch.setattr(random, "random", lambda: selection_calls.append("random") or 0.0)
+    monkeypatch.setattr(random, "shuffle", lambda _items: selection_calls.append("shuffle"))
+    monkeypatch.setattr(random, "choice", lambda _items: selection_calls.append("choice"))
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda: None)
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        client,
+        "_maybe_open_detail_vacancy",
+        lambda **_kwargs: pytest.fail("Gate A must not traverse detail pages"),
+    )
+    monkeypatch.setattr(
+        client,
+        "_maybe_open_noise_page",
+        lambda **_kwargs: pytest.fail("Gate A must not traverse noise pages"),
+    )
+    monkeypatch.setattr(
+        client,
+        "fetch_page",
+        lambda *_args, **_kwargs: BrowserFetchResult(
+            requested_url="https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+            final_url="https://www.linkedin.com/jobs/search/",
+            html="<html><body>results</body></html>",
+            html_sha256="a" * 64,
+            page_offset=0,
+            planned_scroll_steps=1,
+            completed_scroll_steps=1,
+            scroll_trace=(),
+            dom_unique_job_ids=frozenset(),
+            artifact_ref=None,
+            scroll_checkpoints=(),
+            scroll_stop_reason="max_steps",
+        ),
+    )
+
+    client.search_linkedin(
+        "VP Product",
+        geography_location="United Kingdom",
+        execution_plan=plan,
+    )
+
+    assert selection_calls == []
+
+
+def test_gate_a_scroll_records_checkpoint_growth_and_saturation() -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0))
+    plan = LinkedInExecutionPlan(
+        page_offsets=(0,),
+        max_scroll_checkpoints=3,
+        saturation_checkpoints=2,
+        settle_timeout_ms=0,
+    )
+
+    class _Results:
+        def __init__(self, page: object) -> None:
+            self.page = page
+
+        def evaluate(self, _script: str) -> bool:
+            self.page.scroll_calls += 1  # type: ignore[attr-defined]
+            return True
+
+    class _Jobs:
+        def __init__(self, page: object) -> None:
+            self.page = page
+
+        def evaluate_all(self, _script: str) -> list[str]:
+            ids = {"1"}
+            if self.page.scroll_calls >= 1:  # type: ignore[attr-defined]
+                ids.add("2")
+            return [f"https://www.linkedin.com/jobs/view/{job_id}" for job_id in ids]
+
+    class _Page:
+        url = "https://www.linkedin.com/jobs/search/"
+        scroll_calls = 0
+        mouse = types.SimpleNamespace(wheel=lambda *_args: None)
+
+        def goto(self, _url: str, **_kwargs: object) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html><body>results</body></html>"
+
+        def locator(self, selector: str):
+            if selector == plan.results_selector:
+                return _Results(self)
+            return _Jobs(self)
+
+        def close(self) -> None:
+            return None
+
+    page = _Page()
+    client._context = types.SimpleNamespace(pages=[], new_page=lambda: page)  # type: ignore[attr-defined]
+    result = client.fetch_page(
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+        page_offset=0,
+        execution_plan=plan,
+    )
+
+    assert result.planned_scroll_steps == 3
+    assert result.completed_scroll_steps == 3
+    assert result.scroll_stop_reason == "saturation"
+    assert [item["after_unique_dom_id_count"] for item in result.scroll_checkpoints] == [2, 2, 2]
+    assert result.scroll_checkpoints[0]["new_unique_dom_ids"] == ["2"]
+    assert result.scroll_checkpoints[1]["new_unique_dom_ids"] == []
+
+
+def test_gate_a_incomplete_scroll_is_critical_degradation() -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0))
+    plan = LinkedInExecutionPlan(page_offsets=(0,), max_scroll_checkpoints=1, settle_timeout_ms=0)
+
+    class _Page:
+        url = "https://www.linkedin.com/jobs/search/"
+
+        def goto(self, _url: str, **_kwargs: object) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html></html>"
+
+        def locator(self, selector: str):
+            if selector == plan.results_selector:
+                return types.SimpleNamespace(
+                    evaluate=lambda _script: False
+                )
+            return types.SimpleNamespace(evaluate_all=lambda _script: [])
+
+        def close(self) -> None:
+            return None
+
+    page = _Page()
+    client._context = types.SimpleNamespace(pages=[], new_page=lambda: page)  # type: ignore[attr-defined]
+    with pytest.raises(BrowserNativeUnavailable, match="did not execute scroll"):
+        client.fetch_page(
+            "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+            page_offset=0,
+            execution_plan=plan,
+        )
+
+    health = client.session_health_snapshot()
+    assert health["critical_degradation"] is True
+    assert health["status"] == "blocked"
+
+
+def test_gate_a_incomplete_page_plan_is_critical_and_not_a_clean_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+    )
+    plan = LinkedInExecutionPlan(page_offsets=(0, 25, 50), max_scroll_checkpoints=1)
+    fetched_offsets: list[int] = []
+    critical_reasons: list[str] = []
+    original_mark_critical = client._mark_critical_degradation
+
+    def record_critical(reason: str) -> None:
+        critical_reasons.append(reason)
+        original_mark_critical(reason)
+
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda: None)
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(client, "_mark_critical_degradation", record_critical)
+
+    def fake_fetch(
+        _url: str,
+        *,
+        page_offset: int,
+        **_kwargs: object,
+    ) -> BrowserFetchResult:
+        fetched_offsets.append(page_offset)
+        client._health.login_walls = 1
+        return BrowserFetchResult(
+            requested_url=_url,
+            final_url=_url,
+            html=(
+                '<html><head><script type="application/ld+json">'
+                '{"@context":"https://schema.org","@type":"JobPosting",'
+                '"title":"VP Product","url":"https://www.linkedin.com/jobs/view/123",'
+                '"hiringOrganization":{"name":"Spark"}}'
+                '</script></head><body>'
+                '<a href="/jobs/view/123">VP Product</a></body></html>'
+            ),
+            html_sha256="a" * 64,
+            page_offset=page_offset,
+            planned_scroll_steps=1,
+            completed_scroll_steps=1,
+            scroll_trace=(),
+            dom_unique_job_ids=frozenset({"123"}),
+            artifact_ref=None,
+            scroll_checkpoints=(),
+            scroll_stop_reason="max_steps",
+        )
+
+    monkeypatch.setattr(client, "fetch_page", fake_fetch)
+
+    client.search_linkedin(
+        "VP Product",
+        geography_location="United Kingdom",
+        execution_plan=plan,
+    )
+
+    trace = client._last_search_trace
+    assert fetched_offsets == [0]
+    assert trace["planned_page_offsets"] == [0, 25, 50]
+    assert trace["completed_page_offsets"] == [0]
+    assert trace["stop_reason"] == "critical_degradation"
+    assert "planned page offsets were not all completed" in critical_reasons
+    assert trace["zero_result_reason"] != "searched_no_qualified_results"
+    health = client.session_health_snapshot()
+    assert health["critical_degradation"] is True
+    assert health["status"] == "blocked"

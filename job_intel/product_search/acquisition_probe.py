@@ -108,6 +108,34 @@ class RuntimeCapabilityResult(BaseModel):
         return self
 
 
+class LinkedInExecutionPlan(BaseModel):
+    """Versioned, reproducible observation plan for the Gate A LinkedIn path."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal["1.0"] = "1.0"
+    page_offsets: tuple[int, ...] = (0, 25)
+    max_scroll_checkpoints: int = Field(default=2, ge=1, le=20)
+    settle_timeout_ms: int = Field(default=650, ge=0, le=30_000)
+    saturation_checkpoints: int = Field(default=2, ge=1, le=20)
+    saturation_rule: Literal["two_consecutive_checkpoint_no_new_ids"] = (
+        "two_consecutive_checkpoint_no_new_ids"
+    )
+    results_selector: str = "div.jobs-search-results-list"
+
+    @model_validator(mode="after")
+    def _validate_offsets(self) -> "LinkedInExecutionPlan":
+        if not self.page_offsets:
+            raise ValueError("execution plan must contain at least one page offset")
+        if any(offset < 0 for offset in self.page_offsets):
+            raise ValueError("execution plan page offsets must be non-negative")
+        if tuple(sorted(set(self.page_offsets))) != self.page_offsets:
+            raise ValueError("execution plan page offsets must be sorted and unique")
+        if not self.results_selector.strip():
+            raise ValueError("execution plan results selector is required")
+        return self
+
+
 GeographyStatus = Literal["verified", "unverified", "unsupported", "blocked"]
 
 
@@ -202,6 +230,7 @@ class ProbeQuery(BaseModel):
     keywords: str | None = None
     primary_geography: str | None = None
     geography_target: LinkedInGeographyTarget | None = None
+    execution_plan: LinkedInExecutionPlan | None = None
 
 
 def build_isolated_probe_environment(
@@ -314,6 +343,7 @@ def expand_queries(
     *,
     role_terms: tuple[str, ...],
     geography_mapping: Mapping[str, LinkedInGeographyTarget] | None = None,
+    execution_plan: LinkedInExecutionPlan | None = None,
 ) -> tuple[ProbeQuery, ...]:
     expanded: list[ProbeQuery] = []
     mapping = geography_mapping or load_linkedin_geography_mapping()
@@ -351,6 +381,7 @@ def expand_queries(
                                 cell.primary_geography if family == "linkedin" else None
                             ),
                             geography_target=target,
+                            execution_plan=execution_plan if family == "linkedin" else None,
                         )
                     )
     return tuple(sorted(expanded, key=lambda item: item.query_id))
@@ -815,6 +846,11 @@ def resolve_public_sources() -> dict[str, Callable[[Any], Iterable[Any]]]:
                 request.keywords or request.query,
                 location=target.location if target is not None else None,
                 geo_id=target.geo_id if target is not None else None,
+                execution_plan=(
+                    request.execution_plan.model_dump(mode="json")
+                    if request.execution_plan is not None
+                    else None
+                ),
                 max_pages=2,
             )
         return fetch_linkedin_vacancies(str(request), max_pages=2)

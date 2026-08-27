@@ -54,7 +54,7 @@ from html import unescape
 from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import urlopen
 
@@ -209,6 +209,9 @@ class BrowserFetchResult:
     scroll_trace: tuple[dict[str, Any], ...]
     dom_unique_job_ids: frozenset[str]
     artifact_ref: str | None
+    scroll_checkpoints: tuple[dict[str, Any], ...] = ()
+    scroll_stop_reason: str = "legacy"
+    scroll_failure_reason: str | None = None
 
 
 def _linkedin_job_id_from_url(url: str) -> str | None:
@@ -1148,6 +1151,80 @@ class BrowserSourceClient:
             if job_id
         )
 
+    def _coerce_linkedin_execution_plan(
+        self, plan: Mapping[str, Any] | Any | None
+    ) -> Any | None:
+        if plan is None:
+            return None
+        from .product_search.acquisition_probe import LinkedInExecutionPlan
+
+        if isinstance(plan, LinkedInExecutionPlan):
+            return plan
+        return LinkedInExecutionPlan.model_validate(plan)
+
+    def _execute_linkedin_scroll_plan(
+        self, *, page: Any, plan: Any
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str | None]:
+        checkpoints: list[dict[str, Any]] = []
+        scroll_trace: list[dict[str, Any]] = []
+        consecutive_without_new = 0
+        mode = "results_container"
+        failure_reason: str | None = None
+        try:
+            locator = page.locator(plan.results_selector)
+            count = locator.count() if callable(getattr(locator, "count", None)) else 1
+            if count < 1:
+                mode = "page_fallback"
+                failure_reason = "results_container_unavailable"
+                self._health.status = "degraded"
+                container = None
+            else:
+                container = getattr(locator, "first", locator)
+        except Exception as exc:  # noqa: BLE001 - fallback is explicitly traced
+            mode = "page_fallback"
+            failure_reason = f"results_container_unavailable: {exc}"
+            self._health.status = "degraded"
+            container = None
+
+        for step in range(1, plan.max_scroll_checkpoints + 1):
+            before_ids = self._linkedin_dom_unique_job_ids(page)
+            try:
+                if container is None:
+                    page.mouse.wheel(0, 1800)
+                else:
+                    moved = container.evaluate(
+                        "(element) => { element.scrollTop += element.clientHeight; return true; }"
+                    )
+                    if moved is False:
+                        raise RuntimeError("results container did not execute scroll")
+                page.wait_for_timeout(plan.settle_timeout_ms)
+                after_ids = self._linkedin_dom_unique_job_ids(page)
+            except Exception as exc:  # noqa: BLE001 - incomplete plan is critical
+                reason = f"scroll plan failed at checkpoint {step}: {exc}"
+                self._mark_critical_degradation(reason)
+                raise BrowserNativeUnavailable(reason) from exc
+
+            new_ids = sorted(after_ids - before_ids)
+            consecutive_without_new = (
+                consecutive_without_new + 1 if not new_ids else 0
+            )
+            checkpoint = {
+                "step": step,
+                "mode": mode,
+                "before_unique_dom_ids": sorted(before_ids),
+                "after_unique_dom_ids": sorted(after_ids),
+                "before_unique_dom_id_count": len(before_ids),
+                "after_unique_dom_id_count": len(after_ids),
+                "new_unique_dom_ids": new_ids,
+                "completed": True,
+            }
+            checkpoints.append(checkpoint)
+            scroll_trace.append(checkpoint)
+            if consecutive_without_new >= plan.saturation_checkpoints:
+                return scroll_trace, checkpoints, "saturation", failure_reason
+
+        return scroll_trace, checkpoints, "max_steps", failure_reason
+
     def fetch_page(
         self,
         url: str,
@@ -1155,6 +1232,7 @@ class BrowserSourceClient:
         scrolls: int | None = None,
         page_offset: int = 0,
         capture_label: str | None = None,
+        execution_plan: Mapping[str, Any] | Any | None = None,
     ) -> BrowserFetchResult:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
@@ -1162,11 +1240,15 @@ class BrowserSourceClient:
         start = time.perf_counter()
         source_key = (self.config.source_name or "").strip().lower()
         fetch_label = capture_label or "fetch"
+        plan = self._coerce_linkedin_execution_plan(execution_plan)
 
         def _attempt_fetch() -> BrowserFetchResult:
             page = None
             reuse_existing = False
             scroll_trace: list[dict[str, Any]] = []
+            scroll_checkpoints: list[dict[str, Any]] = []
+            scroll_stop_reason = "legacy"
+            scroll_failure_reason: str | None = None
             try:
                 if source_key == "linkedin":
                     # For LinkedIn search pages we prefer a fresh tab. Reusing the feed tab sometimes
@@ -1204,11 +1286,19 @@ class BrowserSourceClient:
                     _do_goto()
                 self._write_attach_diagnostics(label=f"{fetch_label}-goto-done", extra={"requested_url": url, "reused_page": reuse_existing})
                 page.wait_for_timeout(self.config.scroll_pause_ms)
-                self._humanize_page(page, url=url)
-                for _ in range(scroll_count):
-                    page.mouse.wheel(0, 1800)
-                    page.wait_for_timeout(self.config.scroll_pause_ms)
-                    scroll_trace.append({"step": len(scroll_trace) + 1, "completed": True})
+                self._humanize_page(page, url=url, deterministic_measurement=plan is not None)
+                if plan is not None and source_key == "linkedin":
+                    (
+                        scroll_trace,
+                        scroll_checkpoints,
+                        scroll_stop_reason,
+                        scroll_failure_reason,
+                    ) = self._execute_linkedin_scroll_plan(page=page, plan=plan)
+                else:
+                    for _ in range(scroll_count):
+                        page.mouse.wheel(0, 1800)
+                        page.wait_for_timeout(self.config.scroll_pause_ms)
+                        scroll_trace.append({"step": len(scroll_trace) + 1, "completed": True})
                 html = page.content()
                 self._write_attach_diagnostics(label=f"{fetch_label}-content-read", extra={"requested_url": url, "html_length": len(html), "reused_page": reuse_existing})
                 final_url = str(getattr(page, "url", "") or url)
@@ -1224,7 +1314,9 @@ class BrowserSourceClient:
                                 "requested_url": url,
                                 "final_url": final_url,
                                 "page_offset": page_offset,
-                                "planned_scroll_steps": scroll_count,
+                                "planned_scroll_steps": (
+                                    plan.max_scroll_checkpoints if plan is not None else scroll_count
+                                ),
                                 "completed_scroll_steps": len(scroll_trace),
                                 "reused_page": reuse_existing,
                             },
@@ -1243,11 +1335,16 @@ class BrowserSourceClient:
                     html=html,
                     html_sha256=hashlib.sha256(html.encode("utf-8")).hexdigest(),
                     page_offset=page_offset,
-                    planned_scroll_steps=scroll_count,
+                    planned_scroll_steps=(
+                        plan.max_scroll_checkpoints if plan is not None else scroll_count
+                    ),
                     completed_scroll_steps=len(scroll_trace),
                     scroll_trace=tuple(scroll_trace),
                     dom_unique_job_ids=dom_ids,
                     artifact_ref=artifact_ref,
+                    scroll_checkpoints=tuple(scroll_checkpoints),
+                    scroll_stop_reason=scroll_stop_reason,
+                    scroll_failure_reason=scroll_failure_reason,
                 )
             finally:
                 if page is not None and not reuse_existing:
@@ -1259,6 +1356,8 @@ class BrowserSourceClient:
         except BrowserNativeUnavailable:
             raise
         except Exception as exc:
+            if plan is not None:
+                self._mark_critical_degradation(f"page plan failed: {exc}")
             page_obj = locals().get("page")
             html_obj = locals().get("html")
             self._write_browser_failure_diagnostics(
@@ -1291,11 +1390,16 @@ class BrowserSourceClient:
         delay = random.uniform(min_delay, max_delay) / 1000.0
         time.sleep(delay)
 
-    def _humanize_page(self, page: Any, *, url: str) -> None:
+    def _humanize_page(
+        self, page: Any, *, url: str, deterministic_measurement: bool = False
+    ) -> None:
         source_key = (self.config.source_name or "").strip().lower()
         lowered_url = url.lower()
         try:
             if source_key == "linkedin" and "linkedin.com/jobs" in lowered_url:
+                if deterministic_measurement:
+                    page.wait_for_timeout(random.randint(700, 2400))
+                    return
                 if random.random() < 0.75:
                     page.wait_for_timeout(random.randint(700, 2400))
                 if random.random() < 0.50:
@@ -1365,7 +1469,9 @@ class BrowserSourceClient:
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
 
-    def _linkedin_page_plan(self, max_pages: int) -> list[int]:
+    def _linkedin_page_plan(self, max_pages: int, *, execution_plan: Any | None = None) -> list[int]:
+        if execution_plan is not None:
+            return list(execution_plan.page_offsets)
         allowed_pages = max(1, min(max_pages, self.config.max_linkedin_pages))
         plan = [0]
         if allowed_pages > 1 and random.random() < self.config.linkedin_followup_page_probability:
@@ -1384,6 +1490,7 @@ class BrowserSourceClient:
         cell_id: str | None = None,
         geography_location: str | None = None,
         geography_geo_id: str | None = None,
+        execution_plan: Mapping[str, Any] | Any | None = None,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -1394,6 +1501,7 @@ class BrowserSourceClient:
             location=geography_location,
             geo_id=geography_geo_id,
         )
+        plan = self._coerce_linkedin_execution_plan(execution_plan)
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
         trace: dict[str, Any] = {
@@ -1413,11 +1521,26 @@ class BrowserSourceClient:
             "anti_bot_events": 0,
             "pages": [],
             "zero_result_reason": "",
+            "planned_page_offsets": [],
+            "completed_page_offsets": [],
+            "scroll_checkpoints": [],
+            "stop_reason": "",
+            "failure_reason": None,
+            "execution_plan_version": plan.version if plan is not None else None,
         }
         started = time.perf_counter()
-        self._validate_linkedin_auth()
+        try:
+            self._validate_linkedin_auth()
+        except Exception as exc:
+            if plan is not None:
+                self._mark_critical_degradation(f"linkedin authentication failed: {exc}")
+                trace["failure_reason"] = str(exc)
+                trace["stop_reason"] = "critical_degradation"
+                self._last_search_trace = trace
+            raise
         trace["login_wall_check_ms"] = int(round((time.perf_counter() - started) * 1000))
-        page_plan = self._linkedin_page_plan(max_pages)
+        page_plan = self._linkedin_page_plan(max_pages, execution_plan=plan)
+        trace["planned_page_offsets"] = list(page_plan)
         for page_index in page_plan:
             self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
             page_url = (
@@ -1425,15 +1548,33 @@ class BrowserSourceClient:
                     keywords=query,
                     location=geography_location,
                     geo_id=geography_geo_id,
-                    start=page_index * 25,
+                    start=page_index if plan is not None else page_index * 25,
                 )
                 if page_index
                 else url
             )
             started = time.perf_counter()
             capture_label = f"{run_id or 'run-unknown'}-{query_id or 'query-unknown'}-cell-{cell_id or 'unknown'}-page-{page_index}"
-            fetched = self.fetch_html(page_url, capture_label=capture_label)
-            page_result = getattr(self, "_last_fetch_result", None)
+            try:
+                if plan is not None:
+                    page_result = self.fetch_page(
+                        page_url,
+                        page_offset=page_index,
+                        capture_label=capture_label,
+                        execution_plan=plan,
+                    )
+                    fetched = page_result.html
+                    self._last_fetch_result = page_result
+                else:
+                    fetched = self.fetch_html(page_url, capture_label=capture_label)
+                    page_result = getattr(self, "_last_fetch_result", None)
+            except Exception as exc:
+                if plan is not None:
+                    self._mark_critical_degradation(f"page offset {page_index} failed: {exc}")
+                    trace["failure_reason"] = str(exc)
+                    trace["stop_reason"] = "critical_degradation"
+                    self._last_search_trace = trace
+                raise
             if not isinstance(page_result, BrowserFetchResult) or page_result.requested_url != page_url or page_result.html != fetched:
                 page_result = BrowserFetchResult(
                     requested_url=page_url,
@@ -1447,6 +1588,11 @@ class BrowserSourceClient:
                     dom_unique_job_ids=frozenset(),
                     artifact_ref=None,
                 )
+            trace["completed_page_offsets"].append(page_index)
+            trace["scroll_checkpoints"].extend(page_result.scroll_checkpoints)
+            if page_result.scroll_failure_reason and plan is not None:
+                trace["failure_reason"] = page_result.scroll_failure_reason
+            trace["stop_reason"] = page_result.scroll_stop_reason
             html = page_result.html
             trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
             started = time.perf_counter()
@@ -1500,14 +1646,32 @@ class BrowserSourceClient:
             trace["vacancies_extracted"] += len(page_vacancies)
             vacancies.extend(page_vacancies)
             started = time.perf_counter()
-            detail_rows = self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
+            detail_rows = (
+                []
+                if plan is not None
+                else self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
+            )
             vacancies.extend(detail_rows)
             if self._health.login_walls or self._health.auth_redirects:
+                if plan is not None:
+                    reason = "login_wall_or_auth_redirect"
+                    self._mark_critical_degradation(reason)
+                    trace["failure_reason"] = reason
+                    trace["stop_reason"] = "critical_degradation"
                 trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
                 break
-            noise_rows = self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
+            noise_rows = (
+                []
+                if plan is not None
+                else self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
+            )
             vacancies.extend(noise_rows)
             trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
+        if plan is not None and trace["completed_page_offsets"] != trace["planned_page_offsets"]:
+            reason = "planned page offsets were not all completed"
+            self._mark_critical_degradation(reason)
+            trace["failure_reason"] = trace["failure_reason"] or reason
+            trace["stop_reason"] = "critical_degradation"
         started = time.perf_counter()
         deduped = _dedupe_vacancies(vacancies)
         trace["filter_ms"] = int(round((time.perf_counter() - started) * 1000))

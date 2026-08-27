@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -502,6 +502,7 @@ def fetch_linkedin_vacancies(
     *,
     location: str | None = None,
     geo_id: str | None = None,
+    execution_plan: Mapping[str, Any] | None = None,
     max_pages: int = 1,
 ) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
@@ -516,6 +517,13 @@ def fetch_linkedin_vacancies(
             worker_args.extend(["--location", location])
         if geo_id:
             worker_args.extend(["--geo-id", geo_id])
+        if execution_plan is not None:
+            worker_args.extend(
+                [
+                    "--execution-plan-json",
+                    json.dumps(execution_plan, sort_keys=True, separators=(",", ":")),
+                ]
+            )
         payload = _browser_worker_payload(*worker_args)
         fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
         fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]

@@ -323,6 +323,7 @@ def _run_linkedin(
     max_pages: int,
     location: str | None = None,
     geo_id: str | None = None,
+    execution_plan: dict[str, Any] | None = None,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -332,6 +333,7 @@ def _run_linkedin(
             max_pages=max_pages,
             geography_location=location,
             geography_geo_id=geo_id,
+            execution_plan=execution_plan,
         )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
@@ -363,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("max_pages", type=int)
     linkedin.add_argument("--location")
     linkedin.add_argument("--geo-id", dest="geo_id")
+    linkedin.add_argument("--execution-plan-json")
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -383,11 +386,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         if args.cmd == "linkedin":
+            execution_plan = (
+                json.loads(args.execution_plan_json)
+                if args.execution_plan_json
+                else None
+            )
             vacancies, session_health, search_trace = _run_linkedin(
                 args.query,
                 max_pages=args.max_pages,
                 location=args.location,
                 geo_id=args.geo_id,
+                execution_plan=execution_plan,
             )
         else:
             vacancies, session_health, search_trace = _probe(args.source)

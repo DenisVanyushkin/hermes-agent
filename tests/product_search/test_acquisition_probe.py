@@ -12,6 +12,7 @@ from job_intel.product_search.acquisition_probe import (
     build_snapshot_queries,
     expand_queries,
     ProbeQuery,
+    LinkedInExecutionPlan,
     resolve_public_sources,
     run_probe,
     validate_probe_output_path,
@@ -567,3 +568,27 @@ def test_unverified_linkedin_target_blocks_before_market_dispatch(tmp_path: Path
     assert result.source_states == {"linkedin": "blocked_unsupported_geography"}
     assert calls == []
     assert result.cost["market_query_dispatch_count"] == 0
+
+
+def test_gate_a_query_carries_the_versioned_execution_plan() -> None:
+    from job_intel.product_search.acquisition_probe import load_linkedin_geography_mapping
+
+    contract = load_search_contract(ROOT / "config/product_search/search_contract.v1.yaml")
+    mapping = {
+        "uk": load_linkedin_geography_mapping(
+            ROOT / "config/product_search/linkedin_geography.v1.yaml"
+        )["uk"]
+    }
+    plan = LinkedInExecutionPlan(page_offsets=(0, 25), max_scroll_checkpoints=2)
+
+    queries = expand_queries(
+        contract,
+        role_terms=("VP Product",),
+        geography_mapping=mapping,
+        execution_plan=plan,
+    )
+
+    query = next(
+        item for item in queries if item.cell_id == "uk" and item.source_family == "linkedin"
+    )
+    assert query.execution_plan == plan
