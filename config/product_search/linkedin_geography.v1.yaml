@@ -1,0 +1,124 @@
+version: "1.0"
+product_authority_id: PS-SOT-2026-08-10-v1
+search_contract_version: "1.0.0"
+cells:
+  australia:
+    location: Australia
+    geoId: null
+    verified_at: null
+    status: unverified
+  bahrain:
+    location: Bahrain
+    geoId: null
+    verified_at: null
+    status: unverified
+  benelux:
+    location: Benelux
+    geoId: null
+    verified_at: null
+    status: unverified
+  canada:
+    location: Canada
+    geoId: null
+    verified_at: null
+    status: unverified
+  cee:
+    location: Central and Eastern Europe
+    geoId: null
+    verified_at: null
+    status: unverified
+  dach:
+    location: DACH
+    geoId: null
+    verified_at: null
+    status: unverified
+  east_asia_other:
+    location: East Asia excluding Japan and South Korea
+    geoId: null
+    verified_at: null
+    status: unverified
+  india:
+    location: India
+    geoId: null
+    verified_at: null
+    status: unverified
+  japan:
+    location: Japan
+    geoId: null
+    status: unverified
+  kazakhstan:
+    location: Kazakhstan
+    geoId: null
+    status: unverified
+  kuwait:
+    location: Kuwait
+    geoId: null
+    status: unverified
+  kyrgyzstan:
+    location: Kyrgyzstan
+    geoId: null
+    status: unverified
+  latin_america:
+    location: Latin America
+    geoId: null
+    status: unverified
+  new_zealand:
+    location: New Zealand
+    geoId: null
+    status: unverified
+  nordics:
+    location: Nordics
+    geoId: null
+    status: unverified
+  oman:
+    location: Oman
+    geoId: null
+    status: unverified
+  qatar:
+    location: Qatar
+    geoId: null
+    status: unverified
+  remaining_europe:
+    location: Remaining Europe
+    geoId: null
+    status: unverified
+  saudi_arabia:
+    location: Saudi Arabia
+    geoId: null
+    status: unverified
+  singapore:
+    location: Singapore
+    geoId: null
+    status: unverified
+  south_korea:
+    location: South Korea
+    geoId: null
+    status: unverified
+  southeast_asia_other:
+    location: Southeast Asia excluding Singapore
+    geoId: null
+    status: unverified
+  tajikistan:
+    location: Tajikistan
+    geoId: null
+    status: unverified
+  turkmenistan:
+    location: Turkmenistan
+    geoId: null
+    status: unverified
+  uk:
+    location: United Kingdom
+    geoId: null
+    status: unverified
+  united_arab_emirates:
+    location: United Arab Emirates
+    geoId: null
+    status: unverified
+  us_feasibility:
+    location: United States with remote eligibility or sponsorship evidence
+    geoId: null
+    status: unverified
+  uzbekistan:
+    location: Uzbekistan
+    geoId: null
+    status: unverified

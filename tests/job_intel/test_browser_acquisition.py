@@ -416,6 +416,7 @@ def test_linkedin_trace_reconciles_dom_ids_independently_from_card_parser(monkey
         run_id="run-1",
         query_id="query-2",
         cell_id="uk",
+        geography_location="United Kingdom",
     )
     page_trace = client.last_search_trace_snapshot()["pages"][0]
 
@@ -461,7 +462,7 @@ def test_linkedin_search_fails_closed_when_diagnostic_artifact_is_unavailable(mo
 
     client._context = types.SimpleNamespace(new_page=lambda: _Page())  # type: ignore[attr-defined]
     with pytest.raises(BrowserNativeUnavailable, match="diagnostic"):
-        client.search_linkedin("product")
+        client.search_linkedin("product", geography_location="United Kingdom")
     health = client.session_health_snapshot()
     assert health["critical_degradation"] is True
     assert health["status"] == "blocked"
@@ -1086,12 +1087,14 @@ def test_search_linkedin_stops_when_login_wall_appears(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "fetch_html", fake_fetch)
 
-    vacancies = client.search_linkedin("VP Product", max_pages=5)
+    vacancies = client.search_linkedin(
+        "VP Product", max_pages=5, geography_location="United Kingdom"
+    )
 
     assert len(vacancies) == 1
     assert page_urls[0] == "https://www.linkedin.com/feed/"
-    assert page_urls[1] == "https://www.linkedin.com/jobs/search/?keywords=VP+Product"
-    assert page_urls[-1] == "https://www.linkedin.com/jobs/search/?keywords=VP+Product&start=25"
+    assert page_urls[1] == "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom"
+    assert page_urls[-1] == "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom&start=25"
     health = client.session_health_snapshot()
     assert health["pages_fetched"] >= 2
     assert health["login_walls"] == 1
@@ -1150,7 +1153,9 @@ def test_search_linkedin_occasionally_opens_a_detail_page(monkeypatch) -> None:
     monkeypatch.setattr(client, "fetch_html", fake_fetch)
     monkeypatch.setattr("job_intel.browser_sourcing.random.choice", lambda items: items[1])
 
-    vacancies = client.search_linkedin("VP Product", max_pages=1)
+    vacancies = client.search_linkedin(
+        "VP Product", max_pages=1, geography_location="United Kingdom"
+    )
 
     assert any(url.endswith("/456") for url in page_urls)
     assert client.session_health_snapshot()["detail_pages_opened"] == 2
@@ -1177,3 +1182,28 @@ def test_metrics_from_counts_calculates_quality_score() -> None:
     assert 0.0 <= metrics.acquisition_quality_score <= 1.0
     assert metrics.source_reliability > 0.0
     assert metrics.status in {"operational", "degraded"}
+
+def test_linkedin_url_uses_independent_structured_geography_target() -> None:
+    from job_intel.browser_sourcing import build_linkedin_search_url
+
+    urls = [
+        build_linkedin_search_url(keywords="VP Product", location="United Kingdom"),
+        build_linkedin_search_url(keywords="VP Product", location="Singapore"),
+        build_linkedin_search_url(keywords="VP Product", location="Kazakhstan"),
+        build_linkedin_search_url(keywords="VP Product", geo_id="103644278"),
+    ]
+
+    assert urls == [
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=Singapore",
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=Kazakhstan",
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&geoId=103644278",
+    ]
+    assert len(set(urls)) == 4
+
+
+def test_linkedin_without_confirmed_geography_is_named_block_not_keywords_fallback() -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+
+    with pytest.raises(BrowserNativeUnavailable, match="blocked_unsupported_geography"):
+        client.search_linkedin("VP Product")

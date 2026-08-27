@@ -11,6 +11,7 @@ from job_intel.product_search.acquisition_probe import (
     build_isolated_probe_environment,
     build_snapshot_queries,
     expand_queries,
+    ProbeQuery,
     resolve_public_sources,
     run_probe,
     validate_probe_output_path,
@@ -464,3 +465,105 @@ def test_source_state_preserves_observation_when_later_query_fails(tmp_path: Pat
 
     assert result.source_states == {"duckduckgo": "observed_with_failures"}
     assert result.stage_counts["raw_observed"] == 1
+
+def test_linkedin_queries_keep_keywords_and_geography_structurally_separate() -> None:
+    from job_intel.product_search.acquisition_probe import load_linkedin_geography_mapping
+
+    contract = load_search_contract(ROOT / "config/product_search/search_contract.v1.yaml")
+    mapping = load_linkedin_geography_mapping(
+        ROOT / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    queries = expand_queries(
+        contract,
+        role_terms=("VP Product",),
+        geography_mapping=mapping,
+    )
+
+    uk = next(query for query in queries if query.cell_id == "uk" and query.source_family == "linkedin")
+    singapore = next(
+        query for query in queries if query.cell_id == "singapore" and query.source_family == "linkedin"
+    )
+    assert uk.keywords == "VP Product"
+    assert uk.primary_geography == "United Kingdom"
+    assert uk.query != uk.keywords
+    assert uk.geography_target is not None
+    assert uk.geography_target.location == "United Kingdom"
+    assert singapore.primary_geography == "Singapore"
+    assert uk.query_id != singapore.query_id
+
+
+def test_linkedin_query_identity_changes_when_canonical_mapping_changes() -> None:
+    from job_intel.product_search.acquisition_probe import load_linkedin_geography_mapping
+
+    contract = load_search_contract(ROOT / "config/product_search/search_contract.v1.yaml")
+    mapping = load_linkedin_geography_mapping(
+        ROOT / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    changed = dict(mapping)
+    changed["uk"] = mapping["uk"].model_copy(update={"location": "United Kingdom (remote)"})
+
+    original = next(
+        query
+        for query in expand_queries(contract, role_terms=("VP Product",), geography_mapping=mapping)
+        if query.cell_id == "uk" and query.source_family == "linkedin"
+    )
+    remapped = next(
+        query
+        for query in expand_queries(contract, role_terms=("VP Product",), geography_mapping=changed)
+        if query.cell_id == "uk" and query.source_family == "linkedin"
+    )
+    assert original.query_id != remapped.query_id
+
+
+def test_every_linkedin_enabled_cell_has_mapping_or_explicit_block() -> None:
+    from job_intel.product_search.acquisition_probe import load_linkedin_geography_mapping
+
+    contract = load_search_contract(ROOT / "config/product_search/search_contract.v1.yaml")
+    mapping = load_linkedin_geography_mapping(
+        ROOT / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    linkedin_cells = {
+        cell.cell_id
+        for lane in contract.lanes.values()
+        for cell in lane.cells.values()
+        if "linkedin" in cell.source_families
+    }
+    assert linkedin_cells <= set(mapping)
+    assert all(
+        mapping[cell_id].status in {"verified", "unverified", "unsupported", "blocked"}
+        for cell_id in linkedin_cells
+    )
+
+
+def test_unverified_linkedin_target_blocks_before_market_dispatch(tmp_path: Path) -> None:
+    calls: list[object] = []
+
+    query = ProbeQuery(
+        query_id="q-unsupported-geography",
+        cell_id="uk",
+        source_family="linkedin",
+        query="VP Product United Kingdom",
+        keywords="VP Product",
+        primary_geography="United Kingdom",
+    )
+    from job_intel.product_search.acquisition_probe import RuntimeCapabilityResult
+
+    result = run_probe(
+        run_id="run-unsupported-geography",
+        queries=(query,),
+        sources={"linkedin": lambda request: calls.append(request) or []},
+        output_dir=tmp_path / "probe",
+        runtime_capability_checks={"linkedin": lambda: RuntimeCapabilityResult(state="ready")},
+        isolation={
+            "linkedin": SourceIsolation(
+                mode="cloned_profile",
+                path=tmp_path / "profile",
+                collection_method="browser",
+                cdp_url="http://127.0.0.1:19222",
+            )
+        },
+    )
+
+    assert result.source_states == {"linkedin": "blocked_unsupported_geography"}
+    assert calls == []
+    assert result.cost["market_query_dispatch_count"] == 0

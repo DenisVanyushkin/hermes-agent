@@ -497,7 +497,13 @@ def _browser_worker_payload(command: str, *args: str, timeout: int = 240) -> dic
     return payload
 
 
-def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
+def fetch_linkedin_vacancies(
+    query: str,
+    *,
+    location: str | None = None,
+    geo_id: str | None = None,
+    max_pages: int = 1,
+) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
     if not browser_native_available():
@@ -505,7 +511,12 @@ def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]
     config = _browser_config("linkedin")
     _ensure_required_browser_profile("linkedin", config)
     try:
-        payload = _browser_worker_payload("linkedin", query, str(max_pages))
+        worker_args = ["linkedin", query, str(max_pages)]
+        if location:
+            worker_args.extend(["--location", location])
+        if geo_id:
+            worker_args.extend(["--geo-id", geo_id])
+        payload = _browser_worker_payload(*worker_args)
         fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
         fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
         return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]

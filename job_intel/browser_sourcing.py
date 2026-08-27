@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import urlopen
 
 from .models import Vacancy
@@ -67,6 +67,23 @@ _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
     "linkedin": resolve_browser_profile_base() / "linkedin",
     "company_career": _BROWSER_PROFILE_DEFAULT,
 }
+
+
+def build_linkedin_search_url(
+    *,
+    keywords: str,
+    location: str | None = None,
+    geo_id: str | None = None,
+    start: int | None = None,
+) -> str:
+    params: list[tuple[str, str]] = [("keywords", keywords)]
+    if location:
+        params.append(("location", location))
+    if geo_id:
+        params.append(("geoId", geo_id))
+    if start:
+        params.append(("start", str(start)))
+    return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
 
 
 @dataclass(frozen=True)
@@ -1365,8 +1382,18 @@ class BrowserSourceClient:
         run_id: str | None = None,
         query_id: str | None = None,
         cell_id: str | None = None,
+        geography_location: str | None = None,
+        geography_geo_id: str | None = None,
     ) -> list[Vacancy]:
-        url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}"
+        if not (geography_location or geography_geo_id):
+            raise BrowserNativeUnavailable(
+                "blocked_unsupported_geography: LinkedIn search requires a confirmed location or geoId"
+            )
+        url = build_linkedin_search_url(
+            keywords=query,
+            location=geography_location,
+            geo_id=geography_geo_id,
+        )
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
         trace: dict[str, Any] = {
@@ -1393,7 +1420,16 @@ class BrowserSourceClient:
         page_plan = self._linkedin_page_plan(max_pages)
         for page_index in page_plan:
             self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
-            page_url = f"{url}&start={page_index * 25}" if page_index else url
+            page_url = (
+                build_linkedin_search_url(
+                    keywords=query,
+                    location=geography_location,
+                    geo_id=geography_geo_id,
+                    start=page_index * 25,
+                )
+                if page_index
+                else url
+            )
             started = time.perf_counter()
             capture_label = f"{run_id or 'run-unknown'}-{query_id or 'query-unknown'}-cell-{cell_id or 'unknown'}-page-{page_index}"
             fetched = self.fetch_html(page_url, capture_label=capture_label)

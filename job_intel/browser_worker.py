@@ -317,11 +317,22 @@ def _with_browser_source(source: str, fn):
     raise BrowserNativeUnavailable(f"browser worker failed for {source}")
 
 
-def _run_linkedin(query: str, *, max_pages: int) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
+def _run_linkedin(
+    query: str,
+    *,
+    max_pages: int,
+    location: str | None = None,
+    geo_id: str | None = None,
+) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
-        vacancies = client.search_linkedin(query, max_pages=max_pages)
+        vacancies = client.search_linkedin(
+            query,
+            max_pages=max_pages,
+            geography_location=location,
+            geography_geo_id=geo_id,
+        )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
 
@@ -350,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
     linkedin = sub.add_parser("linkedin")
     linkedin.add_argument("query")
     linkedin.add_argument("max_pages", type=int)
+    linkedin.add_argument("--location")
+    linkedin.add_argument("--geo-id", dest="geo_id")
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -370,7 +383,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         if args.cmd == "linkedin":
-            vacancies, session_health, search_trace = _run_linkedin(args.query, max_pages=args.max_pages)
+            vacancies, session_health, search_trace = _run_linkedin(
+                args.query,
+                max_pages=args.max_pages,
+                location=args.location,
+                geo_id=args.geo_id,
+            )
         else:
             vacancies, session_health, search_trace = _probe(args.source)
     except Exception as exc:

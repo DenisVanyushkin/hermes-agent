@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterable, Literal, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+import yaml
 
 from .search_contract import SearchContract
 
@@ -39,6 +40,7 @@ SourceState = Literal[
     "blocked_rate_limit_or_timeout",
     "blocked_extraction_failure",
     "blocked_multiple_failures",
+    "blocked_unsupported_geography",
 ]
 
 OBSERVED_SOURCE_STATES = frozenset({"observed", "observed_with_failures"})
@@ -55,6 +57,7 @@ UNOBSERVED_SOURCE_STATES = frozenset(
         "blocked_rate_limit_or_timeout",
         "blocked_extraction_failure",
         "blocked_multiple_failures",
+        "blocked_unsupported_geography",
     }
 )
 
@@ -105,6 +108,58 @@ class RuntimeCapabilityResult(BaseModel):
         return self
 
 
+GeographyStatus = Literal["verified", "unverified", "unsupported", "blocked"]
+
+
+class LinkedInGeographyTarget(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True
+    )
+
+    location: str | None = None
+    geo_id: str | None = Field(default=None, alias="geoId")
+    verified_at: str | None = None
+    status: GeographyStatus
+
+    @property
+    def canonical_key(self) -> str:
+        return json.dumps(
+            {
+                "geoId": self.geo_id,
+                "location": self.location,
+                "status": self.status,
+                "verified_at": self.verified_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+
+def load_linkedin_geography_mapping(
+    path: Path | str | None = None,
+) -> dict[str, LinkedInGeographyTarget]:
+    mapping_path = Path(path) if path is not None else (
+        Path(__file__).resolve().parents[2]
+        / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    document = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
+    if not isinstance(document, Mapping):
+        raise ValueError("LinkedIn geography mapping must be a mapping")
+    if document.get("version") != "1.0":
+        raise ValueError("unsupported LinkedIn geography mapping version")
+    if document.get("product_authority_id") != "PS-SOT-2026-08-10-v1":
+        raise ValueError("LinkedIn geography mapping has wrong product authority")
+    if document.get("search_contract_version") != "1.0.0":
+        raise ValueError("LinkedIn geography mapping has wrong contract version")
+    cells = document.get("cells")
+    if not isinstance(cells, Mapping):
+        raise ValueError("LinkedIn geography mapping cells are required")
+    return {
+        str(cell_id): LinkedInGeographyTarget.model_validate(value)
+        for cell_id, value in cells.items()
+    }
+
+
 @dataclass(frozen=True)
 class SourceIsolation:
     mode: SourceIsolationMode
@@ -144,6 +199,9 @@ class ProbeQuery(BaseModel):
     cell_id: str
     source_family: str
     query: str
+    keywords: str | None = None
+    primary_geography: str | None = None
+    geography_target: LinkedInGeographyTarget | None = None
 
 
 def build_isolated_probe_environment(
@@ -251,15 +309,36 @@ class ProbeResult(BaseModel):
     family_attempts: tuple[dict[str, Any], ...] = ()
 
 
-def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> tuple[ProbeQuery, ...]:
+def expand_queries(
+    contract: SearchContract,
+    *,
+    role_terms: tuple[str, ...],
+    geography_mapping: Mapping[str, LinkedInGeographyTarget] | None = None,
+) -> tuple[ProbeQuery, ...]:
     expanded: list[ProbeQuery] = []
+    mapping = geography_mapping or load_linkedin_geography_mapping()
     for lane_id, lane in sorted(contract.lanes.items()):
         for cell_id, cell in sorted(lane.cells.items()):
             for family in sorted(cell.source_families):
                 for role in sorted(role_terms):
                     query = f"{role} {cell.primary_geography}".strip()
+                    target = mapping.get(cell_id) if family == "linkedin" else None
+                    geography_key = (
+                        target.canonical_key
+                        if target is not None
+                        else json.dumps(
+                            {"location": cell.primary_geography, "status": "missing"},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                    identity_input = (
+                        f"{lane_id}\0{cell_id}\0{family}\0{role}\0{geography_key}"
+                        if family == "linkedin"
+                        else f"{lane_id}\0{cell_id}\0{family}\0{query}"
+                    )
                     digest = hashlib.sha256(
-                        f"{lane_id}\0{cell_id}\0{family}\0{query}".encode()
+                        identity_input.encode()
                     ).hexdigest()[:20]
                     expanded.append(
                         ProbeQuery(
@@ -267,6 +346,11 @@ def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> 
                             cell_id=cell_id,
                             source_family=family,
                             query=query,
+                            keywords=role if family == "linkedin" else None,
+                            primary_geography=(
+                                cell.primary_geography if family == "linkedin" else None
+                            ),
+                            geography_target=target,
                         )
                     )
     return tuple(sorted(expanded, key=lambda item: item.query_id))
@@ -373,7 +457,7 @@ def run_probe(
     *,
     run_id: str,
     queries: Iterable[ProbeQuery | Mapping[str, Any]],
-    sources: Mapping[str, Callable[[str], Iterable[Any]]],
+    sources: Mapping[str, Callable[[Any], Iterable[Any]]],
     output_dir: Path | str,
     runtime_capability_checks: Mapping[str, Callable[[], Any]] | None = None,
     isolation: Mapping[str, SourceIsolation],
@@ -496,6 +580,18 @@ def run_probe(
             )
             continue
 
+        if query.source_family == "linkedin" and query.primary_geography is not None:
+            target = query.geography_target
+            if target is None or target.status != "verified" or not (
+                target.location or target.geo_id
+            ):
+                _record_source_state(
+                    source_states,
+                    query.source_family,
+                    "blocked_unsupported_geography",
+                )
+                continue
+
         capability = _capability(query.source_family, source_isolation)
         if capability.state == "runtime_capability_blocked":
             _record_source_state(
@@ -509,7 +605,10 @@ def run_probe(
         )
         for attempt in range(1, max_attempts + 1):
             try:
-                records = list(source(query.query))
+                request: Any = query
+                if query.source_family != "linkedin" or query.primary_geography is None:
+                    request = query.query
+                records = list(source(request))
                 state = (
                     "observed_with_failures"
                     if tuple(getattr(source, "last_errors", ()) or ())
@@ -623,7 +722,10 @@ def run_probe(
         cell_states=dict(sorted(cell_states.items())),
         duplicates=len(observations) - len(canonical_records),
         evidence=tuple(evidence),
-        cost={"provider_cost_usd": 0.0},
+        cost={
+            "provider_cost_usd": 0.0,
+            "market_query_dispatch_count": float(sum(market_dispatch_counts.values())),
+        },
         latency_seconds=round(time.monotonic() - started, 6),
         family_attempts=tuple(
             {
@@ -696,7 +798,7 @@ def run_probe(
     return result
 
 
-def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
+def resolve_public_sources() -> dict[str, Callable[[Any], Iterable[Any]]]:
     from job_intel.sources import (
         fetch_headhunter_vacancies,
         fetch_linkedin_vacancies,
@@ -706,8 +808,19 @@ def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
         search_remotive_jobs,
     )
 
-    sources: dict[str, Callable[[str], Iterable[Any]]] = {
-        "linkedin": lambda query: fetch_linkedin_vacancies(query, max_pages=2),
+    def _linkedin_source(request: Any) -> Iterable[Any]:
+        if isinstance(request, ProbeQuery):
+            target = request.geography_target
+            return fetch_linkedin_vacancies(
+                request.keywords or request.query,
+                location=target.location if target is not None else None,
+                geo_id=target.geo_id if target is not None else None,
+                max_pages=2,
+            )
+        return fetch_linkedin_vacancies(str(request), max_pages=2)
+
+    sources: dict[str, Callable[[Any], Iterable[Any]]] = {
+        "linkedin": _linkedin_source,
         "headhunter": lambda query: fetch_headhunter_vacancies(query, per_page=10),
         "duckduckgo": lambda query: [
             normalize_search_hit(hit) for hit in search_duckduckgo(query, max_results=10)
