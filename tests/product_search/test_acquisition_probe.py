@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import shutil
 import sqlite3
+import sys
 
 import pytest
+import yaml
 
 from job_intel.product_search.acquisition_probe import (
+    LinkedInGeographyMapping,
     ProbeSourceBlocked,
     SourceIsolation,
     EXCLUSION_REASON_CATALOG,
@@ -15,9 +20,11 @@ from job_intel.product_search.acquisition_probe import (
     build_experiment_manifest,
     build_snapshot_queries,
     expand_queries,
+    load_linkedin_geography_mapping,
     ProbeQuery,
     LinkedInExecutionPlan,
     resolve_public_sources,
+    RuntimeCapabilityResult,
     run_probe,
     validate_gate_a_run_evidence,
     validate_experiment_manifest,
@@ -28,6 +35,270 @@ import job_intel.product_search.acquisition_probe as acquisition_probe
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _c1a_manifest(root: Path) -> dict[str, object]:
+    return {
+        "gate": "gate-a",
+        "environment_id": "product-search-gate-a",
+        "root": str(root),
+        "paths": {
+            name: str(root / name)
+            for name in (
+                "runtime",
+                "experiment.sqlite3",
+                "raw-evidence",
+                "logs",
+                "locks",
+                "browser-profile",
+                "cache",
+                "tmp",
+            )
+        },
+        "python": {
+            "executable_path": str(root / "python-runtime/bin/python"),
+        },
+        "environment": {
+            "import_root": str(root / "runtime"),
+        },
+        "source_isolation": {
+            family: {
+                "mode": "exclusive_lock",
+                "path": str(root / "locks" / f"{family}.lock"),
+                "collection_method": "browser",
+            }
+            for family in ("linkedin", "duckduckgo")
+        },
+        "bounded_proof": {
+            "cell_ids": ["uk", "singapore", "kazakhstan"],
+            "include_ats_snapshot": False,
+            "negative_control": {
+                "selection_rule": (
+                    "first_alphabetical_unsupported_excluding_bounded_v1"
+                ),
+                "cell_id": "synthetic_c1a_unsupported",
+                "status": "unsupported",
+                "location": "C1A nonexistent geography target",
+                "mapping_version": "1.0",
+            },
+        },
+    }
+
+
+def _c1a_mapping() -> LinkedInGeographyMapping:
+    mapping = load_linkedin_geography_mapping(
+        ROOT / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    verified = {
+        **mapping,
+        **{
+            cell_id: mapping[cell_id].model_copy(
+                update={"status": "verified", "location": mapping[cell_id].location}
+            )
+            for cell_id in ("uk", "singapore", "kazakhstan")
+        },
+    }
+    return LinkedInGeographyMapping(
+        verified,
+        version=mapping.version,
+        normalization_rule_version=mapping.normalization_rule_version,
+        contamination_formula_version=mapping.contamination_formula_version,
+        contamination_threshold=mapping.contamination_threshold,
+        city_country_codes=mapping.city_country_codes,
+    )
+
+
+def test_c1a_run_manifest_passes_mapping_and_preserves_bounded_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "experiment"
+    (root / "runtime/config/product_search").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "config/product_search/search_contract.v1.yaml",
+        root / "runtime/config/product_search/search_contract.v1.yaml",
+    )
+    manifest = _c1a_manifest(root)
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8")
+
+    mapping = _c1a_mapping()
+    calls: list[object] = []
+    synthetic_transport_calls = 0
+
+    def fake_source(request: object) -> list[dict[str, object]]:
+        nonlocal synthetic_transport_calls
+        calls.append(request)
+        if isinstance(request, ProbeQuery) and request.cell_id == "synthetic_c1a_unsupported":
+            synthetic_transport_calls += 1
+        query_id = (
+            request.query_id
+            if isinstance(request, ProbeQuery)
+            else str(request).replace(" ", "-")
+        )
+        return [
+            {
+                "source_id": f"c1a-{query_id}",
+                "url": f"https://example.test/jobs/{query_id}",
+                "structural_url": (
+                    "https://www.linkedin.com/jobs/search/?keywords=VP+Product"
+                    f"&location={query_id}"
+                ),
+                "dom_unique_job_ids": [query_id],
+                "parsed_unique_job_ids_before_role_filter": [query_id],
+                "dom_count": 1,
+                "parser_before_filter_count": 1,
+                "title": "VP Product",
+                "company": "C1A Example",
+                "description": "Own product strategy and P&L",
+                "location": "United Kingdom",
+            }
+        ]
+
+    source_families = {
+        "linkedin",
+        "duckduckgo",
+        "ashby",
+        "greenhouse",
+        "lever",
+        "personio",
+        "recruitee",
+        "smartrecruiters",
+        "teamtailor",
+    }
+    monkeypatch.setattr(
+        acquisition_probe,
+        "verify_experiment_runtime",
+        lambda _manifest: None,
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "load_linkedin_geography_mapping",
+        lambda _path=None: mapping,
+    )
+    monkeypatch.setattr(
+        acquisition_probe,
+        "resolve_public_sources",
+        lambda: {family: fake_source for family in source_families},
+    )
+    real_run_probe = acquisition_probe.run_probe
+    monkeypatch.setattr(
+        acquisition_probe,
+        "run_probe",
+        lambda **kwargs: real_run_probe(
+            **kwargs,
+            runtime_capability_checks={
+                "linkedin": lambda: RuntimeCapabilityResult(state="ready"),
+                "duckduckgo": lambda: RuntimeCapabilityResult(state="ready"),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["acquisition_probe", "run-manifest", str(manifest_path)]
+    )
+
+    environment_before = dict(os.environ)
+    try:
+        assert acquisition_probe.main() == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(environment_before)
+
+    summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    selected = {"uk", "singapore", "kazakhstan"}
+    assert set(summary["acquisition_outcomes"]) == selected | {
+        "synthetic_c1a_unsupported"
+    }
+    assert summary["geography_summary"]["mapping_version"] == "1.0"
+    assert summary["geography_summary"]["cells"]
+    assert all(
+        summary["credited_records_provenance"][cell_id] == "attributed"
+        for cell_id in selected
+    )
+    assert all(
+        not (
+            isinstance(request, ProbeQuery)
+            and request.cell_id == "synthetic_c1a_unsupported"
+        )
+        for request in calls
+    )
+    assert all(
+        not (
+            isinstance(request, str)
+            and request.startswith("Chief Product Officer OR")
+        )
+        for request in calls
+    )
+    assert all(
+        {"cell_id", "source_family", "timestamp", "outcome", "received_records", "credited_records"}
+        <= set(attempt)
+        for attempt in summary["cell_family_attempts"]
+    )
+    assert summary["geography_summary"]["pairwise"]
+    raw = json.loads(
+        next((root / "raw-evidence").glob("*.json")).read_text(encoding="utf-8")
+    )
+    assert raw["structural_url"]
+    assert raw["dom_count"] == 1
+    assert raw["parser_before_filter_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("cell_id", "synthetic_c1a_wrong", "does not follow the mapping rule"),
+        ("selection_rule", "arbitrary_selection", "selection rule is invalid"),
+        ("mapping_version", "0.9", "mapping version is stale"),
+        ("status", "verified", "must be unsupported"),
+        ("location", "another nonexistent target", "location is invalid"),
+    ],
+    ids=["cell-id", "selection-rule", "mapping-version", "status", "location"],
+)
+def test_c1a_negative_control_rejects_each_untrusted_manifest_field(
+    field: str, value: str, error: str
+) -> None:
+    mapping = _c1a_mapping()
+    declared = {
+        "selection_rule": "first_alphabetical_unsupported_excluding_bounded_v1",
+        "cell_id": "synthetic_c1a_unsupported",
+        "status": "unsupported",
+        "location": "C1A nonexistent geography target",
+        "mapping_version": mapping.version,
+    }
+    declared[field] = value
+
+    with pytest.raises(ValueError, match=error):
+        acquisition_probe.select_bounded_negative_control(
+            mapping,
+            excluded_cell_ids=("uk", "singapore", "kazakhstan"),
+            declared=declared,
+        )
+
+
+def test_c1a_synthetic_negative_control_is_deterministic_and_has_zero_transport() -> None:
+    mapping = _c1a_mapping()
+    unsupported = sorted(
+        cell_id
+        for cell_id, target in mapping.items()
+        if target.status == "unsupported"
+        and cell_id not in {"uk", "singapore", "kazakhstan"}
+    )
+    assert unsupported == []
+    control = {
+        "selection_rule": (
+            "first_alphabetical_unsupported_excluding_bounded_v1"
+        ),
+        "cell_id": "synthetic_c1a_unsupported",
+        "status": "unsupported",
+        "location": "C1A nonexistent geography target",
+        "mapping_version": mapping.version,
+    }
+    selected = acquisition_probe.select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=("uk", "singapore", "kazakhstan"),
+        declared=control,
+    )
+    assert selected == control
+    assert selected["cell_id"] == "synthetic_c1a_unsupported"
 
 
 def test_experiment_manifest_binds_exclusion_reason_catalog(tmp_path: Path) -> None:

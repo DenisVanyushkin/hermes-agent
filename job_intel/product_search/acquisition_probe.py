@@ -300,6 +300,74 @@ class LinkedInGeographyMapping(dict[str, LinkedInGeographyTarget]):
         self.city_country_codes = dict(city_country_codes)
 
 
+BOUNDED_PROOF_CELL_IDS = ("uk", "singapore", "kazakhstan")
+BOUNDED_PROOF_SELECTION_RULE = (
+    "first_alphabetical_unsupported_excluding_bounded_v1"
+)
+SYNTHETIC_BOUNDED_CONTROL_ID = "synthetic_c1a_unsupported"
+SYNTHETIC_BOUNDED_CONTROL_LOCATION = "C1A nonexistent geography target"
+
+
+def select_bounded_negative_control(
+    mapping: Mapping[str, Any],
+    *,
+    excluded_cell_ids: Iterable[str],
+    declared: Mapping[str, Any],
+) -> dict[str, Any]:
+    mapping_version = str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION))
+    if str(declared.get("selection_rule") or "") != BOUNDED_PROOF_SELECTION_RULE:
+        raise ValueError("bounded proof negative-control selection rule is invalid")
+    if str(declared.get("mapping_version") or "") != mapping_version:
+        raise ValueError("bounded proof negative-control mapping version is stale")
+    excluded = {str(cell_id) for cell_id in excluded_cell_ids}
+    unsupported = sorted(
+        str(cell_id)
+        for cell_id, target in mapping.items()
+        if (
+            (
+                target.status
+                if isinstance(target, LinkedInGeographyTarget)
+                else str(target.get("status", ""))
+            )
+            == "unsupported"
+            and str(cell_id) not in excluded
+        )
+    )
+    expected_cell_id = unsupported[0] if unsupported else SYNTHETIC_BOUNDED_CONTROL_ID
+    declared_cell_id = str(declared.get("cell_id") or "")
+    if declared_cell_id != expected_cell_id:
+        raise ValueError(
+            "bounded proof negative control does not follow the mapping rule: "
+            f"expected {expected_cell_id}, got {declared_cell_id}"
+        )
+    if str(declared.get("status") or "") != "unsupported":
+        raise ValueError("bounded proof negative control must be unsupported")
+    if not unsupported:
+        if str(declared.get("location") or "") != SYNTHETIC_BOUNDED_CONTROL_LOCATION:
+            raise ValueError("synthetic bounded control location is invalid")
+    return dict(declared)
+
+
+def _bounded_proof_configuration(
+    manifest: Mapping[str, Any], mapping: Mapping[str, Any]
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    config = dict(manifest.get("bounded_proof") or {})
+    cell_ids = tuple(str(cell_id) for cell_id in config.get("cell_ids") or ())
+    if cell_ids != BOUNDED_PROOF_CELL_IDS:
+        raise ValueError(
+            "bounded proof must contain the predeclared cells: "
+            + ", ".join(BOUNDED_PROOF_CELL_IDS)
+        )
+    if config.get("include_ats_snapshot") is not False:
+        raise ValueError("ATS snapshot is forbidden in the bounded proof")
+    control = select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=cell_ids,
+        declared=dict(config.get("negative_control") or {}),
+    )
+    return cell_ids, control
+
+
 def load_linkedin_geography_mapping(
     path: Path | str | None = None,
 ) -> dict[str, LinkedInGeographyTarget]:
@@ -1975,10 +2043,38 @@ def main() -> int:
         contract = __import__(
             "job_intel.product_search.search_contract", fromlist=["load_search_contract"]
         ).load_search_contract(runtime / "config/product_search/search_contract.v1.yaml")
+        mapping = load_linkedin_geography_mapping(
+            runtime / "config/product_search/linkedin_geography.v1.yaml"
+        )
+        bounded_cell_ids, negative_control = _bounded_proof_configuration(
+            manifest, mapping
+        )
         queries = expand_queries(
             contract,
             role_terms=("Chief Product Officer", "VP Product", "Head of Product", "GM Digital"),
-        ) + build_snapshot_queries()
+            geography_mapping=mapping,
+        )
+        queries = tuple(query for query in queries if query.cell_id in bounded_cell_ids)
+        if negative_control["cell_id"] not in mapping:
+            control_cell_id = str(negative_control["cell_id"])
+            control_location = str(negative_control["location"])
+            synthetic_query = ProbeQuery(
+                query_id=hashlib.sha256(
+                    f"c1a-negative-control\0{control_cell_id}\0{control_location}".encode()
+                ).hexdigest()[:20],
+                cell_id=str(negative_control["cell_id"]),
+                source_family="linkedin",
+                query=str(negative_control["location"]),
+                keywords="C1A negative control",
+                primary_geography=str(negative_control["location"]),
+                geography_target=LinkedInGeographyTarget(
+                    location=str(negative_control["location"]),
+                    status="unsupported",
+                    country_codes=(),
+                ),
+                minimum_independent_families=1,
+            )
+            queries = queries + (synthetic_query,)
         isolation = {
             family: SourceIsolation(
                 mode=str(settings.get("mode") or "blocked"),
@@ -2002,6 +2098,7 @@ def main() -> int:
             sources=resolve_public_sources(),
             output_dir=Path(manifest["root"]),
             isolation=isolation,
+            geography_mapping=mapping,
             environment=probe_environment,
         )
     return 0
