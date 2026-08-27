@@ -103,6 +103,16 @@ def _pre_only_test_cmd(world) -> Path:
     return script
 
 
+def _wrong_pre_receipt_test_cmd(world) -> Path:
+    script = world["fork"].parent / "wrong-pre-receipt-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'fork test receipt: contract=v1 source=manifest side=pre manifest_sha256=wrong'\n"
+        "echo '1 failed, 5 passed in 2.00s'\n"
+        "exit 137\n"
+    )
+    script.chmod(0o755)
+    return script
 def _stub_hermes_bin(world) -> Path:
     """Заглушка вместо настоящего hermes.
 
@@ -245,6 +255,18 @@ def test_unreadable_runner_does_not_land_the_merge(world):
     assert "unreadable" in result.stderr.lower()
     assert "new failures" not in result.stdout.lower()
     assert _git(fork, "rev-parse", "HEAD") == before
+
+
+def test_wrong_preliminary_receipt_names_the_preliminary_receipt(world):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+
+    result = _run_sync(
+        world, {"HERMES_SYNC_TEST_CMD": str(_wrong_pre_receipt_test_cmd(world))}
+    )
+
+    assert result.returncode != 0
+    assert "preliminary receipt" in result.stderr.lower()
+    assert "final receipt" not in result.stderr.lower()
 
 
 def _boundary_recording_test_cmd(world) -> tuple[Path, Path]:

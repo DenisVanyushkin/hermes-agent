@@ -689,8 +689,12 @@ if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
   >"$BASELINE_LOG_FILE" 2>&1; then
   :
 fi
-if ! grep -Fqx "$PRE_RECEIPT" "$BASELINE_LOG_FILE" ||
-   ! grep -Fqx "$PRE_FINAL_RECEIPT" "$BASELINE_LOG_FILE"; then
+if ! grep -Fqx "$PRE_RECEIPT" "$BASELINE_LOG_FILE"; then
+  echo "FAILED: baseline runner preliminary receipt missing or measured the wrong manifest side." >&2
+  tail -n 5 "$BASELINE_LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -Fqx "$PRE_FINAL_RECEIPT" "$BASELINE_LOG_FILE"; then
   echo "FAILED: baseline runner final receipt missing; test run unreadable, refusing to land the merge." >&2
   tail -n 5 "$BASELINE_LOG_FILE" >&2
   exit 1
@@ -701,8 +705,12 @@ if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
   >"$POST_LOG_FILE" 2>&1; then
   :
 fi
-if ! grep -Fqx "$POST_RECEIPT" "$POST_LOG_FILE" ||
-   ! grep -Fqx "$POST_FINAL_RECEIPT" "$POST_LOG_FILE"; then
+if ! grep -Fqx "$POST_RECEIPT" "$POST_LOG_FILE"; then
+  echo "FAILED: post runner preliminary receipt missing or measured the wrong manifest side." >&2
+  tail -n 5 "$POST_LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -Fqx "$POST_FINAL_RECEIPT" "$POST_LOG_FILE"; then
   echo "FAILED: post runner final receipt missing; test run unreadable, refusing to land the merge." >&2
   tail -n 5 "$POST_LOG_FILE" >&2
   exit 1

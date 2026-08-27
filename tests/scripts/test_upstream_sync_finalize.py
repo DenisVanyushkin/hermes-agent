@@ -1157,6 +1157,8 @@ class TestApplyMergeIsGatedOnForkTests:
         assert res["status"] == "failed", evidence
         assert res["failed_stage"] == "test-gate"
         assert "receipt" in evidence
+        assert "preliminary receipt" in evidence
+        assert "final receipt" not in evidence
         assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_preliminary_receipt_without_final_receipt_is_unreadable(self, tmp_path, state):
@@ -1217,6 +1219,8 @@ class TestApplyMergeIsGatedOnForkTests:
         assert res["status"] == "failed", evidence
         assert res["failed_stage"] == "test-gate"
         assert "receipt" in evidence
+        assert "preliminary receipt" in evidence
+        assert "final receipt" not in evidence
         assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):

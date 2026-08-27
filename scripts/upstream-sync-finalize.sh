@@ -474,14 +474,22 @@ PY
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$baseline" 2>&1 || true
-  if ! grep -Fqx "$baseline_receipt_line" "$baseline" ||
-     ! grep -Fqx "$baseline_final_receipt_line" "$baseline"; then
+  if ! grep -Fqx "$baseline_receipt_line" "$baseline"; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
     if ! record_unreadable_receipt baseline; then
       echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
     fi
-    echo "runner final receipt missing or mismatched in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    echo "runner preliminary receipt missing or measured the wrong manifest side in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! grep -Fqx "$baseline_final_receipt_line" "$baseline"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    if ! record_unreadable_receipt baseline; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner final receipt missing in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
     return 1
   fi
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
@@ -492,14 +500,22 @@ PY
   fi
   "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
     --attempt-root "$STATE_DIR/attempts" "$wt" >"$post" 2>&1 || true
-  if ! grep -Fqx "$post_receipt_line" "$post" ||
-     ! grep -Fqx "$post_final_receipt_line" "$post"; then
+  if ! grep -Fqx "$post_receipt_line" "$post"; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
     rm -rf "$wt"
     if ! record_unreadable_receipt merged; then
       echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
     fi
-    echo "runner final receipt missing or mismatched in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    echo "runner preliminary receipt missing or measured the wrong manifest side in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! grep -Fqx "$post_final_receipt_line" "$post"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    if ! record_unreadable_receipt merged; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner final receipt missing in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
     return 1
   fi
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
