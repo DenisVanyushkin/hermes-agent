@@ -36,6 +36,7 @@ CDP_TUNNEL_HOST="127.0.0.1"
 CDP_TUNNEL_PORT="${CDP_PORT}"
 BASE_DIR="/var/lib/browser-desktop"
 NETWORK_NAMESPACE=""
+BROWSER_TIMEZONE="${BROWSER_TIMEZONE:-Asia/Almaty}"
 EXPLICIT_NETWORK_NAMESPACE=0
 PRINT_RUNTIME_CONFIG=0
 NOVNC_BIND="127.0.0.1"
@@ -504,18 +505,24 @@ get_password() {
 start_as_browser() {
   local log_file="$1"
   shift
+  local browser_env=(
+    "DISPLAY=:${DISPLAY_NUM}"
+    "HOME=${USER_HOME}"
+    "USER=${USER_NAME}"
+    "LOGNAME=${USER_NAME}"
+    "XDG_RUNTIME_DIR=${RUNTIME_DIR}"
+    "XDG_CONFIG_HOME=${BASE_DIR}/.config"
+    "XDG_CACHE_HOME=${BASE_DIR}/.cache"
+  )
+  if [[ -n "${NETWORK_NAMESPACE}" ]]; then
+    browser_env+=("TZ=${BROWSER_TIMEZONE}")
+  fi
   # Порядок значим: `ip netns exec` требует CAP_SYS_ADMIN, а `runuser`
   # роняет права до browser. Префикс внутри runuser даёт "setting the network
   # namespace failed: Operation not permitted" — X-сервер не стартует, и
   # запуск падает на таймауте ожидания дисплея.
   nohup "${NETNS_PREFIX[@]}" runuser -u "${USER_NAME}" -- env \
-    "DISPLAY=:${DISPLAY_NUM}" \
-    "HOME=${USER_HOME}" \
-    "USER=${USER_NAME}" \
-    "LOGNAME=${USER_NAME}" \
-    "XDG_RUNTIME_DIR=${RUNTIME_DIR}" \
-    "XDG_CONFIG_HOME=${BASE_DIR}/.config" \
-    "XDG_CACHE_HOME=${BASE_DIR}/.cache" \
+    "${browser_env[@]}" \
     "$@" >>"${log_file}" 2>&1 &
 }
 

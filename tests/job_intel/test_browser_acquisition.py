@@ -7,6 +7,7 @@ import os
 import random
 import re
 from pathlib import Path
+import shlex
 import socket
 import signal
 import subprocess
@@ -1280,6 +1281,73 @@ def _bootstrap_runtime_config(*args: str, env: dict[str, str] | None = None) -> 
 
 def _runtime_config(stdout: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+
+
+def _capture_start_as_browser_environment(tmp_path: Path, namespace: str) -> dict[str, str]:
+    script = Path(__file__).parents[2] / "scripts/browser-desktop-bootstrap.sh"
+    body = script.read_text(encoding="utf-8")
+    start = body.index("start_as_browser() {")
+    end = body.index("\n}", start) + 2
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "nohup").write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+    (fake_bin / "runuser").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-u\" ]; then shift 2; fi\n"
+        "if [ \"$1\" = \"--\" ]; then shift; fi\n"
+        "exec \"$@\"\n",
+        encoding="utf-8",
+    )
+    prefix = fake_bin / "namespace-prefix"
+    prefix.write_text("#!/bin/sh\nexec \"$@\"\n", encoding="utf-8")
+    for executable in (fake_bin / "nohup", fake_bin / "runuser", prefix):
+        executable.chmod(0o755)
+
+    capture = tmp_path / "browser.env"
+    log_file = tmp_path / "browser.log"
+    prefix_value = f"({shlex.quote(str(prefix))})" if namespace else "()"
+    harness = (
+        "set -eu\n"
+        f"PATH={shlex.quote(str(fake_bin))}:$PATH\n"
+        f"NETNS_PREFIX={prefix_value}\n"
+        f"NETWORK_NAMESPACE={shlex.quote(namespace)}\n"
+        "BROWSER_TIMEZONE=Asia/Almaty\n"
+        "USER_NAME=browser\n"
+        "DISPLAY_NUM=99\n"
+        "USER_HOME=/tmp/browser\n"
+        "RUNTIME_DIR=/tmp/browser-runtime\n"
+        "BASE_DIR=/tmp/browser\n"
+        f"{body[start:end]}\n"
+        f"start_as_browser {shlex.quote(str(log_file))} sh -c 'env > {shlex.quote(str(capture))}'\n"
+        "wait\n"
+    )
+    environment = {key: value for key, value in os.environ.items() if key != "TZ"}
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    return dict(
+        line.split("=", 1)
+        for line in capture.read_text(encoding="utf-8").splitlines()
+        if "=" in line
+    )
+
+
+def test_bootstrap_namespace_browser_gets_configured_timezone(tmp_path: Path) -> None:
+    environment = _capture_start_as_browser_environment(tmp_path, "ln-eg")
+
+    assert environment["TZ"] == "Asia/Almaty"
+
+
+def test_bootstrap_host_browser_environment_does_not_get_timezone(tmp_path: Path) -> None:
+    environment = _capture_start_as_browser_environment(tmp_path, "")
+
+    assert "TZ" not in environment
 
 
 def test_bootstrap_runtime_config_preserves_linkedin_defaults() -> None:
