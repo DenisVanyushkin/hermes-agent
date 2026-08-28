@@ -1097,6 +1097,7 @@ def _supervisor_command(
     notify_path: Path,
     timeout: str,
     network_namespace: str | None = None,
+    monitor_interval: str = "30",
 ) -> tuple[list[str], dict[str, str], Path]:
     bootstrap_script = profile.parent / "fake-browser-desktop-bootstrap.sh"
     bootstrap_log = profile.parent / "bootstrap-argv.log"
@@ -1122,7 +1123,7 @@ def _supervisor_command(
         "--poll-interval",
         "0.02",
         "--monitor-interval",
-        "30",
+        monitor_interval,
         "--bootstrap-script",
         str(bootstrap_script),
     ]
@@ -1834,3 +1835,105 @@ def test_gate_a_incomplete_page_plan_is_critical_and_not_a_clean_zero(
     health = client.session_health_snapshot()
     assert health["critical_degradation"] is True
     assert health["status"] == "blocked"
+
+
+def test_supervisor_keeps_a_slow_cdp_endpoint_alive(tmp_path: Path) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            if self.path != "/json/version":
+                self.send_response(404)
+                self.end_headers()
+                return
+            time.sleep(1.2)
+            body = b'{"Browser":"slow-fake"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    notify_path = tmp_path / "notify.sock"
+    receiver = _notify_socket(notify_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    command, environment, _bootstrap_log = _supervisor_command(
+        profile=profile,
+        cdp_url=f"http://127.0.0.1:{server.server_port}",
+        lock_path=tmp_path / "profile.lock",
+        notify_path=notify_path,
+        timeout="8",
+        monitor_interval="0.02",
+    )
+    process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        message, _ = receiver.recvfrom(128)
+        assert message == b"READY=1\n"
+        time.sleep(1.4)
+        assert process.poll() is None
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=8)
+        receiver.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=3)
+
+
+def test_supervisor_requires_three_consecutive_cdp_failures(tmp_path: Path) -> None:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            if self.path == "/json/version":
+                body = b'{"Browser":"fake"}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    notify_path = tmp_path / "notify.sock"
+    receiver = _notify_socket(notify_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    command, environment, _bootstrap_log = _supervisor_command(
+        profile=profile,
+        cdp_url=f"http://127.0.0.1:{server.server_port}",
+        lock_path=tmp_path / "profile.lock",
+        notify_path=notify_path,
+        timeout="8",
+        monitor_interval="0.02",
+    )
+    process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        message, _ = receiver.recvfrom(128)
+        assert message == b"READY=1\n"
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=3)
+        _stdout, stderr = process.communicate(timeout=8)
+        assert process.returncode != 0
+        stderr_text = stderr.decode()
+        assert "consecutive=1/3" in stderr_text
+        assert "consecutive=2/3" in stderr_text
+        assert "consecutive=3/3" in stderr_text
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=8)
+        receiver.close()

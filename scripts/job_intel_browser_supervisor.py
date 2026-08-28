@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from pathlib import Path
 import signal
@@ -11,6 +12,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import Literal
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -25,12 +27,43 @@ def _notify(message: str) -> None:
         notify_socket.sendto(message.encode(), address)
 
 
-def _cdp_ready(cdp_url: str) -> bool:
+CDP_PROBE_TIMEOUT_SECONDS = 5.0
+CDP_MONITOR_FAILURE_LIMIT = 3
+LOGGER = logging.getLogger(__name__)
+
+
+class _CdpProbeResult:
+    __slots__ = ("ready", "failure_kind", "detail")
+
+    def __init__(
+        self,
+        ready: bool,
+        failure_kind: Literal["timeout", "connection", "response"] | None = None,
+        detail: str = "",
+    ) -> None:
+        self.ready = ready
+        self.failure_kind = failure_kind
+        self.detail = detail
+
+
+def _cdp_ready(cdp_url: str) -> _CdpProbeResult:
     try:
-        with urlopen(f"{cdp_url.rstrip('/')}/json/version", timeout=1) as response:
-            return response.status == 200
-    except (OSError, URLError):
-        return False
+        with urlopen(
+            f"{cdp_url.rstrip('/')}/json/version", timeout=CDP_PROBE_TIMEOUT_SECONDS
+        ) as response:
+            if response.status == 200:
+                return _CdpProbeResult(ready=True)
+            return _CdpProbeResult(
+                ready=False, failure_kind="response", detail=f"HTTP {response.status}"
+            )
+    except (TimeoutError, socket.timeout) as exc:
+        return _CdpProbeResult(ready=False, failure_kind="timeout", detail=str(exc))
+    except URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            return _CdpProbeResult(ready=False, failure_kind="timeout", detail=str(exc.reason))
+        return _CdpProbeResult(ready=False, failure_kind="connection", detail=str(exc))
+    except OSError as exc:
+        return _CdpProbeResult(ready=False, failure_kind="connection", detail=str(exc))
 
 
 def _terminate(process: subprocess.Popen[str] | None) -> None:
@@ -224,17 +257,35 @@ def _run(args: argparse.Namespace) -> int:
 
         deadline = time.monotonic() + args.startup_timeout
         while time.monotonic() < deadline:
-            if _cdp_ready(cdp_url):
+            probe = _cdp_ready(cdp_url)
+            if probe.ready:
                 _notify("READY=1\n")
                 break
             time.sleep(args.poll_interval)
         else:
             raise TimeoutError(f"CDP endpoint did not become ready: {cdp_url}")
 
+        consecutive_failures = 0
         while True:
             time.sleep(args.monitor_interval)
-            if not _cdp_ready(cdp_url):
-                raise RuntimeError(f"CDP endpoint stopped responding: {cdp_url}")
+            probe = _cdp_ready(cdp_url)
+            if probe.ready:
+                consecutive_failures = 0
+                continue
+            consecutive_failures += 1
+            LOGGER.warning(
+                "CDP health check failed: kind=%s detail=%s url=%s consecutive=%d/%d",
+                probe.failure_kind,
+                probe.detail or "no detail",
+                cdp_url,
+                consecutive_failures,
+                CDP_MONITOR_FAILURE_LIMIT,
+            )
+            if consecutive_failures >= CDP_MONITOR_FAILURE_LIMIT:
+                raise RuntimeError(
+                    "CDP endpoint stopped responding after "
+                    f"{CDP_MONITOR_FAILURE_LIMIT} consecutive failures: {cdp_url}"
+                )
     finally:
         cleanup()
         for signum, previous_handler in previous_handlers.items():
