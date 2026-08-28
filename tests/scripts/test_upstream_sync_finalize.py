@@ -77,6 +77,7 @@ PY
 DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
 "$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
 "$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --stage final --digest "$DIGEST"
+echo 'fork test duration: seconds=2'
 '''
 
 
@@ -221,6 +222,16 @@ class TestFinalizeRequiresRebasedHead:
         logged = calls.read_text()
         assert "sync-local-customizations.sh" in logged
         assert "upstream-sync-smoketest.sh" in logged
+
+    def test_finalize_receipt_check_ignores_duration_sidecar(self, tmp_path, state):
+        repo = _make_repo(tmp_path)
+        parent = _git(repo, "rev-parse", "HEAD~1")
+
+        scripts, _ = _stub_scripts(tmp_path)
+        _request(state, "finalize", parent)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
 
 
 class TestFinalizeNotifiesSlack:

@@ -380,6 +380,9 @@ if [ -n "$NODE_REPORT" ]; then
 fi
 
 cd "$WT"
+# Keep timing in a sidecar line: the exact receipt above is a protocol checked
+# with grep -Fqx by both landing callers and must remain byte-for-byte stable.
+SECONDS=0
 pytest_rc=0
 nice -n 19 "$PYTHON_BIN" "$RUNNER_SCRIPT" "${RUNNER_ARGS[@]}" || pytest_rc=$?
 
@@ -426,4 +429,5 @@ else
   fi
 fi
 printf '%s\n' "$FINAL_RECEIPT_LINE" >&2
+printf 'fork test duration: seconds=%s\n' "$SECONDS" >&2
 exit "$pytest_rc"

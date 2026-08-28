@@ -156,6 +156,7 @@ def _manifest_receipt_preamble() -> str:
     return (
         _manifest_receipt_pre_only()
         + f'''{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$DIGEST"
+echo 'fork test duration: seconds=2'
 '''
     )
 
@@ -387,6 +388,15 @@ def test_a_merge_without_new_failures_lands(world, tmp_path):
     fork = world["fork"]
     assert (fork / "agent" / "new_module.py").exists()
     assert _git(fork, "rev-list", "--merges", "--count", "origin/main..HEAD") == "1"
+
+
+def test_sync_receipt_check_ignores_duration_sidecar(world, tmp_path):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    cmd = _staged_test_cmd(tmp_path, BASELINE_LOG, SAME_LOG)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_a_merge_that_breaks_tests_never_reaches_the_branch(world, tmp_path):
