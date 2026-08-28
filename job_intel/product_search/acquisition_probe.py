@@ -964,9 +964,10 @@ def normalize_geography_evidence(
     if len(mentioned) > 1:
         primary = None
     remote = bool(re.search(r"\bremote\b", folded))
+    remote_only = folded == "remote"
     remote_scope: RemoteScope = (
         "country_remote" if remote and primary is not None
-        else "location_independent" if remote and not mentioned
+        else "location_independent" if remote_only
         else "none"
     )
     return GeographyEvidence(

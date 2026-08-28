@@ -146,6 +146,27 @@ def test_b2_location_independent_remote_is_credited_to_global_remote() -> None:
         "https://www.linkedin.com/jobs/view/remote-global"
     ]
 
+
+@pytest.mark.parametrize(
+    ("location", "expected_scope", "expected_country"),
+    (
+        ("Remote", "location_independent", None),
+        ("Remote, US", "none", None),
+        ("Remote, AE", "none", None),
+        ("Remote, SG", "none", None),
+        ("Remote, GB", "none", None),
+        ("Remote, United States", "country_remote", "US"),
+        ("Remote, Kazakhstan", "country_remote", "KZ"),
+    ),
+)
+def test_b2_location_independent_requires_remote_without_location_qualifier(
+    location: str, expected_scope: str, expected_country: str | None
+) -> None:
+    evidence = acquisition_probe.normalize_geography_evidence(location)
+
+    assert evidence.remote_scope == expected_scope
+    assert evidence.primary_country == expected_country
+
 def test_b2_non_linkedin_record_is_credited_by_primary_country() -> None:
     summary = _b2_summary(
         [_b2_record("hh-kz", "kazakhstan", "Almaty, Kazakhstan", source_family="headhunter")],
