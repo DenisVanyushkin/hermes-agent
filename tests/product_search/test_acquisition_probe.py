@@ -33,6 +33,7 @@ from job_intel.product_search.acquisition_probe import (
 )
 from job_intel.product_search.search_contract import load_search_contract
 import job_intel.product_search.acquisition_probe as acquisition_probe
+import job_intel.sources as job_sources
 import job_intel.browser_worker as browser_worker
 
 
@@ -57,10 +58,63 @@ def test_gate_a_linkedin_source_uses_explicit_unauthenticated_opt_in(monkeypatch
         ),
     )
 
-    list(resolve_public_sources()["linkedin"](request))
+    list(resolve_public_sources(run_id="run-1")["linkedin"](request))
 
     assert calls["allow_unauthenticated"] is True
+    assert calls["run_id"] == "run-1"
+    assert calls["query_id"] == "q1"
+    assert calls["cell_id"] == "uk"
 
+
+
+
+
+
+def test_linkedin_capture_ids_reach_browser_worker_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[str] = []
+
+    monkeypatch.setenv("JOB_INTEL_BROWSER_PYTHON", "/usr/bin/python3")
+    monkeypatch.setattr(job_sources, "browser_native_available", lambda: True)
+    monkeypatch.setattr(job_sources, "_browser_config", lambda _source: object())
+    monkeypatch.setattr(job_sources, "_ensure_required_browser_profile", lambda *_args: None)
+
+    def fake_worker(*args: str, **_kwargs: object) -> dict[str, object]:
+        captured.extend(args)
+        return {"ok": True, "vacancies": [], "session_health": {}, "search_trace": {}}
+
+    monkeypatch.setattr(job_sources, "_browser_worker_payload", fake_worker)
+    job_sources.fetch_linkedin_vacancies(
+        "VP Product",
+        location="United Kingdom",
+        run_id="run-1",
+        query_id="q1",
+        cell_id="uk",
+    )
+
+    assert captured == [
+        "linkedin",
+        "VP Product",
+        "1",
+        "--location",
+        "United Kingdom",
+        "--run-id",
+        "run-1",
+        "--query-id",
+        "q1",
+        "--cell-id",
+        "uk",
+    ]
+
+def test_linkedin_slug_and_numeric_urls_share_one_canonical_identity() -> None:
+    from job_intel.product_search.acquisition_probe import _canonical_url
+
+    slug = (
+        "https://uk.linkedin.com/jobs/view/chief-product-officer-at-acme-4459675813"
+        "?position=1&refId=redacted&trackingId=redacted"
+    )
+    numeric = "https://www.linkedin.com/jobs/view/4459675813?eBP=other"
+
+    assert _canonical_url(slug) == _canonical_url(numeric)
 
 def test_pair_evidence_distinguishes_unauthenticated_completion_and_carries_a1_counts(
     tmp_path: Path,
@@ -264,7 +318,7 @@ def test_c1a_run_manifest_passes_mapping_and_preserves_bounded_artifact(
     monkeypatch.setattr(
         acquisition_probe,
         "resolve_public_sources",
-        lambda: {family: fake_source for family in source_families},
+        lambda **_kwargs: {family: fake_source for family in source_families},
     )
     monkeypatch.setattr(
         acquisition_probe,
@@ -503,7 +557,7 @@ def test_run_manifest_wires_runtime_capability_checks_from_composition_root(
     monkeypatch.setattr(
         acquisition_probe,
         "resolve_public_sources",
-        lambda: {"linkedin": lambda _request: []},
+        lambda **_kwargs: {"linkedin": lambda _request: []},
     )
     monkeypatch.setattr(browser_worker, "_ensure_browser_desktop", fake_browser_ready)
 

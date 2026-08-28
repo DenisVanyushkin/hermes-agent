@@ -767,6 +767,13 @@ def _canonical_url(raw: str) -> str:
     is_headhunter_vacancy = (
         hostname == "hh.ru" or hostname.endswith(".hh.ru")
     ) and path.startswith("/vacancy/")
+    if is_linkedin_job:
+        match = re.fullmatch(
+            r"/jobs/view/(?:[^/]+-)?(?P<job_id>\d{7,})", path, flags=re.I
+        )
+        if match:
+            hostname = "www.linkedin.com"
+            path = f'/jobs/view/{match.group("job_id")}'
     filtered = (
         []
         if is_linkedin_job or is_headhunter_vacancy
@@ -779,7 +786,7 @@ def _canonical_url(raw: str) -> str:
     return urlunsplit(
         (
             split.scheme.casefold(),
-            split.netloc.casefold(),
+            hostname if is_linkedin_job else split.netloc.casefold(),
             path,
             urlencode(filtered),
             "",
@@ -1702,7 +1709,9 @@ def resolve_runtime_capability_checks(
     return checks
 
 
-def resolve_public_sources() -> dict[str, Callable[[Any], Iterable[Any]]]:
+def resolve_public_sources(
+    *, run_id: str | None = None
+) -> dict[str, Callable[[Any], Iterable[Any]]]:
     from job_intel.sources import (
         fetch_headhunter_vacancies,
         fetch_linkedin_vacancies,
@@ -1730,6 +1739,9 @@ def resolve_public_sources() -> dict[str, Callable[[Any], Iterable[Any]]]:
                         else None
                     ),
                     max_pages=2,
+                    run_id=run_id,
+                    query_id=getattr(request, "query_id", None),
+                    cell_id=getattr(request, "cell_id", None),
                     allow_unauthenticated=True,
                 )
             return fetch_linkedin_vacancies(str(request), max_pages=2)
@@ -2205,10 +2217,11 @@ def main() -> int:
             )
             for family, settings in dict(manifest.get("source_isolation") or {}).items()
         }
+        run_id = f"gate-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         run_probe(
-            run_id=f"gate-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+            run_id=run_id,
             queries=queries,
-            sources=resolve_public_sources(),
+            sources=resolve_public_sources(run_id=run_id),
             output_dir=Path(manifest["root"]),
             isolation=isolation,
             runtime_capability_checks=resolve_runtime_capability_checks(isolation),

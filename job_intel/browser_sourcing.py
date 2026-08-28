@@ -817,7 +817,96 @@ def _merge_vacancy_lists(primary: list[Vacancy], secondary: list[Vacancy]) -> li
     return _dedupe_vacancies(list(merged.values()))
 
 
+class _LinkedInPublicCardParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cards: list[dict[str, str]] = []
+        self._depth = 0
+        self._card_depth: int | None = None
+        self._card: dict[str, str] = {}
+        self._field: str | None = None
+        self._field_tag: str | None = None
+        self._field_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._depth += 1
+        attributes = {key: value or "" for key, value in attrs}
+        if (
+            self._card_depth is None
+            and tag == "div"
+            and re.fullmatch(r"urn:li:jobPosting:\d+", attributes.get("data-entity-urn", ""))
+        ):
+            self._card_depth = self._depth
+            self._card = {}
+        if self._card_depth is None:
+            return
+        classes = set(attributes.get("class", "").split())
+        if tag == "a" and "base-card__full-link" in classes:
+            self._card["href"] = attributes.get("href", "")
+        elif tag == "h3" and "base-search-card__title" in classes:
+            self._field, self._field_tag, self._field_text = "title", tag, []
+        elif tag == "a" and "hidden-nested-link" in classes:
+            self._field, self._field_tag, self._field_text = "company", tag, []
+        elif tag == "span" and "job-search-card__location" in classes:
+            self._field, self._field_tag, self._field_text = "location", tag, []
+
+    def handle_data(self, data: str) -> None:
+        if self._field is not None:
+            self._field_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._field_tag == tag:
+            self._card[self._field or ""] = _normalize_whitespace("".join(self._field_text))
+            self._field = None
+            self._field_tag = None
+            self._field_text = []
+        if self._card_depth == self._depth:
+            self.cards.append(dict(self._card))
+            self._card = {}
+            self._card_depth = None
+        self._depth -= 1
+
+
+def _contains_linkedin_public_card_evidence(html: str) -> bool:
+    return bool(
+        re.search(r'data-entity-urn=["\']urn:li:jobPosting:\d+["\']', html)
+        and re.search(r'class=["\'][^"\']*base-card__full-link', html)
+        and re.search(r'class=["\'][^"\']*base-search-card__title', html)
+    )
+
+
+def _linkedin_public_card_vacancies_from_html(
+    html: str, *, page_url: str, apply_role_filter: bool = True
+) -> list[Vacancy]:
+    parser = _LinkedInPublicCardParser()
+    parser.feed(html)
+    vacancies: list[Vacancy] = []
+    for card in parser.cards:
+        href = card.get("href", "")
+        title = _clean_html_text(card.get("title", ""))
+        if not href or not title or (apply_role_filter and not _looks_executive(title)):
+            continue
+        absolute = urljoin(page_url, unescape(href))
+        vacancies.append(
+            Vacancy(
+                source="linkedin",
+                source_id=_vacancy_source_id("linkedin", absolute, title),
+                company=card.get("company") or "Unknown",
+                title=title,
+                location=card.get("location") or "Unknown",
+                url=absolute,
+                description=title,
+                metadata={"source_url": page_url, "href": href},
+            )
+        )
+    return _dedupe_vacancies(vacancies)
+
+
 def _linkedin_card_vacancies_from_html(html: str, *, page_url: str, apply_role_filter: bool = True) -> list[Vacancy]:
+    if _contains_linkedin_public_card_evidence(html):
+        return _linkedin_public_card_vacancies_from_html(
+            html, page_url=page_url, apply_role_filter=apply_role_filter
+        )
     vacancies: list[Vacancy] = []
     pattern = re.compile(
         r'<a[^>]+href="(?P<href>/jobs/view/[^"]+)"[^>]*class="[^"]*job-card-container__link[^"]*"[^>]*>.*?<strong><!---->(?P<title>.*?)<!----></strong>.*?</a>(?P<tail>.{0,2500}?)job-card-list__footer-wrapper',

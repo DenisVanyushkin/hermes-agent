@@ -546,6 +546,139 @@ def test_unauthenticated_search_trace_keeps_auth_state_and_a1_counts(monkeypatch
     }
 
 
+
+
+def test_public_linkedin_fixture_parses_named_lost_job_ids() -> None:
+    public_html = """
+    <section class="two-pane-serp-page__results-list">
+      <ul class="jobs-search__results-list">
+        <li><div class="base-card base-search-card job-search-card"
+            data-entity-urn="urn:li:jobPosting:4459675813">
+          <a class="base-card__full-link" href="https://uk.linkedin.com/jobs/view/chief-product-officer-at-burns-sheehan-4459675813?position=1&amp;refId=redacted">open</a>
+          <h3 class="base-search-card__title">Chief Product Officer</h3>
+          <h4 class="base-search-card__subtitle"><a class="hidden-nested-link">Burns Sheehan</a></h4>
+          <div class="base-search-card__metadata"><span class="job-search-card__location">London Area, United Kingdom</span></div>
+        </div></li>
+        <li><div class="base-card base-search-card job-search-card"
+            data-entity-urn="urn:li:jobPosting:4452385279">
+          <a class="base-card__full-link" href="https://uk.linkedin.com/jobs/view/chief-product-officer-ministry-of-justice-scs2-at-manchester-digital-4452385279?position=2&amp;trackingId=redacted">open</a>
+          <h3 class="base-search-card__title">Chief Product Officer - Ministry of Justice - SCS2</h3>
+          <h4 class="base-search-card__subtitle"><a class="hidden-nested-link">Manchester Digital</a></h4>
+          <div class="base-search-card__metadata"><span class="job-search-card__location">Manchester, England, United Kingdom</span></div>
+        </div></li>
+        <li><div class="base-card base-search-card job-search-card"
+            data-entity-urn="urn:li:jobPosting:4459855617">
+          <a class="base-card__full-link" href="https://uk.linkedin.com/jobs/view/chief-product-officer-at-navigator-4459855617?position=3&amp;refId=redacted">open</a>
+          <h3 class="base-search-card__title">Chief Product Officer</h3>
+          <h4 class="base-search-card__subtitle"><a class="hidden-nested-link">Navigator</a></h4>
+          <div class="base-search-card__metadata"><span class="job-search-card__location">United Kingdom</span></div>
+        </div></li>
+        <li><div class="base-card base-search-card job-search-card"
+            data-entity-urn="urn:li:jobPosting:4450096913">
+          <a class="base-card__full-link" href="https://uk.linkedin.com/jobs/view/chief-product-officer-cpo-at-aeir-4450096913?position=4&amp;trackingId=redacted">open</a>
+          <h3 class="base-search-card__title">Chief Product Officer CPO</h3>
+          <h4 class="base-search-card__subtitle"><a class="hidden-nested-link">Aeir</a></h4>
+          <div class="base-search-card__metadata"><span class="job-search-card__location">London, United Kingdom</span></div>
+        </div></li>
+      </ul>
+    </section>
+    """
+
+    vacancies = extract_linkedin_vacancies_from_html(
+        public_html, page_url="https://www.linkedin.com/jobs/search/"
+    )
+
+    assert {vacancy.url.rsplit("-", 1)[-1].split("?", 1)[0] for vacancy in vacancies} == {
+        "4459675813",
+        "4452385279",
+        "4459855617",
+        "4450096913",
+    }
+    assert {vacancy.company for vacancy in vacancies} == {
+        "Burns Sheehan",
+        "Manchester Digital",
+        "Navigator",
+        "Aeir",
+    }
+
+
+
+
+def test_public_markup_is_parsed_even_when_authentication_is_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+            noise_probability=0.0,
+        )
+    )
+    public_html = """
+    <div class="base-card base-search-card job-search-card"
+         data-entity-urn="urn:li:jobPosting:4459675813">
+      <a class="base-card__full-link"
+         href="https://uk.linkedin.com/jobs/view/chief-product-officer-at-burns-sheehan-4459675813">open</a>
+      <h3 class="base-search-card__title">Chief Product Officer</h3>
+      <h4 class="base-search-card__subtitle"><a class="hidden-nested-link">Burns Sheehan</a></h4>
+      <span class="job-search-card__location">United Kingdom</span>
+    </div>
+    """
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda **_kwargs: "with_session")
+    monkeypatch.setattr(client, "fetch_html", lambda *_args, **_kwargs: public_html)
+
+    vacancies = client.search_linkedin(
+        "product",
+        max_pages=1,
+        geography_location="United Kingdom",
+    )
+
+    assert [vacancy.source_id for vacancy in vacancies]
+    assert vacancies[0].company == "Burns Sheehan"
+
+def test_authorized_linkedin_fixture_still_uses_authorized_card_markup() -> None:
+    authorized_html = """
+    <div class="job-card-container">
+      <a href="/jobs/view/9001" class="job-card-container__link">
+        <strong><!---->Chief Product Officer<!----></strong>
+      </a>
+      <div class="artdeco-entity-lockup__subtitle"><span><!---->Acme<!----></span></div>
+      <div class="job-card-container__metadata-wrapper"><li><span><!---->United Kingdom<!----></span></li></div>
+      <div class="job-card-list__footer-wrapper"></div>
+    </div>
+    """
+
+    vacancies = extract_linkedin_vacancies_from_html(
+        authorized_html, page_url="https://www.linkedin.com/jobs/search/"
+    )
+
+    assert [vacancy.url for vacancy in vacancies] == [
+        "https://www.linkedin.com/jobs/view/9001"
+    ]
+    assert vacancies[0].company == "Acme"
+
+
+def test_linkedin_public_parser_branch_is_selected_from_document_evidence() -> None:
+    public_html = """
+    <div class="base-card base-search-card job-search-card"
+         data-entity-urn="urn:li:jobPosting:4459675813">
+      <a class="base-card__full-link"
+         href="https://uk.linkedin.com/jobs/view/chief-product-officer-at-burns-sheehan-4459675813">open</a>
+      <h3 class="base-search-card__title">Chief Product Officer</h3>
+      <h4 class="base-search-card__subtitle"><a class="hidden-nested-link">Burns Sheehan</a></h4>
+      <span class="job-search-card__location">United Kingdom</span>
+    </div>
+    """
+
+    vacancies = extract_linkedin_vacancies_from_html(
+        public_html, page_url="https://www.linkedin.com/jobs/search/"
+    )
+
+    assert len(vacancies) == 1
+    assert vacancies[0].source == "linkedin"
+
 def test_linkedin_search_fails_closed_when_diagnostic_artifact_is_unavailable(monkeypatch, tmp_path: Path) -> None:
     diagnostics_path = tmp_path / "diagnostics-not-a-directory"
     diagnostics_path.write_text("not a directory")
