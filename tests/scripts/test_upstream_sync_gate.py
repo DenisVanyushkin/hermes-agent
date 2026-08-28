@@ -1330,6 +1330,54 @@ def test_aggregate_parser_accepts_the_real_runner_overall_summary():
     assert outcome["summary"] == {"failed": 1, "passed": 8, "skipped": 1}
 
 
+def test_aggregate_parser_rejects_a_whole_run_with_no_tests(tmp_path):
+    log = tmp_path / "aggregate-empty.log"
+    log.write_text(
+        "Running 2 test files (~0 tests) with -j 1\n"
+        "=== Summary: 2 files, 0 tests passed, 0 failed "
+        "(100% complete) in 0.1s (1 workers) ===\n"
+    )
+
+    with pytest.raises(ValueError, match="no tests ran"):
+        upstream_sync_gate.parse_test_outcomes(
+            log.read_text(encoding="utf-8"), aggregate=True
+        )
+
+
+def test_aggregate_parser_rejects_nonzero_runner_exit_without_node_failure():
+    log = (
+        "--- tests/test_hook.py ---\n"
+        "PASSED tests/test_hook.py::test_passes\n"
+        "1 passed in 0.10s\n"
+        "=== 1 file where all tests passed but pytest exited non-zero "
+        "(warnings-as-errors, hook failures, etc.) ===\n"
+        "=== Summary: 1 files, 1 tests passed, 0 failed "
+        "(100% complete) in 0.1s (1 workers) ===\n"
+    )
+
+    with pytest.raises(ValueError, match="non-zero"):
+        upstream_sync_gate.parse_test_outcomes(log, aggregate=True)
+
+
+def test_aggregate_parser_ignores_human_dash_sections_inside_failure_output():
+    log = (
+        "=== Failure output ===\n"
+        "--- tests/hermes_cli/test_debug.py ---\n"
+        "FAILED tests/hermes_cli/test_debug.py::test_debug - AssertionError\n"
+        "--- hermes dump ---\n"
+        "captured stdout\n"
+        "1 failed in 0.10s\n"
+        "=== Summary: 1 files, 0 tests passed, 1 failed "
+        "(100% complete) in 0.1s (1 workers) ===\n"
+    )
+
+    outcome = upstream_sync_gate.parse_test_outcomes(log, aggregate=True)
+
+    assert outcome["failed_nodeids"] == [
+        "tests/hermes_cli/test_debug.py::test_debug"
+    ]
+
+
 def test_node_outcome_reads_the_runner_machine_report(tmp_path):
     report = tmp_path / "nodes.json"
     report.write_text(

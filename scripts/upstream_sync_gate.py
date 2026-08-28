@@ -917,10 +917,18 @@ _SUMMARY_LINE = re.compile(
 _COUNT_TOKEN = re.compile(
     r"(?P<count>\d+)\s+(?P<label>failed|passed|skipped|warnings?|errors?|error)\b"
 )
-_AGGREGATE_FILE_HEADER = re.compile(r"^--- (?P<path>.+) ---\s*$", re.MULTILINE)
+_AGGREGATE_FILE_HEADER = re.compile(
+    r"^--- (?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py) ---\s*$",
+    re.MULTILINE,
+)
 _AGGREGATE_RUNNER_SUMMARY = re.compile(
     r"^=== Summary: (?P<files>\d+) files, (?P<passed>\d+) tests passed, "
     r"(?P<failed>\d+) failed(?:, (?P<skipped>\d+) skipped)?.*===\s*$",
+    re.MULTILINE,
+)
+_AGGREGATE_NONZERO_NO_TEST_FAILURE = re.compile(
+    r"^=== \d+ files? where all tests passed but pytest exited non-zero "
+    r".*===\s*$",
     re.MULTILINE,
 )
 
@@ -1021,6 +1029,16 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
     """
     if aggregate:
         summary_counts = _parse_aggregate_summaries(log)
+        measured_counts = sum(
+            summary_counts.get(label, 0)
+            for label in ("passed", "failed", "skipped", "error")
+        )
+        if measured_counts == 0:
+            raise ValueError("pytest aggregate run is unreadable: no tests ran")
+        if _AGGREGATE_NONZERO_NO_TEST_FAILURE.search(log):
+            raise ValueError(
+                "pytest aggregate run is unreadable: non-zero exit without test failures"
+            )
     elif _NO_TESTS_RAN.search(log):
         raise ValueError("pytest run is unreadable: no tests ran")
     else:
