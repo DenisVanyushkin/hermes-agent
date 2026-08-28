@@ -511,6 +511,7 @@ def fetch_linkedin_vacancies(
 ) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
+    fetch_linkedin_vacancies.last_errors = ()  # type: ignore[attr-defined]
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
@@ -539,6 +540,11 @@ def fetch_linkedin_vacancies(
         payload = _browser_worker_payload(*worker_args)
         fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
         fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
+        trace = payload.get("search_trace")
+        if isinstance(trace, dict) and trace.get("stop_reason") == "critical_degradation":
+            fetch_linkedin_vacancies.last_errors = (
+                str(trace.get("failure_reason") or "critical degradation"),
+            )  # type: ignore[attr-defined]
         return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc

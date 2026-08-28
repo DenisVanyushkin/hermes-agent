@@ -31,6 +31,12 @@ CDP_PROBE_TIMEOUT_SECONDS = 5.0
 CDP_MONITOR_FAILURE_LIMIT = 3
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 120.0
 LOGGER = logging.getLogger(__name__)
+BROWSER_PROFILE_ROOT = Path("/var/lib/browser-desktop/profiles")
+
+
+def _bootstrap_profile_root() -> Path:
+    configured = os.getenv("JOB_INTEL_BROWSER_PROFILE_ROOT", "").strip()
+    return Path(configured).expanduser() if configured else BROWSER_PROFILE_ROOT
 
 
 class _CdpProbeResult:
@@ -86,10 +92,27 @@ def _terminate(process: subprocess.Popen[str] | None) -> None:
 
 def _stop_profile(profile: Path) -> int:
     stop_script = Path(__file__).with_name("browser-desktop-stop.sh")
+    profile_name = _profile_name_for_bootstrap(profile)
     return subprocess.run(
-        ["bash", str(stop_script), "--profile", profile.name],
+        ["bash", str(stop_script), "--profile", profile_name],
         check=False,
     ).returncode
+
+
+def _profile_name_for_bootstrap(profile: Path) -> str:
+    root = _bootstrap_profile_root().resolve()
+    candidate = profile.expanduser().resolve()
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"profile path is outside bootstrap profile root: {candidate}"
+        ) from exc
+    if len(relative.parts) != 1:
+        raise RuntimeError(
+            f"profile path is not a direct bootstrap profile: {candidate}"
+        )
+    return relative.name
 
 
 def _lock_holder_pids(lock_path: Path) -> list[int]:
@@ -203,6 +226,7 @@ def _run(args: argparse.Namespace) -> int:
     profile_override = args.profile != default_profile
     if (profile_override or args.url is not None) and not args.cdp_url:
         raise RuntimeError("profile or URL overrides require explicit --cdp-url")
+    profile_name = _profile_name_for_bootstrap(args.profile)
     cdp_url = args.cdp_url or str(target["cdp_url"])
     lock_holder: subprocess.Popen[str] | None = None
     cleanup_done = False
@@ -239,7 +263,7 @@ def _run(args: argparse.Namespace) -> int:
             "bash",
             str(args.bootstrap_script),
             "--profile",
-            args.profile.name,
+            profile_name,
             "--url",
             args.url or str(target["start_url"]),
         ]

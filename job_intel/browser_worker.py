@@ -12,6 +12,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from .browser_sourcing import (
@@ -188,7 +189,12 @@ def _browser_process_age_seconds(
     if not target:
         return 0
     endpoint = cdp_url or str(target["cdp_url"])
-    port = int(endpoint.rsplit(":", 1)[-1])
+    try:
+        port = urlsplit(endpoint).port
+    except ValueError:
+        return 0
+    if port is None:
+        return 0
     profile_marker = (
         f"--user-data-dir={profile}"
         if profile is not None

@@ -355,7 +355,10 @@ def classify_linkedin_dom_job_ids(
 
     duplicate_returned = duplicate_ids & returned_ids
     returned_count = len(returned_ids)
-    vacancies_extracted = len(returned_vacancies)
+    # The accounting contract is over unique DOM job identities. A repeated
+    # row can be returned by a rerender or a second extractor, but it must not
+    # make the identity arithmetic fail or be counted as a new job.
+    vacancies_extracted = returned_count
     if len(dom_ids) != (
         len(parsed_ids)
         + len(duplicate_ids)
@@ -817,6 +820,11 @@ def _merge_vacancy_lists(primary: list[Vacancy], secondary: list[Vacancy]) -> li
     return _dedupe_vacancies(list(merged.values()))
 
 
+_HTML_VOID_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+)
+
+
 class _LinkedInPublicCardParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -829,6 +837,8 @@ class _LinkedInPublicCardParser(HTMLParser):
         self._field_text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HTML_VOID_TAGS:
+            return
         self._depth += 1
         attributes = {key: value or "" for key, value in attrs}
         if (
@@ -855,6 +865,8 @@ class _LinkedInPublicCardParser(HTMLParser):
             self._field_text.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_VOID_TAGS:
+            return
         if self._field_tag == tag:
             self._card[self._field or ""] = _normalize_whitespace("".join(self._field_text))
             self._field = None

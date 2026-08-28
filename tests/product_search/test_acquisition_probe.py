@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from job_intel.product_search.acquisition_probe import (
+    BOUNDED_PROOF_SELECTION_RULE,
     LinkedInGeographyMapping,
     LinkedInGeographyTarget,
     ProbeSourceBlocked,
@@ -1844,3 +1845,188 @@ def _b2_summary(records, mapping, **kwargs):
     builder = getattr(acquisition_probe, "build_geography_summary", None)
     assert callable(builder), "B2 geography summary builder is missing"
     return builder(records, mapping, **kwargs)
+
+
+def test_critical_degradation_reaches_pair_evidence_and_blocks_completion(
+    tmp_path: Path,
+) -> None:
+    class CriticalSource:
+        last_errors: tuple[str, ...] = ()
+        last_trace = {
+            "stop_reason": "critical_degradation",
+            "failure_reason": "login_wall_or_auth_redirect",
+        }
+        last_health = {"critical_degradation": True, "status": "blocked"}
+
+        def __call__(self, _query: object) -> list[dict[str, str]]:
+            return [{
+                "source_id": "partial-row",
+                "url": "https://example.test/jobs/partial-row",
+                "title": "Head of Product",
+                "company": "Acme",
+            }]
+
+    result = run_probe(
+        run_id="critical-degradation",
+        queries=({
+            "query_id": "q-critical",
+            "cell_id": "uk",
+            "source_family": "linkedin",
+            "query": "Head of Product United Kingdom",
+        },),
+        sources={"linkedin": CriticalSource()},
+        output_dir=tmp_path,
+        isolation={
+            "linkedin": SourceIsolation(
+                mode="exclusive_lock",
+                path=tmp_path / "linkedin.lock",
+                collection_method="browser",
+            )
+        },
+        runtime_capability_checks={
+            "linkedin": lambda: RuntimeCapabilityResult(state="ready")
+        },
+        max_attempts=1,
+    )
+
+    pair = result.model_dump(mode="json")["cell_family_attempts"][0]
+    assert pair["outcome"] == "degraded"
+    assert pair["critical_degradation"] is True
+    assert pair["critical_degradation_reason"] == "login_wall_or_auth_redirect"
+    assert result.source_states == {"linkedin": "observed_with_failures"}
+
+
+def test_linkedin_source_forwards_critical_degradation_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_fetch(_query: str, **_kwargs: object) -> list[object]:
+        fake_fetch.last_trace = {
+            "stop_reason": "critical_degradation",
+            "failure_reason": "login_wall_or_auth_redirect",
+        }
+        fake_fetch.last_health = {"critical_degradation": True, "status": "blocked"}
+        fake_fetch.last_errors = ("login_wall_or_auth_redirect",)
+        return []
+
+    monkeypatch.setattr(job_sources, "fetch_linkedin_vacancies", fake_fetch)
+    source = acquisition_probe.resolve_public_sources(run_id="critical-source")["linkedin"]
+
+    source("Head of Product United Kingdom")
+
+    assert source.last_errors == ("login_wall_or_auth_redirect",)
+
+
+def test_bounded_run_executes_a_declared_unsupported_mapping_control(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "experiment"
+    (root / "runtime/config/product_search").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "config/product_search/search_contract.v1.yaml",
+        root / "runtime/config/product_search/search_contract.v1.yaml",
+    )
+    base_mapping = _c1a_mapping()
+    mapping = LinkedInGeographyMapping(
+        {
+            **base_mapping,
+            "cee": LinkedInGeographyTarget(
+                location="Central and Eastern Europe",
+                status="unsupported",
+                country_codes=(),
+            ),
+        },
+        version=base_mapping.version,
+        normalization_rule_version=base_mapping.normalization_rule_version,
+        contamination_formula_version=base_mapping.contamination_formula_version,
+        contamination_threshold=base_mapping.contamination_threshold,
+        city_country_codes=base_mapping.city_country_codes,
+    )
+    manifest = _c1a_manifest(root)
+    manifest["bounded_proof"]["negative_control"] = {
+        "selection_rule": BOUNDED_PROOF_SELECTION_RULE,
+        "cell_id": "cee",
+        "status": "unsupported",
+        "location": "Central and Eastern Europe",
+        "mapping_version": mapping.version,
+    }
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8")
+
+    queries = (
+        ProbeQuery(
+            query_id="uk-query",
+            cell_id="uk",
+            source_family="linkedin",
+            query="VP Product United Kingdom",
+        ),
+        ProbeQuery(
+            query_id="cee-control",
+            cell_id="cee",
+            source_family="linkedin",
+            query="Central and Eastern Europe",
+            primary_geography="Central and Eastern Europe",
+            geography_target=mapping["cee"],
+        ),
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(acquisition_probe, "verify_experiment_runtime", lambda _manifest: None)
+    monkeypatch.setattr(acquisition_probe, "load_linkedin_geography_mapping", lambda _path=None: mapping)
+    monkeypatch.setattr(acquisition_probe, "expand_queries", lambda *args, **kwargs: queries)
+    monkeypatch.setattr(acquisition_probe, "resolve_public_sources", lambda **_kwargs: {})
+    monkeypatch.setattr(acquisition_probe, "resolve_runtime_capability_checks", lambda _isolation: {})
+    monkeypatch.setattr(acquisition_probe, "run_probe", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(sys, "argv", ["acquisition_probe", "run-manifest", str(manifest_path)])
+
+    environment_before = dict(os.environ)
+    try:
+        assert acquisition_probe.main() == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(environment_before)
+
+    executed_queries = captured["queries"]
+    assert any(
+        query.cell_id == "cee" and not query.is_synthetic_control
+        for query in executed_queries
+    )
+
+
+def test_successful_retry_replaces_failure_for_the_same_query(
+    tmp_path: Path,
+) -> None:
+    class RetrySource:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_errors: tuple[str, ...] = ()
+
+        def __call__(self, _query: object) -> list[dict[str, str]]:
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("first attempt timed out")
+            return [{
+                "source_id": "retry-row",
+                "url": "https://example.test/jobs/retry-row",
+                "title": "Head of Product",
+                "company": "Acme",
+            }]
+
+    result = run_probe(
+        run_id="retry-recovery",
+        queries=({
+            "query_id": "q-retry",
+            "cell_id": "uk",
+            "source_family": "alpha",
+            "query": "Head of Product",
+        },),
+        sources={"alpha": RetrySource()},
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            )
+        },
+        max_attempts=2,
+    )
+
+    pair = result.model_dump(mode="json")["cell_family_attempts"][0]
+    assert pair["outcome"] == "completed"

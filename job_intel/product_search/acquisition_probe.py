@@ -851,27 +851,52 @@ _COUNTRY_ALIASES: tuple[tuple[str, str], ...] = (
     ("united states", "US"),
     ("south korea", "KR"),
     ("new zealand", "NZ"),
+    ("argentina", "AR"),
     ("australia", "AU"),
     ("austria", "AT"),
     ("bahrain", "BH"),
     ("belgium", "BE"),
+    ("bolivia", "BO"),
+    ("brazil", "BR"),
+    ("brunei", "BN"),
+    ("cambodia", "KH"),
     ("canada", "CA"),
+    ("chile", "CL"),
     ("china", "CN"),
+    ("colombia", "CO"),
+    ("costa rica", "CR"),
     ("denmark", "DK"),
+    ("dominican republic", "DO"),
+    ("ecuador", "EC"),
+    ("el salvador", "SV"),
     ("finland", "FI"),
     ("france", "FR"),
     ("germany", "DE"),
+    ("guatemala", "GT"),
+    ("honduras", "HN"),
+    ("iceland", "IS"),
     ("india", "IN"),
+    ("indonesia", "ID"),
     ("italy", "IT"),
     ("japan", "JP"),
     ("kazakhstan", "KZ"),
     ("kyrgyzstan", "KG"),
     ("kuwait", "KW"),
     ("luxembourg", "LU"),
+    ("laos", "LA"),
+    ("liechtenstein", "LI"),
+    ("malaysia", "MY"),
+    ("mexico", "MX"),
+    ("myanmar", "MM"),
+    ("nicaragua", "NI"),
     ("netherlands", "NL"),
     ("new zealand", "NZ"),
     ("norway", "NO"),
     ("oman", "OM"),
+    ("panama", "PA"),
+    ("paraguay", "PY"),
+    ("peru", "PE"),
+    ("philippines", "PH"),
     ("poland", "PL"),
     ("qatar", "QA"),
     ("saudi arabia", "SA"),
@@ -882,11 +907,16 @@ _COUNTRY_ALIASES: tuple[tuple[str, str], ...] = (
     ("sweden", "SE"),
     ("switzerland", "CH"),
     ("tajikistan", "TJ"),
+    ("thailand", "TH"),
+    ("timor-leste", "TL"),
     ("turkmenistan", "TM"),
     ("ukraine", "UA"),
     ("united states", "US"),
     ("uzbekistan", "UZ"),
     ("vietnam", "VN"),
+    ("suriname", "SR"),
+    ("uruguay", "UY"),
+    ("venezuela", "VE"),
     ("uk", "GB"),
     ("uae", "AE"),
     ("usa", "US"),
@@ -919,8 +949,6 @@ def normalize_geography_evidence(
         match = re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", folded)
         if match is not None:
             found.setdefault(code, match.start())
-    for match in re.finditer(r"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])", text):
-        found.setdefault(match.group(1), match.start())
     if not found:
         aliases = dict(_CITY_COUNTRY_ALIASES)
         aliases.update(
@@ -1392,6 +1420,8 @@ def run_probe(
                 "credited_records_status": "undetermined",
                 "credited_records_reason": "b2_attribution_unavailable",
                 "artifact_references": [],
+                "critical_degradation": False,
+                "critical_degradation_reason": None,
             },
         )
         configured = cell_minimums.get(query.cell_id)
@@ -1411,8 +1441,13 @@ def run_probe(
         cell_minimums[query.cell_id] = expected
         return record
 
-    def _set_pair_outcome(query: ProbeQuery, outcome: AcquisitionOutcome) -> None:
+    def _set_pair_outcome(
+        query: ProbeQuery, outcome: AcquisitionOutcome, *, replace: bool = False
+    ) -> None:
         record = _ensure_pair(query)
+        if replace:
+            record["outcome"] = outcome
+            return
         current = record["outcome"]
         if current == "not_attempted" or current == outcome:
             record["outcome"] = outcome
@@ -1428,6 +1463,11 @@ def run_probe(
         trace = getattr(source, "last_trace", None)
         health = getattr(source, "last_health", None)
         if isinstance(trace, Mapping):
+            if trace.get("stop_reason") == "critical_degradation":
+                pair["critical_degradation"] = True
+                pair["critical_degradation_reason"] = str(
+                    trace.get("failure_reason") or "critical degradation"
+                )
             observation = trace.get("session_observation")
             if observation in {"with_session", "without_session", "not_observed"}:
                 pair["session_observation"] = observation
@@ -1501,15 +1541,20 @@ def run_probe(
                     request = query.query
                 records = list(source(request))
                 _capture_source_evidence(query, source)
+                critical_degradation = bool(pair_attempts[(query.cell_id, query.source_family)]["critical_degradation"])
                 state = (
                     "observed_with_failures"
-                    if tuple(getattr(source, "last_errors", ()) or ())
+                    if critical_degradation
+                    or tuple(getattr(source, "last_errors", ()) or ())
                     else "observed"
                 )
                 _record_attempt_state(query, state)
                 _set_pair_outcome(
                     query,
-                    "degraded" if state == "observed_with_failures" else "completed",
+                    "degraded"
+                    if critical_degradation or state == "observed_with_failures"
+                    else "completed",
+                    replace=attempt > 1,
                 )
                 break
             except ProbeSourceBlocked as exc:
@@ -1865,6 +1910,7 @@ def resolve_public_sources(
     def _publish_linkedin_metadata() -> None:
         _linkedin_source.last_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
         _linkedin_source.last_health = getattr(fetch_linkedin_vacancies, "last_health", None)
+        _linkedin_source.last_errors = getattr(fetch_linkedin_vacancies, "last_errors", ())
 
     def _linkedin_source(request: Any) -> Iterable[Any]:
         try:
@@ -2338,7 +2384,16 @@ def main() -> int:
             execution_plan=execution_plan,
         )
         if run_mode == "bounded":
-            queries = tuple(query for query in queries if query.cell_id in bounded_cell_ids)
+            control_cell_id = str(negative_control["cell_id"])
+            queries = tuple(
+                query
+                for query in queries
+                if query.cell_id in bounded_cell_ids
+                or (
+                    query.cell_id == control_cell_id
+                    and query.source_family == "linkedin"
+                )
+            )
         else:
             queries = queries + build_snapshot_queries()
         if negative_control["cell_id"] not in mapping:

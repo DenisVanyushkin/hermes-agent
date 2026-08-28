@@ -983,7 +983,11 @@ def test_supervisor_sigterm_releases_the_profile_lock_holder(tmp_path: Path) -> 
         "--startup-timeout",
         "30",
     ]
-    process = subprocess.Popen(command, start_new_session=True)
+    process = subprocess.Popen(
+        command,
+        env={**os.environ, "JOB_INTEL_BROWSER_PROFILE_ROOT": str(tmp_path)},
+        start_new_session=True,
+    )
     holder_process_group: int | None = None
     try:
         deadline = time.monotonic() + 3
@@ -1130,7 +1134,11 @@ def _supervisor_command(
     ]
     if network_namespace:
         command.extend(["--network-namespace", network_namespace])
-    return command, {**os.environ, "NOTIFY_SOCKET": str(notify_path)}, bootstrap_log
+    return command, {
+        **os.environ,
+        "NOTIFY_SOCKET": str(notify_path),
+        "JOB_INTEL_BROWSER_PROFILE_ROOT": str(profile.parent),
+    }, bootstrap_log
 
 
 def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Path) -> None:
@@ -2085,3 +2093,97 @@ def test_supervisor_requires_three_consecutive_cdp_failures(tmp_path: Path) -> N
             process.terminate()
             process.wait(timeout=8)
         receiver.close()
+
+
+def test_browser_process_age_accepts_trailing_slash_in_cdp_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_process(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="42  /usr/bin/chromium --remote-debugging-port=19222 "
+            "--user-data-dir=/tmp/linkedin\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(browser_worker, "_run_process", fake_process)
+
+    assert (
+        browser_worker._browser_process_age_seconds(
+            "linkedin",
+            cdp_url="http://169.254.77.2:19222/",
+            profile=Path("/tmp/linkedin"),
+        )
+        == 42
+    )
+
+
+def test_dom_accounting_accepts_returned_duplicate_canonical_rows() -> None:
+    accounting = classify_linkedin_dom_job_ids(
+        dom_job_ids=frozenset({"202"}),
+        parser_vacancies=[
+            _a4_vacancy("202"),
+            _a4_vacancy("202", title="Director Product"),
+        ],
+        returned_vacancies=[
+            _a4_vacancy("202"),
+            _a4_vacancy("202", title="Director Product"),
+        ],
+    )
+
+    assert accounting.outcome_by_id == {"202": "duplicate-canonical"}
+    assert accounting.returned_count == 1
+    assert accounting.vacancies_extracted == 1
+
+
+def test_public_parser_ignores_unclosed_void_tags_inside_a_card() -> None:
+    html = """
+    <div class="base-card base-search-card job-search-card"
+         data-entity-urn="urn:li:jobPosting:4459675813">
+      <img class="company-logo">
+      <input type="hidden">
+      <a class="base-card__full-link"
+         href="https://uk.linkedin.com/jobs/view/chief-product-officer-at-burns-sheehan-4459675813">open</a>
+      <h3 class="base-search-card__title">Chief Product Officer</h3>
+      <a class="hidden-nested-link">Burns Sheehan</a>
+      <span class="job-search-card__location">United Kingdom</span>
+    </div>
+    """
+
+    vacancies = extract_linkedin_vacancies_from_html(
+        html, page_url="https://www.linkedin.com/jobs/search/"
+    )
+
+    assert len(vacancies) == 1
+    assert vacancies[0].url.endswith("/jobs/view/chief-product-officer-at-burns-sheehan-4459675813")
+
+
+def test_supervisor_rejects_profile_path_outside_bootstrap_profile_root(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    supervisor = _load_browser_supervisor()
+    profile = tmp_path / "linkedin"
+    bootstrap_script = tmp_path / "bootstrap.sh"
+    bootstrap_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    assert (
+        supervisor.main(
+            [
+                "--source",
+                "linkedin",
+                "--profile",
+                str(profile),
+                "--cdp-url",
+                "http://127.0.0.1:19222",
+                "--lock-path",
+                str(tmp_path / "profile.lock"),
+                "--bootstrap-script",
+                str(bootstrap_script),
+                "--startup-timeout",
+                "0.01",
+            ]
+        )
+        == 1
+    )
+    assert "profile path" in capsys.readouterr().err

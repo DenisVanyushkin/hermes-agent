@@ -6,6 +6,44 @@ import yaml
 import job_intel.product_search.acquisition_probe as acquisition_probe
 from test_acquisition_probe import ROOT, _b2_mapping, _b2_record, _b2_summary
 
+
+@pytest.mark.parametrize(
+    ("location", "primary_country"),
+    (
+        ("San Francisco, CA", None),
+        ("Indianapolis, IN", None),
+        ("Denver, CO", None),
+        ("Washington, DC", None),
+        ("London, UK", "GB"),
+    ),
+)
+def test_b2_does_not_treat_arbitrary_two_letter_tokens_as_country_codes(
+    location: str, primary_country: str | None
+) -> None:
+    evidence = acquisition_probe.normalize_geography_evidence(location)
+
+    assert evidence.primary_country == primary_country
+    if primary_country is None:
+        assert evidence.mentioned_countries == ()
+
+
+@pytest.mark.parametrize(
+    ("location", "primary_country"),
+    (
+        ("São Paulo, Brazil", "BR"),
+        ("Jakarta, Indonesia", "ID"),
+        ("Kuala Lumpur, Malaysia", "MY"),
+        ("Reykjavik, Iceland", "IS"),
+        ("Vaduz, Liechtenstein", "LI"),
+    ),
+)
+def test_b2_country_aliases_cover_verified_mapping_owners(
+    location: str, primary_country: str
+) -> None:
+    evidence = acquisition_probe.normalize_geography_evidence(location)
+
+    assert evidence.primary_country == primary_country
+
 def test_b2_primary_country_does_not_follow_query_cell() -> None:
     summary = _b2_summary(
         [_b2_record("kz-1", "turkmenistan", "Almaty, Kazakhstan")],
