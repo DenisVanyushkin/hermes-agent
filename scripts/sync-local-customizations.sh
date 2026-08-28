@@ -720,7 +720,7 @@ fi
 # и обязан отличаться от «новых падений нет».
 set +e
 NEW_FAILURES="$("$PYTHON_BIN" "$GATE" new-failures \
-  --baseline "$BASELINE_LOG_FILE" --post "$POST_LOG_FILE")"
+  --baseline "$BASELINE_LOG_FILE" --post "$POST_LOG_FILE" --aggregate)"
 NF_RC=$?
 set -e
 if [ "$NF_RC" -eq 2 ]; then

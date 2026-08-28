@@ -1506,6 +1506,58 @@ def test_cli_new_failures_exits_zero_when_the_sets_match(tmp_path):
     assert r.returncode == 0
 
 
+def test_cli_new_failures_accepts_a_green_aggregate_run(tmp_path):
+    before, after = tmp_path / "b.log", tmp_path / "a.log"
+    green = (
+        "Running 2 test files (~2 tests) with -j 1\n"
+        "=== Summary: 2 files, 2 tests passed, 0 failed "
+        "(100% complete) in 1.0s (1 workers) ===\n"
+    )
+    before.write_text(green)
+    after.write_text(green)
+
+    r = _cli(
+        "new-failures",
+        "--baseline",
+        str(before),
+        "--post",
+        str(after),
+        "--aggregate",
+    )
+
+    assert r.returncode == 0, r.stderr
+
+
+def test_cli_new_failures_reports_a_failure_from_an_aggregate_run(tmp_path):
+    before, after = tmp_path / "b.log", tmp_path / "a.log"
+    before.write_text(
+        "--- tests/a.py ---\n"
+        "PASSED tests/a.py::test_a\n"
+        "1 passed in 0.10s\n"
+        "=== Summary: 1 files, 1 tests passed, 0 failed "
+        "(100% complete) in 0.1s (1 workers) ===\n"
+    )
+    after.write_text(
+        "--- tests/a.py ---\n"
+        "FAILED tests/a.py::test_a - AssertionError\n"
+        "1 failed in 0.10s\n"
+        "=== Summary: 1 files, 0 tests passed, 1 failed "
+        "(100% complete) in 0.1s (1 workers) ===\n"
+    )
+
+    r = _cli(
+        "new-failures",
+        "--baseline",
+        str(before),
+        "--post",
+        str(after),
+        "--aggregate",
+    )
+
+    assert r.returncode == 1, r.stderr
+    assert r.stdout.split() == ["tests/a.py::test_a"]
+
+
 def test_cli_exits_two_on_a_killed_run(tmp_path):
     before, after = tmp_path / "b.log", tmp_path / "a.log"
     before.write_text(_log(["tests/a.py::test_one"]))

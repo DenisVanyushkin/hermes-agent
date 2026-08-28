@@ -1079,9 +1079,11 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
     return result
 
 
-def compare_test_outcomes(baseline_log: str, post_log: str) -> dict[str, list[str]]:
-    baseline = parse_test_outcomes(baseline_log)
-    post = parse_test_outcomes(post_log)
+def compare_test_outcomes(
+    baseline_log: str, post_log: str, *, aggregate: bool = False
+) -> dict[str, list[str]]:
+    baseline = parse_test_outcomes(baseline_log, aggregate=aggregate)
+    post = parse_test_outcomes(post_log, aggregate=aggregate)
     new_collection_errors = sorted(
         set(post["collection_error_paths"]) - set(baseline["collection_error_paths"])
     )
@@ -1103,13 +1105,15 @@ def _failures(log: str) -> set[str]:
     return set(parse_test_outcomes(log)["failed_nodeids"])
 
 
-def new_failures(baseline_log: str, post_log: str) -> list[str]:
+def new_failures(
+    baseline_log: str, post_log: str, *, aggregate: bool = False
+) -> list[str]:
     """Тесты, упавшие после слияния и не падавшие до него.
 
     Пропавшие падения не возвращаются: слияние, которое что-то починило, —
     не повод его блокировать.
     """
-    compared = compare_test_outcomes(baseline_log, post_log)
+    compared = compare_test_outcomes(baseline_log, post_log, aggregate=aggregate)
     return compared["new_failures"] + [
         f"COLLECTION_ERROR {path}" for path in compared["new_collection_errors"]
     ]
@@ -1127,6 +1131,11 @@ def _main(argv: list[str] | None = None) -> int:
     p_nf = sub.add_parser("new-failures", help="list failures the merge introduced")
     p_nf.add_argument("--baseline", required=True)
     p_nf.add_argument("--post", required=True)
+    p_nf.add_argument(
+        "--aggregate",
+        action="store_true",
+        help="parse per-file runner output with an explicit aggregate contract",
+    )
 
     p_probe = sub.add_parser(
         "probe-request", help="select exact newly failing nodeids for the upstream probe"
@@ -1211,6 +1220,7 @@ def _main(argv: list[str] | None = None) -> int:
             items = new_failures(
                 Path(args.baseline).read_text(encoding="utf-8"),
                 Path(args.post).read_text(encoding="utf-8"),
+                aggregate=args.aggregate,
             )
         elif args.cmd == "probe-request":
             baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
