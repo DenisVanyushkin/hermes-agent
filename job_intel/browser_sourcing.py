@@ -271,6 +271,8 @@ class LinkedInDomJobIdAccounting:
     returned_count: int
     vacancies_extracted: int
     returned_outside_dom_job_ids: frozenset[str]
+    returned_outside_dom_row_count: int
+    returned_without_canonical_job_id_count: int
 
     @property
     def dom_count(self) -> int:
@@ -317,12 +319,16 @@ def classify_linkedin_dom_job_ids(
     duplicate_ids = frozenset(
         job_id for job_id, count in parser_counts.items() if count > 1
     )
-    all_returned_ids = frozenset(
-        job_id
-        for vacancy in returned_vacancies
-        for job_id in [_linkedin_job_id_from_url(vacancy.url)]
-        if job_id
+    returned_job_ids = tuple(
+        _linkedin_job_id_from_url(vacancy.url) for vacancy in returned_vacancies
     )
+    returned_without_canonical_job_id_count = sum(
+        job_id is None for job_id in returned_job_ids
+    )
+    returned_outside_dom_row_count = sum(
+        job_id is not None and job_id not in dom_ids for job_id in returned_job_ids
+    )
+    all_returned_ids = frozenset(job_id for job_id in returned_job_ids if job_id)
     returned_ids = all_returned_ids & dom_ids
     returned_outside_dom_job_ids = all_returned_ids - dom_ids
     expected_excluded = parser_ids - duplicate_ids - returned_ids
@@ -362,6 +368,9 @@ def classify_linkedin_dom_job_ids(
     # the extraction count remains the number of returned rows. Keep rows
     # outside that observed set visible instead of filtering them away.
     vacancies_extracted = len(returned_vacancies)
+    returned_dom_row_count = sum(
+        job_id is not None and job_id in dom_ids for job_id in returned_job_ids
+    )
     if len(dom_ids) != (
         len(parsed_ids)
         + len(duplicate_ids)
@@ -373,6 +382,12 @@ def classify_linkedin_dom_job_ids(
         raise ValueError("LinkedIn parser accounting does not close")
     if returned_count != len(parsed_ids) + len(duplicate_returned):
         raise ValueError("LinkedIn returned accounting does not close")
+    if vacancies_extracted != (
+        returned_dom_row_count
+        + returned_outside_dom_row_count
+        + returned_without_canonical_job_id_count
+    ):
+        raise ValueError("LinkedIn returned row accounting does not close")
     return LinkedInDomJobIdAccounting(
         outcome_by_id=outcome_by_id,
         parsed_ids=parsed_ids,
@@ -384,6 +399,8 @@ def classify_linkedin_dom_job_ids(
         returned_count=returned_count,
         vacancies_extracted=vacancies_extracted,
         returned_outside_dom_job_ids=returned_outside_dom_job_ids,
+        returned_outside_dom_row_count=returned_outside_dom_row_count,
+        returned_without_canonical_job_id_count=returned_without_canonical_job_id_count,
     )
 
 
@@ -1812,6 +1829,8 @@ class BrowserSourceClient:
                 "parsed_before_filter": 0,
                 "returned": 0,
                 "returned_outside_dom": 0,
+                "returned_outside_dom_rows": 0,
+                "returned_without_canonical_job_id": 0,
                 "duplicate_canonical": 0,
                 "duplicate_canonical_returned": 0,
                 "excluded": 0,
@@ -1939,6 +1958,7 @@ class BrowserSourceClient:
                 parser_before_filter_ids: list[str] = []
                 returned_unique_ids: list[str] = []
                 returned_outside_dom_ids: list[str] = []
+                returned_without_canonical_job_id_count = 0
                 parsed_ids: list[str] = []
                 duplicate_ids: list[str] = []
                 excluded_by_reason: dict[str, str] = {}
@@ -1949,6 +1969,8 @@ class BrowserSourceClient:
                     "parsed_before_filter": accounting.parser_before_filter_count,
                     "returned": accounting.returned_count,
                     "returned_outside_dom": len(accounting.returned_outside_dom_job_ids),
+                    "returned_outside_dom_rows": accounting.returned_outside_dom_row_count,
+                    "returned_without_canonical_job_id": accounting.returned_without_canonical_job_id_count,
                     "duplicate_canonical": accounting.duplicate_canonical_count,
                     "duplicate_canonical_returned": accounting.duplicate_canonical_returned_count,
                     "excluded": accounting.excluded_count,
@@ -1973,6 +1995,9 @@ class BrowserSourceClient:
                 returned_outside_dom_ids = sorted(
                     accounting.returned_outside_dom_job_ids
                 )
+                returned_without_canonical_job_id_count = (
+                    accounting.returned_without_canonical_job_id_count
+                )
                 parsed_ids = sorted(accounting.parsed_ids)
                 duplicate_ids = sorted(accounting.duplicate_canonical_ids)
                 excluded_by_reason = accounting.excluded_by_reason
@@ -1988,6 +2013,7 @@ class BrowserSourceClient:
                     "parsed_unique_job_ids_before_role_filter": parser_before_filter_ids,
                     "returned_unique_job_ids": returned_unique_ids,
                     "returned_outside_dom_job_ids": returned_outside_dom_ids,
+                    "returned_without_canonical_job_id_count": returned_without_canonical_job_id_count,
                     "parsed_job_ids": parsed_ids,
                     "duplicate_canonical_job_ids": duplicate_ids,
                     "excluded_job_ids_by_reason": excluded_by_reason,

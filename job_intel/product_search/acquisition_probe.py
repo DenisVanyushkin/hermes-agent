@@ -935,6 +935,25 @@ _AMBIGUOUS_US_SUBDIVISION_CODES = frozenset(
 _DECLARED_COUNTRY_CODES = frozenset(code for _, code in _COUNTRY_ALIASES)
 
 
+def _country_code_is_address_country(text: str, match: re.Match[str]) -> bool:
+    """Classify a code from its address position, not from its spelling."""
+
+    segment_start = text.rfind("/", 0, match.start()) + 1
+    segment_end = text.find("/", match.end())
+    if segment_end < 0:
+        segment_end = len(text)
+    segment = text[segment_start:segment_end]
+    suffix = segment[match.end() - segment_start :].strip()
+    if re.fullmatch(r"(?:\([^)]*\)|\[[^]]*\])", suffix):
+        suffix = ""
+    if suffix:
+        return False
+    components = [part.strip() for part in segment.split(",") if part.strip()]
+    if "/" in text or len(components) >= 3:
+        return True
+    return match.group(1) not in _AMBIGUOUS_US_SUBDIVISION_CODES
+
+
 def normalize_geography_evidence(
     raw_location_text: str | None,
     *,
@@ -964,8 +983,7 @@ def normalize_geography_evidence(
         code = match.group(1)
         if code not in _DECLARED_COUNTRY_CODES:
             continue
-        prefix = text[: match.start()].strip()
-        if code in _AMBIGUOUS_US_SUBDIVISION_CODES and prefix:
+        if not _country_code_is_address_country(text, match):
             continue
         found.setdefault(code, match.start())
     if not found:

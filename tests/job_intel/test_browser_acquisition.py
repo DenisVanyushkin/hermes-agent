@@ -448,6 +448,8 @@ def test_linkedin_trace_reconciles_dom_ids_independently_from_card_parser(monkey
             "parsed_before_filter": 2,
             "returned": 2,
             "returned_outside_dom": 0,
+            "returned_outside_dom_rows": 0,
+            "returned_without_canonical_job_id": 0,
         "duplicate_canonical": 0,
         "duplicate_canonical_returned": 0,
         "excluded": 0,
@@ -541,6 +543,8 @@ def test_unauthenticated_search_trace_keeps_auth_state_and_a1_counts(monkeypatch
             "parsed_before_filter": 1,
             "returned": 1,
             "returned_outside_dom": 0,
+            "returned_outside_dom_rows": 0,
+            "returned_without_canonical_job_id": 0,
         "duplicate_canonical": 0,
         "duplicate_canonical_returned": 0,
         "excluded": 0,
@@ -2149,6 +2153,17 @@ def test_dom_accounting_reports_returned_rows_outside_observed_dom() -> None:
     assert accounting.returned_count == 1
     assert accounting.vacancies_extracted == 2
     assert accounting.returned_outside_dom_job_ids == frozenset({"999"})
+
+
+def test_dom_accounting_names_returned_rows_without_canonical_job_id() -> None:
+    accounting = classify_linkedin_dom_job_ids(
+        dom_job_ids=frozenset(),
+        parser_vacancies=[],
+        returned_vacancies=[_a4_vacancy("")],
+    )
+
+    assert accounting.vacancies_extracted == 1
+    assert accounting.returned_without_canonical_job_id_count == 1
 
 
 def test_public_parser_ignores_unclosed_void_tags_inside_a_card() -> None:

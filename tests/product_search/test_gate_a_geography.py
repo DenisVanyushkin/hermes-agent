@@ -28,16 +28,29 @@ def test_b2_does_not_treat_arbitrary_two_letter_tokens_as_country_codes(
 
 
 @pytest.mark.parametrize(
-    ("location", "primary_country"),
-    (("Dubai, AE", "AE"), ("London, GB", "GB")),
+    ("location", "primary_country", "mentioned"),
+    (
+        ("Adelaide, SA, Australia", "AU", {"AU"}),
+        ("St. Johns, NL, Canada", "CA", {"CA"}),
+        ("Charlottetown, PE, Canada", "CA", {"CA"}),
+        ("CA, United States", "US", {"US"}),
+        ("Patna, BR, IN", "IN", {"IN"}),
+        ("Paris, FR / Berlin, DE", None, {"FR", "DE"}),
+        ("Berlin, DE / Paris, FR", None, {"FR", "DE"}),
+        ("Dubai, AE", "AE", {"AE"}),
+        ("London, GB", "GB", {"GB"}),
+        ("San Francisco, CA", None, set()),
+        ("Washington, DC", None, set()),
+        ("Sao Paulo, Brazil", "BR", {"BR"}),
+    ),
 )
-def test_b2_recognizes_declared_unambiguous_country_codes(
-    location: str, primary_country: str
+def test_b2_country_code_classification_uses_position_and_neighborhood(
+    location: str, primary_country: str | None, mentioned: set[str]
 ) -> None:
     evidence = acquisition_probe.normalize_geography_evidence(location)
 
     assert evidence.primary_country == primary_country
-    assert evidence.mentioned_countries == (primary_country,)
+    assert set(evidence.mentioned_countries) == mentioned
 
 
 @pytest.mark.parametrize(
