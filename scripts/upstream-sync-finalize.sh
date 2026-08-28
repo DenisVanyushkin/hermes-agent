@@ -574,8 +574,8 @@ PY
   upstream_nodes="$attempt_dir/gate-upstream-parent.nodes.json"
   baseline_runner_nodes="$attempt_dir/gate-baseline.runner.nodes.json"
   merged_runner_nodes="$attempt_dir/gate-merged.runner.nodes.json"
-  baseline_source=(--log "$baseline")
-  merged_source=(--log "$post")
+  baseline_source=(--log "$baseline" --aggregate)
+  merged_source=(--log "$post" --aggregate)
   if [ -s "$baseline_runner_nodes" ]; then
     baseline_source=(--node-report "$baseline_runner_nodes")
   fi
@@ -632,7 +632,7 @@ PY
         record_unreadable_probe "$merged_isolated_nodes" "merged-isolated"
       else
         merged_isolated_runner_nodes="$attempt_dir/gate-merged-isolated.runner.nodes.json"
-        merged_isolated_source=(--log "$merged_isolated_log")
+        merged_isolated_source=(--log "$merged_isolated_log" --aggregate)
         if [ -s "$merged_isolated_runner_nodes" ]; then
           merged_isolated_source=(--node-report "$merged_isolated_runner_nodes")
         fi
@@ -715,7 +715,7 @@ PY
       record_unreadable_probe "$upstream_nodes" "upstream-parent"
     else
       upstream_runner_nodes="$attempt_dir/gate-upstream-probe.runner.nodes.json"
-      upstream_source=(--log "$probe_log")
+      upstream_source=(--log "$probe_log" --aggregate)
       if [ -s "$upstream_runner_nodes" ]; then
         upstream_source=(--node-report "$upstream_runner_nodes")
       fi

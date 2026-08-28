@@ -1174,7 +1174,7 @@ class TestApplyMergeIsGatedOnForkTests:
             f"real = {str(real_gate)!r}\n"
             "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
             "with log.open('a', encoding='utf-8') as stream:\n"
-            "    stream.write(command + '\\n')\n"
+            "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
             "if command == 'probe-request':\n"
             "    print(json.dumps({'nodeids': [], 'paths': []}))\n"
             "    raise SystemExit(0)\n"
@@ -1189,8 +1189,11 @@ class TestApplyMergeIsGatedOnForkTests:
 
         assert _result(state)["status"] == "ok", proc.stderr
         commands = gate_calls.read_text().splitlines()
-        assert "classify-node-failures" in commands, commands
-        assert "new-failures" not in commands, commands
+        assert any(line.startswith("classify-node-failures") for line in commands), commands
+        assert not any(line.startswith("new-failures") for line in commands), commands
+        node_outcome = [line for line in commands if line.startswith("node-outcome")]
+        assert node_outcome, commands
+        assert all("--aggregate" in line for line in node_outcome), commands
 
     def test_missing_runner_receipt_blocks_landing(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)

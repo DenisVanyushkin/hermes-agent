@@ -972,7 +972,7 @@ def _parse_aggregate_summaries(log: str) -> dict[str, int]:
             _add_counts(counts, _summary_counts(summaries[-1]))
         if runner_summary:
             total = runner_summary[-1]
-            return {
+            result = {
                 "passed": int(total.group("passed")),
                 "failed": int(total.group("failed")),
                 **(
@@ -981,6 +981,9 @@ def _parse_aggregate_summaries(log: str) -> dict[str, int]:
                     else {}
                 ),
             }
+            if counts.get("error"):
+                result["error"] = counts["error"]
+            return result
         return counts
 
     if runner_summary:
@@ -1101,10 +1104,6 @@ def compare_test_outcomes(
     }
 
 
-def _failures(log: str) -> set[str]:
-    return set(parse_test_outcomes(log)["failed_nodeids"])
-
-
 def new_failures(
     baseline_log: str, post_log: str, *, aggregate: bool = False
 ) -> list[str]:
@@ -1166,6 +1165,11 @@ def _main(argv: list[str] | None = None) -> int:
     outcome_source = p_outcome.add_mutually_exclusive_group(required=True)
     outcome_source.add_argument("--log")
     outcome_source.add_argument("--node-report")
+    p_outcome.add_argument(
+        "--aggregate",
+        action="store_true",
+        help="parse per-file runner output with an explicit aggregate contract",
+    )
     p_outcome.add_argument("--expected-nodeids")
 
     p_selection = sub.add_parser(
@@ -1302,7 +1306,7 @@ def _main(argv: list[str] | None = None) -> int:
                     raise ValueError("run_tests_parallel node report is unreadable")
             else:
                 log = Path(args.log).read_text(encoding="utf-8")
-                parsed = parse_test_outcomes(log)
+                parsed = parse_test_outcomes(log, aggregate=args.aggregate)
             failed = parsed["failed_nodeids"]
             expected = None
             if args.expected_nodeids:

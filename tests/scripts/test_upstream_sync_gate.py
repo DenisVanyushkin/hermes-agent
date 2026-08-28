@@ -1449,6 +1449,46 @@ def test_outcomes_node_run_marks_collection_error_unreadable(tmp_path):
     assert outcome["error_count"] == 2
 
 
+def test_node_outcome_reads_a_green_aggregate_log_explicitly(tmp_path):
+    log = tmp_path / "aggregate-green.log"
+    log.write_text(
+        "Running 2 test files (~2 tests) with -j 1\n"
+        "=== Summary: 2 files, 2 tests passed, 0 failed "
+        "(100% complete) in 1.0s (1 workers) ===\n"
+    )
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome["collect_ok"] is True
+    assert outcome["probe_ok"] is True
+
+
+def test_node_outcome_sums_collection_errors_across_an_aggregate_log(tmp_path):
+    log = tmp_path / "aggregate-errors.log"
+    log.write_text(
+        "--- tests/a.py ---\n"
+        "ERROR tests/a.py - RuntimeError: a\n"
+        "1 error in 0.10s\n"
+        "--- tests/b.py ---\n"
+        "ERROR tests/b.py - RuntimeError: b\n"
+        "1 error in 0.10s\n"
+        "=== Summary: 2 files, 0 tests passed, 0 failed "
+        "(100% complete) in 0.2s (1 workers) ===\n"
+    )
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome["error_count"] == 2
+    assert outcome["collection_error_paths"] == [
+        "tests/a.py",
+        "tests/b.py",
+    ]
+
+
 def test_a_log_without_a_summary_line_is_a_killed_run_not_a_clean_one():
     """Прогон без итоговой строки убит (os._exit, OOM, вотчдог).
 
