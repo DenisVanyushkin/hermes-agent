@@ -98,3 +98,15 @@ def test_parse_node_statuses_preserves_parameterized_nodeids_with_spaces():
     assert measure.parse_node_statuses(log) == {
         "tests/a.py::test_value[hello world]": "PASSED"
     }
+
+
+def test_standalone_results_mark_each_node_yes_or_no():
+    results = {
+        "tests/a.py::test_red": {"returncode": 1},
+        "tests/b.py::test_green": {"returncode": 0},
+    }
+
+    assert measure.classify_standalone_results(results) == {
+        "tests/a.py::test_red": "yes",
+        "tests/b.py::test_green": "no",
+    }

@@ -58,6 +58,31 @@ def classify_nodes(
     ]
 
 
+def classify_standalone_results(results: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """Turn one-node pytest return codes into the required yes/no trait."""
+    return {
+        nodeid: ("yes" if result["returncode"] != 0 else "no")
+        for nodeid, result in sorted(results.items())
+    }
+
+
+def probe_standalone_nodes(
+    nodeids: list[str] | set[str], *, tree: Path, python: str
+) -> dict[str, dict[str, Any]]:
+    """Run every node in its own pytest process and retain concise evidence."""
+    results: dict[str, dict[str, Any]] = {}
+    for nodeid in sorted(nodeids):
+        output, returncode = _run_checked(
+            _pytest_command(python, [nodeid]), tree=tree
+        )
+        results[nodeid] = {
+            "returncode": returncode,
+            "failed": returncode != 0,
+            "output_tail": output[-1000:],
+        }
+    return results
+
+
 def parse_failed_nodeids(log: str) -> set[str]:
     """Parse pytest's final ``FAILED nodeid`` lines from one log."""
     failed: set[str] = set()
@@ -312,15 +337,12 @@ def classify_failure_report(
         for result in order_probe.values()
         for nodeid in result["changed_nodeids"]
     }
-    standalone_files = {
-        "tests/hermes_cli/test_cmd_update.py",
-        "tests/hermes_cli/test_git_mutation_requires_review.py",
-        "tests/hermes_cli/test_commit_gate_authorization.py",
-    }
+    standalone_probe = probe_standalone_nodes(
+        failed_nodeids, tree=tree, python=python
+    )
+    standalone_states = classify_standalone_results(standalone_probe)
     standalone = {
-        nodeid
-        for nodeid in failed_nodeids
-        if nodeid.split("::", 1)[0] in standalone_files
+        nodeid for nodeid, state in standalone_states.items() if state == "yes"
     }
     host_sensitive = {
         nodeid
@@ -347,8 +369,12 @@ def classify_failure_report(
         "order_probe": order_probe,
         "evidence": {
             "red_standalone": {
-                "rule": "previously confirmed standalone red nodes; not reopened here",
+                "rule": "yes when pytest <nodeid> fails in its own process with no file or run neighbours",
                 "nodeids": sorted(standalone),
+                "no_nodeids": sorted(
+                    nodeid for nodeid, state in standalone_states.items() if state == "no"
+                ),
+                "probe_results": standalone_probe,
             },
             "needs_neighbour": {
                 "rule": "not probed in task 11; reserved for task 13",
@@ -478,6 +504,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="classify failed_nodeids from a saved node report with order probes",
     )
+    parser.add_argument(
+        "--standalone-only",
+        type=Path,
+        help="update an existing classification JSON with one-node probes",
+    )
     parser.add_argument("--tree", type=Path, required=True)
     parser.add_argument(
         "--python", default=os.environ.get("HERMES_PYTHON", sys.executable)
@@ -488,6 +519,27 @@ def main(argv: list[str] | None = None) -> int:
         help="merge a saved direct/reverse bisection report into classification JSON",
     )
     args = parser.parse_args(argv)
+    if args.standalone_only is not None:
+        result = json.loads(args.standalone_only.read_text(encoding="utf-8"))
+        nodeids = [node["nodeid"] for node in result.get("nodes", [])]
+        probe = probe_standalone_nodes(nodeids, tree=args.tree, python=args.python)
+        states = classify_standalone_results(probe)
+        for node in result["nodes"]:
+            node["traits"]["red_standalone"] = states[node["nodeid"]]
+        evidence = result.setdefault("evidence", {})
+        evidence["red_standalone"] = {
+            "rule": "yes when pytest <nodeid> fails in its own process with no file or run neighbours",
+            "nodeids": sorted(node for node, state in states.items() if state == "yes"),
+            "no_nodeids": sorted(node for node, state in states.items() if state == "no"),
+            "probe_results": probe,
+        }
+        result["standalone_probe"] = {
+            "node_count": len(probe),
+            "yes": sum(state == "yes" for state in states.values()),
+            "no": sum(state == "no" for state in states.values()),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if args.failure_report is not None:
         report = json.loads(args.failure_report.read_text(encoding="utf-8"))
         if not isinstance(report, dict):
