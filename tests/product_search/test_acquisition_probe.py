@@ -262,6 +262,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _c1a_manifest(root: Path) -> dict[str, object]:
+    mapping_version = _c1a_mapping().version
     return {
         "gate": "gate-a",
         "environment_id": "product-search-gate-a",
@@ -303,7 +304,7 @@ def _c1a_manifest(root: Path) -> dict[str, object]:
                 "cell_id": "synthetic_c1a_unsupported",
                 "status": "unsupported",
                 "location": "C1A nonexistent geography target",
-                "mapping_version": "1.0",
+                "mapping_version": mapping_version,
             },
         },
     }
@@ -313,18 +314,27 @@ def _c1a_mapping() -> LinkedInGeographyMapping:
     mapping = load_linkedin_geography_mapping(
         ROOT / "config/product_search/linkedin_geography.v1.yaml"
     )
+    historical = {
+        cell_id: target.model_copy(
+            update={
+                "status": "verified" if cell_id in {"uk", "singapore", "kazakhstan"} else "unverified",
+                "verified_at": "2026-08-27" if cell_id in {"uk", "singapore", "kazakhstan"} else None,
+            }
+        )
+        for cell_id, target in mapping.items()
+    }
     verified = {
-        **mapping,
+        **historical,
         **{
-            cell_id: mapping[cell_id].model_copy(
-                update={"status": "verified", "location": mapping[cell_id].location}
+            cell_id: historical[cell_id].model_copy(
+                update={"status": "verified", "location": historical[cell_id].location}
             )
             for cell_id in ("uk", "singapore", "kazakhstan")
         },
     }
     return LinkedInGeographyMapping(
         verified,
-        version=mapping.version,
+        version="1.0",
         normalization_rule_version=mapping.normalization_rule_version,
         contamination_formula_version=mapping.contamination_formula_version,
         contamination_threshold=mapping.contamination_threshold,
@@ -428,7 +438,7 @@ def test_c1a_run_manifest_passes_mapping_and_preserves_bounded_artifact(
     assert set(summary["acquisition_outcomes"]) == selected | {
         "synthetic_c1a_unsupported"
     }
-    assert summary["geography_summary"]["mapping_version"] == "1.0"
+    assert summary["geography_summary"]["mapping_version"] == mapping.version
     assert summary["geography_summary"]["cells"]
     assert all(
         summary["credited_records_provenance"][cell_id] == "attributed"
@@ -565,7 +575,7 @@ def test_write_manifest_and_run_manifest_are_ring_compatible(
     assert generated["bounded_proof"]["cell_ids"] == ["uk", "singapore", "kazakhstan"]
     assert generated["bounded_proof"]["include_ats_snapshot"] is False
     assert generated["bounded_proof"]["negative_control"]["cell_id"] == "aaa_control"
-    assert generated["bounded_proof"]["negative_control"]["mapping_version"] == "1.0"
+    assert generated["bounded_proof"]["negative_control"]["mapping_version"] == mapping.version
 
     execution_plan = LinkedInExecutionPlan(
         page_offsets=(0, 25, 50), max_scroll_checkpoints=3
@@ -716,6 +726,61 @@ def test_probe_summary_keeps_open_market_and_seeded_ats_denominators_separate(
     assert denominators["seeded_ats_snapshot"]["unique_canonical_vacancies"] == 1
     assert denominators["combined_diagnostic"]["unique_canonical_vacancies"] == 2
     assert result.denominators == denominators
+
+
+def test_c2_mapping_records_verified_and_unsupported_ui_results() -> None:
+    mapping = load_linkedin_geography_mapping(
+        ROOT / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    assert mapping.version == "1.1"
+    assert {
+        cell_id for cell_id, target in mapping.items() if target.status == "verified"
+    } == {
+        "australia",
+        "bahrain",
+        "benelux",
+        "canada",
+        "dach",
+        "india",
+        "japan",
+        "kuwait",
+        "kyrgyzstan",
+        "latin_america",
+        "new_zealand",
+        "nordics",
+        "oman",
+        "qatar",
+        "saudi_arabia",
+        "south_korea",
+        "southeast_asia_other",
+        "tajikistan",
+        "turkmenistan",
+        "united_arab_emirates",
+        "uzbekistan",
+        "uk",
+        "singapore",
+        "kazakhstan",
+    }
+    assert {
+        cell_id for cell_id, target in mapping.items() if target.status == "unsupported"
+    } == {
+        "cee",
+        "east_asia_other",
+        "genuinely_location_independent",
+        "remaining_europe",
+        "us_feasibility",
+    }
+    control = acquisition_probe.select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=(),
+        declared={
+            "selection_rule": "first_alphabetical_unsupported_excluding_bounded_v1",
+            "cell_id": "cee",
+            "status": "unsupported",
+            "mapping_version": "1.1",
+        },
+    )
+    assert control["cell_id"] == "cee"
 
 
 def test_run_manifest_wires_runtime_capability_checks_from_composition_root(

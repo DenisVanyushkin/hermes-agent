@@ -274,7 +274,7 @@ class LinkedInGeographyTarget(BaseModel):
         )
 
 
-GEOGRAPHY_MAPPING_VERSION = "1.0"
+GEOGRAPHY_MAPPING_VERSION = "1.1"
 GEOGRAPHY_NORMALIZATION_RULE_VERSION = "1.0"
 GEOGRAPHY_CONTAMINATION_FORMULA_VERSION = "jaccard_received_v1"
 GEOGRAPHY_CONTAMINATION_THRESHOLD = 0.6
@@ -434,7 +434,7 @@ def load_linkedin_geography_mapping(
     document = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
     if not isinstance(document, Mapping):
         raise ValueError("LinkedIn geography mapping must be a mapping")
-    if document.get("version") != "1.0":
+    if document.get("version") not in {"1.0", "1.1"}:
         raise ValueError("unsupported LinkedIn geography mapping version")
     if document.get("product_authority_id") != "PS-SOT-2026-08-10-v1":
         raise ValueError("LinkedIn geography mapping has wrong product authority")
