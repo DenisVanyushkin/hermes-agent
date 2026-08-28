@@ -77,6 +77,7 @@ def world(tmp_path: Path) -> Path:
     repo = tmp_path / "fork"
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
+    _write(repo, ".gitignore", "__pycache__/\n.pytest_cache/\n")
 
     _write(repo, "tests/test_upstream_kept.py", "def test_kept():\n    pass\n")
     _write(repo, "tests/test_upstream_dropped.py", "def test_dropped():\n    pass\n")
@@ -366,6 +367,50 @@ def test_real_runner_reports_passed_nodes_from_rA(world: Path) -> None:
     assert result.returncode != 0
     assert "PASSED tests/test_runner_reports.py::test_passed" in output
     assert "FAILED tests/test_runner_reports.py::test_failed" in output
+
+
+def test_probe_nodeid_runs_only_the_requested_node(world: Path, tmp_path: Path) -> None:
+    _write(
+        world,
+        "tests/test_probe_targets.py",
+        "def test_requested_node():\n"
+        "    assert True\n\n"
+        "def test_unrequested_node():\n"
+        "    assert False\n",
+    )
+    _write(world, ".gitignore", "__pycache__/\n.pytest_cache/\n")
+    _commit(world, "add an exact probe target")
+    nodeid = "tests/test_probe_targets.py::test_requested_node"
+    request = tmp_path / "probe.request.json"
+    request.write_text(json.dumps({"nodeids": [nodeid]}), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--boundary",
+            UPSTREAM_REF,
+            "--probe-nodeids-from",
+            str(request),
+            str(world),
+        ],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": sys.executable,
+            "HERMES_CONTROL_PYTHON": sys.executable,
+            "HERMES_UPSTREAM_SYNC_GATE": str(
+                REPO_ROOT / "scripts" / "upstream_sync_gate.py"
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "1 tests passed" in output, output
+    assert "test_unrequested_node" not in output, output
 
 
 def test_deleted_path_not_selected(world: Path, fake_python: tuple[Path, Path]) -> None:

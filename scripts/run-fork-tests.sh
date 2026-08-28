@@ -342,9 +342,12 @@ if [ ! -f "$RUNNER_SCRIPT" ]; then
   echo "FAILED: pinned parallel test runner is unavailable at $RUNNER_SCRIPT" >&2
   exit 2
 fi
-if ! FILE_LIST="$(printf '%s\n' "${TESTS[@]}" | paste -sd: -)" || [ -z "$FILE_LIST" ]; then
-  echo "FAILED: could not encode the selected test files for the parallel runner" >&2
-  exit 2
+FILE_LIST=""
+if [ -z "$PROBE_NODEIDS_FROM" ]; then
+  if ! FILE_LIST="$(printf '%s\n' "${TESTS[@]}" | paste -sd: -)" || [ -z "$FILE_LIST" ]; then
+    echo "FAILED: could not encode the selected test files for the parallel runner" >&2
+    exit 2
+  fi
 fi
 
 # In selection/probe mode the manifest/request directory is the durable
@@ -368,13 +371,17 @@ fi
 
 RUNNER_ARGS=(
   --repo-root "$WT"
-  --files "$FILE_LIST"
   --file-retries 0
   --file-timeout "$RUNNER_FILE_TIMEOUT"
   --jobs "$RUNNER_JOBS"
   --no-duration-cache
   -q -p no:cacheprovider --timeout=90 --continue-on-collection-errors -rA
 )
+if [ -n "$PROBE_NODEIDS_FROM" ]; then
+  RUNNER_ARGS+=(--nodeids-file "$PROBE_NODEIDS_FROM")
+else
+  RUNNER_ARGS+=(--files "$FILE_LIST")
+fi
 if [ -n "$NODE_REPORT" ]; then
   RUNNER_ARGS+=(--node-report "$NODE_REPORT")
 fi

@@ -308,6 +308,7 @@ def _run_one_file(
     repo_root: Path,
     file_timeout: float,
     retries: int = 0,
+    nodeids: List[str] | None = None,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
 
@@ -342,14 +343,14 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout
+        file, pytest_args, repo_root, file_timeout, nodeids
     )
     attempt = 0
     while rc != 0 and attempt < retries:
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+            file, pytest_args, repo_root, file_timeout, nodeids
         )
         subproc_wall += subproc_wall2
         if rc == 0:
@@ -377,9 +378,11 @@ def _run_one_file_once(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    nodeids: List[str] | None = None,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    selectors = nodeids or [str(file)]
+    cmd = [sys.executable, "-m", "pytest", *selectors, *pytest_args]
     
     subproc_start = time.monotonic()
     # launch the pytest process
@@ -984,6 +987,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--nodeids-file",
+        type=Path,
+        metavar="JSON",
+        help=(
+            "Explicit JSON probe request containing a nodeids list. Each "
+            "nodeid is passed losslessly to pytest; files sharing a nodeid "
+            "run together in one subprocess. Mutually exclusive with --files."
+        ),
+    )
+    parser.add_argument(
         "--repo-root",
         type=Path,
         help=(
@@ -1032,7 +1045,7 @@ def main() -> int:
     OUR_FLAGS = {
         "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
-        "--repo-root", "--node-report", "--no-duration-cache",
+        "--nodeids-file", "--repo-root", "--node-report", "--no-duration-cache",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -1134,8 +1147,40 @@ def main() -> int:
 
     repo_root = (args.repo_root or Path(__file__).resolve().parent.parent).resolve()
 
+    if args.files and args.nodeids_file:
+        parser.error("--files and --nodeids-file are mutually exclusive")
+
+    # --nodeids-file: lossless probe selectors. The request object form is
+    # accepted because the finalizer persists the probe request as an object;
+    # a bare list remains useful for direct runner callers.
+    nodeids_by_file: Dict[Path, List[str]] = {}
+    if args.nodeids_file:
+        payload = json.loads(args.nodeids_file.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload = payload.get("nodeids")
+        if not isinstance(payload, list) or not payload or not all(
+            isinstance(item, str) and "::" in item for item in payload
+        ):
+            parser.error("--nodeids-file must contain a non-empty nodeids list")
+        for raw_nodeid in payload:
+            path_part, _, selector = raw_nodeid.partition("::")
+            candidate = Path(path_part)
+            if candidate.is_absolute():
+                try:
+                    candidate = candidate.resolve().relative_to(repo_root)
+                except ValueError:
+                    parser.error(f"probe nodeid is outside repo root: {raw_nodeid!r}")
+            file = (repo_root / candidate).resolve()
+            try:
+                file.relative_to(repo_root)
+            except ValueError:
+                parser.error(f"probe nodeid is outside repo root: {raw_nodeid!r}")
+            normalized = f"{file.relative_to(repo_root).as_posix()}::{selector}"
+            nodeids_by_file.setdefault(file, []).append(normalized)
+        files = sorted(nodeids_by_file)
+        roots = []
     # --files: explicit file list from the CI generate job — skip discovery.
-    if args.files:
+    elif args.files:
         files = [repo_root / f for f in _split_pathspec(args.files)]
         roots = []
     else:
@@ -1289,7 +1334,7 @@ def main() -> int:
             t0 = time.monotonic()
             fut = pool.submit(
                 _run_one_file, file, pytest_passthrough, repo_root,
-                args.file_timeout, args.file_retries,
+                args.file_timeout, args.file_retries, nodeids_by_file.get(file),
             )
             fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
             futures.append(fut)
