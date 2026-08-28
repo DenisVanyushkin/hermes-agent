@@ -1986,7 +1986,7 @@ def test_bounded_run_executes_a_declared_unsupported_mapping_control(
 
     executed_queries = captured["queries"]
     assert any(
-        query.cell_id == "cee" and not query.is_synthetic_control
+        query.cell_id == "cee" and query.is_synthetic_control
         for query in executed_queries
     )
 
@@ -2030,3 +2030,56 @@ def test_successful_retry_replaces_failure_for_the_same_query(
 
     pair = result.model_dump(mode="json")["cell_family_attempts"][0]
     assert pair["outcome"] == "completed"
+
+
+def test_successful_retry_is_query_scoped_and_preserves_other_role_failure(
+    tmp_path: Path,
+) -> None:
+    class MultiRoleSource:
+        def __init__(self) -> None:
+            self.vp_calls = 0
+            self.last_errors: tuple[str, ...] = ()
+
+        def __call__(self, query: object) -> list[dict[str, str]]:
+            if query == "Chief Product Officer":
+                raise ProbeSourceBlocked("anti_bot")
+            if query == "VP Product":
+                self.vp_calls += 1
+                if self.vp_calls == 1:
+                    raise TimeoutError("transient timeout")
+                return [{
+                    "source_id": "vp-row",
+                    "url": "https://example.test/jobs/vp-row",
+                    "title": "VP Product",
+                    "company": "Acme",
+                }]
+            raise AssertionError(f"unexpected role query: {query}")
+
+    result = run_probe(
+        run_id="retry-query-scope",
+        queries=(
+            {
+                "query_id": "q-chief",
+                "cell_id": "uk",
+                "source_family": "alpha",
+                "query": "Chief Product Officer",
+            },
+            {
+                "query_id": "q-vp",
+                "cell_id": "uk",
+                "source_family": "alpha",
+                "query": "VP Product",
+            },
+        ),
+        sources={"alpha": MultiRoleSource()},
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            )
+        },
+        max_attempts=2,
+    )
+
+    pair = result.model_dump(mode="json")["cell_family_attempts"][0]
+    assert pair["outcome"] == "blocked"

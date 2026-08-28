@@ -29,6 +29,19 @@ def test_b2_does_not_treat_arbitrary_two_letter_tokens_as_country_codes(
 
 @pytest.mark.parametrize(
     ("location", "primary_country"),
+    (("Dubai, AE", "AE"), ("London, GB", "GB")),
+)
+def test_b2_recognizes_declared_unambiguous_country_codes(
+    location: str, primary_country: str
+) -> None:
+    evidence = acquisition_probe.normalize_geography_evidence(location)
+
+    assert evidence.primary_country == primary_country
+    assert evidence.mentioned_countries == (primary_country,)
+
+
+@pytest.mark.parametrize(
+    ("location", "primary_country"),
     (
         ("São Paulo, Brazil", "BR"),
         ("Jakarta, Indonesia", "ID"),

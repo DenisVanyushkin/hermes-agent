@@ -922,6 +922,17 @@ _COUNTRY_ALIASES: tuple[tuple[str, str], ...] = (
     ("usa", "US"),
 )
 _CITY_COUNTRY_ALIASES: dict[str, str] = {}
+_AMBIGUOUS_US_SUBDIVISION_CODES = frozenset(
+    {
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+        "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+        "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+        "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+        "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+        "DC",
+    }
+)
+_DECLARED_COUNTRY_CODES = frozenset(code for _, code in _COUNTRY_ALIASES)
 
 
 def normalize_geography_evidence(
@@ -949,6 +960,14 @@ def normalize_geography_evidence(
         match = re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", folded)
         if match is not None:
             found.setdefault(code, match.start())
+    for match in re.finditer(r"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])", text):
+        code = match.group(1)
+        if code not in _DECLARED_COUNTRY_CODES:
+            continue
+        prefix = text[: match.start()].strip()
+        if code in _AMBIGUOUS_US_SUBDIVISION_CODES and prefix:
+            continue
+        found.setdefault(code, match.start())
     if not found:
         aliases = dict(_CITY_COUNTRY_ALIASES)
         aliases.update(
@@ -1399,6 +1418,8 @@ def run_probe(
     cell_attempts: dict[str, list[str]] = {}
     cell_minimums: dict[str, int] = dict(minimum_independent_families_by_cell or {})
     pair_attempts: dict[tuple[str, str], dict[str, Any]] = {}
+    query_outcomes: dict[tuple[str, str], dict[str, AcquisitionOutcome]] = {}
+    query_critical_degradation: dict[tuple[str, str], dict[str, bool]] = {}
 
     def _ensure_pair(query: ProbeQuery) -> dict[str, Any]:
         key = (query.cell_id, query.source_family)
@@ -1441,29 +1462,31 @@ def run_probe(
         cell_minimums[query.cell_id] = expected
         return record
 
-    def _set_pair_outcome(
-        query: ProbeQuery, outcome: AcquisitionOutcome, *, replace: bool = False
-    ) -> None:
+    def _set_pair_outcome(query: ProbeQuery, outcome: AcquisitionOutcome) -> None:
         record = _ensure_pair(query)
-        if replace:
-            record["outcome"] = outcome
-            return
-        current = record["outcome"]
-        if current == "not_attempted" or current == outcome:
-            record["outcome"] = outcome
-        elif "degraded" in {current, outcome}:
+        pair_key = (query.cell_id, query.source_family)
+        per_query = query_outcomes.setdefault(pair_key, {})
+        per_query[query.query_id] = outcome
+        outcomes = set(per_query.values())
+        if "degraded" in outcomes:
             record["outcome"] = "degraded"
-        elif "blocked" in {current, outcome}:
+        elif "blocked" in outcomes:
             record["outcome"] = "blocked"
+        elif "completed" in outcomes:
+            record["outcome"] = "completed"
         else:
-            record["outcome"] = "degraded"
+            record["outcome"] = "not_attempted"
 
     def _capture_source_evidence(query: ProbeQuery, source: Any) -> None:
         pair = _ensure_pair(query)
+        pair_key = (query.cell_id, query.source_family)
+        per_query_critical = query_critical_degradation.setdefault(pair_key, {})
+        per_query_critical.setdefault(query.query_id, False)
         trace = getattr(source, "last_trace", None)
         health = getattr(source, "last_health", None)
         if isinstance(trace, Mapping):
             if trace.get("stop_reason") == "critical_degradation":
+                per_query_critical[query.query_id] = True
                 pair["critical_degradation"] = True
                 pair["critical_degradation_reason"] = str(
                     trace.get("failure_reason") or "critical degradation"
@@ -1504,6 +1527,9 @@ def run_probe(
         query = raw_query if isinstance(raw_query, ProbeQuery) else ProbeQuery.model_validate(raw_query)
         cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
         _ensure_pair(query)
+        query_critical_degradation.setdefault(
+            (query.cell_id, query.source_family), {}
+        ).setdefault(query.query_id, False)
         source = sources.get(query.source_family)
         source_isolation = isolation.get(query.source_family)
         if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock", "api"}:
@@ -1541,7 +1567,9 @@ def run_probe(
                     request = query.query
                 records = list(source(request))
                 _capture_source_evidence(query, source)
-                critical_degradation = bool(pair_attempts[(query.cell_id, query.source_family)]["critical_degradation"])
+                critical_degradation = query_critical_degradation[
+                    (query.cell_id, query.source_family)
+                ][query.query_id]
                 state = (
                     "observed_with_failures"
                     if critical_degradation
@@ -1554,7 +1582,6 @@ def run_probe(
                     "degraded"
                     if critical_degradation or state == "observed_with_failures"
                     else "completed",
-                    replace=attempt > 1,
                 )
                 break
             except ProbeSourceBlocked as exc:
@@ -2386,7 +2413,10 @@ def main() -> int:
         if run_mode == "bounded":
             control_cell_id = str(negative_control["cell_id"])
             queries = tuple(
-                query
+                query.model_copy(update={"is_synthetic_control": True})
+                if query.cell_id == control_cell_id
+                and query.source_family == "linkedin"
+                else query
                 for query in queries
                 if query.cell_id in bounded_cell_ids
                 or (
