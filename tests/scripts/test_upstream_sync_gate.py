@@ -1385,6 +1385,7 @@ def _run_real_aggregate_runner(
     node_report: Path | None = None,
     selected_files: list[str] | None = None,
     pytest_args: tuple[str, ...] = (),
+    pytest_config: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     repo = tmp_path / "runner-worktree"
     tests = repo / "tests"
@@ -1393,6 +1394,8 @@ def _run_real_aggregate_runner(
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
+    if pytest_config is not None:
+        (repo / "pyproject.toml").write_text(pytest_config, encoding="utf-8")
     selected = ":".join(selected_files or files)
     runner = Path(__file__).resolve().parents[2] / "scripts" / "run_tests_parallel.py"
     command = [
@@ -1458,8 +1461,9 @@ def _matrix_case(
     *,
     selected_files: list[str] | None = None,
     pytest_args: tuple[str, ...] = (),
-) -> tuple[str, dict[str, str], list[str] | None, tuple[str, ...]]:
-    return name, files, selected_files, pytest_args
+    pytest_config: str | None = None,
+) -> tuple[str, dict[str, str], list[str] | None, tuple[str, ...], str | None]:
+    return name, files, selected_files, pytest_args, pytest_config
 
 
 _READABILITY_MATRIX = [
@@ -1483,6 +1487,19 @@ _READABILITY_MATRIX = [
             "tests/test_empty.py": "# deliberately empty\n",
             "tests/test_pass.py": "def test_pass():\n    pass\n",
         },
+    ),
+    _matrix_case(
+        "deselected-beside-measured",
+        {
+            "tests/test_integration.py": (
+                "import pytest\n\n"
+                "pytestmark = pytest.mark.integration\n\n"
+                "def test_integration():\n    pass\n"
+            ),
+            "tests/test_regular.py": "def test_regular():\n    pass\n",
+        },
+        selected_files=["tests/test_integration.py", "tests/test_regular.py"],
+        pytest_config="[tool.pytest.ini_options]\naddopts = \"-m 'not integration'\"\n",
     ),
     _matrix_case(
         "all-skipped",
@@ -1511,6 +1528,20 @@ _READABILITY_MATRIX = [
     _matrix_case(
         "errors-in-two-files",
         {"tests/test_error_a.py": _ERROR_FILE, "tests/test_error_b.py": _ERROR_FILE},
+    ),
+    _matrix_case(
+        "error-nodeid-with-space",
+        {
+            "tests/test_param.py": (
+                "import pytest\n\n"
+                "@pytest.fixture\n"
+                "def broken_fixture():\n"
+                "    raise RuntimeError('fixture boom')\n\n"
+                "@pytest.mark.parametrize('value', ['foo bar'])\n"
+                "def test_case(value, broken_fixture):\n"
+                "    pass\n"
+            )
+        },
     ),
     _matrix_case(
         "mixed-infrastructure-and-test-failure",
@@ -1572,15 +1603,15 @@ _READABILITY_MATRIX = [
 
 
 @pytest.mark.parametrize(
-    "name, files, selected_files, pytest_args",
+    "name, files, selected_files, pytest_args, pytest_config",
     _READABILITY_MATRIX,
     ids=[case[0] for case in _READABILITY_MATRIX],
 )
 def test_real_runner_log_and_node_report_readability_matrix(
-    tmp_path, name, files, selected_files, pytest_args
+    tmp_path, name, files, selected_files, pytest_args, pytest_config
 ):
     """Every runner outcome category must have one verdict through both doors."""
-    assert len(_READABILITY_MATRIX) == 14
+    assert len(_READABILITY_MATRIX) == 16
     report = tmp_path / f"{name}-nodes.json"
     runner = _run_real_aggregate_runner(
         tmp_path,
@@ -1588,6 +1619,7 @@ def test_real_runner_log_and_node_report_readability_matrix(
         node_report=report,
         selected_files=selected_files,
         pytest_args=pytest_args,
+        pytest_config=pytest_config,
     )
     log = tmp_path / f"{name}.log"
     log.write_text(runner.stdout, encoding="utf-8")
@@ -1609,6 +1641,61 @@ def test_real_runner_log_and_node_report_readability_matrix(
         report_result.stderr,
         runner.stdout,
     )
+
+
+def test_deselected_file_beside_measured_file_is_readable_through_both_doors(
+    tmp_path,
+):
+    report = tmp_path / "deselected-mixed-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_integration.py": (
+                "import pytest\n\n"
+                "pytestmark = pytest.mark.integration\n\n"
+                "def test_integration():\n    pass\n"
+            ),
+            "tests/test_regular.py": "def test_regular():\n    pass\n",
+        },
+        node_report=report,
+        selected_files=["tests/test_integration.py", "tests/test_regular.py"],
+        pytest_config="[tool.pytest.ini_options]\naddopts = \"-m 'not integration'\"\n",
+    )
+    assert runner.returncode == 0, runner.stdout + runner.stderr
+    log = tmp_path / "deselected-mixed.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert log_result.returncode == 0, log_result.stderr
+    assert report_result.returncode == 0, report_result.stderr
+
+
+def test_real_runner_error_nodeid_with_space_is_named_by_log_door(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_param.py": (
+                "import pytest\n\n"
+                "@pytest.fixture\n"
+                "def broken_fixture():\n"
+                "    raise RuntimeError('fixture boom')\n\n"
+                "@pytest.mark.parametrize('value', ['foo bar'])\n"
+                "def test_case(value, broken_fixture):\n"
+                "    pass\n"
+            )
+        },
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+    log = tmp_path / "param-space.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert "tests/test_param.py::test_case[foo bar]" in outcome["failed_nodeids"]
 
 
 def test_node_outcome_accepts_real_runner_green_aggregate_output(tmp_path):

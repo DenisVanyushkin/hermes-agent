@@ -549,9 +549,13 @@ def _file_output_is_readable(
         return False
     if executed:
         return True
+    # A selector may intentionally remove every test from this file.  That is
+    # readable at file scope; the whole-run tests_collected guard decides
+    # whether the invocation measured anything at all.
+    if summary.get("deselected", 0):
+        return returncode == 0
     # Preserve the established exception for an intentionally empty file
-    # beside measured files.  A non-zero empty file and a deselected-only file
-    # remain unreadable because neither contains an executed outcome.
+    # beside measured files.  A non-zero empty file remains unreadable.
     return returncode == 0 and bool(
         re.search(r"(?:^|\n)\s*no tests ran\b", output, re.IGNORECASE)
     )

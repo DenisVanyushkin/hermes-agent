@@ -901,7 +901,6 @@ def filter_probe_request(
 
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
-_ERROR_NODE_LINE = re.compile(r"^ERROR\s+(\S+::\S+)(?:\s+-.*)?$")
 _COLLECTION_ERROR_LINE = re.compile(
     r"^ERROR\s+(?!collecting\b)(?P<path>[^\s:]+\.py)(?:\s+-.*)?$"
 )
@@ -961,7 +960,9 @@ _AGGREGATE_NO_TESTS_FILE = re.compile(
 
 def _nodeid_from_status_line(line: str) -> str | None:
     fields = line.split(None, 1)
-    if len(fields) != 2 or fields[0] not in {"PASSED", "FAILED", "XFAIL", "XPASS", "RERUN"}:
+    if len(fields) != 2 or fields[0] not in {
+        "PASSED", "FAILED", "XFAIL", "XPASS", "RERUN", "ERROR"
+    }:
         return None
     value = fields[1].partition(" - ")[0].strip()
     path, separator, _ = value.partition("::")
@@ -1096,24 +1097,17 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
     node_log = log if not aggregate else "\n".join(
         line.strip().removeprefix("║").strip() for line in log.splitlines()
     )
-    collected_nodeids = {
-        nodeid
+    status_nodeids = [
+        (line.split(None, 1)[0], nodeid)
         for line in node_log.splitlines()
         if (nodeid := _nodeid_from_status_line(line)) is not None
-    }
-    error_nodeids = {
-        match.group(1)
-        for line in node_log.splitlines()
-        if (match := _ERROR_NODE_LINE.match(line))
-    }
-    collected_nodeids.update(error_nodeids)
+    ]
+    collected_nodeids = {nodeid for _status, nodeid in status_nodeids}
     failed_nodeids = {
         nodeid
-        for line in node_log.splitlines()
-        if (nodeid := _nodeid_from_status_line(line)) is not None
-        and line.startswith("FAILED")
+        for status, nodeid in status_nodeids
+        if status in {"FAILED", "ERROR"}
     }
-    failed_nodeids.update(error_nodeids)
     collection_error_paths = sorted(
         {
             match.group("path")
