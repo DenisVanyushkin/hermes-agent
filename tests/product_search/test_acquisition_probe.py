@@ -607,6 +607,117 @@ def test_write_manifest_and_run_manifest_are_ring_compatible(
     assert all(query.execution_plan is execution_plan for query in linkedin_queries)
 
 
+def test_full_run_manifest_is_explicit_and_includes_seeded_ats_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "experiment"
+    (root / "runtime/config/product_search").mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "config/product_search/search_contract.v1.yaml",
+        root / "runtime/config/product_search/search_contract.v1.yaml",
+    )
+    manifest = _c1a_manifest(root)
+    manifest["run_mode"] = "full"
+    manifest["full_run"] = {
+        "include_ats_snapshot": True,
+        "negative_control": manifest["bounded_proof"]["negative_control"],
+    }
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=True), encoding="utf-8")
+
+    mapping = _c1a_mapping()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(acquisition_probe, "verify_experiment_runtime", lambda _manifest: None)
+    monkeypatch.setattr(
+        acquisition_probe, "load_linkedin_geography_mapping", lambda _path=None: mapping
+    )
+    monkeypatch.setattr(
+        acquisition_probe, "build_isolated_probe_environment", lambda _manifest, ambient: {}
+    )
+    monkeypatch.setattr(acquisition_probe, "resolve_public_sources", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        acquisition_probe, "run_probe", lambda **kwargs: captured.update(kwargs)
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["acquisition_probe", "run-manifest", str(manifest_path)]
+    )
+
+    assert acquisition_probe.main() == 0
+
+    queries = captured["queries"]
+    assert any(query.cell_id == "ats_global_snapshot" for query in queries)
+    assert any(query.is_synthetic_control for query in queries)
+    assert {query.cell_id for query in queries} >= {
+        cell_id
+        for lane in load_search_contract(
+            ROOT / "config/product_search/search_contract.v1.yaml"
+        ).lanes.values()
+        for cell_id in lane.cells
+    }
+    assert captured["isolation"]["ashby"].mode == "api"
+    assert captured["isolation"]["greenhouse"].mode == "api"
+
+
+def test_probe_summary_keeps_open_market_and_seeded_ats_denominators_separate(
+    tmp_path: Path,
+) -> None:
+    queries = (
+        ProbeQuery(
+            query_id="open-query",
+            cell_id="uk",
+            source_family="duckduckgo",
+            query="VP Product United Kingdom",
+        ),
+        next(query for query in build_snapshot_queries() if query.source_family == "ashby"),
+    )
+
+    def open_source(_request: object) -> list[dict[str, str]]:
+        return [
+            {
+                "source_id": "one",
+                "url": "https://example.test/jobs/one",
+                "title": "VP Product",
+                "company": "One Company",
+                "description": "Own product strategy",
+            }
+        ]
+
+    def seeded_source(_request: object) -> list[dict[str, str]]:
+        return [
+            {
+                "source_id": "seeded-one",
+                "url": "https://example.test/jobs/one",
+                "title": "VP Product",
+                "company": "One Company",
+                "description": "Own product strategy",
+            }
+        ]
+
+    result = run_probe(
+        run_id="c2-denominators",
+        queries=queries,
+        sources={"duckduckgo": open_source, "ashby": seeded_source},
+        output_dir=tmp_path,
+        isolation={
+            "duckduckgo": SourceIsolation(
+                mode="exclusive_lock", path=tmp_path / "duck.lock", collection_method="browser"
+            ),
+            "ashby": SourceIsolation(mode="api", path=None, collection_method="api"),
+        },
+        runtime_capability_checks={
+            "duckduckgo": lambda: RuntimeCapabilityResult(state="ready")
+        },
+    )
+
+    denominators = json.loads(
+        (tmp_path / "summary.json").read_text(encoding="utf-8")
+    )["denominators"]
+    assert denominators["open_market"]["unique_canonical_vacancies"] == 1
+    assert denominators["seeded_ats_snapshot"]["unique_canonical_vacancies"] == 1
+    assert denominators["combined_diagnostic"]["unique_canonical_vacancies"] == 2
+    assert result.denominators == denominators
+
+
 def test_run_manifest_wires_runtime_capability_checks_from_composition_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

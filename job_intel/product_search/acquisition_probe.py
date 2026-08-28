@@ -32,6 +32,7 @@ GATE_A_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-a
 
 SourceIsolationMode = Literal["cloned_profile", "exclusive_lock", "api", "blocked"]
 SourceCollectionMethod = Literal["browser", "api"]
+Denominator = Literal["open_market", "seeded_ats_snapshot"]
 SourceState = Literal[
     "observed",
     "observed_with_failures",
@@ -368,6 +369,22 @@ def _bounded_proof_configuration(
     return cell_ids, control
 
 
+def _full_run_configuration(
+    manifest: Mapping[str, Any], mapping: Mapping[str, Any]
+) -> dict[str, Any]:
+    config = dict(manifest.get("full_run") or {})
+    if config.get("include_ats_snapshot") is not True:
+        raise ValueError("full run must explicitly include the ATS snapshot")
+    declared = dict(config.get("negative_control") or {})
+    if not declared:
+        raise ValueError("full run negative control must be predeclared")
+    return select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=(),
+        declared=declared,
+    )
+
+
 def build_bounded_proof_configuration(
     mapping: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -536,6 +553,7 @@ class ProbeQuery(BaseModel):
     primary_geography: str | None = None
     geography_target: LinkedInGeographyTarget | None = None
     execution_plan: LinkedInExecutionPlan | None = None
+    denominator: Denominator = "open_market"
     is_synthetic_control: bool = False
     minimum_independent_families: int = Field(default=1, ge=1)
 
@@ -650,6 +668,7 @@ class ProbeResult(BaseModel):
     family_attempts: tuple[dict[str, Any], ...] = ()
     cell_family_attempts: tuple[dict[str, Any], ...] = ()
     geography_summary: dict[str, Any] = Field(default_factory=dict)
+    denominators: dict[str, Any] = Field(default_factory=dict)
 
 
 def expand_queries(
@@ -715,6 +734,7 @@ def build_snapshot_queries() -> tuple[ProbeQuery, ...]:
             cell_id="ats_global_snapshot",
             source_family=family,
             query=query,
+            denominator="seeded_ats_snapshot",
         )
         for family in ATS_FAMILIES
     )
@@ -1190,6 +1210,52 @@ def _minimum_evidence_sufficient(record: Mapping[str, Any]) -> bool:
     return all(str(record.get(field) or "").strip() for field in ("url", "title", "company", "description"))
 
 
+def _build_denominators(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    buckets: dict[str, dict[str, Any]] = {
+        "open_market": {"received_rows": 0, "vacancies": set(), "companies": set()},
+        "seeded_ats_snapshot": {
+            "received_rows": 0,
+            "vacancies": set(),
+            "companies": set(),
+        },
+    }
+    for raw_record in records:
+        record = dict(raw_record)
+        denominator = str(record.get("denominator") or "")
+        if denominator not in buckets:
+            raise ValueError(f"unknown acquisition denominator: {denominator}")
+        identity = str(record.get("canonical_url") or "")
+        if not identity:
+            identity = hashlib.sha256(
+                f"{record.get('company')}\0{record.get('title')}".encode()
+            ).hexdigest()
+        company = str(record.get("company") or "").strip()
+        bucket = buckets[denominator]
+        bucket["received_rows"] += 1
+        bucket["vacancies"].add(identity)
+        if company:
+            bucket["companies"].add(company)
+
+    def public(bucket: Mapping[str, Any]) -> dict[str, int]:
+        return {
+            "received_rows": int(bucket["received_rows"]),
+            "unique_canonical_vacancies": len(bucket["vacancies"]),
+            "unique_companies": len(bucket["companies"]),
+        }
+
+    return {
+        "open_market": public(buckets["open_market"]),
+        "seeded_ats_snapshot": public(buckets["seeded_ats_snapshot"]),
+        "combined_diagnostic": {
+            "received_rows": sum(int(buckets[name]["received_rows"]) for name in buckets),
+            "unique_canonical_vacancies": sum(
+                len(buckets[name]["vacancies"]) for name in buckets
+            ),
+            "unique_companies": sum(len(buckets[name]["companies"]) for name in buckets),
+        },
+    }
+
+
 def run_probe(
     *,
     run_id: str,
@@ -1478,6 +1544,7 @@ def run_probe(
             normalized["query_id"] = query.query_id
             normalized["cell_id"] = query.cell_id
             normalized["source_family"] = query.source_family
+            normalized["denominator"] = query.denominator
             if geography_mapping is not None:
                 normalized["geography_evidence"] = normalize_geography_evidence(
                     record.get("location"),
@@ -1656,6 +1723,7 @@ def run_probe(
             )
         )
 
+    denominators = _build_denominators(observations)
     result = ProbeResult(
         run_id=run_id,
         stage_counts={
@@ -1700,6 +1768,7 @@ def run_probe(
             for key in sorted(pair_attempts)
         ),
         geography_summary=geography_summary,
+        denominators=denominators,
     )
     (output / "summary.json").write_text(
         result.model_dump_json(indent=2), encoding="utf-8"
@@ -1845,6 +1914,15 @@ def _inside(path: str, root: Path) -> bool:
 def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     if manifest.get("gate") != "gate-a" or manifest.get("environment_id") != "product-search-gate-a":
         raise ValueError("wrong gate or environment identity")
+    run_mode = str(manifest.get("run_mode") or "bounded")
+    if run_mode not in {"bounded", "full"}:
+        raise ValueError(f"invalid Gate A run mode: {run_mode}")
+    if run_mode == "full":
+        full_run = dict(manifest.get("full_run") or {})
+        if full_run.get("include_ats_snapshot") is not True:
+            raise ValueError("full run must explicitly include the ATS snapshot")
+        if not dict(full_run.get("negative_control") or {}):
+            raise ValueError("full run negative control must be predeclared")
     exclusion_catalog = dict(manifest.get("exclusion_reason_codes") or {})
     if exclusion_catalog.get("version") != EXCLUSION_REASON_CATALOG.version:
         raise ValueError("manifest exclusion reason catalog version is not current")
@@ -2242,9 +2320,16 @@ def main() -> int:
         mapping = load_linkedin_geography_mapping(
             runtime / "config/product_search/linkedin_geography.v1.yaml"
         )
-        bounded_cell_ids, negative_control = _bounded_proof_configuration(
-            manifest, mapping
-        )
+        run_mode = str(manifest.get("run_mode") or "bounded")
+        if run_mode == "bounded":
+            bounded_cell_ids, negative_control = _bounded_proof_configuration(
+                manifest, mapping
+            )
+        elif run_mode == "full":
+            negative_control = _full_run_configuration(manifest, mapping)
+            bounded_cell_ids = tuple(mapping)
+        else:
+            raise ValueError(f"invalid Gate A run mode: {run_mode}")
         execution_plan = LinkedInExecutionPlan()
         queries = expand_queries(
             contract,
@@ -2252,7 +2337,10 @@ def main() -> int:
             geography_mapping=mapping,
             execution_plan=execution_plan,
         )
-        queries = tuple(query for query in queries if query.cell_id in bounded_cell_ids)
+        if run_mode == "bounded":
+            queries = tuple(query for query in queries if query.cell_id in bounded_cell_ids)
+        else:
+            queries = queries + build_snapshot_queries()
         if negative_control["cell_id"] not in mapping:
             control_cell_id = str(negative_control["cell_id"])
             control_location = str(negative_control["location"])
@@ -2291,6 +2379,17 @@ def main() -> int:
             )
             for family, settings in dict(manifest.get("source_isolation") or {}).items()
         }
+        if run_mode == "full":
+            from .acquisition_plugins.ats_snapshot import ATS_FAMILIES
+
+            isolation.update(
+                {
+                    family: SourceIsolation(
+                        mode="api", path=None, collection_method="api"
+                    )
+                    for family in ATS_FAMILIES
+                }
+            )
         run_id = f"gate-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         run_probe(
             run_id=run_id,
