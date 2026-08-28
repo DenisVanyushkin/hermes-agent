@@ -1362,6 +1362,44 @@ def test_node_outcome_reads_the_runner_machine_report(tmp_path):
     }
 
 
+def test_node_outcome_rejects_an_expected_node_missing_from_measured_collection(
+    tmp_path,
+):
+    report = tmp_path / "nodes.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": "run-tests-parallel/node-report/v1",
+                "files": {},
+                "collected_nodeids": ["tests/a.py::test_present"],
+                "failed_nodeids": [],
+                "collection_error_paths": [],
+                "error_count": 0,
+                "collect_ok": True,
+                "probe_ok": True,
+                "readable": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    expected = tmp_path / "expected.json"
+    expected.write_text(
+        json.dumps(["tests/a.py::test_present", "tests/a.py::test_missing"]),
+        encoding="utf-8",
+    )
+
+    result = _cli(
+        "node-outcome",
+        "--node-report",
+        str(report),
+        "--expected-nodeids",
+        str(expected),
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "not collected" in result.stderr.lower(), result.stderr
+
+
 def test_outcomes_parser_keeps_skipped_summary_out_of_nodeids():
     outcome = upstream_sync_gate.parse_test_outcomes(
         "SKIPPED [1] tests/hermes_cli/test_gateway_service.py:931: macOS-only test\n"

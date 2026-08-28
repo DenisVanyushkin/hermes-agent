@@ -1303,7 +1303,14 @@ def _main(argv: list[str] | None = None) -> int:
                     isinstance(item, str) for item in expected
                 ):
                     raise ValueError("expected nodeids must be a JSON string list")
-            collected = sorted(set(expected if expected is not None else parsed["collected_nodeids"]))
+            measured = sorted(set(parsed["collected_nodeids"]))
+            if expected is not None:
+                missing = sorted(set(expected) - set(measured))
+                if missing:
+                    raise ValueError(
+                        "expected nodeids were not collected: " + ", ".join(missing)
+                    )
+            collected = measured
             unexpected = sorted(set(failed) - set(collected))
             print(json.dumps({
                 "collect_ok": parsed.get("collect_ok", True) and not unexpected and not parsed["collection_error_paths"],
