@@ -936,7 +936,25 @@ _AGGREGATE_NONZERO_NO_TEST_FAILURE = re.compile(
     re.MULTILINE,
 )
 _AGGREGATE_NONZERO_FILE = re.compile(
-    r"^\s+(?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py)\s+\(\d+ passed\)\s*$",
+    r"^  (?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py)\s+\(\d+ passed\)\s*$",
+    re.MULTILINE,
+)
+_AGGREGATE_TEST_FAILURE = re.compile(
+    r"^=== (?P<files>\d+) files? with test failures "
+    r"\(\d+ tests? failed\) ===\s*$",
+    re.MULTILINE,
+)
+_AGGREGATE_TEST_FAILURE_FILE = re.compile(
+    r"^  (?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py)\s+"
+    r"\(\d+ tests? failed\)\s*$",
+    re.MULTILINE,
+)
+_AGGREGATE_NO_TESTS = re.compile(
+    r"^=== (?P<files>\d+) files? where no tests ran .*===\s*$",
+    re.MULTILINE,
+)
+_AGGREGATE_NO_TESTS_FILE = re.compile(
+    r"^  (?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py)\s*$",
     re.MULTILINE,
 )
 
@@ -975,8 +993,12 @@ def _runner_summary_counts(match: re.Match[str]) -> dict[str, int]:
     return counts
 
 
-def _aggregate_nonzero_file_paths(log: str) -> tuple[set[str], bool]:
-    """Return files named by every non-zero-without-failures banner.
+def _aggregate_banner_file_paths(
+    log: str,
+    banner_pattern: re.Pattern[str],
+    file_pattern: re.Pattern[str],
+) -> tuple[set[str], bool]:
+    """Return files named by a runner banner and whether its list is complete.
 
     The runner prints one path line below each banner.  The count and path
     list are a small contract of that human output; an incomplete list is not
@@ -984,7 +1006,7 @@ def _aggregate_nonzero_file_paths(log: str) -> tuple[set[str], bool]:
     """
     paths: set[str] = set()
     complete = True
-    banners = list(_AGGREGATE_NONZERO_NO_TEST_FAILURE.finditer(log))
+    banners = list(banner_pattern.finditer(log))
     for index, banner in enumerate(banners):
         end = banners[index + 1].start() if index + 1 < len(banners) else len(log)
         next_section = re.search(r"^=== ", log[banner.end() : end], re.MULTILINE)
@@ -995,9 +1017,7 @@ def _aggregate_nonzero_file_paths(log: str) -> tuple[set[str], bool]:
         )
         listed = {
             match.group("path")
-            for match in _AGGREGATE_NONZERO_FILE.finditer(
-                log[banner.end() : section_end]
-            )
+            for match in file_pattern.finditer(log[banner.end() : section_end])
         }
         expected = int(banner.group("files"))
         if len(listed) != expected:
@@ -1120,17 +1140,25 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
         has_node_evidence = bool(failed_nodeids or collection_error_paths)
         if measured_counts == 0 and not has_node_evidence:
             raise ValueError("pytest aggregate run is unreadable: no tests ran")
-        if _AGGREGATE_NONZERO_NO_TEST_FAILURE.search(log):
-            nonzero_files, complete = _aggregate_nonzero_file_paths(log)
-            evidence_paths = {
-                nodeid.split("::", 1)[0] for nodeid in failed_nodeids
-            } | set(collection_error_paths)
+        evidence_paths = {
+            nodeid.split("::", 1)[0] for nodeid in failed_nodeids
+        } | set(collection_error_paths)
+        for banner_pattern, file_pattern in (
+            (_AGGREGATE_NONZERO_NO_TEST_FAILURE, _AGGREGATE_NONZERO_FILE),
+            (_AGGREGATE_TEST_FAILURE, _AGGREGATE_TEST_FAILURE_FILE),
+            (_AGGREGATE_NO_TESTS, _AGGREGATE_NO_TESTS_FILE),
+        ):
+            if not banner_pattern.search(log):
+                continue
+            banner_files, complete = _aggregate_banner_file_paths(
+                log, banner_pattern, file_pattern
+            )
             if not complete or any(
-                path not in evidence_paths for path in nonzero_files
+                path not in evidence_paths for path in banner_files
             ):
                 raise ValueError(
                     "pytest aggregate run is unreadable: non-zero exit without "
-                    "test failures"
+                    "test failures (non-zero file has no test-failure evidence)"
                 )
     # The -rA skipped summary has no nodeid, only file:line.  Do not guess a
     # nodeid: that would corrupt collected membership and suspected-renames;
@@ -1352,12 +1380,14 @@ def _main(argv: list[str] | None = None) -> int:
                     "failed_nodeids",
                     "error_count",
                     "collection_error_paths",
+                    "tests_collected",
                 )
                 if (
                     not isinstance(parsed.get("collected_nodeids"), list)
                     or not isinstance(parsed.get("failed_nodeids"), list)
                     or not isinstance(parsed.get("collection_error_paths"), list)
-                    or not isinstance(parsed.get("error_count"), int)
+                    or type(parsed.get("error_count")) is not int
+                    or type(parsed.get("tests_collected")) is not int
                     or not all(
                         isinstance(item, str)
                         for key in (
@@ -1371,6 +1401,14 @@ def _main(argv: list[str] | None = None) -> int:
                     raise ValueError("node report has invalid outcome fields")
                 if parsed.get("readable") is False:
                     raise ValueError("run_tests_parallel node report is unreadable")
+                if (
+                    parsed["tests_collected"] == 0
+                    and not parsed["failed_nodeids"]
+                    and not parsed["collection_error_paths"]
+                ):
+                    raise ValueError(
+                        "run_tests_parallel node report is unreadable: no tests ran"
+                    )
             else:
                 log = Path(args.log).read_text(encoding="utf-8")
                 parsed = parse_test_outcomes(log, aggregate=args.aggregate)

@@ -534,16 +534,27 @@ def _file_output_is_readable(
     node_report: dict[str, object],
     returncode: int,
 ) -> bool:
-    """A deliberate empty pytest file is readable; a silent death is not."""
+    """Require an executed outcome and trustworthy exit/evidence."""
+    executed = sum(
+        summary.get(key, 0)
+        for key in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
+    )
+    evidence = bool(
+        node_report["failed_nodeids"] or node_report["collection_error_paths"]
+    )
     if (
         returncode != 0
-        and not node_report["failed_nodeids"]
-        and not node_report["collection_error_paths"]
+        and not evidence
     ):
         return False
-    if summary or node_report["collected_nodeids"]:
+    if executed:
         return True
-    return bool(re.search(r"(?:^|\n)\s*no tests ran\b", output, re.IGNORECASE))
+    # Preserve the established exception for an intentionally empty file
+    # beside measured files.  A non-zero empty file and a deselected-only file
+    # remain unreadable because neither contains an executed outcome.
+    return returncode == 0 and bool(
+        re.search(r"(?:^|\n)\s*no tests ran\b", output, re.IGNORECASE)
+    )
 
 
 def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
@@ -625,8 +636,12 @@ def _write_node_report(
     skipped_paths = sorted({
         item
         for report in file_reports.values()
-        for item in report["skipped_paths"]
+        for item in report.get("skipped_paths", [])
     })
+    tests_collected = sum(
+        int(report.get("tests_collected", 0))
+        for report in file_reports.values()
+    )
     payload = {
         "schema_version": _NODE_REPORT_SCHEMA,
         "files": {key: file_reports[key] for key in sorted(file_reports)},
@@ -634,6 +649,7 @@ def _write_node_report(
         "failed_nodeids": failed,
         "collection_error_paths": collection_errors,
         "error_count": sum(int(report["error_count"]) for report in file_reports.values()),
+        "tests_collected": tests_collected,
         "skipped_paths": skipped_paths,
         "collect_ok": not collection_errors,
         "probe_ok": not collection_errors,
@@ -1302,6 +1318,8 @@ def main() -> int:
                     "failed_nodeids": [],
                     "collection_error_paths": [],
                     "error_count": 0,
+                    "tests_collected": 0,
+                    "skipped_paths": [],
                     "returncode": None,
                     "readable": False,
                 }
@@ -1329,6 +1347,10 @@ def main() -> int:
             )
             file_times.append((fpath, subproc_wall))
             node_report = _parse_node_outcomes(output, repo_root)
+            node_report["tests_collected"] = sum(
+                summary.get(k, 0)
+                for k in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
+            )
             node_report["returncode"] = rc
             node_report["readable"] = _file_output_is_readable(
                 output, summary, node_report, rc
@@ -1367,6 +1389,12 @@ def main() -> int:
             fut.result() if fut.exception() is None else None
 
     elapsed = time.monotonic() - started
+    if args.node_report:
+        # Persist the machine evidence before emitting the human summary.  If
+        # this write fails, the log must not contain a clean-looking receipt
+        # that a log-only consumer could accept.
+        _write_node_report(args.node_report, file_reports)
+
     print()
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0
     summary_notes = []
@@ -1380,9 +1408,6 @@ def main() -> int:
             summary_notes.append(f", {count} {label}")
     summary_suffix = "".join(summary_notes)
     print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{summary_suffix} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
-
-    if args.node_report:
-        _write_node_report(args.node_report, file_reports)
 
     # Host-OS gating note: tests marked for another OS were skipped by the
     # conftest hook, not run. Say so explicitly — a green local run on Linux

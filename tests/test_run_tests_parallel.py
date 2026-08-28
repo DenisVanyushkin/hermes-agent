@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import run_tests_parallel
+from scripts import run_tests_parallel, upstream_sync_gate
 
 
 # Both tests share the same handoff file: the leaker writes here, the
@@ -566,6 +566,7 @@ def test_node_report_includes_nodes_from_green_and_failed_files(tmp_path: Path) 
         "tests/test_red.py::test_red",
     }
     assert payload["failed_nodeids"] == ["tests/test_red.py::test_red"]
+    assert payload["tests_collected"] == 3
 
 
 def test_node_parser_ignores_application_error_log_lines() -> None:
@@ -635,6 +636,7 @@ def test_node_report_distinguishes_no_tests_from_a_silent_kill(tmp_path: Path) -
 
     assert proc.returncode != 0, proc.stdout
     payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["tests_collected"] == 0
     assert payload["files"]["tests/test_empty.py"]["readable"] is True
     assert payload["files"]["tests/test_killed.py"]["readable"] is False
     assert payload["readable"] is False
@@ -704,3 +706,71 @@ def test_node_report_distinguishes_infrastructure_rc_from_normal_test_failure(
         "tests/test_normal_failure.py::test_normal_failure"
     ]
     assert normal_failure["readable"] is True
+
+
+def test_write_node_report_handles_worker_crash_report(tmp_path: Path) -> None:
+    report = tmp_path / "nodes.json"
+    run_tests_parallel._write_node_report(
+        report,
+        {
+            "tests/test_crashed.py": {
+                "collected_nodeids": [],
+                "failed_nodeids": [],
+                "collection_error_paths": [],
+                "error_count": 0,
+                "returncode": None,
+                "readable": False,
+            }
+        },
+    )
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["readable"] is False
+    assert payload["files"]["tests/test_crashed.py"]["returncode"] is None
+
+
+def test_node_report_write_failure_cannot_leave_a_green_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = tmp_path / "target-worktree"
+    tests_root = repo_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "test_pass.py").write_text(
+        "def test_pass():\n    assert True\n", encoding="utf-8"
+    )
+    report = tmp_path / "nodes.json"
+
+    def fail_to_write(*args, **kwargs):
+        raise OSError("simulated node report write failure")
+
+    monkeypatch.setattr(run_tests_parallel, "_write_node_report", fail_to_write)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(repo_root / "scripts" / "run_tests_parallel.py"),
+            "--repo-root",
+            str(repo_root),
+            "--files",
+            "tests/test_pass.py",
+            "--node-report",
+            str(report),
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+    )
+
+    with pytest.raises(OSError, match="simulated node report write failure"):
+        run_tests_parallel.main()
+
+    output = capsys.readouterr().out
+    with pytest.raises(ValueError, match="summary"):
+        upstream_sync_gate.parse_test_outcomes(output, aggregate=True)

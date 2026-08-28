@@ -1383,6 +1383,8 @@ def _run_real_aggregate_runner(
     files: dict[str, str],
     *,
     node_report: Path | None = None,
+    selected_files: list[str] | None = None,
+    pytest_args: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     repo = tmp_path / "runner-worktree"
     tests = repo / "tests"
@@ -1391,7 +1393,7 @@ def _run_real_aggregate_runner(
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
-    selected = ":".join(files)
+    selected = ":".join(selected_files or files)
     runner = Path(__file__).resolve().parents[2] / "scripts" / "run_tests_parallel.py"
     command = [
             sys.executable,
@@ -1412,6 +1414,7 @@ def _run_real_aggregate_runner(
             "no:cacheprovider",
             "-rA",
     ]
+    command.extend(pytest_args)
     if node_report is not None:
         command.extend(["--node-report", str(node_report)])
     return subprocess.run(
@@ -1420,6 +1423,191 @@ def _run_real_aggregate_runner(
         capture_output=True,
         text=True,
         timeout=60,
+    )
+
+
+_TEARDOWN_ERROR_FILE = (
+    "import pytest\n\n"
+    "@pytest.fixture\n"
+    "def failing_teardown():\n"
+    "    yield\n"
+    "    raise RuntimeError('teardown boom')\n\n"
+    "def test_passes():\n"
+    "    pass\n\n"
+    "def test_errors_in_teardown(failing_teardown):\n"
+    "    pass\n"
+)
+_ERROR_FILE = (
+    "import pytest\n\n"
+    "@pytest.fixture(autouse=True)\n"
+    "def fail_before_test():\n"
+    "    raise RuntimeError('fixture boom')\n\n"
+    "def test_reaches_fixture():\n"
+    "    pass\n"
+)
+_INFRA_CONFTST = (
+    "def pytest_sessionfinish(session, exitstatus):\n"
+    "    if exitstatus == 0:\n"
+    "        session.exitstatus = 3\n"
+)
+
+
+def _matrix_case(
+    name: str,
+    files: dict[str, str],
+    *,
+    selected_files: list[str] | None = None,
+    pytest_args: tuple[str, ...] = (),
+) -> tuple[str, dict[str, str], list[str] | None, tuple[str, ...]]:
+    return name, files, selected_files, pytest_args
+
+
+_READABILITY_MATRIX = [
+    _matrix_case(
+        "green",
+        {"tests/test_green.py": "def test_green():\n    assert True\n"},
+    ),
+    _matrix_case(
+        "ordinary-red",
+        {"tests/test_red.py": "def test_red():\n    assert False\n"},
+    ),
+    _matrix_case(
+        "nonzero-without-node-evidence",
+        {"tests/conftest.py": _INFRA_CONFTST, "tests/test_pass.py": "def test_pass():\n    pass\n"},
+        selected_files=["tests/test_pass.py"],
+    ),
+    _matrix_case("teardown-error", {"tests/test_teardown.py": _TEARDOWN_ERROR_FILE}),
+    _matrix_case(
+        "empty-beside-measured",
+        {
+            "tests/test_empty.py": "# deliberately empty\n",
+            "tests/test_pass.py": "def test_pass():\n    pass\n",
+        },
+    ),
+    _matrix_case(
+        "all-skipped",
+        {
+            "tests/test_skipped.py": (
+                "import pytest\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped_a():\n    pass\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped_b():\n    pass\n"
+            )
+        },
+    ),
+    _matrix_case(
+        "xfail-and-xpass",
+        {
+            "tests/test_expected.py": (
+                "import pytest\n\n"
+                "@pytest.mark.xfail(reason='expected')\n"
+                "def test_expected_failure():\n    assert False\n\n"
+                "@pytest.mark.xfail(reason='unexpected', strict=False)\n"
+                "def test_unexpected_pass():\n    assert True\n"
+            )
+        },
+    ),
+    _matrix_case(
+        "errors-in-two-files",
+        {"tests/test_error_a.py": _ERROR_FILE, "tests/test_error_b.py": _ERROR_FILE},
+    ),
+    _matrix_case(
+        "mixed-infrastructure-and-test-failure",
+        {
+            "tests/infra/conftest.py": _INFRA_CONFTST,
+            "tests/infra/test_infra.py": "def test_infra_passes():\n    pass\n",
+            "tests/real/test_real.py": "def test_real_failure():\n    assert False\n",
+        },
+        selected_files=["tests/infra/test_infra.py", "tests/real/test_real.py"],
+    ),
+    _matrix_case(
+        "skipped-only-with-infrastructure",
+        {
+            "tests/infra/conftest.py": _INFRA_CONFTST,
+            "tests/infra/test_skipped.py": (
+                "import pytest\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped_a():\n    pass\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped_b():\n    pass\n"
+            ),
+        },
+        selected_files=["tests/infra/test_skipped.py"],
+    ),
+    _matrix_case(
+        "xfail-only-with-infrastructure",
+        {
+            "tests/infra/conftest.py": _INFRA_CONFTST,
+            "tests/infra/test_xfail.py": (
+                "import pytest\n\n"
+                "@pytest.mark.xfail(reason='expected')\n"
+                "def test_expected_failure():\n    assert False\n"
+            ),
+        },
+        selected_files=["tests/infra/test_xfail.py"],
+    ),
+    _matrix_case(
+        "all-deselected",
+        {
+            "tests/test_deselected.py": "def test_one():\n    pass\n\ndef test_two():\n    pass\n"
+        },
+        pytest_args=("-k", "no_such_test_name_xyz"),
+    ),
+    _matrix_case(
+        "all-empty",
+        {
+            "tests/test_empty_a.py": "# intentionally empty\n",
+            "tests/test_empty_b.py": "# intentionally empty\n",
+        },
+    ),
+    _matrix_case(
+        "worker-crash",
+        {
+            "tests/test_survivor.py": "def test_survivor():\n    pass\n",
+            "tests/test_crashed.py": "import os\nos._exit(137)\n",
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name, files, selected_files, pytest_args",
+    _READABILITY_MATRIX,
+    ids=[case[0] for case in _READABILITY_MATRIX],
+)
+def test_real_runner_log_and_node_report_readability_matrix(
+    tmp_path, name, files, selected_files, pytest_args
+):
+    """Every runner outcome category must have one verdict through both doors."""
+    assert len(_READABILITY_MATRIX) == 14
+    report = tmp_path / f"{name}-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        files,
+        node_report=report,
+        selected_files=selected_files,
+        pytest_args=pytest_args,
+    )
+    log = tmp_path / f"{name}.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+    report_payload = json.loads(report.read_text(encoding="utf-8"))
+    expected_counts = {
+        "all-skipped": 2,
+        "all-deselected": 0,
+        "all-empty": 0,
+        "empty-beside-measured": 1,
+    }
+    if name in expected_counts:
+        assert report_payload["tests_collected"] == expected_counts[name]
+
+    assert (log_result.returncode == 0) == (report_result.returncode == 0), (
+        name,
+        log_result.stderr,
+        report_result.stderr,
+        runner.stdout,
     )
 
 
@@ -1477,6 +1665,29 @@ def test_node_outcome_rejects_real_runner_with_no_tests(tmp_path):
 
     assert result.returncode == 2
     assert "no tests ran" in result.stderr
+
+
+def test_node_outcome_rejects_real_runner_with_no_tests_through_node_report(
+    tmp_path,
+):
+    report = tmp_path / "empty-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_empty_a.py": "# intentionally empty\n",
+            "tests/test_empty_b.py": "# intentionally empty\n",
+        },
+        node_report=report,
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "empty.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert log_result.returncode == 2, log_result.stdout
+    assert report_result.returncode == 2, report_result.stdout
 
 
 def test_node_outcome_counts_errors_across_real_runner_files(tmp_path):
@@ -1590,6 +1801,97 @@ def test_node_outcome_reads_real_runner_all_skipped(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_node_outcome_skipped_only_infrastructure_is_unreadable_with_parity(
+    tmp_path,
+):
+    report = tmp_path / "skipped-infra-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/infra/conftest.py": (
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if exitstatus == 0:\n"
+                "        session.exitstatus = 3\n"
+            ),
+            "tests/infra/test_skipped.py": (
+                "import pytest\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped_a():\n"
+                "    pass\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped_b():\n"
+                "    pass\n"
+            ),
+        },
+        node_report=report,
+        selected_files=["tests/infra/test_skipped.py"],
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "skipped-infra.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert log_result.returncode == 2, log_result.stdout
+    assert report_result.returncode == 2, report_result.stdout
+
+
+def test_node_outcome_xfail_only_infrastructure_is_unreadable_with_parity(tmp_path):
+    report = tmp_path / "xfail-infra-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/infra/conftest.py": (
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if exitstatus == 0:\n"
+                "        session.exitstatus = 3\n"
+            ),
+            "tests/infra/test_xfail.py": (
+                "import pytest\n\n"
+                "@pytest.mark.xfail(reason='expected')\n"
+                "def test_expected_failure():\n"
+                "    assert False\n"
+            ),
+        },
+        node_report=report,
+        selected_files=["tests/infra/test_xfail.py"],
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "xfail-infra.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert log_result.returncode == 2, log_result.stdout
+    assert report_result.returncode == 2, report_result.stdout
+
+
+def test_node_outcome_all_deselected_is_unreadable_through_both_doors(tmp_path):
+    report = tmp_path / "deselected-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_deselected.py": (
+                "def test_one():\n    pass\n\n"
+                "def test_two():\n    pass\n"
+            ),
+        },
+        node_report=report,
+        pytest_args=("-k", "no_such_test_name_xyz"),
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "deselected.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert log_result.returncode == 2, log_result.stdout
+    assert report_result.returncode == 2, report_result.stdout
+
+
 def test_node_outcome_reads_real_runner_failed_node(tmp_path):
     runner = _run_real_aggregate_runner(
         tmp_path,
@@ -1684,6 +1986,7 @@ def test_node_outcome_reads_the_runner_machine_report(tmp_path):
                 "failed_nodeids": ["tests/red.py::test_bad"],
                 "collection_error_paths": [],
                 "error_count": 0,
+                "tests_collected": 2,
                 "collect_ok": True,
                 "probe_ok": True,
                 "readable": True,
@@ -1718,6 +2021,7 @@ def test_node_outcome_rejects_an_expected_node_missing_from_measured_collection(
                 "failed_nodeids": [],
                 "collection_error_paths": [],
                 "error_count": 0,
+                "tests_collected": 1,
                 "collect_ok": True,
                 "probe_ok": True,
                 "readable": True,
