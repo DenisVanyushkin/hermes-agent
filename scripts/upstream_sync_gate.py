@@ -910,12 +910,14 @@ _SKIPPED_PATH_LINE = re.compile(
 )
 _NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
-    r"^=*\s*(?P<counts>(?:\d+\s+(?:failed|passed|skipped|warnings?|errors?|error)\b"
+    r"^=*\s*(?P<counts>(?:\d+\s+(?:failed|passed|skipped|warnings?|errors?|error|"
+    r"xfailed|xpassed|deselected)\b"
     r"(?:,\s*)?)+)\s+in\s+[\d.]+s(?:\s+\(\d+:\d{2}:\d{2}\))?\s*$",
     re.MULTILINE,
 )
 _COUNT_TOKEN = re.compile(
-    r"(?P<count>\d+)\s+(?P<label>failed|passed|skipped|warnings?|errors?|error)\b"
+    r"(?P<count>\d+)\s+(?P<label>failed|passed|skipped|warnings?|errors?|error|"
+    r"xfailed|xpassed|deselected)\b"
 )
 _AGGREGATE_FILE_HEADER = re.compile(
     r"^--- (?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py) ---\s*$",
@@ -923,12 +925,18 @@ _AGGREGATE_FILE_HEADER = re.compile(
 )
 _AGGREGATE_RUNNER_SUMMARY = re.compile(
     r"^=== Summary: (?P<files>\d+) files, (?P<passed>\d+) tests passed, "
-    r"(?P<failed>\d+) failed(?:, (?P<skipped>\d+) skipped)?.*===\s*$",
+    r"(?P<failed>\d+) failed"
+    r"(?P<extras>(?:, \d+ (?:skipped|xfailed|xpassed|deselected))*)"
+    r".*===\s*$",
     re.MULTILINE,
 )
 _AGGREGATE_NONZERO_NO_TEST_FAILURE = re.compile(
-    r"^=== \d+ files? where all tests passed but pytest exited non-zero "
+    r"^=== (?P<files>\d+) files? where all tests passed but pytest exited non-zero "
     r".*===\s*$",
+    re.MULTILINE,
+)
+_AGGREGATE_NONZERO_FILE = re.compile(
+    r"^\s+(?P<path>/?(?:[^:\s/]+/)*[^:\s/]+\.py)\s+\(\d+ passed\)\s*$",
     re.MULTILINE,
 )
 
@@ -956,6 +964,48 @@ def _summary_counts(match: re.Match[str]) -> dict[str, int]:
     return counts
 
 
+def _runner_summary_counts(match: re.Match[str]) -> dict[str, int]:
+    counts = {
+        "passed": int(match.group("passed")),
+        "failed": int(match.group("failed")),
+    }
+    for token in _COUNT_TOKEN.finditer(match.group("extras")):
+        label = token.group("label")
+        counts[label] = int(token.group("count"))
+    return counts
+
+
+def _aggregate_nonzero_file_paths(log: str) -> tuple[set[str], bool]:
+    """Return files named by every non-zero-without-failures banner.
+
+    The runner prints one path line below each banner.  The count and path
+    list are a small contract of that human output; an incomplete list is not
+    safe to use for a file-level readability decision.
+    """
+    paths: set[str] = set()
+    complete = True
+    banners = list(_AGGREGATE_NONZERO_NO_TEST_FAILURE.finditer(log))
+    for index, banner in enumerate(banners):
+        end = banners[index + 1].start() if index + 1 < len(banners) else len(log)
+        next_section = re.search(r"^=== ", log[banner.end() : end], re.MULTILINE)
+        section_end = (
+            banner.end() + next_section.start()
+            if next_section is not None
+            else end
+        )
+        listed = {
+            match.group("path")
+            for match in _AGGREGATE_NONZERO_FILE.finditer(
+                log[banner.end() : section_end]
+            )
+        }
+        expected = int(banner.group("files"))
+        if len(listed) != expected:
+            complete = False
+        paths.update(listed)
+    return paths, complete
+
+
 def _add_counts(target: dict[str, int], source: dict[str, int]) -> None:
     for label, count in source.items():
         target[label] = target.get(label, 0) + count
@@ -979,32 +1029,15 @@ def _parse_aggregate_summaries(log: str) -> dict[str, int]:
                 )
             _add_counts(counts, _summary_counts(summaries[-1]))
         if runner_summary:
-            total = runner_summary[-1]
-            result = {
-                "passed": int(total.group("passed")),
-                "failed": int(total.group("failed")),
-                **(
-                    {"skipped": int(total.group("skipped"))}
-                    if total.group("skipped") is not None
-                    else {}
-                ),
-            }
-            if counts.get("error"):
-                result["error"] = counts["error"]
+            result = _runner_summary_counts(runner_summary[-1])
+            for label in ("error", "xfailed", "xpassed", "deselected"):
+                if counts.get(label):
+                    result[label] = counts[label]
             return result
         return counts
 
     if runner_summary:
-        total = runner_summary[-1]
-        return {
-            "passed": int(total.group("passed")),
-            "failed": int(total.group("failed")),
-            **(
-                {"skipped": int(total.group("skipped"))}
-                if total.group("skipped") is not None
-                else {}
-            ),
-        }
+        return _runner_summary_counts(runner_summary[-1])
     if _NO_TESTS_RAN.search(log):
         summaries = list(_SUMMARY_LINE.finditer(log))
         if not summaries:
@@ -1026,19 +1059,11 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
     ``no tests ran`` line is deliberately rejected in single-run mode. In
     aggregate mode it is allowed for an individual file; the runner's overall
     summary or the remaining file summaries still establish the run result.
+    Aggregate readability is decided from the complete outcome vocabulary and
+    node-level evidence before considering a human runner banner.
     """
     if aggregate:
         summary_counts = _parse_aggregate_summaries(log)
-        measured_counts = sum(
-            summary_counts.get(label, 0)
-            for label in ("passed", "failed", "skipped", "error")
-        )
-        if measured_counts == 0:
-            raise ValueError("pytest aggregate run is unreadable: no tests ran")
-        if _AGGREGATE_NONZERO_NO_TEST_FAILURE.search(log):
-            raise ValueError(
-                "pytest aggregate run is unreadable: non-zero exit without test failures"
-            )
     elif _NO_TESTS_RAN.search(log):
         raise ValueError("pytest run is unreadable: no tests ran")
     else:
@@ -1083,6 +1108,30 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
             if (match := _SKIPPED_PATH_LINE.match(line))
         }
     )
+    if aggregate:
+        # Deselected tests are deliberately not evidence of execution: the
+        # selector removed them before pytest ran them.  A run containing only
+        # deselected tests must therefore remain unreadable, while any real
+        # outcome (including xfail/xpass) establishes that something ran.
+        measured_counts = sum(
+            summary_counts.get(label, 0)
+            for label in ("passed", "failed", "skipped", "error", "xfailed", "xpassed")
+        )
+        has_node_evidence = bool(failed_nodeids or collection_error_paths)
+        if measured_counts == 0 and not has_node_evidence:
+            raise ValueError("pytest aggregate run is unreadable: no tests ran")
+        if _AGGREGATE_NONZERO_NO_TEST_FAILURE.search(log):
+            nonzero_files, complete = _aggregate_nonzero_file_paths(log)
+            evidence_paths = {
+                nodeid.split("::", 1)[0] for nodeid in failed_nodeids
+            } | set(collection_error_paths)
+            if not complete or any(
+                path not in evidence_paths for path in nonzero_files
+            ):
+                raise ValueError(
+                    "pytest aggregate run is unreadable: non-zero exit without "
+                    "test failures"
+                )
     # The -rA skipped summary has no nodeid, only file:line.  Do not guess a
     # nodeid: that would corrupt collected membership and suspected-renames;
     # expose the path separately and let the classifier account for the

@@ -459,7 +459,8 @@ def _parse_pytest_summary(output: str) -> dict[str, int]:
     granularity instead of just file-level pass/fail.
 
     Returns a dict with keys ``passed``, ``failed``, ``skipped``, ``errors``,
-    ``xfailed``, ``xpassed`` (only keys found in the output are present).
+    ``xfailed``, ``xpassed``, ``deselected`` (only keys found in the output
+    are present).
     """
     result: dict[str, int] = {}
     # Walk backwards from the end — the summary line is always near the tail.
@@ -467,8 +468,12 @@ def _parse_pytest_summary(output: str) -> dict[str, int]:
         line = line.strip()
         if not line:
             continue
-        # Match "N passed", "N failed", "N skipped", "N errors", "N xfailed", "N xpassed"
-        for m in re.finditer(r"(\d+)\s+(passed|failed|skipped|errors|xfailed|xpassed)", line):
+        # Match pytest's complete outcome vocabulary.  Deselected tests are
+        # reported separately because they were not executed.
+        for m in re.finditer(
+            r"(\d+)\s+(passed|failed|skipped|errors|xfailed|xpassed|deselected)",
+            line,
+        ):
             result[m.group(2)] = int(m.group(1))
         # Also match "N error" (singular — pytest uses this sometimes).
         for m in re.finditer(r"(\d+)\s+error\b", line):
@@ -1267,6 +1272,9 @@ def main() -> int:
     tests_passed = 0
     tests_failed = 0
     tests_skipped = 0
+    tests_xfailed = 0
+    tests_xpassed = 0
+    tests_deselected = 0
     # Every collected outcome, not just pass/fail: a legitimately all-skipped
     # (platform-gated) file reports "2 skipped" and must NOT trip the
     # nothing-ran guard, whereas a file that died before collection reports
@@ -1276,7 +1284,9 @@ def main() -> int:
     lock = threading.Lock()
 
     def _on_done(file: Path, started_at: float, fut: "Future[Tuple[Path, int, str, Dict[str, int], float]]") -> None:
-        nonlocal files_done, tests_done, pass_count, fail_count, tests_passed, tests_failed, tests_skipped
+        nonlocal files_done, tests_done, pass_count, fail_count
+        nonlocal tests_passed, tests_failed, tests_skipped
+        nonlocal tests_xfailed, tests_xpassed, tests_deselected
         nonlocal tests_collected
         n_tests = test_counts.get(file, 0)
         try:
@@ -1310,6 +1320,9 @@ def main() -> int:
             tests_passed += summary.get("passed", 0)
             tests_failed += summary.get("failed", 0)
             tests_skipped += summary.get("skipped", 0)
+            tests_xfailed += summary.get("xfailed", 0)
+            tests_xpassed += summary.get("xpassed", 0)
+            tests_deselected += summary.get("deselected", 0)
             tests_collected += sum(
                 summary.get(k, 0)
                 for k in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
@@ -1356,8 +1369,17 @@ def main() -> int:
     elapsed = time.monotonic() - started
     print()
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0
-    skipped_note = f", {tests_skipped} skipped" if tests_skipped else ""
-    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{skipped_note} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
+    summary_notes = []
+    for count, label in (
+        (tests_skipped, "skipped"),
+        (tests_xfailed, "xfailed"),
+        (tests_xpassed, "xpassed"),
+        (tests_deselected, "deselected"),
+    ):
+        if count:
+            summary_notes.append(f", {count} {label}")
+    summary_suffix = "".join(summary_notes)
+    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{summary_suffix} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
 
     if args.node_report:
         _write_node_report(args.node_report, file_reports)

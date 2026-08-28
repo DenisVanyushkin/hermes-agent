@@ -1381,6 +1381,8 @@ def test_aggregate_parser_ignores_human_dash_sections_inside_failure_output():
 def _run_real_aggregate_runner(
     tmp_path: Path,
     files: dict[str, str],
+    *,
+    node_report: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     repo = tmp_path / "runner-worktree"
     tests = repo / "tests"
@@ -1391,8 +1393,7 @@ def _run_real_aggregate_runner(
         path.write_text(source, encoding="utf-8")
     selected = ":".join(files)
     runner = Path(__file__).resolve().parents[2] / "scripts" / "run_tests_parallel.py"
-    return subprocess.run(
-        [
+    command = [
             sys.executable,
             str(runner),
             "--repo-root",
@@ -1410,7 +1411,11 @@ def _run_real_aggregate_runner(
             "-p",
             "no:cacheprovider",
             "-rA",
-        ],
+    ]
+    if node_report is not None:
+        command.extend(["--node-report", str(node_report)])
+    return subprocess.run(
+        command,
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -1499,6 +1504,173 @@ def test_node_outcome_counts_errors_across_real_runner_files(tmp_path):
     assert result.returncode == 0, result.stderr
     outcome = json.loads(result.stdout)
     assert outcome["error_count"] == 2
+
+
+def test_node_outcome_reads_real_runner_teardown_error_as_failed_node(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_teardown.py": (
+                "import pytest\n\n"
+                "@pytest.fixture\n"
+                "def failing_teardown():\n"
+                "    yield\n"
+                "    raise RuntimeError('teardown boom')\n\n"
+                "def test_passes():\n"
+                "    pass\n\n"
+                "def test_errors_in_teardown(failing_teardown):\n"
+                "    pass\n"
+            ),
+        },
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "teardown.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert "tests/test_teardown.py::test_errors_in_teardown" in outcome[
+        "failed_nodeids"
+    ]
+    assert outcome["error_count"] == 1
+
+
+def test_node_outcome_reads_real_runner_xfail_and_xpass(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_expected.py": (
+                "import pytest\n\n"
+                "@pytest.mark.xfail(reason='expected')\n"
+                "def test_expected_failure():\n"
+                "    assert False\n\n"
+                "@pytest.mark.xfail(reason='unexpected', strict=False)\n"
+                "def test_unexpected_pass():\n"
+                "    assert True\n"
+            ),
+        },
+    )
+    assert runner.returncode == 0, runner.stdout + runner.stderr
+    assert "xfailed" in runner.stdout
+    assert "xpassed" in runner.stdout
+
+    log = tmp_path / "expected.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    parsed = upstream_sync_gate.parse_test_outcomes(
+        log.read_text(encoding="utf-8"), aggregate=True
+    )
+    assert parsed["summary"]["xfailed"] == 1
+    assert parsed["summary"]["xpassed"] == 1
+
+
+def test_node_outcome_reads_real_runner_all_skipped(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_skipped.py": (
+                "import pytest\n\n"
+                "@pytest.mark.skip(reason='not for this run')\n"
+                "def test_skipped():\n"
+                "    pass\n"
+            ),
+        },
+    )
+    assert runner.returncode == 0, runner.stdout + runner.stderr
+    assert "1 skipped" in runner.stdout
+
+    log = tmp_path / "skipped.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_node_outcome_reads_real_runner_failed_node(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_failed.py": (
+                "def test_failure():\n"
+                "    assert False\n"
+            ),
+        },
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "failed.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome["failed_nodeids"] == ["tests/test_failed.py::test_failure"]
+
+
+def test_node_outcome_log_and_node_report_have_same_readability_verdict(tmp_path):
+    report = tmp_path / "nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_teardown.py": (
+                "import pytest\n\n"
+                "@pytest.fixture\n"
+                "def failing_teardown():\n"
+                "    yield\n"
+                "    raise RuntimeError('teardown boom')\n\n"
+                "def test_passes():\n"
+                "    pass\n\n"
+                "def test_errors_in_teardown(failing_teardown):\n"
+                "    pass\n"
+            ),
+        },
+        node_report=report,
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+
+    log = tmp_path / "teardown-parity.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert (log_result.returncode == 0) == (report_result.returncode == 0)
+    assert log_result.returncode == 0, log_result.stderr
+
+
+def test_node_outcome_mixed_infrastructure_and_test_failure_keeps_parity(
+    tmp_path,
+):
+    report = tmp_path / "mixed-nodes.json"
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/infra/conftest.py": (
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if exitstatus == 0:\n"
+                "        session.exitstatus = 3\n"
+            ),
+            "tests/infra/test_infra.py": "def test_infra_passes():\n    pass\n",
+            "tests/real/test_real.py": (
+                "def test_real_failure():\n"
+                "    assert False\n"
+            ),
+        },
+        node_report=report,
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+    assert "  tests/infra/test_infra.py  (1 passed)" in runner.stdout
+
+    log = tmp_path / "mixed.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+    log_result = _cli("node-outcome", "--log", str(log), "--aggregate")
+    report_result = _cli("node-outcome", "--node-report", str(report))
+
+    assert log_result.returncode == 2, log_result.stdout
+    assert report_result.returncode == 2, report_result.stdout
 
 
 def test_node_outcome_reads_the_runner_machine_report(tmp_path):
