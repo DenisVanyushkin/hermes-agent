@@ -1362,6 +1362,19 @@ def test_node_outcome_reads_the_runner_machine_report(tmp_path):
     }
 
 
+def test_outcomes_parser_keeps_skipped_summary_out_of_nodeids():
+    outcome = upstream_sync_gate.parse_test_outcomes(
+        "SKIPPED [1] tests/hermes_cli/test_gateway_service.py:931: macOS-only test\n"
+        "1 skipped in 0.01s\n"
+    )
+
+    assert outcome["collected_nodeids"] == []
+    assert outcome["failed_nodeids"] == []
+    assert outcome["skipped_paths"] == [
+        "tests/hermes_cli/test_gateway_service.py"
+    ]
+
+
 def test_outcomes_comparator_reports_new_collection_error():
     comparator = getattr(upstream_sync_gate, "compare_test_outcomes", None)
     assert callable(comparator), "outcomes comparator is not implemented"

@@ -578,6 +578,19 @@ def test_node_parser_ignores_application_error_log_lines() -> None:
     assert parsed["collected_nodeids"] == []
 
 
+def test_node_parser_does_not_treat_skipped_summary_as_a_nodeid() -> None:
+    parsed = run_tests_parallel._parse_node_outcomes(
+        "SKIPPED [1] tests/hermes_cli/test_gateway_service.py:931: macOS-only\n",
+        Path("/repo"),
+    )
+
+    assert parsed["collected_nodeids"] == []
+    assert parsed["failed_nodeids"] == []
+    assert parsed["skipped_paths"] == [
+        "tests/hermes_cli/test_gateway_service.py"
+    ]
+
+
 def test_node_report_distinguishes_no_tests_from_a_silent_kill(tmp_path: Path) -> None:
     repo_root = tmp_path / "target-worktree"
     tests_root = repo_root / "tests"

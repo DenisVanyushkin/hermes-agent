@@ -500,7 +500,24 @@ def _looks_like_test_file(path: str, repo_root: Path) -> bool:
             path = str(candidate.resolve().relative_to(repo_root.resolve()))
         except ValueError:
             return False
-    return path.startswith("tests/") and path.endswith(".py") and "::" not in path
+    return path.endswith(".py") and "::" not in path and ":" not in path
+
+
+_SKIPPED_PATH_LINE = re.compile(
+    r"^\[\d+\]\s+(?P<path>[^:\s]+\.py):\d+(?::.*)?$"
+)
+
+
+def _parse_skipped_path(value: str, repo_root: Path) -> str | None:
+    match = _SKIPPED_PATH_LINE.match(value.strip())
+    if not match:
+        return None
+    return _normalise_nodeid(match.group("path"), repo_root)
+
+
+def _looks_like_nodeid(nodeid: str) -> bool:
+    path, separator, _ = nodeid.partition("::")
+    return bool(separator and path.endswith(".py") and ":" not in path)
 
 
 def _file_output_is_readable(
@@ -525,6 +542,7 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
     collected: set[str] = set()
     failed: set[str] = set()
     collection_errors: set[str] = set()
+    skipped_paths: set[str] = set()
     error_count = 0
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -537,6 +555,15 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
         if status not in {"PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR"}:
             continue
         nodeid = value.strip()
+        if status == "SKIPPED":
+            # pytest -rA's short skipped summary contains only file:line, not
+            # a nodeid.  Keep it out of collected coverage: inventing one
+            # would poison classifier membership and rename detection.  The
+            # skipped path is retained separately as an explicit limitation.
+            skipped_path = _parse_skipped_path(nodeid, repo_root)
+            if skipped_path is not None:
+                skipped_paths.add(skipped_path)
+                continue
         if status in {"FAILED", "ERROR"}:
             nodeid, _, _ = nodeid.partition(" - ")
             nodeid = nodeid.rstrip()
@@ -546,6 +573,8 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
                 collection_errors.add(nodeid)
                 error_count += 1
             continue
+        if not _looks_like_nodeid(nodeid):
+            continue
         collected.add(nodeid)
         if status in {"FAILED", "ERROR"}:
             failed.add(nodeid)
@@ -554,6 +583,7 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
         "failed_nodeids": sorted(failed),
         "collection_error_paths": sorted(collection_errors),
         "error_count": error_count,
+        "skipped_paths": sorted(skipped_paths),
     }
 
 
@@ -577,6 +607,11 @@ def _write_node_report(
         for report in file_reports.values()
         for item in report["collection_error_paths"]
     })
+    skipped_paths = sorted({
+        item
+        for report in file_reports.values()
+        for item in report["skipped_paths"]
+    })
     payload = {
         "schema_version": _NODE_REPORT_SCHEMA,
         "files": {key: file_reports[key] for key in sorted(file_reports)},
@@ -584,6 +619,7 @@ def _write_node_report(
         "failed_nodeids": failed,
         "collection_error_paths": collection_errors,
         "error_count": sum(int(report["error_count"]) for report in file_reports.values()),
+        "skipped_paths": skipped_paths,
         "collect_ok": not collection_errors,
         "probe_ok": not collection_errors,
         "readable": bool(file_reports) and all(

@@ -886,10 +886,12 @@ def filter_probe_request(
 
 
 _FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
-_COLLECTED_LINE = re.compile(r"^(?:PASSED|FAILED|SKIPPED|XFAIL|XPASS|RERUN)\s+(\S+)")
 _ERROR_NODE_LINE = re.compile(r"^ERROR\s+(\S+::\S+)(?:\s+-.*)?$")
 _COLLECTION_ERROR_LINE = re.compile(
-    r"^ERROR\s+(?!collecting\b)(?!\S+::)(\S+)(?:\s+-.*)?$"
+    r"^ERROR\s+(?!collecting\b)(?P<path>[^\s:]+\.py)(?:\s+-.*)?$"
+)
+_SKIPPED_PATH_LINE = re.compile(
+    r"^SKIPPED\s+\[\d+\]\s+(?P<path>[^:\s]+\.py):\d+(?::.*)?$"
 )
 _NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
@@ -906,6 +908,17 @@ _AGGREGATE_RUNNER_SUMMARY = re.compile(
     r"(?P<failed>\d+) failed(?:, (?P<skipped>\d+) skipped)?.*===\s*$",
     re.MULTILINE,
 )
+
+
+def _nodeid_from_status_line(line: str) -> str | None:
+    fields = line.split(None, 1)
+    if len(fields) != 2 or fields[0] not in {"PASSED", "FAILED", "XFAIL", "XPASS", "RERUN"}:
+        return None
+    value = fields[1].partition(" - ")[0].strip()
+    path, separator, _ = value.partition("::")
+    if not separator or not path.endswith(".py") or ":" in path:
+        return None
+    return value
 
 
 def _summary_counts(match: re.Match[str]) -> dict[str, int]:
@@ -1003,9 +1016,9 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
         line.strip().removeprefix("║").strip() for line in log.splitlines()
     )
     collected_nodeids = {
-        match.group(1)
+        nodeid
         for line in node_log.splitlines()
-        if (match := _COLLECTED_LINE.match(line))
+        if (nodeid := _nodeid_from_status_line(line)) is not None
     }
     error_nodeids = {
         match.group(1)
@@ -1014,25 +1027,41 @@ def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
     }
     collected_nodeids.update(error_nodeids)
     failed_nodeids = {
-        match.group(1)
+        nodeid
         for line in node_log.splitlines()
-        if (match := _FAILED_LINE.match(line))
+        if (nodeid := _nodeid_from_status_line(line)) is not None
+        and line.startswith("FAILED")
     }
     failed_nodeids.update(error_nodeids)
     collection_error_paths = sorted(
         {
-            match.group(1)
+            match.group("path")
             for line in node_log.splitlines()
             if (match := _COLLECTION_ERROR_LINE.match(line))
         }
     )
-    return {
+    skipped_paths = sorted(
+        {
+            match.group("path")
+            for line in node_log.splitlines()
+            if (match := _SKIPPED_PATH_LINE.match(line))
+        }
+    )
+    # The -rA skipped summary has no nodeid, only file:line.  Do not guess a
+    # nodeid: that would corrupt collected membership and suspected-renames;
+    # expose the path separately and let the classifier account for the
+    # resulting limitation.
+    result = {
         "collected_nodeids": sorted(collected_nodeids),
         "failed_nodeids": sorted(failed_nodeids),
         "error_count": summary_counts.get("error", 0),
         "collection_error_paths": collection_error_paths,
-        **({"summary": summary_counts} if aggregate else {}),
     }
+    if skipped_paths:
+        result["skipped_paths"] = skipped_paths
+    if aggregate:
+        result["summary"] = summary_counts
+    return result
 
 
 def compare_test_outcomes(baseline_log: str, post_log: str) -> dict[str, list[str]]:
