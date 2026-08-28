@@ -1330,6 +1330,38 @@ def test_aggregate_parser_accepts_the_real_runner_overall_summary():
     assert outcome["summary"] == {"failed": 1, "passed": 8, "skipped": 1}
 
 
+def test_node_outcome_reads_the_runner_machine_report(tmp_path):
+    report = tmp_path / "nodes.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": "run-tests-parallel/node-report/v1",
+                "files": {},
+                "collected_nodeids": ["tests/green.py::test_ok", "tests/red.py::test_bad"],
+                "failed_nodeids": ["tests/red.py::test_bad"],
+                "collection_error_paths": [],
+                "error_count": 0,
+                "collect_ok": True,
+                "probe_ok": True,
+                "readable": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _cli("node-outcome", "--node-report", str(report))
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "collect_ok": True,
+        "probe_ok": True,
+        "collected_nodeids": ["tests/green.py::test_ok", "tests/red.py::test_bad"],
+        "failed_nodeids": ["tests/red.py::test_bad"],
+        "error_count": 0,
+        "collection_error_paths": [],
+    }
+
+
 def test_outcomes_comparator_reports_new_collection_error():
     comparator = getattr(upstream_sync_gate, "compare_test_outcomes", None)
     assert callable(comparator), "outcomes comparator is not implemented"

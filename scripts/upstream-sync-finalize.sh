@@ -534,8 +534,18 @@ PY
   baseline_nodes="$attempt_dir/gate-baseline.nodes.json"
   merged_nodes="$attempt_dir/gate-merged.nodes.json"
   upstream_nodes="$attempt_dir/gate-upstream-parent.nodes.json"
-  if ! "$py" "$gate" node-outcome --log "$baseline" >"$baseline_nodes" 2>>"$DETAIL_LOG" ||
-     ! "$py" "$gate" node-outcome --log "$post" >"$merged_nodes" 2>>"$DETAIL_LOG"; then
+  baseline_runner_nodes="$attempt_dir/gate-baseline.runner.nodes.json"
+  merged_runner_nodes="$attempt_dir/gate-merged.runner.nodes.json"
+  baseline_source=(--log "$baseline")
+  merged_source=(--log "$post")
+  if [ -s "$baseline_runner_nodes" ]; then
+    baseline_source=(--node-report "$baseline_runner_nodes")
+  fi
+  if [ -s "$merged_runner_nodes" ]; then
+    merged_source=(--node-report "$merged_runner_nodes")
+  fi
+  if ! "$py" "$gate" node-outcome "${baseline_source[@]}" >"$baseline_nodes" 2>>"$DETAIL_LOG" ||
+     ! "$py" "$gate" node-outcome "${merged_source[@]}" >"$merged_nodes" 2>>"$DETAIL_LOG"; then
     echo "could not parse structured node outcomes; refusing to land the merge" >>"$DETAIL_LOG"
     return 1
   fi
@@ -579,7 +589,12 @@ PY
       echo "could not create the merged-tree probe worktree" >>"$DETAIL_LOG"
     else
       "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_request" "$merged_probe_wt" >"$merged_isolated_log" 2>&1 || true
-      if ! "$py" "$gate" node-outcome --log "$merged_isolated_log" \
+      merged_isolated_runner_nodes="$attempt_dir/gate-merged-isolated.runner.nodes.json"
+      merged_isolated_source=(--log "$merged_isolated_log")
+      if [ -s "$merged_isolated_runner_nodes" ]; then
+        merged_isolated_source=(--node-report "$merged_isolated_runner_nodes")
+      fi
+      if ! "$py" "$gate" node-outcome "${merged_isolated_source[@]}" \
         --expected-nodeids "$merged_isolated_probe_nodeids" >"$merged_isolated_nodes" 2>>"$DETAIL_LOG"; then
         printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
       fi
@@ -652,7 +667,12 @@ PY
     rm -rf "$probe_wt"
   else
     "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_filtered_request" "$probe_wt" >"$probe_log" 2>&1 || true
-    if ! "$py" "$gate" node-outcome --log "$probe_log" \
+    upstream_runner_nodes="$attempt_dir/gate-upstream-probe.runner.nodes.json"
+    upstream_source=(--log "$probe_log")
+    if [ -s "$upstream_runner_nodes" ]; then
+      upstream_source=(--node-report "$upstream_runner_nodes")
+    fi
+    if ! "$py" "$gate" node-outcome "${upstream_source[@]}" \
       --expected-nodeids "$probe_nodeids" >"$upstream_nodes" 2>>"$DETAIL_LOG"; then
       printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
     fi

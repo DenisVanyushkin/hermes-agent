@@ -21,7 +21,6 @@ pytest, получив несуществующий путь, не пропус�
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -134,10 +133,9 @@ def fake_python(tmp_path: Path) -> tuple[Path, Path]:
 def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
     """Набор, который раннер реально передал pytest.
 
-    Извлекается срезом по контракту вызова — аргументы между парой ``-m pytest``
-    и первой опцией раннера, — а не фильтром «похоже на путь к тесту». Срез
-    доказывает саму форму вызова: если раннер начнёт передавать пути иначе,
-    тест это заметит, а фильтр по внешнему виду промолчал бы.
+    Извлекается из ``--files`` в контракте вызова, а не фильтром «похоже на
+    путь к тесту». Это доказывает саму форму вызова: если раннер перестанет
+    получать явный список, тест это заметит.
     """
     interpreter, argv_file = fake_python
     env = {
@@ -178,16 +176,11 @@ def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
     )
 
     argv = invocations[0]
-    assert argv[:2] == ["-m", "pytest"], (
-        f"the runner no longer invokes pytest as a module; argv={argv}"
+    assert argv and argv[0].endswith("/scripts/run_tests_parallel.py"), (
+        f"the pinned per-file runner was not invoked; argv={argv}"
     )
-    rest = argv[2:]
-    selection = list(itertools.takewhile(lambda arg: not arg.startswith("-"), rest))
-    assert len(selection) < len(rest), (
-        "no runner-owned pytest option follows the paths, so the slice cannot "
-        f"be trusted to end where the selection ends; argv={argv}"
-    )
-    return selection
+    assert "--files" in argv, f"parallel runner needs an explicit file list; argv={argv}"
+    return argv[argv.index("--files") + 1].split(":")
 
 
 def test_runner_uses_a_summary_capable_pytest_report_flag(
@@ -200,6 +193,44 @@ def test_runner_uses_a_summary_capable_pytest_report_flag(
         "pytest must emit PASSED/FAILED node lines so the gate can distinguish "
         f"collected nodes from failures; argv={argv}"
     )
+
+
+def test_runner_is_pinned_to_main_checkout_and_receives_target_root(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """The gate must pin the runner code without moving pytest to that checkout."""
+    runner_copy = world / "scripts" / "run_tests_parallel.py"
+    runner_copy.parent.mkdir(parents=True, exist_ok=True)
+    runner_copy.write_text("raise SystemExit('runner copy')\n", encoding="utf-8")
+    _commit(world, "provide the pinned runner in the main checkout")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": str(fake_python[0]),
+            "FAKE_ARGV_FILE": str(fake_python[1]),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(fake_python[1].read_text(encoding="utf-8").splitlines()[0])
+
+    assert str(REPO_ROOT / "scripts" / "run_tests_parallel.py") in argv
+    assert argv[argv.index("--repo-root") + 1] == str(world)
+    files_arg = argv[argv.index("--files") + 1]
+    assert files_arg.split(":") == ["tests/test_fork_only.py"]
+    assert argv[argv.index("--file-retries") + 1] == "0"
+    assert "--file-timeout" in argv
+    assert "--jobs" in argv
 
 
 def _run_runner(world: Path, python: Path, **extra_env: str) -> subprocess.CompletedProcess:
@@ -231,7 +262,7 @@ def _checkout_fake_python(tmp_path: Path) -> Path:
     interpreter.write_text(
         "#!/usr/bin/env python3\n"
         "import os, subprocess, sys\n"
-        "if sys.argv[1:3] == ['-m', 'pytest']:\n"
+        "if any(arg.endswith('run_tests_parallel.py') for arg in sys.argv[1:]):\n"
         "    subprocess.run(['git', 'checkout', '-q', os.environ['FAKE_CHECKOUT_REF']], check=True)\n"
     )
     interpreter.chmod(0o755)
@@ -779,8 +810,8 @@ def test_collection_error_does_not_abort_run(world: Path) -> None:
     assert "Interrupted" not in output, (
         "pytest aborted after collection instead of running the modules it could collect"
     )
-    assert re.search(r"2 passed, 1 error in ", output), (
-        "the runnable fork tests did not execute to a terminal pytest summary; "
+    assert "2 tests passed" in output and "1 error in" in output, (
+        "the runnable fork tests did not execute to a terminal runner summary; "
         f"output={output!r}"
     )
     assert re.search(

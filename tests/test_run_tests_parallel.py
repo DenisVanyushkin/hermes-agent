@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -460,3 +461,106 @@ def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
         f"drive letter split off as a phantom root:\n{proc.stdout}"
     )
     assert "Discovered 1 test files" in proc.stdout, proc.stdout
+
+
+def test_runner_can_separate_script_location_from_execution_root(tmp_path: Path) -> None:
+    """A pinned runner may execute pytest against a different worktree."""
+    repo_root = Path(__file__).resolve().parent.parent
+    copied_runner = tmp_path / "pinned-checkout" / "scripts" / "run_tests_parallel.py"
+    copied_runner.parent.mkdir(parents=True)
+    shutil.copy2(repo_root / "scripts" / "run_tests_parallel.py", copied_runner)
+
+    target_root = tmp_path / "target-worktree"
+    test_file = target_root / "tests" / "test_target.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_target_tree_is_used():\n    assert True\n", encoding="utf-8")
+    report = tmp_path / "target.nodes.json"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(copied_runner),
+            "--repo-root",
+            str(target_root),
+            "--files",
+            "tests/test_target.py",
+            "--node-report",
+            str(report),
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert json.loads(report.read_text(encoding="utf-8"))["collected_nodeids"] == [
+        "tests/test_target.py::test_target_tree_is_used"
+    ]
+
+
+def test_node_report_includes_nodes_from_green_and_failed_files(tmp_path: Path) -> None:
+    """The machine report must not lose a whole file merely because it passed."""
+    repo_root = Path(__file__).resolve().parent.parent
+    target_root = tmp_path / "target-worktree"
+    tests_root = target_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "test_green.py").write_text(
+        "def test_green_one():\n    assert True\n\n"
+        "def test_green_two():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_red.py").write_text(
+        "def test_red():\n    assert False\n", encoding="utf-8"
+    )
+    report = tmp_path / "nodes.json"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_tests_parallel.py"),
+            "--repo-root",
+            str(target_root),
+            "--files",
+            "tests/test_green.py:tests/test_red.py",
+            "--node-report",
+            str(report),
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "2",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode == 1, proc.stdout
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert set(payload["collected_nodeids"]) == {
+        "tests/test_green.py::test_green_one",
+        "tests/test_green.py::test_green_two",
+        "tests/test_red.py::test_red",
+    }
+    assert payload["failed_nodeids"] == ["tests/test_red.py::test_red"]

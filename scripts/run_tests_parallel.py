@@ -101,6 +101,7 @@ _DEFAULT_FILE_RETRIES = 1
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+_NODE_REPORT_SCHEMA = "run-tests-parallel/node-report/v1"
 
 
 def _split_pathspec(value: str) -> List[str]:
@@ -479,6 +480,99 @@ def _parse_pytest_summary(output: str) -> dict[str, int]:
     return result
 
 
+def _normalise_nodeid(nodeid: str, repo_root: Path) -> str:
+    """Make an absolute pytest node id portable relative to *repo_root*."""
+    path, separator, suffix = nodeid.partition("::")
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            path = str(candidate.resolve().relative_to(repo_root.resolve()))
+        except ValueError:
+            pass
+    return path + (separator + suffix if separator else "")
+
+
+def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
+    """Extract complete node outcomes from one child's uncropped output.
+
+    The parent runner deliberately prints only a short tail for failed files,
+    and prints no child output for green files.  This parser runs before that
+    presentation policy is applied, so the machine report retains every node
+    from every file.
+    """
+    collected: set[str] = set()
+    failed: set[str] = set()
+    collection_errors: set[str] = set()
+    error_count = 0
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        status, separator, value = line.partition(" ")
+        if not separator:
+            continue
+        if status not in {"PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR"}:
+            continue
+        nodeid = value.strip()
+        if status in {"FAILED", "ERROR"}:
+            nodeid, _, _ = nodeid.partition(" - ")
+            nodeid = nodeid.rstrip()
+        nodeid = _normalise_nodeid(nodeid, repo_root)
+        if "::" not in nodeid and status == "ERROR":
+            collection_errors.add(nodeid)
+            error_count += 1
+            continue
+        collected.add(nodeid)
+        if status in {"FAILED", "ERROR"}:
+            failed.add(nodeid)
+    return {
+        "collected_nodeids": sorted(collected),
+        "failed_nodeids": sorted(failed),
+        "collection_error_paths": sorted(collection_errors),
+        "error_count": error_count,
+    }
+
+
+def _write_node_report(
+    path: Path,
+    file_reports: dict[str, dict[str, object]],
+) -> None:
+    """Persist a complete, gate-consumable report after all files finish."""
+    collected = sorted({
+        nodeid
+        for report in file_reports.values()
+        for nodeid in report["collected_nodeids"]
+    })
+    failed = sorted({
+        nodeid
+        for report in file_reports.values()
+        for nodeid in report["failed_nodeids"]
+    })
+    collection_errors = sorted({
+        item
+        for report in file_reports.values()
+        for item in report["collection_error_paths"]
+    })
+    payload = {
+        "schema_version": _NODE_REPORT_SCHEMA,
+        "files": {key: file_reports[key] for key in sorted(file_reports)},
+        "collected_nodeids": collected,
+        "failed_nodeids": failed,
+        "collection_error_paths": collection_errors,
+        "error_count": sum(int(report["error_count"]) for report in file_reports.values()),
+        "collect_ok": not collection_errors,
+        "probe_ok": not collection_errors,
+        "readable": bool(file_reports) and all(
+            report.get("readable", False) for report in file_reports.values()
+        ),
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def _format_file(file: Path, repo_root: Path) -> str:
     """Render a test-file path for display: strip the repo-root prefix
     when possible so output reads ``tests/acp/test_auth.py`` instead of
@@ -830,6 +924,26 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--repo-root",
+        type=Path,
+        help=(
+            "Repository/worktree in which to resolve files and run pytest. "
+            "Defaults to the checkout containing this runner."
+        ),
+    )
+    parser.add_argument(
+        "--node-report",
+        type=Path,
+        help=(
+            "Write a machine-readable complete per-node outcome report to this path."
+        ),
+    )
+    parser.add_argument(
+        "--no-duration-cache",
+        action="store_true",
+        help="Do not write test_durations.json into the execution root.",
+    )
+    parser.add_argument(
         "paths_positional",
         nargs="*",
         metavar="PATH",
@@ -858,6 +972,7 @@ def main() -> int:
     OUR_FLAGS = {
         "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
+        "--repo-root", "--node-report", "--no-duration-cache",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -957,7 +1072,7 @@ def main() -> int:
             print(f"error: --slice must be I/N (e.g. 1/4), got: {slice_raw!r}", file=sys.stderr)
             sys.exit(2)
 
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = (args.repo_root or Path(__file__).resolve().parent.parent).resolve()
 
     # --files: explicit file list from the CI generate job — skip discovery.
     if args.files:
@@ -1045,6 +1160,7 @@ def main() -> int:
     # nothing-ran guard, whereas a file that died before collection reports
     # nothing at all and must.
     tests_collected = 0
+    file_reports: dict[str, dict[str, object]] = {}
     lock = threading.Lock()
 
     def _on_done(file: Path, started_at: float, fut: "Future[Tuple[Path, int, str, Dict[str, int], float]]") -> None:
@@ -1059,6 +1175,13 @@ def main() -> int:
                 tests_done += n_tests
                 fail_count += 1
                 failures.append((file, f"runner crashed: {exc!r}", {}))
+                file_reports[_format_file(file, repo_root)] = {
+                    "collected_nodeids": [],
+                    "failed_nodeids": [],
+                    "collection_error_paths": [],
+                    "error_count": 0,
+                    "readable": False,
+                }
                 _print_progress(
                     tests_done, approx_total_tests, file, 1,
                     time.monotonic() - started_at,
@@ -1079,6 +1202,9 @@ def main() -> int:
                 for k in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
             )
             file_times.append((fpath, subproc_wall))
+            node_report = _parse_node_outcomes(output, repo_root)
+            node_report["readable"] = bool(summary) or bool(node_report["collected_nodeids"])
+            file_reports[_format_file(fpath, repo_root)] = node_report
             if rc == 0:
                 pass_count += 1
             else:
@@ -1116,6 +1242,9 @@ def main() -> int:
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0
     skipped_note = f", {tests_skipped} skipped" if tests_skipped else ""
     print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{skipped_note} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
+
+    if args.node_report:
+        _write_node_report(args.node_report, file_reports)
 
     # Host-OS gating note: tests marked for another OS were skipped by the
     # conftest hook, not run. Say so explicitly — a green local run on Linux
@@ -1165,7 +1294,7 @@ def main() -> int:
     # partial test_durations.json; a CI merge step joins them later.
     # Locally, _save_durations merges with any existing cache so entries
     # from previous runs aren't lost.
-    if file_times:
+    if file_times and not args.no_duration_cache:
         _save_durations(file_times, repo_root)
         print(f"  Durations cached to {_DURATIONS_FILE} ({len(file_times)} files)")
 

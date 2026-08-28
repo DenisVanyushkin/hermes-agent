@@ -1110,7 +1110,9 @@ def _main(argv: list[str] | None = None) -> int:
     p_outcome = sub.add_parser(
         "node-outcome", help="turn one pytest log into a minimal structured node outcome"
     )
-    p_outcome.add_argument("--log", required=True)
+    outcome_source = p_outcome.add_mutually_exclusive_group(required=True)
+    outcome_source.add_argument("--log")
+    outcome_source.add_argument("--node-report")
     p_outcome.add_argument("--expected-nodeids")
 
     p_selection = sub.add_parser(
@@ -1216,8 +1218,37 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps(classification, ensure_ascii=False, sort_keys=True))
             return 0
         elif args.cmd == "node-outcome":
-            log = Path(args.log).read_text(encoding="utf-8")
-            parsed = parse_test_outcomes(log)
+            if args.node_report:
+                parsed = json.loads(Path(args.node_report).read_text(encoding="utf-8"))
+                if parsed.get("schema_version") != "run-tests-parallel/node-report/v1":
+                    raise ValueError("unsupported run_tests_parallel node report schema")
+                required = (
+                    "collected_nodeids",
+                    "failed_nodeids",
+                    "error_count",
+                    "collection_error_paths",
+                )
+                if (
+                    not isinstance(parsed.get("collected_nodeids"), list)
+                    or not isinstance(parsed.get("failed_nodeids"), list)
+                    or not isinstance(parsed.get("collection_error_paths"), list)
+                    or not isinstance(parsed.get("error_count"), int)
+                    or not all(
+                        isinstance(item, str)
+                        for key in (
+                            "collected_nodeids",
+                            "failed_nodeids",
+                            "collection_error_paths",
+                        )
+                        for item in parsed[key]
+                    )
+                ):
+                    raise ValueError("node report has invalid outcome fields")
+                if parsed.get("readable") is False:
+                    raise ValueError("run_tests_parallel node report is unreadable")
+            else:
+                log = Path(args.log).read_text(encoding="utf-8")
+                parsed = parse_test_outcomes(log)
             failed = parsed["failed_nodeids"]
             expected = None
             if args.expected_nodeids:
@@ -1231,8 +1262,8 @@ def _main(argv: list[str] | None = None) -> int:
             collected = sorted(set(expected if expected is not None else parsed["collected_nodeids"]))
             unexpected = sorted(set(failed) - set(collected))
             print(json.dumps({
-                "collect_ok": not unexpected and not parsed["collection_error_paths"],
-                "probe_ok": not unexpected and not parsed["collection_error_paths"],
+                "collect_ok": parsed.get("collect_ok", True) and not unexpected and not parsed["collection_error_paths"],
+                "probe_ok": parsed.get("probe_ok", True) and not unexpected and not parsed["collection_error_paths"],
                 "collected_nodeids": collected,
                 "failed_nodeids": sorted(set(failed) & set(collected)),
                 "error_count": parsed["error_count"],

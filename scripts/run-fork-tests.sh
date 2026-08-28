@@ -142,7 +142,12 @@ fi
 # основном рабочем дереве и в worktree не копируется. Взять оттуда python3 без
 # зависимостей проекта — значит получить два одинаково рассыпавшихся прогона,
 # совпадающие множества падений и гейт, который пропускает что угодно.
-MAIN_CHECKOUT="$(dirname "$(git -C "$WT" rev-parse --git-common-dir)")"
+COMMON_GIT_DIR="$(git -C "$WT" rev-parse --git-common-dir)"
+if [[ "$COMMON_GIT_DIR" = /* ]]; then
+  MAIN_CHECKOUT="$(dirname "$COMMON_GIT_DIR")"
+else
+  MAIN_CHECKOUT="$(cd "$WT/$(dirname "$COMMON_GIT_DIR")" && pwd)"
+fi
 PYTHON_BIN="${HERMES_PYTHON:-$MAIN_CHECKOUT/venv/bin/python}"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$WT/venv/bin/python"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"
@@ -319,15 +324,64 @@ else
 fi
 printf '%s\n' "$RECEIPT_LINE" >&2
 
+# The runner is pinned to the main checkout, while --repo-root keeps pytest in
+# the worktree being measured.  Two workers fit the four-core/7.9-GiB host
+# without the default cpu_count*2 fan-out; 600 seconds leaves margin above the
+# observed 325.66-second slow file.  Retries stay disabled because a retry
+# would hide the order-dependent failure this gate is measuring.
+RUNNER_SCRIPT="${HERMES_FORK_TEST_RUNNER:-$RUNNER_DIR/run_tests_parallel.py}"
+RUNNER_JOBS="${HERMES_FORK_TEST_JOBS:-2}"
+RUNNER_FILE_TIMEOUT="${HERMES_FORK_TEST_FILE_TIMEOUT:-600}"
 if [ "$PRINT_SELECTION" -eq 1 ]; then
   printf '%s\n' "${TESTS[@]}"
   exit 0
 fi
 
+RUNNER_SCRIPT="${HERMES_FORK_TEST_RUNNER:-$RUNNER_DIR/run_tests_parallel.py}"
+if [ ! -f "$RUNNER_SCRIPT" ]; then
+  echo "FAILED: pinned parallel test runner is unavailable at $RUNNER_SCRIPT" >&2
+  exit 2
+fi
+if ! FILE_LIST="$(printf '%s\n' "${TESTS[@]}" | paste -sd: -)" || [ -z "$FILE_LIST" ]; then
+  echo "FAILED: could not encode the selected test files for the parallel runner" >&2
+  exit 2
+fi
+
+# In selection/probe mode the manifest/request directory is the durable
+# attempt directory.  Keep the complete machine report there; the finalizer
+# prefers it over the human log and falls back to the log for legacy doubles.
+NODE_REPORT=""
+if [ -n "$SELECTION_FROM" ]; then
+  if [ "$RECEIPT_SIDE" = pre ]; then
+    NODE_REPORT="$(dirname "$SELECTION_FROM")/gate-baseline.runner.nodes.json"
+  else
+    NODE_REPORT="$(dirname "$SELECTION_FROM")/gate-merged.runner.nodes.json"
+  fi
+elif [ -n "$PROBE_NODEIDS_FROM" ]; then
+  case "$(basename "$PROBE_NODEIDS_FROM")" in
+    gate-upstream-probe.request.json)
+      NODE_REPORT="$(dirname "$PROBE_NODEIDS_FROM")/gate-merged-isolated.runner.nodes.json" ;;
+    gate-upstream-probe.filtered.request.json)
+      NODE_REPORT="$(dirname "$PROBE_NODEIDS_FROM")/gate-upstream-probe.runner.nodes.json" ;;
+  esac
+fi
+
+RUNNER_ARGS=(
+  --repo-root "$WT"
+  --files "$FILE_LIST"
+  --file-retries 0
+  --file-timeout "$RUNNER_FILE_TIMEOUT"
+  --jobs "$RUNNER_JOBS"
+  --no-duration-cache
+  -q -p no:cacheprovider --timeout=90 --continue-on-collection-errors -rA
+)
+if [ -n "$NODE_REPORT" ]; then
+  RUNNER_ARGS+=(--node-report "$NODE_REPORT")
+fi
+
 cd "$WT"
 pytest_rc=0
-nice -n 19 "$PYTHON_BIN" -m pytest "${TESTS[@]}" \
-  -q -p no:cacheprovider --timeout=90 -rA --continue-on-collection-errors || pytest_rc=$?
+nice -n 19 "$PYTHON_BIN" "$RUNNER_SCRIPT" "${RUNNER_ARGS[@]}" || pytest_rc=$?
 
 if ! HEAD_AFTER="$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null)" ||
    [ -z "$HEAD_AFTER" ]; then
