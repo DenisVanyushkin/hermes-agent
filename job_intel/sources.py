@@ -504,6 +504,7 @@ def fetch_linkedin_vacancies(
     geo_id: str | None = None,
     execution_plan: Mapping[str, Any] | None = None,
     max_pages: int = 1,
+    allow_unauthenticated: bool = False,
 ) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
@@ -517,6 +518,8 @@ def fetch_linkedin_vacancies(
             worker_args.extend(["--location", location])
         if geo_id:
             worker_args.extend(["--geo-id", geo_id])
+        if allow_unauthenticated:
+            worker_args.append("--allow-unauthenticated")
         if execution_plan is not None:
             worker_args.extend(
                 [

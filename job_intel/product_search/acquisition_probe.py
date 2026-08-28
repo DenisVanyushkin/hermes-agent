@@ -1246,6 +1246,11 @@ def run_probe(
                 "source_family": query.source_family,
                 "timestamp": clock().isoformat(),
                 "outcome": "not_attempted",
+                "session_observation": (
+                    "not_observed" if query.source_family == "linkedin" else "not_applicable"
+                ),
+                "extraction_counts": None,
+                "extraction_artifact_references": [],
                 "received_records": 0,
                 "credited_records": None,
                 "credited_records_status": "undetermined",
@@ -1281,6 +1286,32 @@ def run_probe(
             record["outcome"] = "blocked"
         else:
             record["outcome"] = "degraded"
+
+    def _capture_source_evidence(query: ProbeQuery, source: Any) -> None:
+        pair = _ensure_pair(query)
+        trace = getattr(source, "last_trace", None)
+        health = getattr(source, "last_health", None)
+        if isinstance(trace, Mapping):
+            observation = trace.get("session_observation")
+            if observation in {"with_session", "without_session", "not_observed"}:
+                pair["session_observation"] = observation
+            counts = trace.get("extraction_counts")
+            if isinstance(counts, Mapping):
+                pair["extraction_counts"] = dict(counts)
+            pages = trace.get("pages")
+            if isinstance(pages, list):
+                pair["extraction_artifact_references"] = [
+                    str(page["artifact_ref"])
+                    for page in pages
+                    if isinstance(page, Mapping) and page.get("artifact_ref")
+                ]
+        if (
+            query.source_family == "linkedin"
+            and pair["session_observation"] == "not_observed"
+            and isinstance(health, Mapping)
+            and health.get("session_state") == "session_ok"
+        ):
+            pair["session_observation"] = "with_session"
 
     def _record_attempt_state(query: ProbeQuery, state: SourceState) -> None:
         if not query.is_synthetic_control:
@@ -1326,6 +1357,7 @@ def run_probe(
                 if query.source_family != "linkedin" or query.primary_geography is None:
                     request = query.query
                 records = list(source(request))
+                _capture_source_evidence(query, source)
                 state = (
                     "observed_with_failures"
                     if tuple(getattr(source, "last_errors", ()) or ())
@@ -1338,16 +1370,19 @@ def run_probe(
                 )
                 break
             except ProbeSourceBlocked as exc:
+                _capture_source_evidence(query, source)
                 _record_attempt_state(query, f"blocked_{exc.reason}")
                 _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except TimeoutError:
+                _capture_source_evidence(query, source)
                 _record_attempt_state(query, "blocked_rate_limit_or_timeout")
                 _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except Exception:
+                _capture_source_evidence(query, source)
                 _record_attempt_state(query, "blocked_extraction_failure")
                 _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
@@ -1677,21 +1712,29 @@ def resolve_public_sources() -> dict[str, Callable[[Any], Iterable[Any]]]:
         search_remotive_jobs,
     )
 
+    def _publish_linkedin_metadata() -> None:
+        _linkedin_source.last_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
+        _linkedin_source.last_health = getattr(fetch_linkedin_vacancies, "last_health", None)
+
     def _linkedin_source(request: Any) -> Iterable[Any]:
-        if isinstance(request, ProbeQuery):
-            target = request.geography_target
-            return fetch_linkedin_vacancies(
-                request.keywords or request.query,
-                location=target.location if target is not None else None,
-                geo_id=target.geo_id if target is not None else None,
-                execution_plan=(
-                    request.execution_plan.model_dump(mode="json")
-                    if request.execution_plan is not None
-                    else None
-                ),
-                max_pages=2,
-            )
-        return fetch_linkedin_vacancies(str(request), max_pages=2)
+        try:
+            if isinstance(request, ProbeQuery):
+                target = request.geography_target
+                return fetch_linkedin_vacancies(
+                    request.keywords or request.query,
+                    location=target.location if target is not None else None,
+                    geo_id=target.geo_id if target is not None else None,
+                    execution_plan=(
+                        request.execution_plan.model_dump(mode="json")
+                        if request.execution_plan is not None
+                        else None
+                    ),
+                    max_pages=2,
+                    allow_unauthenticated=True,
+                )
+            return fetch_linkedin_vacancies(str(request), max_pages=2)
+        finally:
+            _publish_linkedin_metadata()
 
     sources: dict[str, Callable[[Any], Iterable[Any]]] = {
         "linkedin": _linkedin_source,

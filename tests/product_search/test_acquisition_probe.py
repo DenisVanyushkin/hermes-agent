@@ -36,6 +36,90 @@ import job_intel.product_search.acquisition_probe as acquisition_probe
 import job_intel.browser_worker as browser_worker
 
 
+def test_gate_a_linkedin_source_uses_explicit_unauthenticated_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_fetch(query: str, **kwargs: object) -> list[object]:
+        calls["query"] = query
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr("job_intel.sources.fetch_linkedin_vacancies", fake_fetch)
+    request = ProbeQuery(
+        query_id="q1",
+        cell_id="uk",
+        source_family="linkedin",
+        query="VP Product United Kingdom",
+        keywords="VP Product",
+        primary_geography="United Kingdom",
+        geography_target=LinkedInGeographyTarget(
+            status="verified", location="United Kingdom", verified_at="2026-08-27"
+        ),
+    )
+
+    list(resolve_public_sources()["linkedin"](request))
+
+    assert calls["allow_unauthenticated"] is True
+
+
+def test_pair_evidence_distinguishes_unauthenticated_completion_and_carries_a1_counts(
+    tmp_path: Path,
+) -> None:
+    class Source:
+        last_trace = {
+            "session_observation": "without_session",
+            "extraction_counts": {
+                "dom": 3,
+                "parsed_before_filter": 2,
+                "returned": 2,
+                "duplicate_canonical": 0,
+                "duplicate_canonical_returned": 0,
+                "excluded": 0,
+                "unexplained": 1,
+                "vacancies_extracted": 2,
+            },
+            "pages": [{"artifact_ref": "diagnostics/a1-page.json"}],
+        }
+        last_health = {"session_state": "session_missing_cookie"}
+
+        def __call__(self, _request: object) -> list[dict[str, object]]:
+            return [
+                {
+                    "source": "linkedin",
+                    "source_id": "101",
+                    "company": "Spark",
+                    "title": "VP Product",
+                    "location": "United Kingdom",
+                    "url": "https://www.linkedin.com/jobs/view/101",
+                    "description": "Own monetization",
+                }
+            ]
+
+    query = ProbeQuery(
+        query_id="q1",
+        cell_id="uk",
+        source_family="linkedin",
+        query="VP Product United Kingdom",
+        minimum_independent_families=1,
+    )
+    result = run_probe(
+        run_id="run-1",
+        queries=[query],
+        sources={"linkedin": Source()},
+        output_dir=tmp_path,
+        isolation={"linkedin": SourceIsolation(mode="exclusive_lock", path=tmp_path / "lock", collection_method="browser")},
+        runtime_capability_checks={"linkedin": lambda: RuntimeCapabilityResult(state="ready")},
+        minimum_independent_families_by_cell={"uk": 1},
+    )
+
+    pair = result.model_dump(mode="json")["cell_family_attempts"][0]
+    assert pair["outcome"] == "completed"
+    assert pair["session_observation"] == "without_session"
+    assert pair["extraction_counts"]["dom"] == 3
+    assert pair["extraction_counts"]["parsed_before_filter"] == 2
+    assert pair["extraction_artifact_references"] == ["diagnostics/a1-page.json"]
+
+
 ROOT = Path(__file__).resolve().parents[2]
 
 

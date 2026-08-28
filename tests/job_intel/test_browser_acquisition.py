@@ -17,6 +17,7 @@ import types
 import pytest
 
 from job_intel import browser_worker
+from job_intel import linkedin_session
 from job_intel.product_search.acquisition_probe import (
     ProbeQuery,
     LinkedInExecutionPlan,
@@ -459,6 +460,92 @@ def test_linkedin_trace_reconciles_dom_ids_independently_from_card_parser(monkey
     assert "run-1-query-2-cell-uk-page-0" in page_trace["artifact_ref"]
 
 
+def test_linkedin_auth_opt_in_allows_missing_session_but_default_stays_strict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", user_data_dir=tmp_path)
+    )
+    verdict = types.SimpleNamespace(
+        state=linkedin_session.SESSION_MISSING,
+        cookie_mismatch=False,
+        page_unrecognised=False,
+    )
+    monkeypatch.setattr(client, "fetch_html", lambda *_args, **_kwargs: "<html>guest</html>")
+    monkeypatch.setattr(client, "_write_attach_diagnostics", lambda **_kwargs: None)
+    monkeypatch.setattr(linkedin_session, "classify_auth_page", lambda *_args: "guest")
+    monkeypatch.setattr(linkedin_session, "resolve_profile_dir", lambda _path: tmp_path)
+    monkeypatch.setattr(linkedin_session, "read_cookie_inventory", lambda _path: [])
+    monkeypatch.setattr(
+        linkedin_session,
+        "session_state_from_cookies",
+        lambda *_args, **_kwargs: linkedin_session.SESSION_MISSING,
+    )
+    monkeypatch.setattr(linkedin_session, "resolve_session_state", lambda **_kwargs: verdict)
+
+    with pytest.raises(BrowserNativeUnavailable, match="session_missing_cookie"):
+        client._validate_linkedin_auth()
+
+    assert client._validate_linkedin_auth(allow_unauthenticated=True) == "without_session"
+
+
+def test_unauthenticated_search_trace_keeps_auth_state_and_a1_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+            noise_probability=0.0,
+        )
+    )
+    html = """
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@type":"JobPosting","title":"VP Product",
+       "description":"Own monetization","url":"https://www.linkedin.com/jobs/view/101",
+       "hiringOrganization":{"name":"Spark"}}
+    </script>
+    <a href="/jobs/view/101">VP Product</a>
+    """
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda **_kwargs: "without_session")
+    monkeypatch.setattr(
+        client,
+        "fetch_page",
+        lambda *_args, **_kwargs: BrowserFetchResult(
+            requested_url="https://www.linkedin.com/jobs/search/?keywords=product&location=United+Kingdom",
+            final_url="https://www.linkedin.com/jobs/search/?keywords=product&location=United+Kingdom",
+            html=html,
+            html_sha256="a" * 64,
+            page_offset=0,
+            planned_scroll_steps=0,
+            completed_scroll_steps=0,
+            scroll_trace=(),
+            dom_unique_job_ids=frozenset({"101"}),
+            artifact_ref="raw-a1.json",
+        ),
+    )
+
+    vacancies = client.search_linkedin(
+        "product",
+        geography_location="United Kingdom",
+        execution_plan=LinkedInExecutionPlan(page_offsets=(0,)),
+    )
+
+    assert len(vacancies) == 1
+    trace = client.last_search_trace_snapshot()
+    assert trace["session_observation"] == "without_session"
+    assert trace["extraction_counts"] == {
+        "dom": 1,
+        "parsed_before_filter": 1,
+        "returned": 1,
+        "duplicate_canonical": 0,
+        "duplicate_canonical_returned": 0,
+        "excluded": 0,
+        "unexplained": 0,
+        "vacancies_extracted": 1,
+    }
+
+
 def test_linkedin_search_fails_closed_when_diagnostic_artifact_is_unavailable(monkeypatch, tmp_path: Path) -> None:
     diagnostics_path = tmp_path / "diagnostics-not-a-directory"
     diagnostics_path.write_text("not a directory")
@@ -817,6 +904,51 @@ def test_supervisor_sigterm_releases_the_profile_lock_holder(tmp_path: Path) -> 
                 subprocess.run(["kill", "-KILL", f"-{process_group}"], check=False)
 
 
+def test_supervisor_stop_signals_main_before_endpoint_teardown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = _load_browser_supervisor()
+    events: list[object] = []
+
+    monkeypatch.setattr(
+        supervisor.os,
+        "kill",
+        lambda pid, signum: events.append(("signal", pid, signum)),
+    )
+    monkeypatch.setattr(supervisor, "_pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(
+        supervisor,
+        "_stop_profile",
+        lambda _profile: events.append("endpoint") or 0,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_release_profile_lock",
+        lambda _lock_path: events.append("lock"),
+    )
+
+    result = supervisor.main(
+        [
+            "--stop",
+            "--source",
+            "linkedin",
+            "--profile",
+            str(tmp_path / "linkedin"),
+            "--lock-path",
+            str(tmp_path / "profile.lock"),
+            "--supervisor-pid",
+            "1234",
+        ]
+    )
+
+    assert result == 0
+    assert events == [
+        ("signal", 1234, signal.SIGTERM),
+        "endpoint",
+        "lock",
+    ]
+
+
 def _notify_socket(path: Path) -> socket.socket:
     receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     receiver.bind(str(path))
@@ -967,7 +1099,7 @@ def test_bootstrap_unit_declares_foreground_notify_and_explicit_teardown() -> No
     assert "job_intel_browser_supervisor.py" in unit
     assert "browser-desktop-bootstrap.sh" in unit
     assert "--source linkedin" in unit
-    assert "--cdp-url" not in unit
+    assert "--cdp-url ${PRODUCT_SEARCH_BROWSER_CDP_URL}" in unit
     assert "User=root" in unit
 
 
@@ -979,10 +1111,11 @@ def test_bootstrap_unit_uses_one_interpreter_for_start_and_stop() -> None:
         if line.startswith(("ExecStart=", "ExecStop="))
     }
 
-    start_interpreter = commands["ExecStart"].split(maxsplit=1)[0]
-    stop_interpreter = commands["ExecStop"].split(maxsplit=1)[0]
+    start_tokens = commands["ExecStart"].split()
+    stop_tokens = commands["ExecStop"].split()
 
-    assert start_interpreter == stop_interpreter == "${PRODUCT_SEARCH_PYTHON}"
+    assert start_tokens[0] == stop_tokens[0] == "/usr/bin/env"
+    assert start_tokens[1] == stop_tokens[1] == "${PRODUCT_SEARCH_PYTHON}"
 
 
 def _bootstrap_runtime_config(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:

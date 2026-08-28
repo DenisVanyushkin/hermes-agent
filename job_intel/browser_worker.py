@@ -324,6 +324,7 @@ def _run_linkedin(
     location: str | None = None,
     geo_id: str | None = None,
     execution_plan: dict[str, Any] | None = None,
+    allow_unauthenticated: bool = False,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -334,6 +335,7 @@ def _run_linkedin(
             geography_location=location,
             geography_geo_id=geo_id,
             execution_plan=execution_plan,
+            allow_unauthenticated=allow_unauthenticated,
         )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
@@ -366,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--location")
     linkedin.add_argument("--geo-id", dest="geo_id")
     linkedin.add_argument("--execution-plan-json")
+    linkedin.add_argument("--allow-unauthenticated", action="store_true")
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -397,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
                 location=args.location,
                 geo_id=args.geo_id,
                 execution_plan=execution_plan,
+                allow_unauthenticated=args.allow_unauthenticated,
             )
         else:
             vacancies, session_health, search_trace = _probe(args.source)

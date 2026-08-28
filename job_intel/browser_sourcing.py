@@ -1188,7 +1188,7 @@ class BrowserSourceClient:
             raise BrowserNativeUnavailable(f"{source} authenticated feed/profile markers were not visible at {url}")
         self._health.last_successful_authenticated_request = url
 
-    def _validate_linkedin_auth(self) -> None:
+    def _validate_linkedin_auth(self, *, allow_unauthenticated: bool = False) -> str:
         from job_intel.linkedin_session import (
             SESSION_MISSING,
             SESSION_OK,
@@ -1229,7 +1229,10 @@ class BrowserSourceClient:
                     label="linkedin-auth-page-unrecognised",
                     extra={"requested_url": url, "cookie_state": cookie_state},
                 )
-            return
+            return "with_session"
+
+        if verdict.state == SESSION_MISSING and allow_unauthenticated:
+            return "without_session"
 
         self._write_attach_diagnostics(
             label=f"linkedin-auth-{verdict.state}",
@@ -1666,6 +1669,7 @@ class BrowserSourceClient:
         geography_location: str | None = None,
         geography_geo_id: str | None = None,
         execution_plan: Mapping[str, Any] | Any | None = None,
+        allow_unauthenticated: bool = False,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -1712,10 +1716,17 @@ class BrowserSourceClient:
             "stop_reason": "",
             "failure_reason": None,
             "execution_plan_version": plan.version if plan is not None else None,
+            "session_observation": "not_observed",
         }
         started = time.perf_counter()
+        auth_login_walls = self._health.login_walls
+        auth_redirects = self._health.auth_redirects
         try:
-            self._validate_linkedin_auth()
+            if allow_unauthenticated:
+                observation = self._validate_linkedin_auth(allow_unauthenticated=True)
+            else:
+                observation = self._validate_linkedin_auth()
+            trace["session_observation"] = observation or "with_session"
         except Exception as exc:
             if plan is not None:
                 self._mark_critical_degradation(f"linkedin authentication failed: {exc}")
@@ -1887,7 +1898,10 @@ class BrowserSourceClient:
                 else self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
             )
             vacancies.extend(detail_rows)
-            if self._health.login_walls or self._health.auth_redirects:
+            if (
+                self._health.login_walls > auth_login_walls
+                or self._health.auth_redirects > auth_redirects
+            ):
                 if plan is not None:
                     reason = "login_wall_or_auth_redirect"
                     self._mark_critical_degradation(reason)

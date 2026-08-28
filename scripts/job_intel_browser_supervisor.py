@@ -93,6 +93,21 @@ def _pid_is_running(pid: int) -> bool:
     return state != "Z"
 
 
+def _stop_supervisor(pid: int) -> None:
+    if pid == os.getpid():
+        raise RuntimeError("refusing to stop the current supervisor process")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"browser supervisor did not exit after SIGTERM: pid={pid}")
+
+
 def _terminate_lock_holder(pid: int) -> None:
     try:
         process_group = os.getpgid(pid)
@@ -240,10 +255,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--network-namespace")
     parser.add_argument("--bootstrap-timeout", type=float, default=600.0)
     parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--supervisor-pid", type=int)
     args = parser.parse_args(argv)
 
     try:
         if args.stop:
+            if args.supervisor_pid is not None:
+                _stop_supervisor(args.supervisor_pid)
             stop_returncode = _stop_profile(args.profile)
             _release_profile_lock(args.lock_path)
             return stop_returncode
