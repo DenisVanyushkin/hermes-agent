@@ -1378,6 +1378,129 @@ def test_aggregate_parser_ignores_human_dash_sections_inside_failure_output():
     ]
 
 
+def _run_real_aggregate_runner(
+    tmp_path: Path,
+    files: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    repo = tmp_path / "runner-worktree"
+    tests = repo / "tests"
+    tests.mkdir(parents=True)
+    for relative, source in files.items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+    selected = ":".join(files)
+    runner = Path(__file__).resolve().parents[2] / "scripts" / "run_tests_parallel.py"
+    return subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo-root",
+            str(repo),
+            "--files",
+            selected,
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_node_outcome_accepts_real_runner_green_aggregate_output(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {"tests/test_green.py": "def test_green():\n    assert True\n"},
+    )
+    assert runner.returncode == 0, runner.stdout + runner.stderr
+    assert "=== Summary: 1 files, 1 tests passed, 0 failed" in runner.stdout
+    log = tmp_path / "green.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_node_outcome_rejects_real_runner_nonzero_without_node_failure(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/conftest.py": (
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if exitstatus == 0:\n"
+                "        session.exitstatus = 3\n"
+            ),
+            "tests/test_hook.py": "def test_passes():\n    assert True\n",
+        },
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+    log = tmp_path / "nonzero.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 2
+    assert "non-zero exit without test failures" in result.stderr
+
+
+def test_node_outcome_rejects_real_runner_with_no_tests(tmp_path):
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_empty_a.py": "# intentionally empty\n",
+            "tests/test_empty_b.py": "# intentionally empty\n",
+        },
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+    assert "NO TESTS RAN" in runner.stdout
+    log = tmp_path / "empty.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 2
+    assert "no tests ran" in result.stderr
+
+
+def test_node_outcome_counts_errors_across_real_runner_files(tmp_path):
+    error_file = (
+        "import pytest\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def fail_before_test():\n"
+        "    raise RuntimeError('fixture boom')\n\n"
+        "def test_reaches_fixture():\n"
+        "    pass\n"
+    )
+    runner = _run_real_aggregate_runner(
+        tmp_path,
+        {
+            "tests/test_error_a.py": error_file,
+            "tests/test_error_b.py": error_file,
+        },
+    )
+    assert runner.returncode != 0, runner.stdout + runner.stderr
+    log = tmp_path / "errors.log"
+    log.write_text(runner.stdout, encoding="utf-8")
+
+    result = _cli("node-outcome", "--log", str(log), "--aggregate")
+
+    assert result.returncode == 0, result.stderr
+    outcome = json.loads(result.stdout)
+    assert outcome["error_count"] == 2
+
+
 def test_node_outcome_reads_the_runner_machine_report(tmp_path):
     report = tmp_path / "nodes.json"
     report.write_text(
