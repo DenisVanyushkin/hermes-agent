@@ -1460,29 +1460,64 @@ class BrowserSourceClient:
             return plan
         return LinkedInExecutionPlan.model_validate(plan)
 
+    def _linkedin_scroll_container(
+        self, *, page: Any, selector: str
+    ) -> tuple[Any | None, str | None]:
+        """Find the results scroller from the rendered document.
+
+        The authenticated LinkedIn UI does not always expose the configured
+        results selector.  In that case, identify the first substantial
+        ``div`` or ``ul`` whose scroll geometry proves that it is scrollable.
+        This deliberately uses the document's observed geometry rather than
+        session or profile metadata.
+        """
+        failure_reason: str | None = None
+        try:
+            configured = page.locator(selector)
+            count = configured.count() if callable(getattr(configured, "count", None)) else 1
+            if count > 0:
+                return getattr(configured, "first", configured), None
+        except Exception as exc:  # noqa: BLE001 - geometry fallback is explicit
+            failure_reason = f"configured_results_container_unavailable: {exc}"
+
+        try:
+            candidates = page.locator("div, ul")
+            measurements = candidates.evaluate_all(
+                """(elements) => elements.map((element) => ({
+                    clientHeight: element.clientHeight,
+                    scrollHeight: element.scrollHeight,
+                }))"""
+            )
+            for index, measurement in enumerate(measurements):
+                if not isinstance(measurement, Mapping):
+                    continue
+                client_height = measurement.get("clientHeight")
+                scroll_height = measurement.get("scrollHeight")
+                if (
+                    isinstance(client_height, (int, float))
+                    and isinstance(scroll_height, (int, float))
+                    and client_height > 200
+                    and scroll_height > client_height + 200
+                ):
+                    return candidates.nth(index), None
+            failure_reason = "results_container_unavailable"
+        except Exception as exc:  # noqa: BLE001 - fallback is explicitly traced
+            failure_reason = f"results_container_unavailable: {exc}"
+        return None, failure_reason
+
     def _execute_linkedin_scroll_plan(
-        self, *, page: Any, plan: Any
+        self, *, page: Any, plan: Any, page_offset: int
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str | None]:
         checkpoints: list[dict[str, Any]] = []
         scroll_trace: list[dict[str, Any]] = []
         consecutive_without_new = 0
         mode = "results_container"
-        failure_reason: str | None = None
-        try:
-            locator = page.locator(plan.results_selector)
-            count = locator.count() if callable(getattr(locator, "count", None)) else 1
-            if count < 1:
-                mode = "page_fallback"
-                failure_reason = "results_container_unavailable"
-                self._health.status = "degraded"
-                container = None
-            else:
-                container = getattr(locator, "first", locator)
-        except Exception as exc:  # noqa: BLE001 - fallback is explicitly traced
+        container, failure_reason = self._linkedin_scroll_container(
+            page=page, selector=plan.results_selector
+        )
+        if container is None:
             mode = "page_fallback"
-            failure_reason = f"results_container_unavailable: {exc}"
             self._health.status = "degraded"
-            container = None
 
         for step in range(1, plan.max_scroll_checkpoints + 1):
             before_ids = self._linkedin_dom_unique_job_ids(page)
@@ -1508,6 +1543,7 @@ class BrowserSourceClient:
             )
             checkpoint = {
                 "step": step,
+                "page_offset": page_offset,
                 "mode": mode,
                 "before_unique_dom_ids": sorted(before_ids),
                 "after_unique_dom_ids": sorted(after_ids),
@@ -1592,7 +1628,9 @@ class BrowserSourceClient:
                         scroll_checkpoints,
                         scroll_stop_reason,
                         scroll_failure_reason,
-                    ) = self._execute_linkedin_scroll_plan(page=page, plan=plan)
+                    ) = self._execute_linkedin_scroll_plan(
+                        page=page, plan=plan, page_offset=page_offset
+                    )
                 else:
                     for _ in range(scroll_count):
                         page.mouse.wheel(0, 1800)
