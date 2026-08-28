@@ -1847,6 +1847,360 @@ def _b2_summary(records, mapping, **kwargs):
     return builder(records, mapping, **kwargs)
 
 
+def test_b2_foreign_credit_is_explicit_when_own_families_are_blocked(tmp_path: Path) -> None:
+    foreign_url = "https://example.test/jobs/foreign-remote"
+    result = run_probe(
+        run_id="b2-foreign-credit",
+        queries=(
+            {
+                "query_id": "q-foreign",
+                "cell_id": "uk",
+                "source_family": "alpha",
+                "query": "Remote United Kingdom",
+            },
+            {
+                "query_id": "q-global-one",
+                "cell_id": "genuinely_location_independent",
+                "source_family": "remoteok",
+                "query": "Remote",
+            },
+            {
+                "query_id": "q-global-two",
+                "cell_id": "genuinely_location_independent",
+                "source_family": "remotive",
+                "query": "Remote",
+            },
+        ),
+        sources={
+            "alpha": lambda _query: [
+                _b2_record(
+                    "foreign-remote",
+                    "uk",
+                    "Remote",
+                    url=foreign_url,
+                    source_family="alpha",
+                )
+            ],
+            "remoteok": lambda _query: [],
+            "remotive": lambda _query: [],
+        },
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            ),
+            "remoteok": SourceIsolation(
+                mode="blocked", path=None, collection_method="browser"
+            ),
+            "remotive": SourceIsolation(
+                mode="blocked", path=None, collection_method="browser"
+            ),
+        },
+        minimum_independent_families_by_cell={
+            "uk": 1,
+            "genuinely_location_independent": 2,
+        },
+        geography_mapping=_b2_mapping(uk=("GB",), genuinely_location_independent=()),
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    cell = summary["geography_summary"]["cells"]["genuinely_location_independent"]
+    assert cell["credited"] == [foreign_url]
+    assert cell["credited_from_other_queries"] == [foreign_url]
+    assert cell["credited_from_other_queries_count"] == 1
+    credited_inside_received = len(set(cell["credited"]) & set(cell["received"]))
+    assert len(cell["credited"]) == (
+        credited_inside_received + cell["credited_from_other_queries_count"]
+    )
+    assert summary["acquisition_outcomes"]["genuinely_location_independent"] == "blocked"
+    assert summary["acquisition_outcome_annotations"]["genuinely_location_independent"] == {
+        "acquisition_outcome": "blocked",
+        "credited_records": 1,
+        "credited_from_other_queries_count": 1,
+        "own_completed_families": 0,
+        "credit_note": "credited_from_other_queries_while_own_families_blocked",
+    }
+    assert summary["geography_summary"]["pairwise"]["genuinely_location_independent|uk"]["jaccard"] == 0.0
+
+
+def test_b2_credit_from_own_query_has_no_foreign_credit(tmp_path: Path) -> None:
+    result = run_probe(
+        run_id="b2-own-credit",
+        queries=({
+            "query_id": "q-own",
+            "cell_id": "uk",
+            "source_family": "alpha",
+            "query": "United Kingdom",
+        },),
+        sources={
+            "alpha": lambda _query: [
+                _b2_record("own-uk", "uk", "London, United Kingdom", source_family="alpha")
+            ]
+        },
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            )
+        },
+        minimum_independent_families_by_cell={"uk": 1},
+        geography_mapping=_b2_mapping(uk=("GB",)),
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    cell = summary["geography_summary"]["cells"]["uk"]
+    assert cell["credited_from_other_queries"] == []
+    assert cell["credited_from_other_queries_count"] == 0
+    assert len(cell["credited"]) == len(set(cell["received"]) & set(cell["credited"]))
+    assert summary["acquisition_outcomes"]["uk"] == "candidate_records_found"
+    assert summary["acquisition_outcome_annotations"]["uk"] == {
+        "acquisition_outcome": "candidate_records_found",
+        "credited_records": 1,
+        "credited_from_other_queries_count": 0,
+        "own_completed_families": 1,
+        "credit_note": None,
+    }
+
+
+def test_b3_pair_aggregates_extraction_evidence_for_all_queries(tmp_path: Path) -> None:
+    class MultiQuerySource:
+        last_errors: tuple[str, ...] = ()
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_trace: dict[str, object] = {}
+            self.counts_by_query = (
+                {
+                    "dom": 5,
+                    "parsed_before_filter": 4,
+                    "returned": 2,
+                    "duplicate_canonical": 1,
+                    "duplicate_canonical_returned": 1,
+                    "excluded": 2,
+                    "unexplained": 3,
+                    "vacancies_extracted": 5,
+                },
+                {
+                    "dom": 7,
+                    "parsed_before_filter": 6,
+                    "returned": 3,
+                    "duplicate_canonical": 4,
+                    "duplicate_canonical_returned": 2,
+                    "excluded": 5,
+                    "unexplained": 6,
+                    "vacancies_extracted": 7,
+                },
+            )
+
+        def __call__(self, _query: object) -> list[dict[str, str]]:
+            self.calls += 1
+            query_id = f"q-{self.calls}"
+            counts = self.counts_by_query[self.calls - 1]
+            self.last_trace = {
+                "extraction_counts": counts,
+                "pages": [{"artifact_ref": f"diagnostics/{query_id}-page-0.json"}],
+                "scroll_checkpoints": [{"page_offset": 25 * (self.calls - 1), "step": 1}],
+            }
+            return [
+                _b1_record(f"{query_id}-row-{index}")
+                for index in range(counts["returned"])
+            ]
+
+    source = MultiQuerySource()
+    run_probe(
+        run_id="b3-aggregate-extraction",
+        queries=(
+            {
+                "query_id": "q-1",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "first role",
+            },
+            {
+                "query_id": "q-2",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "second role",
+            },
+        ),
+        sources={"alpha": source},
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            )
+        },
+        minimum_independent_families_by_cell={"b3-cell": 1},
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    pair = summary["cell_family_attempts"][0]
+    assert pair["query_count"] == 2
+    assert pair["query_ids"] == ["q-1", "q-2"]
+    assert pair["received_records"] == sum(
+        counts["returned"] for counts in source.counts_by_query
+    )
+    expected_counts = {
+        key: sum(counts.get(key, 0) for counts in source.counts_by_query)
+        for key in set().union(*(counts.keys() for counts in source.counts_by_query))
+    }
+    assert pair["extraction_counts"] == expected_counts
+    assert pair["extraction_artifact_references"] == [
+        "diagnostics/q-1-page-0.json",
+        "diagnostics/q-2-page-0.json",
+    ]
+    assert pair["scroll_checkpoints"] == [
+        {"page_offset": 0, "step": 1},
+        {"page_offset": 25, "step": 1},
+    ]
+
+
+def test_b1_foreign_credit_note_requires_zero_own_completed_families(
+    tmp_path: Path,
+) -> None:
+    foreign_url = "https://example.test/jobs/foreign-remote"
+    own_url = "https://example.test/jobs/own-remote"
+    result = run_probe(
+        run_id="b1-foreign-credit-with-own-completion",
+        queries=(
+            {
+                "query_id": "q-foreign",
+                "cell_id": "uk",
+                "source_family": "alpha",
+                "query": "Remote United Kingdom",
+            },
+            {
+                "query_id": "q-global-completed",
+                "cell_id": "genuinely_location_independent",
+                "source_family": "remoteok",
+                "query": "Remote",
+            },
+            {
+                "query_id": "q-global-blocked",
+                "cell_id": "genuinely_location_independent",
+                "source_family": "remotive",
+                "query": "Remote",
+            },
+        ),
+        sources={
+            "alpha": lambda _query: [
+                _b2_record("foreign-remote", "uk", "Remote", url=foreign_url, source_family="alpha")
+            ],
+            "remoteok": lambda _query: [
+                _b2_record(
+                    "own-remote",
+                    "genuinely_location_independent",
+                    "Remote",
+                    url=own_url,
+                    source_family="remoteok",
+                )
+            ],
+            "remotive": lambda _query: [],
+        },
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            ),
+            "remoteok": SourceIsolation(
+                mode="api", path=tmp_path / "remoteok.lock", collection_method="api"
+            ),
+            "remotive": SourceIsolation(
+                mode="blocked", path=None, collection_method="browser"
+            ),
+        },
+        minimum_independent_families_by_cell={
+            "uk": 1,
+            "genuinely_location_independent": 2,
+        },
+        geography_mapping=_b2_mapping(uk=("GB",), genuinely_location_independent=()),
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    annotation = summary["acquisition_outcome_annotations"]["genuinely_location_independent"]
+    assert summary["acquisition_outcomes"]["genuinely_location_independent"] == "blocked"
+    assert annotation["credited_from_other_queries_count"] == 1
+    assert annotation["own_completed_families"] == 1
+    assert annotation["credit_note"] is None
+
+
+def test_b1_foreign_credit_note_requires_blocked_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_resolve = acquisition_probe.resolve_acquisition_outcome
+
+    def resolve_as_not_attempted(**kwargs: int):
+        if kwargs["completed"] == 0 and kwargs["credited"] > 0:
+            return acquisition_probe.AcquisitionOutcomeDecision(
+                acquisition_outcome="not_attempted",
+                product_observability_state="not_observed",
+                product_observability_reason=None,
+            )
+        return real_resolve(**kwargs)
+
+    monkeypatch.setattr(acquisition_probe, "resolve_acquisition_outcome", resolve_as_not_attempted)
+    foreign_url = "https://example.test/jobs/foreign-remote"
+    run_probe(
+        run_id="b1-foreign-credit-with-not-blocked-outcome",
+        queries=(
+            {
+                "query_id": "q-foreign",
+                "cell_id": "uk",
+                "source_family": "alpha",
+                "query": "Remote United Kingdom",
+            },
+            {
+                "query_id": "q-global-one",
+                "cell_id": "genuinely_location_independent",
+                "source_family": "remoteok",
+                "query": "Remote",
+            },
+            {
+                "query_id": "q-global-two",
+                "cell_id": "genuinely_location_independent",
+                "source_family": "remotive",
+                "query": "Remote",
+            },
+        ),
+        sources={
+            "alpha": lambda _query: [
+                _b2_record("foreign-remote", "uk", "Remote", url=foreign_url, source_family="alpha")
+            ],
+            "remoteok": lambda _query: [],
+            "remotive": lambda _query: [],
+        },
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            ),
+            "remoteok": SourceIsolation(
+                mode="blocked", path=None, collection_method="browser"
+            ),
+            "remotive": SourceIsolation(
+                mode="blocked", path=None, collection_method="browser"
+            ),
+        },
+        minimum_independent_families_by_cell={
+            "uk": 1,
+            "genuinely_location_independent": 2,
+        },
+        geography_mapping=_b2_mapping(uk=("GB",), genuinely_location_independent=()),
+        max_attempts=1,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    annotation = summary["acquisition_outcome_annotations"]["genuinely_location_independent"]
+    assert summary["acquisition_outcomes"]["genuinely_location_independent"] == "not_attempted"
+    assert annotation["credited_from_other_queries_count"] == 1
+    assert annotation["own_completed_families"] == 0
+    assert annotation["credit_note"] is None
+
+
 def test_critical_degradation_reaches_pair_evidence_and_blocks_completion(
     tmp_path: Path,
 ) -> None:

@@ -656,6 +656,7 @@ class ProbeResult(BaseModel):
     provisional_labels: dict[str, int]
     source_states: dict[str, SourceState]
     acquisition_outcomes: dict[str, AcquisitionOutcome]
+    acquisition_outcome_annotations: dict[str, dict[str, Any]] = Field(default_factory=dict)
     product_observability_state: dict[str, ProductObservabilityState | None]
     product_observability_reason: dict[str, str | None]
     credited_records_provenance: dict[str, CreditedRecordsProvenance]
@@ -1112,6 +1113,7 @@ def build_geography_summary(
     source_ids_by_identity: dict[str, set[str]] = {}
     received_seen: set[tuple[str, str]] = set()
     credited_identity_owners: dict[str, str] = {}
+    received_query_cells_by_identity: dict[str, set[str]] = {}
 
     for raw_record in records:
         record = dict(raw_record)
@@ -1150,6 +1152,7 @@ def build_geography_summary(
         evidence_by_identity[identity] = geography
         source_id = str(record.get("source_id") or identity)
         source_ids_by_identity.setdefault(identity, set()).add(source_id)
+        received_query_cells_by_identity.setdefault(identity, set()).add(query_cell)
         evidence_by_source_id[source_id] = geography.model_dump(mode="json")
         if (query_cell, identity) in received_seen:
             continue
@@ -1186,6 +1189,14 @@ def build_geography_summary(
                 credited_identity_owners[identity] = owner
                 cells[owner]["credited"].add(identity)
 
+    credited_from_other_queries: dict[str, list[str]] = {}
+    for cell_id, cell in cells.items():
+        credited_from_other_queries[cell_id] = sorted(
+            identity
+            for identity in cell["credited"]
+            if cell_id not in received_query_cells_by_identity.get(identity, set())
+        )
+
     cell_ids = sorted(cells)
     pairwise: dict[str, dict[str, Any]] = {}
     for index, left in enumerate(cell_ids):
@@ -1217,6 +1228,8 @@ def build_geography_summary(
             cell_id: {
                 "received": sorted(cells[cell_id]["received"]),
                 "credited": sorted(cells[cell_id]["credited"]),
+                "credited_from_other_queries": credited_from_other_queries[cell_id],
+                "credited_from_other_queries_count": len(credited_from_other_queries[cell_id]),
                 "rejected_country_mismatch": cells[cell_id]["rejected_country_mismatch"],
                 "geography_unknown": cells[cell_id]["geography_unknown"],
             }
@@ -1410,6 +1423,8 @@ def run_probe(
             {
                 "cell_id": query.cell_id,
                 "source_family": query.source_family,
+                "query_ids": [],
+                "query_count": 0,
                 "timestamp": clock().isoformat(),
                 "outcome": "not_attempted",
                 "session_observation": (
@@ -1478,21 +1493,31 @@ def run_probe(
                 pair["session_observation"] = observation
             counts = trace.get("extraction_counts")
             if isinstance(counts, Mapping):
-                pair["extraction_counts"] = dict(counts)
+                previous_counts = pair["extraction_counts"] or {}
+                aggregated_counts: dict[str, int] = {}
+                for key in sorted(set(previous_counts) | set(counts), key=str):
+                    aggregated_counts[str(key)] = int(previous_counts.get(key, 0)) + int(
+                        counts.get(key, 0)
+                    )
+                pair["extraction_counts"] = aggregated_counts
             pages = trace.get("pages")
             if isinstance(pages, list):
-                pair["extraction_artifact_references"] = [
-                    str(page["artifact_ref"])
-                    for page in pages
-                    if isinstance(page, Mapping) and page.get("artifact_ref")
-                ]
+                pair["extraction_artifact_references"].extend(
+                    [
+                        str(page["artifact_ref"])
+                        for page in pages
+                        if isinstance(page, Mapping) and page.get("artifact_ref")
+                    ]
+                )
             checkpoints = trace.get("scroll_checkpoints")
             if isinstance(checkpoints, list):
-                pair["scroll_checkpoints"] = [
-                    dict(checkpoint)
-                    for checkpoint in checkpoints
-                    if isinstance(checkpoint, Mapping)
-                ]
+                pair["scroll_checkpoints"].extend(
+                    [
+                        dict(checkpoint)
+                        for checkpoint in checkpoints
+                        if isinstance(checkpoint, Mapping)
+                    ]
+                )
         if (
             query.source_family == "linkedin"
             and pair["session_observation"] == "not_observed"
@@ -1508,7 +1533,10 @@ def run_probe(
     for raw_query in queries:
         query = raw_query if isinstance(raw_query, ProbeQuery) else ProbeQuery.model_validate(raw_query)
         cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
-        _ensure_pair(query)
+        pair = _ensure_pair(query)
+        if query.query_id not in pair["query_ids"]:
+            pair["query_ids"].append(query.query_id)
+            pair["query_count"] = len(pair["query_ids"])
         query_critical_degradation.setdefault(
             (query.cell_id, query.source_family), {}
         ).setdefault(query.query_id, False)
@@ -1706,6 +1734,7 @@ def run_probe(
     acquisition_outcomes: dict[str, AcquisitionOutcome] = {}
     product_observability_state: dict[str, ProductObservabilityState | None] = {}
     product_observability_reason: dict[str, str | None] = {}
+    acquisition_outcome_annotations: dict[str, dict[str, Any]] = {}
     credited_records_provenance: dict[str, CreditedRecordsProvenance] = {}
     degraded_families: dict[str, tuple[str, ...]] = {}
     blocked_families: dict[str, tuple[str, ...]] = {}
@@ -1760,6 +1789,25 @@ def run_probe(
             credited=credited,
         )
         acquisition_outcomes[cell_id] = decision.acquisition_outcome
+        geography_cell = geography_summary.get("cells", {}).get(cell_id, {})
+        credited_from_other_queries_count = int(
+            geography_cell.get("credited_from_other_queries_count", 0)
+        )
+        acquisition_outcome_annotations[cell_id] = {
+            "acquisition_outcome": decision.acquisition_outcome,
+            "credited_records": credited,
+            "credited_from_other_queries_count": credited_from_other_queries_count,
+            "own_completed_families": counts["completed"],
+            "credit_note": (
+                "credited_from_other_queries_while_own_families_blocked"
+                if (
+                    decision.acquisition_outcome == "blocked"
+                    and counts["completed"] == 0
+                    and credited_from_other_queries_count > 0
+                )
+                else None
+            ),
+        }
         product_observability_state[cell_id] = decision.product_observability_state
         product_observability_reason[cell_id] = decision.product_observability_reason
         degraded_families[cell_id] = tuple(
@@ -1788,6 +1836,7 @@ def run_probe(
         provisional_labels=dict(sorted(labels.items())),
         source_states=dict(sorted(source_states.items())),
         acquisition_outcomes=dict(sorted(acquisition_outcomes.items())),
+        acquisition_outcome_annotations=dict(sorted(acquisition_outcome_annotations.items())),
         product_observability_state=dict(sorted(product_observability_state.items())),
         product_observability_reason=dict(sorted(product_observability_reason.items())),
         credited_records_provenance=dict(sorted(credited_records_provenance.items())),
