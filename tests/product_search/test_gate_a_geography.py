@@ -10,112 +10,6 @@ from test_acquisition_probe import ROOT, _b2_mapping, _b2_record, _b2_summary
 @pytest.mark.parametrize(
     ("location", "primary_country"),
     (
-        ("San Francisco, CA", None),
-        ("Indianapolis, IN", None),
-        ("Denver, CO", None),
-        ("Washington, DC", None),
-        ("London, UK", "GB"),
-    ),
-)
-def test_b2_does_not_treat_arbitrary_two_letter_tokens_as_country_codes(
-    location: str, primary_country: str | None
-) -> None:
-    evidence = acquisition_probe.normalize_geography_evidence(location)
-
-    assert evidence.primary_country == primary_country
-    if primary_country is None:
-        assert evidence.mentioned_countries == ()
-
-
-@pytest.mark.parametrize(
-    ("location", "primary_country", "mentioned"),
-    (
-        ("Adelaide, SA, Australia", "AU", {"AU"}),
-        ("St. Johns, NL, Canada", "CA", {"CA"}),
-        ("Charlottetown, PE, Canada", "CA", {"CA"}),
-        ("CA, United States", "US", {"US"}),
-        ("Patna, BR, IN", "IN", {"IN"}),
-        ("Paris, FR / Berlin, DE", None, {"FR"}),
-        ("Berlin, DE / Paris, FR", None, {"FR"}),
-        ("Dubai, AE", "AE", {"AE"}),
-        ("London, GB", "GB", {"GB"}),
-        ("San Francisco, CA", None, set()),
-        ("Washington, DC", None, set()),
-        ("Sao Paulo, Brazil", "BR", {"BR"}),
-    ),
-)
-def test_b2_country_code_classification_uses_position_and_neighborhood(
-    location: str, primary_country: str | None, mentioned: set[str]
-) -> None:
-    evidence = acquisition_probe.normalize_geography_evidence(location)
-
-    assert evidence.primary_country == primary_country
-    assert set(evidence.mentioned_countries) == mentioned
-
-
-@pytest.mark.parametrize(
-    "location",
-    (
-        "1234 Market St, San Francisco, CA",
-        "Suite 200, Wilmington, DE",
-        "Austin, TX / Denver, CO",
-        "123 Main St, Austin, TX",
-        "500 Market St, Denver, CO",
-        "San Francisco, CA / Remote",
-        "Denver, CO / Austin, TX",
-    ),
-)
-def test_b2_country_codes_in_address_regions_remain_unresolved(
-    location: str,
-) -> None:
-    evidence = acquisition_probe.normalize_geography_evidence(location)
-
-    assert evidence.primary_country is None
-    assert evidence.mentioned_countries == ()
-
-
-@pytest.mark.parametrize(
-    ("location", "mentioned"),
-    (
-        ("Paris, FR / Berlin, DE", {"FR"}),
-        ("Berlin, DE / Vienna, AT", {"AT"}),
-        ("Paris, France / Berlin, DE", {"FR"}),
-        ("Berlin, Germany / Vienna, DE", {"DE"}),
-        ("Austin, TX / Denver, CO", set()),
-    ),
-)
-def test_b2_ambiguous_code_in_mixed_segments_is_explicitly_unresolved(
-    location: str, mentioned: set[str]
-) -> None:
-    evidence = acquisition_probe.normalize_geography_evidence(location)
-
-    assert evidence.primary_country is None
-    assert set(evidence.mentioned_countries) == mentioned
-    assert evidence.geography_resolution_reason == "ambiguous_country_code"
-
-
-def test_b2_ambiguous_code_cannot_make_contamination_look_clean() -> None:
-    url = "https://www.linkedin.com/jobs/view/mixed-country-codes"
-    location = "Paris, FR / Berlin, DE"
-    summary = _b2_summary(
-        [
-            _b2_record("mixed-remaining", "remaining_europe", location, url=url),
-            _b2_record("mixed-dach", "dach", location, url=url),
-        ],
-        _b2_mapping(remaining_europe=("FR",), dach=("DE",)),
-    )
-
-    assert summary["cells"]["remaining_europe"]["credited"] == []
-    assert summary["cells"]["remaining_europe"]["geography_unknown"] == 1
-    assert summary["pairwise"]["dach|remaining_europe"] == {
-        "jaccard": 0.0,
-        "contamination_suspected": False,
-    }
-
-
-@pytest.mark.parametrize(
-    ("location", "primary_country"),
-    (
         ("São Paulo, Brazil", "BR"),
         ("Jakarta, Indonesia", "ID"),
         ("Kuala Lumpur, Malaysia", "MY"),
@@ -210,7 +104,7 @@ def test_b2_ambiguous_multi_country_location_is_unknown_not_guessed() -> None:
     assert summary["cells"]["dach"]["credited"] == []
     assert summary["cells"]["australia"]["credited"] == []
 
-def test_b2_dach_uses_explicit_country_codes_not_name_prefix() -> None:
+def test_b2_dach_uses_expanded_country_names_not_name_prefix() -> None:
     summary = _b2_summary(
         [
             _b2_record("at-1", "dach", "Vienna, Austria"),

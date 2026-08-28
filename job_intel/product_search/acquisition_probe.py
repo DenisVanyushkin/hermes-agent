@@ -922,50 +922,6 @@ _COUNTRY_ALIASES: tuple[tuple[str, str], ...] = (
     ("usa", "US"),
 )
 _CITY_COUNTRY_ALIASES: dict[str, str] = {}
-_AMBIGUOUS_US_SUBDIVISION_CODES = frozenset(
-    {
-        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
-        "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
-        "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
-        "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
-        "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
-        "DC",
-    }
-)
-_DECLARED_COUNTRY_CODES = frozenset(code for _, code in _COUNTRY_ALIASES)
-
-
-def _country_code_context(
-    text: str, match: re.Match[str]
-) -> tuple[bool, bool]:
-    """Return whether a code is terminal and whether its country is ambiguous."""
-
-    segment_start = text.rfind("/", 0, match.start()) + 1
-    segment_end = text.find("/", match.end())
-    if segment_end < 0:
-        segment_end = len(text)
-    segment = text[segment_start:segment_end]
-    suffix = segment[match.end() - segment_start :].strip()
-    if re.fullmatch(r"(?:\([^)]*\)|\[[^]]*\])", suffix):
-        suffix = ""
-    if suffix:
-        return False, False
-    components = [part.strip() for part in segment.split(",") if part.strip()]
-    has_neighboring_region_code = len(components) >= 2 and bool(
-        re.fullmatch(r"[A-Z]{2}", components[-2])
-    )
-    ambiguous = (
-        match.group(1) in _AMBIGUOUS_US_SUBDIVISION_CODES
-        and not has_neighboring_region_code
-    )
-    return True, ambiguous
-
-
-def _country_code_is_address_country(text: str, match: re.Match[str]) -> bool:
-    """Classify an unambiguous code from its address position."""
-
-    is_terminal, ambiguous = _country_code_context(text, match)
-    return is_terminal and not ambiguous
 
 
 def normalize_geography_evidence(
@@ -988,25 +944,11 @@ def normalize_geography_evidence(
         )
 
     found: dict[str, int] = {}
-    ambiguous_code_seen = False
     folded = text.casefold()
     for alias, code in sorted(_COUNTRY_ALIASES, key=lambda item: len(item[0]), reverse=True):
         match = re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", folded)
         if match is not None:
             found.setdefault(code, match.start())
-    for match in re.finditer(r"(?<![A-Za-z])([A-Z]{2})(?![A-Za-z])", text):
-        code = match.group(1)
-        if code not in _DECLARED_COUNTRY_CODES:
-            continue
-        is_terminal, ambiguous = _country_code_context(text, match)
-        if not is_terminal:
-            continue
-        if ambiguous:
-            if "/" not in text:
-                continue
-            ambiguous_code_seen = True
-            continue
-        found.setdefault(code, match.start())
     if not found:
         aliases = dict(_CITY_COUNTRY_ALIASES)
         aliases.update(
@@ -1019,12 +961,12 @@ def normalize_geography_evidence(
 
     mentioned = tuple(code for code, _ in sorted(found.items(), key=lambda item: item[1]))
     primary = mentioned[0] if len(mentioned) == 1 else None
-    if len(mentioned) > 1 or ambiguous_code_seen:
+    if len(mentioned) > 1:
         primary = None
     remote = bool(re.search(r"\bremote\b", folded))
     remote_scope: RemoteScope = (
         "country_remote" if remote and primary is not None
-        else "location_independent" if remote and not mentioned and not ambiguous_code_seen
+        else "location_independent" if remote and not mentioned
         else "none"
     )
     return GeographyEvidence(
@@ -1035,9 +977,6 @@ def normalize_geography_evidence(
         normalization_rule_version=GEOGRAPHY_NORMALIZATION_RULE_VERSION,
         mapping_version=mapping_version,
         remote_scope=remote_scope,
-        geography_resolution_reason=(
-            "ambiguous_country_code" if ambiguous_code_seen else None
-        ),
     )
 
 
@@ -1253,20 +1192,12 @@ def build_geography_summary(
             left_ids = {
                 identity
                 for identity in cells[left]["received"]
-                if (
-                    len(evidence_by_identity[identity].mentioned_countries) <= 1
-                    and evidence_by_identity[identity].geography_resolution_reason
-                    is None
-                )
+                if len(evidence_by_identity[identity].mentioned_countries) <= 1
             }
             right_ids = {
                 identity
                 for identity in cells[right]["received"]
-                if (
-                    len(evidence_by_identity[identity].mentioned_countries) <= 1
-                    and evidence_by_identity[identity].geography_resolution_reason
-                    is None
-                )
+                if len(evidence_by_identity[identity].mentioned_countries) <= 1
             }
             union = left_ids | right_ids
             jaccard = len(left_ids & right_ids) / len(union) if union else 0.0
