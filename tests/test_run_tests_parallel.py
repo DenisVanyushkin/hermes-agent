@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import run_tests_parallel
+
 
 # Both tests share the same handoff file: the leaker writes here, the
 # verifier reads here. We park it in $TMPDIR with a unique-per-run name
@@ -564,3 +566,62 @@ def test_node_report_includes_nodes_from_green_and_failed_files(tmp_path: Path) 
         "tests/test_red.py::test_red",
     }
     assert payload["failed_nodeids"] == ["tests/test_red.py::test_red"]
+
+
+def test_node_parser_ignores_application_error_log_lines() -> None:
+    parsed = run_tests_parallel._parse_node_outcomes(
+        "ERROR cron.scheduler:scheduler.py:4026 delivery failed\n",
+        Path("/repo"),
+    )
+
+    assert parsed["collection_error_paths"] == []
+    assert parsed["collected_nodeids"] == []
+
+
+def test_node_report_distinguishes_no_tests_from_a_silent_kill(tmp_path: Path) -> None:
+    repo_root = tmp_path / "target-worktree"
+    tests_root = repo_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "test_empty.py").write_text(
+        "# deliberately contains no tests\n", encoding="utf-8"
+    )
+    (tests_root / "test_killed.py").write_text(
+        "import os\nos._exit(137)\n", encoding="utf-8"
+    )
+    report = tmp_path / "nodes.json"
+    runner = Path(__file__).resolve().parent.parent / "scripts" / "run_tests_parallel.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo-root",
+            str(repo_root),
+            "--files",
+            "tests/test_empty.py:tests/test_killed.py",
+            "--node-report",
+            str(report),
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["files"]["tests/test_empty.py"]["readable"] is True
+    assert payload["files"]["tests/test_killed.py"]["readable"] is False
+    assert payload["readable"] is False

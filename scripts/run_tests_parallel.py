@@ -492,6 +492,28 @@ def _normalise_nodeid(nodeid: str, repo_root: Path) -> str:
     return path + (separator + suffix if separator else "")
 
 
+def _looks_like_test_file(path: str, repo_root: Path) -> bool:
+    """Accept only pytest collection-error paths, not logger output."""
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            path = str(candidate.resolve().relative_to(repo_root.resolve()))
+        except ValueError:
+            return False
+    return path.startswith("tests/") and path.endswith(".py") and "::" not in path
+
+
+def _file_output_is_readable(
+    output: str,
+    summary: dict[str, int],
+    node_report: dict[str, object],
+) -> bool:
+    """A deliberate empty pytest file is readable; a silent death is not."""
+    if summary or node_report["collected_nodeids"]:
+        return True
+    return bool(re.search(r"(?:^|\n)\s*no tests ran\b", output, re.IGNORECASE))
+
+
 def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
     """Extract complete node outcomes from one child's uncropped output.
 
@@ -508,9 +530,10 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
         line = raw_line.strip()
         if not line:
             continue
-        status, separator, value = line.partition(" ")
-        if not separator:
+        fields = line.split(None, 1)
+        if len(fields) != 2:
             continue
+        status, value = fields
         if status not in {"PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR"}:
             continue
         nodeid = value.strip()
@@ -519,8 +542,9 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
             nodeid = nodeid.rstrip()
         nodeid = _normalise_nodeid(nodeid, repo_root)
         if "::" not in nodeid and status == "ERROR":
-            collection_errors.add(nodeid)
-            error_count += 1
+            if _looks_like_test_file(nodeid, repo_root):
+                collection_errors.add(nodeid)
+                error_count += 1
             continue
         collected.add(nodeid)
         if status in {"FAILED", "ERROR"}:
@@ -1203,7 +1227,9 @@ def main() -> int:
             )
             file_times.append((fpath, subproc_wall))
             node_report = _parse_node_outcomes(output, repo_root)
-            node_report["readable"] = bool(summary) or bool(node_report["collected_nodeids"])
+            node_report["readable"] = _file_output_is_readable(
+                output, summary, node_report
+            )
             file_reports[_format_file(fpath, repo_root)] = node_report
             if rc == 0:
                 pass_count += 1
