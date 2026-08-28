@@ -55,3 +55,46 @@ def test_bidirectional_section_is_derived_for_any_file():
 
     assert set(report["bidirectional"]) == {"tests/other.py"}
     assert report["bidirectional"]["tests/other.py"] == report["by_file"]["tests/other.py"]
+
+
+def test_classify_nodes_keeps_four_traits_independent():
+    nodes = [
+        "tests/a.py::test_order_and_standalone",
+        "tests/b.py::test_host_sensitive",
+    ]
+
+    classified = measure.classify_nodes(
+        nodes,
+        red_standalone={nodes[0]},
+        intra_file_order={nodes[0]},
+        host_sensitive={nodes[1]},
+    )
+
+    assert classified == [
+        {
+            "nodeid": nodes[0],
+            "traits": {
+                "red_standalone": "yes",
+                "intra_file_order": "yes",
+                "needs_neighbour": "not_checked",
+                "cross_process_or_host_state_sensitive": "not_checked",
+            },
+        },
+        {
+            "nodeid": nodes[1],
+            "traits": {
+                "red_standalone": "not_checked",
+                "intra_file_order": "no",
+                "needs_neighbour": "not_checked",
+                "cross_process_or_host_state_sensitive": "yes",
+            },
+        },
+    ]
+
+
+def test_parse_node_statuses_preserves_parameterized_nodeids_with_spaces():
+    log = "PASSED tests/a.py::test_value[hello world] - detail\n"
+
+    assert measure.parse_node_statuses(log) == {
+        "tests/a.py::test_value[hello world]": "PASSED"
+    }

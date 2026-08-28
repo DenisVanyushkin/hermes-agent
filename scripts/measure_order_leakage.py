@@ -21,6 +21,43 @@ from typing import Any
 
 
 FAILED_LINE = re.compile(r"^FAILED (.+?)(?: - .*)?$")
+def classify_nodes(
+    nodeids: list[str] | set[str],
+    *,
+    red_standalone: set[str],
+    intra_file_order: set[str],
+    host_sensitive: set[str],
+    needs_neighbour: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Attach independent evidence states to every supplied node id.
+
+    Missing evidence is deliberately represented as ``not_checked`` rather
+    than inferred from another trait.  In particular, order sensitivity and
+    neighbour dependence are not mutually exclusive classifications.
+    """
+    neighbour_nodes = needs_neighbour or set()
+    return [
+        {
+            "nodeid": nodeid,
+            "traits": {
+                "red_standalone": (
+                    "yes" if nodeid in red_standalone else "not_checked"
+                ),
+                "intra_file_order": (
+                    "yes" if nodeid in intra_file_order else "no"
+                ),
+                "needs_neighbour": (
+                    "yes" if nodeid in neighbour_nodes else "not_checked"
+                ),
+                "cross_process_or_host_state_sensitive": (
+                    "yes" if nodeid in host_sensitive else "not_checked"
+                ),
+            },
+        }
+        for nodeid in sorted(nodeids)
+    ]
+
+
 def parse_failed_nodeids(log: str) -> set[str]:
     """Parse pytest's final ``FAILED nodeid`` lines from one log."""
     failed: set[str] = set()
@@ -32,6 +69,27 @@ def parse_failed_nodeids(log: str) -> set[str]:
         if nodeid.startswith("tests/") and "::" in nodeid:
             failed.add(nodeid)
     return failed
+
+
+def parse_node_statuses(log: str) -> dict[str, str]:
+    """Parse explicit per-node outcome lines from a pytest run log."""
+    statuses: dict[str, str] = {}
+    for line in log.splitlines():
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2 or fields[0] not in {
+            "PASSED",
+            "FAILED",
+            "SKIPPED",
+            "XFAIL",
+            "XPASS",
+            "RERUN",
+            "ERROR",
+        }:
+            continue
+        nodeid = fields[1].partition(" - ")[0].strip()
+        if nodeid.startswith("tests/") and "::" in nodeid:
+            statuses[nodeid] = fields[0]
+    return statuses
 
 
 def parse_measurement_report(
@@ -154,6 +212,176 @@ def _pytest_command(python: str, paths: list[str]) -> list[str]:
     ]
 
 
+def _collect_nodeids(*, tree: Path, python: str, path: str) -> list[str]:
+    output, returncode = _run_checked(
+        [
+            python,
+            "-m",
+            "pytest",
+            path,
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        tree=tree,
+    )
+    if returncode != 0:
+        raise RuntimeError(f"collection failed for {path}: rc={returncode}")
+    nodeids: list[str] = []
+    seen: set[str] = set()
+    for line in output.splitlines():
+        nodeid = line.strip()
+        if nodeid.startswith("tests/") and "::" in nodeid and nodeid not in seen:
+            nodeids.append(nodeid)
+            seen.add(nodeid)
+    if not nodeids:
+        raise RuntimeError(f"collection returned no nodeids for {path}")
+    return nodeids
+
+
+def _probe_file_order(
+    *, tree: Path, python: str, path: str
+) -> dict[str, Any]:
+    """Run one file in explicit collection order and its exact reverse."""
+    nodeids = _collect_nodeids(tree=tree, python=python, path=path)
+    direct_log, direct_returncode = _run_checked(
+        _pytest_command(python, nodeids), tree=tree
+    )
+    reverse_log, reverse_returncode = _run_checked(
+        _pytest_command(python, list(reversed(nodeids))), tree=tree
+    )
+    direct_statuses = parse_node_statuses(direct_log)
+    reverse_statuses = parse_node_statuses(reverse_log)
+    missing = (set(nodeids) - direct_statuses.keys()) | (
+        set(nodeids) - reverse_statuses.keys()
+    )
+    if missing:
+        raise RuntimeError(
+            f"order probe did not produce terminal status for {len(missing)} "
+            f"node(s) in {path}"
+        )
+    changed = sorted(
+        nodeid
+        for nodeid in nodeids
+        if direct_statuses[nodeid] != reverse_statuses[nodeid]
+    )
+    return {
+        "nodeids": nodeids,
+        "direct_returncode": direct_returncode,
+        "reverse_returncode": reverse_returncode,
+        "direct_failed": sorted(
+            nodeid
+            for nodeid, status in direct_statuses.items()
+            if status == "FAILED"
+        ),
+        "reverse_failed": sorted(
+            nodeid
+            for nodeid, status in reverse_statuses.items()
+            if status == "FAILED"
+        ),
+        "changed_nodeids": changed,
+    }
+
+
+def classify_failure_report(
+    report: dict[str, Any], *, tree: Path, python: str,
+    bisection_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Probe all residual files and emit the four-trait node inventory."""
+    failed_nodeids = report.get("failed_nodeids")
+    if not isinstance(failed_nodeids, list) or not all(
+        isinstance(nodeid, str) for nodeid in failed_nodeids
+    ):
+        raise ValueError("failure report must contain a failed_nodeids list")
+    files = sorted({nodeid.split("::", 1)[0] for nodeid in failed_nodeids})
+    order_probe = {
+        path: _probe_file_order(tree=tree, python=python, path=path)
+        for path in files
+    }
+    if bisection_report is not None:
+        for path, result in bisection_report.items():
+            if path in order_probe and isinstance(result, dict):
+                order_probe[path]["bisection"] = {
+                    "conclusion": result.get("bisection"),
+                    "minimal_changed_subset": result.get("minimal_changed_subset"),
+                    "probe_count": len(result.get("probes", [])),
+                }
+    order_changed = {
+        nodeid
+        for result in order_probe.values()
+        for nodeid in result["changed_nodeids"]
+    }
+    standalone_files = {
+        "tests/hermes_cli/test_cmd_update.py",
+        "tests/hermes_cli/test_git_mutation_requires_review.py",
+        "tests/hermes_cli/test_commit_gate_authorization.py",
+    }
+    standalone = {
+        nodeid
+        for nodeid in failed_nodeids
+        if nodeid.split("::", 1)[0] in standalone_files
+    }
+    host_sensitive = {
+        nodeid
+        for nodeid in failed_nodeids
+        if nodeid
+        in {
+            "tests/hermes_cli/test_profile_handoff.py::test_preview_mode_writes_nothing",
+            "tests/test_baseline_git.py::test_clean_repo_returns_empty",
+        }
+    }
+    nodes = classify_nodes(
+        failed_nodeids,
+        red_standalone=standalone,
+        intra_file_order=order_changed,
+        host_sensitive=host_sensitive,
+    )
+    return {
+        "schema": "hermes-order-leakage-classification/v1",
+        "source_report": report.get("source_report"),
+        "tree": str(tree),
+        "head": _git(tree, "rev-parse", "HEAD"),
+        "node_count": len(nodes),
+        "nodes": nodes,
+        "order_probe": order_probe,
+        "evidence": {
+            "red_standalone": {
+                "rule": "previously confirmed standalone red nodes; not reopened here",
+                "nodeids": sorted(standalone),
+            },
+            "needs_neighbour": {
+                "rule": "not probed in task 11; reserved for task 13",
+            },
+            "cross_process_or_host_state_sensitive": {
+                "rule": "yes only when the same node changed result under different external process or shared-state conditions",
+                "measurements": [
+                    {
+                        "node_or_scope": "test_gate_b_record_controls.py",
+                        "without_external_process": 1,
+                        "with_external_process": 42,
+                        "cause": "unresolved between resource pressure and shared state",
+                    },
+                    {
+                        "node_or_scope": "test_profile_handoff.py + test_baseline_git.py",
+                        "without_fixture_mutation": 0,
+                        "with_tracked_fixture_mutation": 2,
+                        "cause": "shared worktree state: tracked legal_research fixtures",
+                    },
+                ],
+                "nodeids": sorted(host_sensitive),
+            },
+            "fixture_writer": {
+                "status": "unresolved",
+                "tracked_suite_search": "no direct writer found; legal-research tests read fixtures only",
+                "sequential_full_probe": "464 selected files, 6974 passed, 197 failed, no legal_research HTML mutation",
+                "parallel_full_probe": "464 selected files, 6124 estimated tests, 119 file-level failures, no legal_research HTML mutation",
+                "strace_probe": "legal-research client/review tests: 17 passed, no writes to legal_research HTML",
+            },
+        },
+    }
+
+
 def _one_measurement(
     *, attempt: Path, tree: Path, python: str, repeat: int
 ) -> dict[str, Any]:
@@ -244,12 +472,37 @@ def measure(*, attempt: Path, tree: Path, python: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--attempt", type=Path, required=True)
+    parser.add_argument("--attempt", type=Path)
+    parser.add_argument(
+        "--failure-report",
+        type=Path,
+        help="classify failed_nodeids from a saved node report with order probes",
+    )
     parser.add_argument("--tree", type=Path, required=True)
     parser.add_argument(
         "--python", default=os.environ.get("HERMES_PYTHON", sys.executable)
     )
+    parser.add_argument(
+        "--bisection-report",
+        type=Path,
+        help="merge a saved direct/reverse bisection report into classification JSON",
+    )
     args = parser.parse_args(argv)
+    if args.failure_report is not None:
+        report = json.loads(args.failure_report.read_text(encoding="utf-8"))
+        if not isinstance(report, dict):
+            raise SystemExit("failure report must be a JSON object")
+        report["source_report"] = str(args.failure_report)
+        bisection = None
+        if args.bisection_report is not None:
+            bisection = json.loads(args.bisection_report.read_text(encoding="utf-8"))
+        result = classify_failure_report(
+            report, tree=args.tree, python=args.python, bisection_report=bisection
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if args.attempt is None:
+        parser.error("--attempt is required unless --failure-report is given")
     report = measure(attempt=args.attempt, tree=args.tree, python=args.python)
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
