@@ -114,7 +114,81 @@ def test_linkedin_slug_and_numeric_urls_share_one_canonical_identity() -> None:
     )
     numeric = "https://www.linkedin.com/jobs/view/4459675813?eBP=other"
 
-    assert _canonical_url(slug) == _canonical_url(numeric)
+    assert _canonical_url(slug, collapse_linkedin_slug=True) == _canonical_url(
+        numeric, collapse_linkedin_slug=True
+    )
+
+
+def test_canonical_url_default_preserves_gate_b_legacy_slug_identity() -> None:
+    from job_intel.product_search.acquisition_probe import _canonical_url
+
+    slug = (
+        "https://uk.linkedin.com/jobs/view/chief-product-officer-at-acme-4459675813"
+        "?position=1&refId=redacted&trackingId=redacted"
+    )
+    numeric = "https://www.linkedin.com/jobs/view/4459675813?eBP=other"
+
+    assert _canonical_url(slug) == (
+        "https://uk.linkedin.com/jobs/view/chief-product-officer-at-acme-4459675813"
+    )
+    assert _canonical_url(slug) != _canonical_url(numeric)
+
+
+def test_gate_b_consumer_keeps_legacy_identity_while_gate_a_opts_in() -> None:
+    from job_intel.product_search.acquisition_probe import _canonical_url
+    from job_intel.product_search.gate_b import _canonical_url as gate_b_canonical_url
+
+    slug = (
+        "https://uk.linkedin.com/jobs/view/chief-product-officer-at-acme-4459675813"
+        "?position=1&refId=redacted&trackingId=redacted"
+    )
+
+    assert gate_b_canonical_url(slug) == _canonical_url(slug)
+    assert gate_b_canonical_url(slug) != _canonical_url(
+        slug, collapse_linkedin_slug=True
+    )
+
+
+def test_gate_a_persists_collapsed_slug_identity_in_evidence(tmp_path: Path) -> None:
+    slug = (
+        "https://uk.linkedin.com/jobs/view/chief-product-officer-at-acme-4459675813"
+        "?position=1&refId=redacted&trackingId=redacted"
+    )
+    query = ProbeQuery(
+        query_id="q-slug",
+        cell_id="uk",
+        source_family="linkedin",
+        query="VP Product United Kingdom",
+        minimum_independent_families=1,
+    )
+
+    result = run_probe(
+        run_id="run-slug",
+        queries=[query],
+        sources={
+            "linkedin": lambda _query: [
+                {
+                    "source_id": "linkedin-slug-1",
+                    "company": "Acme",
+                    "title": "Chief Product Officer",
+                    "location": "United Kingdom",
+                    "url": slug,
+                }
+            ]
+        },
+        output_dir=tmp_path / "probe",
+        isolation={
+            "linkedin": SourceIsolation(
+                mode="exclusive_lock", path=tmp_path / "linkedin.lock", collection_method="browser"
+            )
+        },
+        runtime_capability_checks={"linkedin": lambda: RuntimeCapabilityResult(state="ready")},
+    )
+
+    evidence_path = tmp_path / "probe" / result.evidence[0].raw_reference
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert payload["canonical_url"] == "https://www.linkedin.com/jobs/view/4459675813"
+
 
 def test_pair_evidence_distinguishes_unauthenticated_completion_and_carries_a1_counts(
     tmp_path: Path,
@@ -133,6 +207,11 @@ def test_pair_evidence_distinguishes_unauthenticated_completion_and_carries_a1_c
                 "vacancies_extracted": 2,
             },
             "pages": [{"artifact_ref": "diagnostics/a1-page.json"}],
+            "scroll_checkpoints": [
+                {"step": 1, "cumulative_unique_dom_id_count": 3},
+                {"step": 2, "cumulative_unique_dom_id_count": 5},
+                {"step": 3, "cumulative_unique_dom_id_count": 5},
+            ],
         }
         last_health = {"session_state": "session_missing_cookie"}
 
@@ -172,6 +251,11 @@ def test_pair_evidence_distinguishes_unauthenticated_completion_and_carries_a1_c
     assert pair["extraction_counts"]["dom"] == 3
     assert pair["extraction_counts"]["parsed_before_filter"] == 2
     assert pair["extraction_artifact_references"] == ["diagnostics/a1-page.json"]
+    assert pair["scroll_checkpoints"] == [
+        {"step": 1, "cumulative_unique_dom_id_count": 3},
+        {"step": 2, "cumulative_unique_dom_id_count": 5},
+        {"step": 3, "cumulative_unique_dom_id_count": 5},
+    ]
 
 
 ROOT = Path(__file__).resolve().parents[2]

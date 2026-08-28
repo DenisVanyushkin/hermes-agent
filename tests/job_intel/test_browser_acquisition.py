@@ -1704,6 +1704,77 @@ def test_gate_a_scroll_records_checkpoint_growth_and_saturation() -> None:
     assert result.scroll_checkpoints[1]["new_unique_dom_ids"] == []
 
 
+def test_gate_a_scroll_trace_distinguishes_growth_from_saturation() -> None:
+    def run_sequence(ids_after_scroll: tuple[frozenset[str], ...]) -> object:
+        client = BrowserSourceClient(
+            BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+        )
+        plan = LinkedInExecutionPlan(
+            page_offsets=(0,),
+            max_scroll_checkpoints=len(ids_after_scroll),
+            saturation_checkpoints=2,
+            settle_timeout_ms=0,
+        )
+
+        class _Results:
+            def __init__(self, page: object) -> None:
+                self.page = page
+
+            def evaluate(self, _script: str) -> bool:
+                self.page.scroll_calls += 1  # type: ignore[attr-defined]
+                return True
+
+        class _Jobs:
+            def __init__(self, page: object) -> None:
+                self.page = page
+
+            def evaluate_all(self, _script: str) -> list[str]:
+                if self.page.scroll_calls == 0:  # type: ignore[attr-defined]
+                    ids = frozenset({"1"})
+                else:
+                    ids = ids_after_scroll[self.page.scroll_calls - 1]  # type: ignore[attr-defined]
+                return [f"https://www.linkedin.com/jobs/view/{job_id}" for job_id in ids]
+
+        class _Page:
+            url = "https://www.linkedin.com/jobs/search/"
+            scroll_calls = 0
+
+            def goto(self, _url: str, **_kwargs: object) -> None:
+                return None
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+            def content(self) -> str:
+                return "<html><body>results</body></html>"
+
+            def locator(self, selector: str):
+                return _Results(self) if selector == plan.results_selector else _Jobs(self)
+
+            def close(self) -> None:
+                return None
+
+        page = _Page()
+        client._context = types.SimpleNamespace(pages=[], new_page=lambda: page)  # type: ignore[attr-defined]
+        return client.fetch_page(
+            "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+            page_offset=0,
+            execution_plan=plan,
+        )
+
+    growing = run_sequence(
+        (frozenset({"1", "2"}), frozenset({"1", "2", "3"}), frozenset({"1", "2", "3", "4"}))
+    )
+    saturated = run_sequence(
+        (frozenset({"1", "2"}), frozenset({"1", "2"}), frozenset({"1", "2"}))
+    )
+
+    assert [item["cumulative_unique_dom_id_count"] for item in growing.scroll_checkpoints] == [2, 3, 4]  # type: ignore[union-attr]
+    assert growing.scroll_stop_reason == "max_steps"  # type: ignore[union-attr]
+    assert [item["cumulative_unique_dom_id_count"] for item in saturated.scroll_checkpoints] == [2, 2, 2]  # type: ignore[union-attr]
+    assert saturated.scroll_stop_reason == "saturation"  # type: ignore[union-attr]
+
+
 def test_gate_a_incomplete_scroll_is_critical_degradation() -> None:
     client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0))
     plan = LinkedInExecutionPlan(page_offsets=(0,), max_scroll_checkpoints=1, settle_timeout_ms=0)

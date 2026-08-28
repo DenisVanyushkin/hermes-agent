@@ -757,7 +757,7 @@ def _record_source_state(
         states[family] = "blocked_multiple_failures"
 
 
-def _canonical_url(raw: str) -> str:
+def _canonical_url(raw: str, *, collapse_linkedin_slug: bool = False) -> str:
     split = urlsplit(unescape(raw.strip()))
     hostname = (split.hostname or "").casefold()
     path = split.path.rstrip("/")
@@ -767,7 +767,7 @@ def _canonical_url(raw: str) -> str:
     is_headhunter_vacancy = (
         hostname == "hh.ru" or hostname.endswith(".hh.ru")
     ) and path.startswith("/vacancy/")
-    if is_linkedin_job:
+    if collapse_linkedin_slug and is_linkedin_job:
         match = re.fullmatch(
             r"/jobs/view/(?:[^/]+-)?(?P<job_id>\d{7,})", path, flags=re.I
         )
@@ -786,7 +786,7 @@ def _canonical_url(raw: str) -> str:
     return urlunsplit(
         (
             split.scheme.casefold(),
-            hostname if is_linkedin_job else split.netloc.casefold(),
+            hostname if collapse_linkedin_slug and is_linkedin_job else split.netloc.casefold(),
             path,
             urlencode(filtered),
             "",
@@ -1034,7 +1034,9 @@ def build_geography_summary(
                 "geography_unknown": 0,
             },
         )
-        identity = _canonical_url(str(record.get("url") or ""))
+        identity = _canonical_url(
+            str(record.get("url") or ""), collapse_linkedin_slug=True
+        )
         if not identity:
             identity = hashlib.sha256(
                 f"{record.get('company')}\0{record.get('title')}".encode()
@@ -1258,6 +1260,7 @@ def run_probe(
                 ),
                 "extraction_counts": None,
                 "extraction_artifact_references": [],
+                "scroll_checkpoints": [],
                 "received_records": 0,
                 "credited_records": None,
                 "credited_records_status": "undetermined",
@@ -1311,6 +1314,13 @@ def run_probe(
                     str(page["artifact_ref"])
                     for page in pages
                     if isinstance(page, Mapping) and page.get("artifact_ref")
+                ]
+            checkpoints = trace.get("scroll_checkpoints")
+            if isinstance(checkpoints, list):
+                pair["scroll_checkpoints"] = [
+                    dict(checkpoint)
+                    for checkpoint in checkpoints
+                    if isinstance(checkpoint, Mapping)
                 ]
         if (
             query.source_family == "linkedin"
@@ -1399,7 +1409,9 @@ def run_probe(
 
         for raw_record in records:
             record = _as_mapping(raw_record)
-            canonical = _canonical_url(str(record.get("url") or ""))
+            canonical = _canonical_url(
+                str(record.get("url") or ""), collapse_linkedin_slug=True
+            )
             captured_at = str(record.get("captured_at") or clock().isoformat())
             normalized = dict(record)
             normalized["canonical_url"] = canonical

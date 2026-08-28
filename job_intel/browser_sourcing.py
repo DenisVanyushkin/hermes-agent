@@ -1482,6 +1482,7 @@ class BrowserSourceClient:
                 "after_unique_dom_ids": sorted(after_ids),
                 "before_unique_dom_id_count": len(before_ids),
                 "after_unique_dom_id_count": len(after_ids),
+                "cumulative_unique_dom_id_count": len(after_ids),
                 "new_unique_dom_ids": new_ids,
                 "completed": True,
             }
