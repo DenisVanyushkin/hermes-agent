@@ -35,8 +35,8 @@ def test_b2_does_not_treat_arbitrary_two_letter_tokens_as_country_codes(
         ("Charlottetown, PE, Canada", "CA", {"CA"}),
         ("CA, United States", "US", {"US"}),
         ("Patna, BR, IN", "IN", {"IN"}),
-        ("Paris, FR / Berlin, DE", None, {"FR", "DE"}),
-        ("Berlin, DE / Paris, FR", None, {"FR", "DE"}),
+        ("Paris, FR / Berlin, DE", None, {"FR"}),
+        ("Berlin, DE / Paris, FR", None, {"FR"}),
         ("Dubai, AE", "AE", {"AE"}),
         ("London, GB", "GB", {"GB"}),
         ("San Francisco, CA", None, set()),
@@ -51,6 +51,66 @@ def test_b2_country_code_classification_uses_position_and_neighborhood(
 
     assert evidence.primary_country == primary_country
     assert set(evidence.mentioned_countries) == mentioned
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        "1234 Market St, San Francisco, CA",
+        "Suite 200, Wilmington, DE",
+        "Austin, TX / Denver, CO",
+        "123 Main St, Austin, TX",
+        "500 Market St, Denver, CO",
+        "San Francisco, CA / Remote",
+        "Denver, CO / Austin, TX",
+    ),
+)
+def test_b2_country_codes_in_address_regions_remain_unresolved(
+    location: str,
+) -> None:
+    evidence = acquisition_probe.normalize_geography_evidence(location)
+
+    assert evidence.primary_country is None
+    assert evidence.mentioned_countries == ()
+
+
+@pytest.mark.parametrize(
+    ("location", "mentioned"),
+    (
+        ("Paris, FR / Berlin, DE", {"FR"}),
+        ("Berlin, DE / Vienna, AT", {"AT"}),
+        ("Paris, France / Berlin, DE", {"FR"}),
+        ("Berlin, Germany / Vienna, DE", {"DE"}),
+        ("Austin, TX / Denver, CO", set()),
+    ),
+)
+def test_b2_ambiguous_code_in_mixed_segments_is_explicitly_unresolved(
+    location: str, mentioned: set[str]
+) -> None:
+    evidence = acquisition_probe.normalize_geography_evidence(location)
+
+    assert evidence.primary_country is None
+    assert set(evidence.mentioned_countries) == mentioned
+    assert evidence.geography_resolution_reason == "ambiguous_country_code"
+
+
+def test_b2_ambiguous_code_cannot_make_contamination_look_clean() -> None:
+    url = "https://www.linkedin.com/jobs/view/mixed-country-codes"
+    location = "Paris, FR / Berlin, DE"
+    summary = _b2_summary(
+        [
+            _b2_record("mixed-remaining", "remaining_europe", location, url=url),
+            _b2_record("mixed-dach", "dach", location, url=url),
+        ],
+        _b2_mapping(remaining_europe=("FR",), dach=("DE",)),
+    )
+
+    assert summary["cells"]["remaining_europe"]["credited"] == []
+    assert summary["cells"]["remaining_europe"]["geography_unknown"] == 1
+    assert summary["pairwise"]["dach|remaining_europe"] == {
+        "jaccard": 0.0,
+        "contamination_suspected": False,
+    }
 
 
 @pytest.mark.parametrize(
