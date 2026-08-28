@@ -34,9 +34,24 @@ BLOCKING_CLASSIFICATIONS = frozenset(
         "order_dependent_failure",
     }
 )
-# The owner decision is still pending for upstream_red_admission_failure:
-# preserve the current blocking behavior until the repository owner decides.
-# In the 2026-08-26 rerun, five such nodes passed and one remained.
+# Owner decision recorded 2026-08-28: upstream_red_admission_failure remains
+# blocking. Landing is materially irreversible: an admitted red upstream test
+# is classified as pre_existing_failure on the next sync and is no longer
+# visible as an admission decision. An upstream test may also be red because of
+# this fork's customizations, which upstream cannot see; only inspection can
+# distinguish those cases.
+#
+# The blocking cost fell after file isolation: the paired run on
+# 20a83fe167/a79bc64b12 had 139 merged failures and the same 139 baseline
+# failures, with zero unique failures on either side. Isolation removed the
+# noise; weakening this class did not. Task 1 provides a cheap, named
+# unblock: an operator can decide one node at a time in decision-memory.json,
+# with both logs recorded.
+#
+# Five of six nodes of this class passing in the 2026-08-26 rerun is not a
+# reason to weaken admission: it indicates order dependence, not that admitting
+# red tests is safe. Such cases now have the separate order_dependent_failure
+# classification.
 INFORMATIONAL_CLASSIFICATIONS = frozenset({"pre_existing_failure"})
 _RECEIPT_FIELDS = {
     "manifest": "manifest_sha256",
