@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import random
+import re
 from pathlib import Path
 import socket
 import signal
@@ -1299,7 +1300,12 @@ def test_bootstrap_runtime_config_allows_an_arbitrary_profile_in_a_namespace(tmp
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_ip = fake_bin / "ip"
-    fake_ip.write_text("#!/bin/sh\nprintf '%s\\n' ln-eg\n", encoding="utf-8")
+    fake_ip.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = netns ] && [ \"$2\" = exec ]; then shift 3; exec \"$@\"; fi\n"
+        "printf '%s\\n' ln-eg\n",
+        encoding="utf-8",
+    )
     fake_ip.chmod(0o755)
     environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
 
@@ -1312,9 +1318,9 @@ def test_bootstrap_runtime_config_allows_an_arbitrary_profile_in_a_namespace(tmp
     assert config["profile"] == "a0probe"
     assert config["namespace"] == "ln-eg"
     assert config["novnc_bind"] == "169.254.77.2"
-    assert config["cdp_endpoint"] == "http://169.254.77.2:19222"
+    assert config["cdp_endpoint"] == "http://169.254.77.2:19254"
     assert config["cdp_tunnel_host"] == "169.254.77.2"
-    assert config["cdp_tunnel_port"] == "19222"
+    assert config["cdp_tunnel_port"] == "19254"
 
 
 def test_bootstrap_runtime_config_rejects_a_missing_namespace(tmp_path: Path) -> None:
@@ -1331,6 +1337,77 @@ def test_bootstrap_runtime_config_rejects_a_missing_namespace(tmp_path: Path) ->
 
     assert result.returncode != 0
     assert "network namespace" in result.stderr.lower()
+
+
+def test_bootstrap_runtime_config_derives_a_distinct_relay_port_from_profile(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ip = fake_bin / "ip"
+    fake_ip.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = netns ] && [ \"$2\" = exec ]; then shift 3; exec \"$@\"; fi\n"
+        "printf '%s\\n' ln-eg\n",
+        encoding="utf-8",
+    )
+    fake_ip.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    result = _bootstrap_runtime_config(
+        "--profile", "a0probe", "--network-namespace", "ln-eg", env=environment
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = _runtime_config(result.stdout)
+    assert config["cdp_port"] == "9254"
+    assert config["cdp_tunnel_port"] == "19254"
+    assert config["cdp_tunnel_port"] != "19222"
+
+
+def test_bootstrap_rejects_an_occupied_relay_address_before_side_effects(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ip = fake_bin / "ip"
+    fake_ip.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = netns ] && [ \"$2\" = exec ]; then shift 3; exec \"$@\"; fi\n"
+        "printf '%s\\n' ln-eg\n",
+        encoding="utf-8",
+    )
+    fake_ip.chmod(0o755)
+    fake_ss = fake_bin / "ss"
+    fake_ss.write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'LISTEN 0 128 169.254.77.2:19254 0.0.0.0:*'\n",
+        encoding="utf-8",
+    )
+    fake_ss.chmod(0o755)
+    fake_pgrep = fake_bin / "pgrep"
+    fake_pgrep.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_pgrep.chmod(0o755)
+    fake_apt = fake_bin / "apt-get"
+    fake_apt.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    fake_apt.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    script = Path(__file__).parents[2] / "scripts/browser-desktop-bootstrap.sh"
+    result = subprocess.run(
+        ["bash", str(script), "--profile", "a0probe", "--network-namespace", "ln-eg"],
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
+    assert "CDP relay address 169.254.77.2:19254 is already occupied" in result.stderr
+
+
+def test_bootstrap_unit_start_timeout_exceeds_supervisor_startup_timeout() -> None:
+    unit = (Path(__file__).parents[2] / "deploy/systemd/experiments/job-intel-browser-bootstrap.service").read_text()
+    match = re.search(r"(?m)^TimeoutStartSec=([0-9]+(?:\\.[0-9]+)?)$", unit)
+    assert match is not None
+
+    supervisor = _load_browser_supervisor()
+    assert float(match.group(1)) > supervisor.DEFAULT_STARTUP_TIMEOUT_SECONDS
 
 
 def test_acquisition_unit_binds_to_bootstrap_without_privilege_escalation() -> None:

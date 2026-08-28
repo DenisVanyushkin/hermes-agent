@@ -29,6 +29,7 @@ def _notify(message: str) -> None:
 
 CDP_PROBE_TIMEOUT_SECONDS = 5.0
 CDP_MONITOR_FAILURE_LIMIT = 3
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 120.0
 LOGGER = logging.getLogger(__name__)
 
 
@@ -299,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cdp-url", help="explicit CDP endpoint; required for profile or URL overrides (otherwise resolved from --source)")
     parser.add_argument("--url")
     parser.add_argument("--lock-path", type=Path, default=Path("/run/job-intel/linkedin-profile.lock"))
-    parser.add_argument("--startup-timeout", type=float, default=120.0)
+    parser.add_argument("--startup-timeout", type=float, default=DEFAULT_STARTUP_TIMEOUT_SECONDS)
     parser.add_argument("--poll-interval", type=float, default=0.2)
     parser.add_argument("--monitor-interval", type=float, default=5.0)
     parser.add_argument("--bootstrap-script", type=Path, default=Path(__file__).with_name("browser-desktop-bootstrap.sh"))

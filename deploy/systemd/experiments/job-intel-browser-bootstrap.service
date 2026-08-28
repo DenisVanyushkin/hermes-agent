@@ -16,7 +16,7 @@ ExecStart=/usr/bin/env ${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/s
 # supervisor and its lock holder as a control group.
 ExecStop=/usr/bin/env ${PRODUCT_SEARCH_PYTHON} ${PRODUCT_SEARCH_RUNTIME_ROOT}/scripts/job_intel_browser_supervisor.py --stop --source linkedin --profile ${PRODUCT_SEARCH_BROWSER_PROFILE_PATH} --lock-path ${PRODUCT_SEARCH_BROWSER_LOCK_PATH} --supervisor-pid $MAINPID
 KillMode=control-group
-TimeoutStartSec=120
+TimeoutStartSec=150
 Restart=no
 
 [Install]
