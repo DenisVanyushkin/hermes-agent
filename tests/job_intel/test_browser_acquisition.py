@@ -1811,9 +1811,9 @@ def test_gate_a_auth_page_uses_first_observed_scrollable_results_container() -> 
 
         def evaluate_all(self, _script: str) -> list[dict[str, int]]:
             return [
-                {"clientHeight": 180, "scrollHeight": 1200},
-                {"clientHeight": 587, "scrollHeight": 3807},
-                {"clientHeight": 700, "scrollHeight": 5000},
+                {"clientHeight": 180, "scrollHeight": 1200, "jobLinkCount": 0},
+                {"clientHeight": 587, "scrollHeight": 3807, "jobLinkCount": 2},
+                {"clientHeight": 700, "scrollHeight": 5000, "jobLinkCount": 1},
             ]
 
         def nth(self, index: int) -> _Container:
@@ -1864,6 +1864,217 @@ def test_gate_a_auth_page_uses_first_observed_scrollable_results_container() -> 
     assert page.container_scrolls == [1]
     assert result.scroll_checkpoints[0]["mode"] == "results_container"
     assert result.scroll_checkpoints[0]["page_offset"] == 25
+
+
+def test_gate_a_scroll_container_must_own_job_links_not_just_geometry() -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+    )
+    plan = LinkedInExecutionPlan(
+        page_offsets=(0,),
+        max_scroll_checkpoints=1,
+        saturation_checkpoints=2,
+        settle_timeout_ms=0,
+    )
+
+    class _Container:
+        def __init__(self, page: object, index: int) -> None:
+            self.page = page
+            self.index = index
+
+        def evaluate(self, _script: str) -> bool:
+            self.page.container_scrolls.append(self.index)  # type: ignore[attr-defined]
+            return True
+
+    class _Candidates:
+        def __init__(self, page: object) -> None:
+            self.page = page
+
+        def evaluate_all(self, script: str) -> list[dict[str, int]]:
+            assert "jobs/view/" in script
+            return [
+                {"clientHeight": 900, "scrollHeight": 4000, "jobLinkCount": 0},
+                {"clientHeight": 587, "scrollHeight": 3807, "jobLinkCount": 2},
+            ]
+
+        def nth(self, index: int) -> _Container:
+            return _Container(self.page, index)
+
+    class _ConfiguredSelector:
+        def count(self) -> int:
+            return 0
+
+    class _Jobs:
+        def evaluate_all(self, _script: str) -> list[str]:
+            return ["https://www.linkedin.com/jobs/view/1"]
+
+    class _Page:
+        url = "https://www.linkedin.com/jobs/search/"
+
+        def __init__(self) -> None:
+            self.container_scrolls: list[int] = []
+            self.mouse = types.SimpleNamespace(
+                wheel=lambda *_args: pytest.fail("must not use page fallback")
+            )
+
+        def goto(self, _url: str, **_kwargs: object) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html><body>results</body></html>"
+
+        def locator(self, selector: str):
+            if selector == plan.results_selector:
+                return _ConfiguredSelector()
+            if selector == "div, ul":
+                return _Candidates(self)
+            return _Jobs()
+
+        def close(self) -> None:
+            return None
+
+    page = _Page()
+    client._context = types.SimpleNamespace(pages=[], new_page=lambda: page)  # type: ignore[attr-defined]
+    result = client.fetch_page(
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+        page_offset=0,
+        execution_plan=plan,
+    )
+
+    assert page.container_scrolls == [1]
+    assert result.scroll_checkpoints[0]["mode"] == "results_container"
+
+
+def test_gate_a_public_page_uses_window_fallback_without_results_container() -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+    )
+    plan = LinkedInExecutionPlan(
+        page_offsets=(0,),
+        max_scroll_checkpoints=1,
+        saturation_checkpoints=2,
+        settle_timeout_ms=0,
+    )
+
+    class _Candidates:
+        def evaluate_all(self, _script: str) -> list[dict[str, int]]:
+            return [{"clientHeight": 900, "scrollHeight": 4000, "jobLinkCount": 0}]
+
+    class _ConfiguredSelector:
+        def count(self) -> int:
+            return 0
+
+    class _Jobs:
+        def __init__(self, page: object) -> None:
+            self.page = page
+
+        def evaluate_all(self, _script: str) -> list[str]:
+            ids = {"1"} if self.page.scroll_calls == 0 else {"1", "2"}  # type: ignore[attr-defined]
+            return [f"https://www.linkedin.com/jobs/view/{job_id}" for job_id in ids]
+
+    class _Page:
+        url = "https://www.linkedin.com/jobs/search/"
+
+        def __init__(self) -> None:
+            self.scroll_calls = 0
+            self.mouse = types.SimpleNamespace(wheel=self._wheel)
+
+        def _wheel(self, _x: int, _y: int) -> None:
+            self.scroll_calls += 1
+
+        def goto(self, _url: str, **_kwargs: object) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html><body>public results</body></html>"
+
+        def locator(self, selector: str):
+            if selector == plan.results_selector:
+                return _ConfiguredSelector()
+            if selector == "div, ul":
+                return _Candidates()
+            return _Jobs(self)
+
+        def close(self) -> None:
+            return None
+
+    page = _Page()
+    client._context = types.SimpleNamespace(pages=[], new_page=lambda: page)  # type: ignore[attr-defined]
+    result = client.fetch_page(
+        "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+        page_offset=0,
+        execution_plan=plan,
+    )
+
+    assert page.scroll_calls == 1
+    assert result.scroll_checkpoints[0]["mode"] == "page_fallback"
+    assert result.scroll_checkpoints[0]["after_unique_dom_id_count"] == 2
+
+
+def test_gate_a_nonmoving_results_container_is_critical_degradation() -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+    )
+    plan = LinkedInExecutionPlan(
+        page_offsets=(0,),
+        max_scroll_checkpoints=2,
+        saturation_checkpoints=2,
+        settle_timeout_ms=0,
+    )
+
+    class _Container:
+        def evaluate(self, script: str) -> bool:
+            # Model a real DOM element whose scrollTop does not change.  The
+            # pre-fix JavaScript returned true unconditionally and therefore
+            # would incorrectly report saturation.
+            return "scrollTop !== before" not in script
+
+    class _Results:
+        def count(self) -> int:
+            return 1
+
+        first = _Container()
+
+    class _Jobs:
+        def evaluate_all(self, _script: str) -> list[str]:
+            return ["https://www.linkedin.com/jobs/view/1"]
+
+    class _Page:
+        url = "https://www.linkedin.com/jobs/search/"
+
+        def goto(self, _url: str, **_kwargs: object) -> None:
+            return None
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html><body>results</body></html>"
+
+        def locator(self, selector: str):
+            return _Results() if selector == plan.results_selector else _Jobs()
+
+        def close(self) -> None:
+            return None
+
+    page = _Page()
+    client._context = types.SimpleNamespace(pages=[], new_page=lambda: page)  # type: ignore[attr-defined]
+    with pytest.raises(BrowserNativeUnavailable, match="scroll plan failed"):
+        client.fetch_page(
+            "https://www.linkedin.com/jobs/search/?keywords=VP+Product&location=United+Kingdom",
+            page_offset=0,
+            execution_plan=plan,
+        )
+
+    health = client.session_health_snapshot()
+    assert health["critical_degradation"] is True
+    assert health["status"] == "blocked"
 
 
 def test_gate_a_scroll_trace_distinguishes_growth_from_saturation() -> None:

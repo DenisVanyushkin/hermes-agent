@@ -1467,7 +1467,8 @@ class BrowserSourceClient:
 
         The authenticated LinkedIn UI does not always expose the configured
         results selector.  In that case, identify the first substantial
-        ``div`` or ``ul`` whose scroll geometry proves that it is scrollable.
+        ``div`` or ``ul`` whose scroll geometry and vacancy links prove that
+        it owns the results.
         This deliberately uses the document's observed geometry rather than
         session or profile metadata.
         """
@@ -1486,6 +1487,9 @@ class BrowserSourceClient:
                 """(elements) => elements.map((element) => ({
                     clientHeight: element.clientHeight,
                     scrollHeight: element.scrollHeight,
+                    jobLinkCount: element.querySelectorAll(
+                        "a[href*='/jobs/view/']"
+                    ).length,
                 }))"""
             )
             for index, measurement in enumerate(measurements):
@@ -1498,6 +1502,8 @@ class BrowserSourceClient:
                     and isinstance(scroll_height, (int, float))
                     and client_height > 200
                     and scroll_height > client_height + 200
+                    and isinstance(measurement.get("jobLinkCount"), (int, float))
+                    and measurement["jobLinkCount"] > 0
                 ):
                     return candidates.nth(index), None
             failure_reason = "results_container_unavailable"
@@ -1526,7 +1532,11 @@ class BrowserSourceClient:
                     page.mouse.wheel(0, 1800)
                 else:
                     moved = container.evaluate(
-                        "(element) => { element.scrollTop += element.clientHeight; return true; }"
+                        """(element) => {
+                            const before = element.scrollTop;
+                            element.scrollTop += element.clientHeight;
+                            return element.scrollTop !== before;
+                        }"""
                     )
                     if moved is False:
                         raise RuntimeError("results container did not execute scroll")
