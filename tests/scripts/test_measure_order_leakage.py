@@ -39,3 +39,19 @@ def test_parse_measurement_report_splits_survivors_vanished_and_isolation_only()
             "isolation_only": ["tests/b.py::test_isolation_only"],
         },
     }
+
+
+def test_bidirectional_section_is_derived_for_any_file():
+    full_log = (
+        "FAILED tests/other.py::test_full - AssertionError\n"
+        "FAILED tests/plain.py::test_same - AssertionError\n"
+    )
+    isolated_logs = {
+        "tests/other.py": "FAILED tests/other.py::test_isolated - AssertionError\n",
+        "tests/plain.py": "FAILED tests/plain.py::test_same - AssertionError\n",
+    }
+
+    report = measure.parse_measurement_report(full_log, isolated_logs)
+
+    assert set(report["bidirectional"]) == {"tests/other.py"}
+    assert report["bidirectional"]["tests/other.py"] == report["by_file"]["tests/other.py"]

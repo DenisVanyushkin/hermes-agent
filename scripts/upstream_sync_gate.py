@@ -900,59 +900,138 @@ _SUMMARY_LINE = re.compile(
 _COUNT_TOKEN = re.compile(
     r"(?P<count>\d+)\s+(?P<label>failed|passed|skipped|warnings?|errors?|error)\b"
 )
+_AGGREGATE_FILE_HEADER = re.compile(r"^--- (?P<path>.+) ---\s*$", re.MULTILINE)
+_AGGREGATE_RUNNER_SUMMARY = re.compile(
+    r"^=== Summary: (?P<files>\d+) files, (?P<passed>\d+) tests passed, "
+    r"(?P<failed>\d+) failed(?:, (?P<skipped>\d+) skipped)?.*===\s*$",
+    re.MULTILINE,
+)
 
 
-def parse_test_outcomes(log: str) -> dict[str, Any]:
-    """Parse pytest's failure and collection-error outcomes together.
-
-    A summary containing only collection errors is still readable. The special
-    ``no tests ran`` line is deliberately rejected: it is an unreadable gate
-    run, not evidence that the selected tests passed.
-    """
-    if _NO_TESTS_RAN.search(log):
-        raise ValueError("pytest run is unreadable: no tests ran")
-    summary = _SUMMARY_LINE.search(log)
-    if not summary:
-        raise ValueError(
-            "pytest log has no summary line: the run was killed, not clean"
-        )
+def _summary_counts(match: re.Match[str]) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for match in _COUNT_TOKEN.finditer(summary.group("counts")):
-        label = match.group("label")
+    for token in _COUNT_TOKEN.finditer(match.group("counts")):
+        label = token.group("label")
         if label == "warnings":
             label = "warning"
         elif label == "errors":
             label = "error"
-        counts[label] = counts.get(label, 0) + int(match.group("count"))
+        counts[label] = counts.get(label, 0) + int(token.group("count"))
+    return counts
+
+
+def _add_counts(target: dict[str, int], source: dict[str, int]) -> None:
+    for label, count in source.items():
+        target[label] = target.get(label, 0) + count
+
+
+def _parse_aggregate_summaries(log: str) -> dict[str, int]:
+    headers = list(_AGGREGATE_FILE_HEADER.finditer(log))
+    runner_summary = list(_AGGREGATE_RUNNER_SUMMARY.finditer(log))
+    if headers:
+        counts: dict[str, int] = {}
+        for index, header in enumerate(headers):
+            end = headers[index + 1].start() if index + 1 < len(headers) else len(log)
+            block = log[header.end() : end]
+            if _NO_TESTS_RAN.search(block):
+                continue
+            summaries = list(_SUMMARY_LINE.finditer(block))
+            if not summaries:
+                raise ValueError(
+                    "aggregate pytest log has no final summary for "
+                    f"{header.group('path')}"
+                )
+            _add_counts(counts, _summary_counts(summaries[-1]))
+        if runner_summary:
+            total = runner_summary[-1]
+            return {
+                "passed": int(total.group("passed")),
+                "failed": int(total.group("failed")),
+                **(
+                    {"skipped": int(total.group("skipped"))}
+                    if total.group("skipped") is not None
+                    else {}
+                ),
+            }
+        return counts
+
+    if runner_summary:
+        total = runner_summary[-1]
+        return {
+            "passed": int(total.group("passed")),
+            "failed": int(total.group("failed")),
+            **(
+                {"skipped": int(total.group("skipped"))}
+                if total.group("skipped") is not None
+                else {}
+            ),
+        }
+    if _NO_TESTS_RAN.search(log):
+        summaries = list(_SUMMARY_LINE.finditer(log))
+        if not summaries:
+            return {}
+    else:
+        summaries = list(_SUMMARY_LINE.finditer(log))
+        if not summaries:
+            raise ValueError("aggregate pytest log has no summary lines")
+    counts = {}
+    for summary in summaries:
+        _add_counts(counts, _summary_counts(summary))
+    return counts
+
+
+def parse_test_outcomes(log: str, *, aggregate: bool = False) -> dict[str, Any]:
+    """Parse pytest's failure and collection-error outcomes together.
+
+    A summary containing only collection errors is still readable. The special
+    ``no tests ran`` line is deliberately rejected in single-run mode. In
+    aggregate mode it is allowed for an individual file; the runner's overall
+    summary or the remaining file summaries still establish the run result.
+    """
+    if aggregate:
+        summary_counts = _parse_aggregate_summaries(log)
+    elif _NO_TESTS_RAN.search(log):
+        raise ValueError("pytest run is unreadable: no tests ran")
+    else:
+        summary = _SUMMARY_LINE.search(log)
+        if not summary:
+            raise ValueError(
+                "pytest log has no summary line: the run was killed, not clean"
+            )
+        summary_counts = _summary_counts(summary)
+    node_log = log if not aggregate else "\n".join(
+        line.strip().removeprefix("║").strip() for line in log.splitlines()
+    )
     collected_nodeids = {
         match.group(1)
-        for line in log.splitlines()
+        for line in node_log.splitlines()
         if (match := _COLLECTED_LINE.match(line))
     }
     error_nodeids = {
         match.group(1)
-        for line in log.splitlines()
+        for line in node_log.splitlines()
         if (match := _ERROR_NODE_LINE.match(line))
     }
     collected_nodeids.update(error_nodeids)
     failed_nodeids = {
         match.group(1)
-        for line in log.splitlines()
+        for line in node_log.splitlines()
         if (match := _FAILED_LINE.match(line))
     }
     failed_nodeids.update(error_nodeids)
     collection_error_paths = sorted(
         {
             match.group(1)
-            for line in log.splitlines()
+            for line in node_log.splitlines()
             if (match := _COLLECTION_ERROR_LINE.match(line))
         }
     )
     return {
         "collected_nodeids": sorted(collected_nodeids),
         "failed_nodeids": sorted(failed_nodeids),
-        "error_count": counts.get("error", 0),
+        "error_count": summary_counts.get("error", 0),
         "collection_error_paths": collection_error_paths,
+        **({"summary": summary_counts} if aggregate else {}),
     }
 
 

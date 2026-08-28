@@ -1288,6 +1288,48 @@ def test_outcomes_parser_accepts_known_pytest_summary_forms(summary, error_count
     assert outcome["error_count"] == error_count
 
 
+def test_outcomes_parser_sums_explicit_aggregate_file_summaries():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    aggregate = (
+        "--- tests/a.py ---\n"
+        "FAILED tests/a.py::test_a - AssertionError\n"
+        "2 failed, 3 passed in 1.00s\n"
+        "--- tests/b.py ---\n"
+        "no tests ran in 0.01s\n"
+        "--- tests/c.py ---\n"
+        "FAILED tests/c.py::test_c - AssertionError\n"
+        "1 failed, 1 passed in 0.20s\n"
+        "=== Summary: 3 files, 4 tests passed, 3 failed ===\n"
+    )
+
+    outcome = parser(aggregate, aggregate=True)
+
+    assert outcome["summary"] == {"failed": 3, "passed": 4}
+
+
+def test_aggregate_parser_rejects_a_file_without_a_final_summary():
+    aggregate = (
+        "--- tests/a.py ---\n"
+        "1 passed in 0.10s\n"
+        "--- tests/b.py ---\n"
+        "FAILED tests/b.py::test_b - AssertionError\n"
+    )
+
+    with pytest.raises(ValueError, match="tests/b.py"):
+        upstream_sync_gate.parse_test_outcomes(aggregate, aggregate=True)
+
+
+def test_aggregate_parser_accepts_the_real_runner_overall_summary():
+    outcome = upstream_sync_gate.parse_test_outcomes(
+        "Running 2 test files (~10 tests) with -j 1\n"
+        "=== Summary: 2 files, 8 tests passed, 1 failed, 1 skipped "
+        "(100% complete) in 1.0s (1 workers) ===\n",
+        aggregate=True,
+    )
+
+    assert outcome["summary"] == {"failed": 1, "passed": 8, "skipped": 1}
+
+
 def test_outcomes_comparator_reports_new_collection_error():
     comparator = getattr(upstream_sync_gate, "compare_test_outcomes", None)
     assert callable(comparator), "outcomes comparator is not implemented"

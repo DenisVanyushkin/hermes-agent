@@ -21,9 +21,6 @@ from typing import Any
 
 
 FAILED_LINE = re.compile(r"^FAILED (.+?)(?: - .*)?$")
-BIDIRECTIONAL_FILE = "tests/test_baseline_doctor.py"
-
-
 def parse_failed_nodeids(log: str) -> set[str]:
     """Parse pytest's final ``FAILED nodeid`` lines from one log."""
     failed: set[str] = set()
@@ -68,13 +65,11 @@ def parse_measurement_report(
         "vanish": len(vanish),
         "isolation_only": len(isolation_only),
         "by_file": by_file,
-        "bidirectional": by_file.get(BIDIRECTIONAL_FILE, {
-            "full": [],
-            "isolated": [],
-            "survive": [],
-            "vanish": [],
-            "isolation_only": [],
-        }),
+        "bidirectional": {
+            path: entries
+            for path, entries in by_file.items()
+            if entries["vanish"] and entries["isolation_only"]
+        },
     }
 
 
