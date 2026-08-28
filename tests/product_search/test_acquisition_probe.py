@@ -2058,6 +2058,86 @@ def test_b3_pair_aggregates_extraction_evidence_for_all_queries(tmp_path: Path) 
     ]
 
 
+def test_b3_repeated_query_id_replaces_previous_extraction_trace(tmp_path: Path) -> None:
+    successful_counts = {
+        "dom": 4,
+        "parsed_before_filter": 3,
+        "returned": 2,
+        "duplicate_canonical": 1,
+        "duplicate_canonical_returned": 0,
+        "excluded": 1,
+        "unexplained": 1,
+        "vacancies_extracted": 2,
+    }
+
+    class RetryingSource:
+        last_errors: tuple[str, ...] = ()
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_trace: dict[str, object] = {}
+
+        def __call__(self, _query: object) -> list[dict[str, str]]:
+            self.calls += 1
+            if self.calls == 1:
+                self.last_trace = {
+                    "extraction_counts": {
+                        "dom": 99,
+                        "parsed_before_filter": 98,
+                        "returned": 97,
+                        "duplicate_canonical": 9,
+                        "duplicate_canonical_returned": 8,
+                        "excluded": 7,
+                        "unexplained": 6,
+                        "vacancies_extracted": 5,
+                    },
+                    "pages": [{"artifact_ref": "diagnostics/retry-failed.json"}],
+                    "scroll_checkpoints": [{"page_offset": 0, "step": 1}],
+                }
+                raise ValueError("late validation failure")
+            self.last_trace = {
+                "extraction_counts": successful_counts,
+                "pages": [{"artifact_ref": "diagnostics/retry-success.json"}],
+                "scroll_checkpoints": [{"page_offset": 25, "step": 1}],
+            }
+            return [_b1_record(f"successful-row-{index}") for index in range(2)]
+
+    source = RetryingSource()
+    run_probe(
+        run_id="b3-repeated-query-id",
+        queries=(
+            {
+                "query_id": "same-query",
+                "cell_id": "b3-cell",
+                "source_family": "alpha",
+                "query": "one role",
+            },
+        ),
+        sources={"alpha": source},
+        output_dir=tmp_path,
+        isolation={
+            "alpha": SourceIsolation(
+                mode="api", path=tmp_path / "alpha.lock", collection_method="api"
+            )
+        },
+        minimum_independent_families_by_cell={"b3-cell": 1},
+        max_attempts=2,
+    )
+
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    pair = summary["cell_family_attempts"][0]
+    assert source.calls == 2
+    assert pair["query_ids"] == ["same-query"]
+    assert pair["query_count"] == 1
+    assert pair["outcome"] == "completed"
+    assert pair["received_records"] == 2
+    assert pair["extraction_counts"] == successful_counts
+    assert pair["extraction_artifact_references"] == [
+        "diagnostics/retry-success.json"
+    ]
+    assert pair["scroll_checkpoints"] == [{"page_offset": 25, "step": 1}]
+
+
 def test_b1_foreign_credit_note_requires_zero_own_completed_families(
     tmp_path: Path,
 ) -> None:

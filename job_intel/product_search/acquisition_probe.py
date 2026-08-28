@@ -1413,6 +1413,7 @@ def run_probe(
     cell_attempts: dict[str, list[str]] = {}
     cell_minimums: dict[str, int] = dict(minimum_independent_families_by_cell or {})
     pair_attempts: dict[tuple[str, str], dict[str, Any]] = {}
+    pair_trace_evidence: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
     query_outcomes: dict[tuple[str, str], dict[str, AcquisitionOutcome]] = {}
     query_critical_degradation: dict[tuple[str, str], dict[str, bool]] = {}
 
@@ -1492,32 +1493,48 @@ def run_probe(
             if observation in {"with_session", "without_session", "not_observed"}:
                 pair["session_observation"] = observation
             counts = trace.get("extraction_counts")
-            if isinstance(counts, Mapping):
-                previous_counts = pair["extraction_counts"] or {}
-                aggregated_counts: dict[str, int] = {}
-                for key in sorted(set(previous_counts) | set(counts), key=str):
-                    aggregated_counts[str(key)] = int(previous_counts.get(key, 0)) + int(
-                        counts.get(key, 0)
-                    )
-                pair["extraction_counts"] = aggregated_counts
             pages = trace.get("pages")
-            if isinstance(pages, list):
-                pair["extraction_artifact_references"].extend(
+            checkpoints = trace.get("scroll_checkpoints")
+            query_traces = pair_trace_evidence.setdefault(pair_key, {})
+            query_traces[query.query_id] = {
+                "extraction_counts": (
+                    {str(key): int(value) for key, value in counts.items()}
+                    if isinstance(counts, Mapping)
+                    else {}
+                ),
+                "artifact_references": (
                     [
                         str(page["artifact_ref"])
                         for page in pages
                         if isinstance(page, Mapping) and page.get("artifact_ref")
                     ]
-                )
-            checkpoints = trace.get("scroll_checkpoints")
-            if isinstance(checkpoints, list):
-                pair["scroll_checkpoints"].extend(
+                    if isinstance(pages, list)
+                    else []
+                ),
+                "scroll_checkpoints": (
                     [
                         dict(checkpoint)
                         for checkpoint in checkpoints
                         if isinstance(checkpoint, Mapping)
                     ]
-                )
+                    if isinstance(checkpoints, list)
+                    else []
+                ),
+            }
+            aggregated_counts: dict[str, int] = {}
+            artifact_references: list[str] = []
+            scroll_checkpoints: list[dict[str, Any]] = []
+            for query_id in pair["query_ids"]:
+                query_trace = query_traces.get(query_id)
+                if query_trace is None:
+                    continue
+                for key, value in query_trace["extraction_counts"].items():
+                    aggregated_counts[key] = aggregated_counts.get(key, 0) + value
+                artifact_references.extend(query_trace["artifact_references"])
+                scroll_checkpoints.extend(query_trace["scroll_checkpoints"])
+            pair["extraction_counts"] = aggregated_counts or None
+            pair["extraction_artifact_references"] = artifact_references
+            pair["scroll_checkpoints"] = scroll_checkpoints
         if (
             query.source_family == "linkedin"
             and pair["session_observation"] == "not_observed"
