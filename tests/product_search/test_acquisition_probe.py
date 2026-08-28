@@ -567,6 +567,11 @@ def test_write_manifest_and_run_manifest_are_ring_compatible(
     assert generated["bounded_proof"]["negative_control"]["cell_id"] == "aaa_control"
     assert generated["bounded_proof"]["negative_control"]["mapping_version"] == "1.0"
 
+    execution_plan = LinkedInExecutionPlan(
+        page_offsets=(0, 25, 50), max_scroll_checkpoints=3
+    )
+    monkeypatch.setattr(acquisition_probe, "LinkedInExecutionPlan", lambda: execution_plan)
+
     captured: dict[str, object] = {}
     monkeypatch.setattr(
         acquisition_probe,
@@ -591,6 +596,15 @@ def test_write_manifest_and_run_manifest_are_ring_compatible(
 
     assert acquisition_probe.main() == 0
     assert captured["geography_mapping"] is mapping
+    linkedin_queries = [
+        query
+        for query in captured["queries"]
+        if isinstance(query, ProbeQuery) and query.source_family == "linkedin"
+    ]
+    assert linkedin_queries
+    assert {query.execution_plan for query in linkedin_queries} == {execution_plan}
+    assert execution_plan.max_scroll_checkpoints != 2
+    assert all(query.execution_plan is execution_plan for query in linkedin_queries)
 
 
 def test_run_manifest_wires_runtime_capability_checks_from_composition_root(

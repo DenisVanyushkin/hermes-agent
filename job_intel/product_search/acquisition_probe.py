@@ -2245,10 +2245,12 @@ def main() -> int:
         bounded_cell_ids, negative_control = _bounded_proof_configuration(
             manifest, mapping
         )
+        execution_plan = LinkedInExecutionPlan()
         queries = expand_queries(
             contract,
             role_terms=("Chief Product Officer", "VP Product", "Head of Product", "GM Digital"),
             geography_mapping=mapping,
+            execution_plan=execution_plan,
         )
         queries = tuple(query for query in queries if query.cell_id in bounded_cell_ids)
         if negative_control["cell_id"] not in mapping:
