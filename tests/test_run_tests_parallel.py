@@ -638,3 +638,69 @@ def test_node_report_distinguishes_no_tests_from_a_silent_kill(tmp_path: Path) -
     assert payload["files"]["tests/test_empty.py"]["readable"] is True
     assert payload["files"]["tests/test_killed.py"]["readable"] is False
     assert payload["readable"] is False
+
+
+def test_node_report_distinguishes_infrastructure_rc_from_normal_test_failure(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "target-worktree"
+    tests_root = repo_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    if exitstatus == 0:\n"
+        "        session.exitstatus = 7\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_infrastructure_rc.py").write_text(
+        "def test_passes_but_session_rc_is_nonzero():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_normal_failure.py").write_text(
+        "def test_normal_failure():\n    assert False\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "nodes.json"
+    runner = Path(__file__).resolve().parent.parent / "scripts" / "run_tests_parallel.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo-root",
+            str(repo_root),
+            "--files",
+            "tests/test_infrastructure_rc.py:tests/test_normal_failure.py",
+            "--node-report",
+            str(report),
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    infrastructure = payload["files"]["tests/test_infrastructure_rc.py"]
+    normal_failure = payload["files"]["tests/test_normal_failure.py"]
+    assert infrastructure["returncode"] != 0
+    assert infrastructure["failed_nodeids"] == []
+    assert infrastructure["readable"] is False
+    assert normal_failure["returncode"] != 0
+    assert normal_failure["failed_nodeids"] == [
+        "tests/test_normal_failure.py::test_normal_failure"
+    ]
+    assert normal_failure["readable"] is True

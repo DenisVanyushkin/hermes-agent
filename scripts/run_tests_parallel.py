@@ -527,8 +527,15 @@ def _file_output_is_readable(
     output: str,
     summary: dict[str, int],
     node_report: dict[str, object],
+    returncode: int,
 ) -> bool:
     """A deliberate empty pytest file is readable; a silent death is not."""
+    if (
+        returncode != 0
+        and not node_report["failed_nodeids"]
+        and not node_report["collection_error_paths"]
+    ):
+        return False
     if summary or node_report["collected_nodeids"]:
         return True
     return bool(re.search(r"(?:^|\n)\s*no tests ran\b", output, re.IGNORECASE))
@@ -1285,6 +1292,7 @@ def main() -> int:
                     "failed_nodeids": [],
                     "collection_error_paths": [],
                     "error_count": 0,
+                    "returncode": None,
                     "readable": False,
                 }
                 _print_progress(
@@ -1308,8 +1316,9 @@ def main() -> int:
             )
             file_times.append((fpath, subproc_wall))
             node_report = _parse_node_outcomes(output, repo_root)
+            node_report["returncode"] = rc
             node_report["readable"] = _file_output_is_readable(
-                output, summary, node_report
+                output, summary, node_report, rc
             )
             file_reports[_format_file(fpath, repo_root)] = node_report
             if rc == 0:
