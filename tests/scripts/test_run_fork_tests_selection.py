@@ -301,6 +301,18 @@ def test_unchanged_clean_tree_emits_preliminary_and_final_receipts(
     assert f"head_before={before} head_after={before}" in output
 
 
+def test_final_receipt_has_machine_readable_duration(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    result = _run_runner(world, fake_python[0], FAKE_ARGV_FILE=str(fake_python[1]))
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    duration = re.search(r"^fork test duration: seconds=(\d+)$", output, re.MULTILINE)
+    assert duration is not None, output
+    assert int(duration.group(1)) >= 0
+
+
 @pytest.mark.parametrize("dirty_kind", ["tracked", "index", "untracked"])
 def test_dirty_tree_does_not_emit_a_final_receipt(
     world: Path, fake_python: tuple[Path, Path], dirty_kind: str
@@ -749,6 +761,38 @@ def test_manifest_selection_emits_receipt_for_consumed_file(
     )
     assert result.returncode == 0, f"stderr={result.stderr!r}"
     assert expected in result.stderr
+
+
+def test_manifest_receipt_binds_file_set_not_only_file_count(
+    world: Path, tmp_path: Path
+) -> None:
+    manifest_a = _manifest_attempt(world, tmp_path)
+    payload = json.loads(manifest_a.read_text(encoding="utf-8"))
+    candidate = manifest_a.parents[1]
+    manifest_b_dir = candidate / "2"
+    manifest_b_dir.mkdir()
+    payload["generation"] = 2
+    payload["run_id"] = f"{payload['candidate_id']}:2"
+    payload["tests"][0]["path"] = "tests/test_upstream_kept.py"
+    manifest_b = manifest_b_dir / "gate-selection.json"
+    manifest_b.write_text(json.dumps(payload), encoding="utf-8")
+    (manifest_b_dir / "attempt.json").write_text("{}\n", encoding="utf-8")
+
+    result_a = _consume_manifest(world, manifest_a)
+    result_same = _consume_manifest(world, manifest_a)
+    result_b = _consume_manifest(world, manifest_b)
+    assert result_a.returncode == 0, result_a.stderr
+    assert result_same.returncode == 0, result_same.stderr
+    assert result_b.returncode == 0, result_b.stderr
+    assert len(result_a.stdout.splitlines()) == len(result_b.stdout.splitlines())
+
+    digest_a = re.search(r"manifest_sha256=([0-9a-f]{64})", result_a.stderr).group(1)
+    digest_same = re.search(
+        r"manifest_sha256=([0-9a-f]{64})", result_same.stderr
+    ).group(1)
+    digest_b = re.search(r"manifest_sha256=([0-9a-f]{64})", result_b.stderr).group(1)
+    assert digest_same == digest_a
+    assert digest_a != digest_b
 
 
 def test_duplicate_boundary_option_is_refused(world: Path) -> None:
