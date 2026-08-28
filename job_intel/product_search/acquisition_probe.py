@@ -808,6 +808,7 @@ class GeographyEvidence(BaseModel):
     normalization_rule_version: str
     mapping_version: str
     remote_scope: RemoteScope
+    geography_resolution_reason: str | None = None
 
     @model_validator(mode="after")
     def _validate_primary_country(self) -> "GeographyEvidence":
@@ -931,6 +932,50 @@ def normalize_geography_evidence(
     )
 
 
+def _merge_geography_evidence(
+    current: GeographyEvidence, incoming: GeographyEvidence
+) -> GeographyEvidence:
+    current_semantics = (
+        current.primary_country,
+        current.remote_scope,
+        current.mentioned_countries,
+    )
+    incoming_semantics = (
+        incoming.primary_country,
+        incoming.remote_scope,
+        incoming.mentioned_countries,
+    )
+    if current_semantics == incoming_semantics:
+        return current
+    if current.geography_resolution_reason or incoming.geography_resolution_reason:
+        return _conflicting_geography_evidence(current, incoming)
+    if current.normalization_source == "unresolved":
+        return incoming
+    if incoming.normalization_source == "unresolved":
+        return current
+    return _conflicting_geography_evidence(current, incoming)
+
+
+def _conflicting_geography_evidence(
+    current: GeographyEvidence, incoming: GeographyEvidence
+) -> GeographyEvidence:
+    return GeographyEvidence(
+        raw_location_text=None,
+        mentioned_countries=tuple(
+            sorted(
+                set(current.mentioned_countries)
+                | set(incoming.mentioned_countries)
+            )
+        ),
+        primary_country=None,
+        normalization_source="unresolved",
+        normalization_rule_version=current.normalization_rule_version,
+        mapping_version=current.mapping_version,
+        remote_scope="none",
+        geography_resolution_reason="conflicting_resolved_geography",
+    )
+
+
 def _mapping_metadata(mapping: Mapping[str, Any]) -> tuple[str, str, str, float]:
     return (
         str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION)),
@@ -1015,6 +1060,7 @@ def build_geography_summary(
     }
     evidence_by_identity: dict[str, GeographyEvidence] = {}
     evidence_by_source_id: dict[str, dict[str, Any]] = {}
+    source_ids_by_identity: dict[str, set[str]] = {}
     received_seen: set[tuple[str, str]] = set()
     credited_identity_owners: dict[str, str] = {}
 
@@ -1041,41 +1087,55 @@ def build_geography_summary(
             identity = hashlib.sha256(
                 f"{record.get('company')}\0{record.get('title')}".encode()
             ).hexdigest()
-        geography = normalize_geography_evidence(
+        incoming_geography = normalize_geography_evidence(
             record.get("location"),
             mapping_version=mapping_version,
             city_country_codes=_mapping_city_country_codes(mapping),
         )
         previous = evidence_by_identity.get(identity)
-        if previous is not None and previous != geography:
-            raise ValueError(f"conflicting geography evidence for {identity}")
+        geography = (
+            incoming_geography
+            if previous is None
+            else _merge_geography_evidence(previous, incoming_geography)
+        )
         evidence_by_identity[identity] = geography
         source_id = str(record.get("source_id") or identity)
+        source_ids_by_identity.setdefault(identity, set()).add(source_id)
         evidence_by_source_id[source_id] = geography.model_dump(mode="json")
         if (query_cell, identity) in received_seen:
             continue
         received_seen.add((query_cell, identity))
         cells[query_cell]["received"].add(identity)
 
-        owner: str | None = None
-        if geography.remote_scope == "location_independent":
-            if "genuinely_location_independent" in cells:
-                owner = "genuinely_location_independent"
-        elif geography.primary_country is None:
-            cells[query_cell]["geography_unknown"] += 1
-        else:
-            owner = owners.get(geography.primary_country)
-        if owner is None:
-            if geography.primary_country is not None:
-                cells[query_cell]["rejected_country_mismatch"] += 1
-        elif owner != query_cell:
-            cells[query_cell]["rejected_country_mismatch"] += 1
-        if owner is not None:
-            existing_owner = credited_identity_owners.get(identity)
-            if existing_owner is not None and existing_owner != owner:
-                raise ValueError(f"geography identity credited to multiple cells: {identity}")
-            credited_identity_owners[identity] = owner
-            cells[owner]["credited"].add(identity)
+    for identity, source_ids in source_ids_by_identity.items():
+        final_evidence = evidence_by_identity[identity].model_dump(mode="json")
+        for source_id in source_ids:
+            evidence_by_source_id[source_id] = final_evidence
+
+    for query_cell, cell in cells.items():
+        for identity in cell["received"]:
+            geography = evidence_by_identity[identity]
+            owner: str | None = None
+            if geography.remote_scope == "location_independent":
+                if "genuinely_location_independent" in cells:
+                    owner = "genuinely_location_independent"
+            elif geography.primary_country is None:
+                cell["geography_unknown"] += 1
+            else:
+                owner = owners.get(geography.primary_country)
+            if owner is None:
+                if geography.primary_country is not None:
+                    cell["rejected_country_mismatch"] += 1
+            elif owner != query_cell:
+                cell["rejected_country_mismatch"] += 1
+            if owner is not None:
+                existing_owner = credited_identity_owners.get(identity)
+                if existing_owner is not None and existing_owner != owner:
+                    raise ValueError(
+                        f"geography identity credited to multiple cells: {identity}"
+                    )
+                credited_identity_owners[identity] = owner
+                cells[owner]["credited"].add(identity)
 
     cell_ids = sorted(cells)
     pairwise: dict[str, dict[str, Any]] = {}

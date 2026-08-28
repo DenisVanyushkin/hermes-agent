@@ -28,6 +28,52 @@ def test_b2_unknown_location_is_unresolved_and_not_credited() -> None:
     assert summary["cells"]["kazakhstan"]["credited"] == []
     assert summary["cells"]["kazakhstan"]["geography_unknown"] == 1
 
+def test_b2_same_semantic_geography_ignores_raw_location_text_difference() -> None:
+    same_url = "https://www.linkedin.com/jobs/view/geo-merge-same"
+    summary = _b2_summary(
+        [
+            _b2_record("sg-verbose", "singapore", "Singapore Singapore", url=same_url),
+            _b2_record("sg-short", "singapore", "Singapore", url=same_url),
+        ],
+        _b2_mapping(singapore=("SG",)),
+    )
+
+    assert summary["records"]["sg-verbose"]["primary_country"] == "SG"
+    assert summary["records"]["sg-short"]["primary_country"] == "SG"
+    assert summary["cells"]["singapore"]["credited"] == [same_url]
+    assert summary["cells"]["singapore"]["geography_unknown"] == 0
+
+def test_b2_resolved_geography_wins_over_unknown_duplicate() -> None:
+    same_url = "https://www.linkedin.com/jobs/view/geo-merge-known"
+    summary = _b2_summary(
+        [
+            _b2_record("sg-unknown", "singapore", "Unknown", url=same_url),
+            _b2_record("sg-known", "singapore", "Singapore Singapore", url=same_url),
+        ],
+        _b2_mapping(singapore=("SG",)),
+    )
+
+    assert summary["records"]["sg-unknown"]["primary_country"] == "SG"
+    assert summary["records"]["sg-known"]["primary_country"] == "SG"
+    assert summary["cells"]["singapore"]["credited"] == [same_url]
+    assert summary["cells"]["singapore"]["geography_unknown"] == 0
+
+def test_b2_different_resolved_geographies_become_named_unknown() -> None:
+    same_url = "https://www.linkedin.com/jobs/view/geo-merge-conflict"
+    summary = _b2_summary(
+        [
+            _b2_record("sg", "singapore", "Singapore", url=same_url),
+            _b2_record("my", "singapore", "Kuala Lumpur, Malaysia", url=same_url),
+        ],
+        _b2_mapping(singapore=("SG",)),
+    )
+
+    evidence = summary["records"]["sg"]
+    assert evidence["primary_country"] is None
+    assert evidence["geography_resolution_reason"] == "conflicting_resolved_geography"
+    assert summary["cells"]["singapore"]["credited"] == []
+    assert summary["cells"]["singapore"]["geography_unknown"] == 1
+
 def test_b2_ambiguous_multi_country_location_is_unknown_not_guessed() -> None:
     summary = _b2_summary(
         [_b2_record("multi-1", "dach", "Austria / Australia")],
