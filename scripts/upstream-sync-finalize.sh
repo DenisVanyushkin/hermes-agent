@@ -433,6 +433,44 @@ merge_passes_fork_tests() {
     return 1
   fi
 
+  probe_final_receipt_line() {
+    local nodeids_file="$1"
+    local digest
+    if ! digest="$("$py" - "$nodeids_file" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+nodeids = payload.get("nodeids") if isinstance(payload, dict) else payload
+if not isinstance(nodeids, list) or not all(isinstance(item, str) for item in nodeids):
+    raise SystemExit("probe request nodeids must be a string list")
+print(hashlib.sha256("".join(f"{item}\n" for item in nodeids).encode()).hexdigest())
+PY
+    )" || [ -z "$digest" ]; then
+      return 1
+    fi
+    "$py" "$gate" receipt --source legacy --stage final --digest "$digest"
+  }
+
+  record_unreadable_probe() {
+    local output="$1"
+    local label="$2"
+    "$py" - "$output" "$label" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+    "collect_ok": False,
+    "probe_ok": False,
+    "collected_nodeids": [],
+    "failed_nodeids": [],
+    "error_count": 0,
+    "collection_error_paths": [],
+    "unreadable_runs": [{"source": sys.argv[2], "stage": "receipt"}],
+}), encoding="utf-8")
+PY
+    echo "$label probe final receipt missing; refusing to use its node report" >>"$DETAIL_LOG"
+  }
+
   record_unreadable_receipt() {
     local source="$1"
     local unreadable_classification="$attempt_dir/gate-classification.json"
@@ -589,14 +627,19 @@ PY
       echo "could not create the merged-tree probe worktree" >>"$DETAIL_LOG"
     else
       "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_request" "$merged_probe_wt" >"$merged_isolated_log" 2>&1 || true
-      merged_isolated_runner_nodes="$attempt_dir/gate-merged-isolated.runner.nodes.json"
-      merged_isolated_source=(--log "$merged_isolated_log")
-      if [ -s "$merged_isolated_runner_nodes" ]; then
-        merged_isolated_source=(--node-report "$merged_isolated_runner_nodes")
-      fi
-      if ! "$py" "$gate" node-outcome "${merged_isolated_source[@]}" \
-        --expected-nodeids "$merged_isolated_probe_nodeids" >"$merged_isolated_nodes" 2>>"$DETAIL_LOG"; then
-        printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+      if ! merged_probe_final_receipt_line="$(probe_final_receipt_line "$probe_request" 2>>"$DETAIL_LOG")" ||
+         ! grep -Fqx "$merged_probe_final_receipt_line" "$merged_isolated_log"; then
+        record_unreadable_probe "$merged_isolated_nodes" "merged-isolated"
+      else
+        merged_isolated_runner_nodes="$attempt_dir/gate-merged-isolated.runner.nodes.json"
+        merged_isolated_source=(--log "$merged_isolated_log")
+        if [ -s "$merged_isolated_runner_nodes" ]; then
+          merged_isolated_source=(--node-report "$merged_isolated_runner_nodes")
+        fi
+        if ! "$py" "$gate" node-outcome "${merged_isolated_source[@]}" \
+          --expected-nodeids "$merged_isolated_probe_nodeids" >"$merged_isolated_nodes" 2>>"$DETAIL_LOG"; then
+          printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+        fi
       fi
       git -C "$REPO" worktree remove --force "$merged_probe_wt" >/dev/null 2>&1 || true
       rm -rf "$merged_probe_wt"
@@ -667,14 +710,19 @@ PY
     rm -rf "$probe_wt"
   else
     "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_filtered_request" "$probe_wt" >"$probe_log" 2>&1 || true
-    upstream_runner_nodes="$attempt_dir/gate-upstream-probe.runner.nodes.json"
-    upstream_source=(--log "$probe_log")
-    if [ -s "$upstream_runner_nodes" ]; then
-      upstream_source=(--node-report "$upstream_runner_nodes")
-    fi
-    if ! "$py" "$gate" node-outcome "${upstream_source[@]}" \
-      --expected-nodeids "$probe_nodeids" >"$upstream_nodes" 2>>"$DETAIL_LOG"; then
-      printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
+    if ! upstream_probe_final_receipt_line="$(probe_final_receipt_line "$probe_filtered_request" 2>>"$DETAIL_LOG")" ||
+       ! grep -Fqx "$upstream_probe_final_receipt_line" "$probe_log"; then
+      record_unreadable_probe "$upstream_nodes" "upstream-parent"
+    else
+      upstream_runner_nodes="$attempt_dir/gate-upstream-probe.runner.nodes.json"
+      upstream_source=(--log "$probe_log")
+      if [ -s "$upstream_runner_nodes" ]; then
+        upstream_source=(--node-report "$upstream_runner_nodes")
+      fi
+      if ! "$py" "$gate" node-outcome "${upstream_source[@]}" \
+        --expected-nodeids "$probe_nodeids" >"$upstream_nodes" 2>>"$DETAIL_LOG"; then
+        printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
+      fi
     fi
     git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
     rm -rf "$probe_wt"

@@ -1018,7 +1018,14 @@ class TestApplyMergeIsGatedOnForkTests:
             "echo '2 failed, 4 passed in 2.00s'\n"
         )
 
-    def _node_aware_block_stub(self, scripts: Path) -> None:
+    def _node_aware_block_stub(
+        self,
+        scripts: Path,
+        *,
+        include_probe_final_receipt: bool = True,
+        missing_probe_request: str | None = None,
+        include_existing_upstream_failure: bool = False,
+    ) -> None:
         """Emit valid structured evidence for a measured block.
 
         The upstream-parent probe must pass the newly-added upstream node;
@@ -1028,17 +1035,54 @@ class TestApplyMergeIsGatedOnForkTests:
         """
         python = str(sys.executable)
         gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+        existing_upstream_failure = (
+            'if [ "$SIDE" = post ]; then\n'
+            "  echo 'PASSED tests/test_upstream_kept.py::test_kept'\n"
+            "  echo 'FAILED tests/test_upstream_kept.py::test_kept - AssertionError'\n"
+            "fi\n"
+            if include_existing_upstream_failure
+            else ""
+        )
+        probe_receipt_block = ""
+        if include_probe_final_receipt:
+            if missing_probe_request is not None:
+                probe_receipt_block += (
+                    f'  if [ "$(basename "$PROBE_REQUEST")" != "{missing_probe_request}" ]; then\n'
+                )
+            probe_receipt_block += (
+                f'  DIGEST="$({python} - "$PROBE_REQUEST" <<\'PY\'\n'
+                "import hashlib, json, sys\n"
+                "from pathlib import Path\n"
+                "request = json.loads(Path(sys.argv[1]).read_text())\n"
+                "payload = ''.join(f'{nodeid}\\n' for nodeid in request['nodeids'])\n"
+                "print(hashlib.sha256(payload.encode()).hexdigest())\n"
+                "PY\n"
+                ')"\n'
+                f'  {python} {gate} receipt --source legacy --stage final --digest "$DIGEST"\n'
+            )
+            if missing_probe_request is not None:
+                probe_receipt_block += "  fi\n"
         (scripts / "run-fork-tests.sh").write_text(
             "#!/usr/bin/env bash\n"
-            'SEL=""; WT=""; PROBE=0\n'
+            'SEL=""; WT=""; PROBE=0; PROBE_REQUEST=""\n'
             'while [ $# -gt 0 ]; do case "$1" in\n'
             '  --selection-from) SEL="$2"; shift 2 ;;\n'
             '  --attempt-root|--boundary) shift 2 ;;\n'
-            '  --probe-nodeids-from) PROBE=1; shift 2 ;;\n'
+            '  --probe-nodeids-from) PROBE=1; PROBE_REQUEST="$2"; shift 2 ;;\n'
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'if [ "$PROBE" -eq 1 ]; then\n'
-            "  echo '0 failed, 1 passed in 0.10s'\n"
+            + probe_receipt_block
+            + (
+                "  echo 'PASSED tests/test_upstream_kept.py::test_kept'\n"
+                if include_existing_upstream_failure
+                else ""
+            )
+            + "  echo 'PASSED tests/test_fork_only.py::test_fork_only'\n"
+            + '  if [ -f "$WT/tests/test_upstream_added.py" ]; then\n'
+            + "    echo 'PASSED tests/test_upstream_added.py::test_added'\n"
+            + "  fi\n"
+            + "  echo '0 failed, 1 passed in 0.10s'\n"
             "  exit 0\n"
             "fi\n"
             f'HEAD="$({python} -c \'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())\' "$WT")"\n'
@@ -1051,8 +1095,11 @@ class TestApplyMergeIsGatedOnForkTests:
             ')"\n'
             f'{python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
             f'{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
+            + existing_upstream_failure
+            + "echo 'PASSED tests/test_fork_only.py::test_fork_only'\n"
             "echo 'FAILED tests/test_fork_only.py::test_fork_only - AssertionError'\n"
             'if [ -f "$WT/tests/test_upstream_added.py" ]; then\n'
+            "  echo 'PASSED tests/test_upstream_added.py::test_added'\n"
             "  echo 'FAILED tests/test_upstream_added.py::test_added - AssertionError'\n"
             "  echo '2 failed, 1 passed in 0.10s'\n"
             "else\n"
@@ -1260,6 +1307,54 @@ class TestApplyMergeIsGatedOnForkTests:
         assert "run_gate outcome: mode=apply outcome=block" in (
             state / "finalize-detail.log"
         ).read_text()
+
+    def test_probe_without_final_receipt_is_unreadable(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+        self._node_aware_block_stub(scripts, include_probe_final_receipt=False)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        evidence = proc.stderr + proc.stdout + _result(state).get("detail", "")
+        assert _result(state)["status"] == "failed", evidence
+        assert "merged-isolated probe final receipt missing" in evidence, evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_upstream_probe_without_final_receipt_is_unreadable(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "tests/test_upstream_kept.py").write_text(
+            "def test_kept(): assert False\n"
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "-c", "user.name=t", "-c", "user.email=t", "commit", "-qm", "change kept test")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+        self._node_aware_block_stub(
+            scripts,
+            missing_probe_request="gate-upstream-probe.filtered.request.json",
+            include_existing_upstream_failure=True,
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        evidence = proc.stderr + proc.stdout + _result(state).get("detail", "")
+        assert _result(state)["status"] == "failed", evidence
+        assert "upstream-parent probe final receipt missing" in evidence, evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_pre_existing_failures_do_not_block(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
