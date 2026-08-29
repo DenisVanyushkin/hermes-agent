@@ -68,6 +68,14 @@ DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
 '''
 
 
+def _manifest_final_receipt_tail() -> str:
+    """Append the final receipt after the stub runner has printed its output."""
+    return (
+        '"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" '
+        '--stage final --digest "$DIGEST"\n'
+    )
+
+
 @pytest.fixture()
 def world(tmp_path: Path):
     """A live checkout on local/customizations plus a divergent upstream commit.
@@ -485,6 +493,7 @@ class TestEndToEndWithTheHostFinalizer:
             "#!/usr/bin/env bash\n"
             + _manifest_receipt_preamble()
             + "echo '0 failed, 1 passed in 0.10s'\n"
+            + _manifest_final_receipt_tail()
         )
         tests_stub.chmod(0o755)
         for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py"):
