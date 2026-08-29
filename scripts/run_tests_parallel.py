@@ -101,6 +101,7 @@ _DEFAULT_FILE_RETRIES = 1
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+_NODE_REPORT_SCHEMA = "run-tests-parallel/node-report/v1"
 
 
 def _split_pathspec(value: str) -> List[str]:
@@ -307,6 +308,7 @@ def _run_one_file(
     repo_root: Path,
     file_timeout: float,
     retries: int = 0,
+    nodeids: List[str] | None = None,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
 
@@ -341,14 +343,14 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout
+        file, pytest_args, repo_root, file_timeout, nodeids
     )
     attempt = 0
     while rc != 0 and attempt < retries:
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+            file, pytest_args, repo_root, file_timeout, nodeids
         )
         subproc_wall += subproc_wall2
         if rc == 0:
@@ -376,9 +378,11 @@ def _run_one_file_once(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    nodeids: List[str] | None = None,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    selectors = nodeids or [str(file)]
+    cmd = [sys.executable, "-m", "pytest", *selectors, *pytest_args]
     
     subproc_start = time.monotonic()
     # launch the pytest process
@@ -455,7 +459,8 @@ def _parse_pytest_summary(output: str) -> dict[str, int]:
     granularity instead of just file-level pass/fail.
 
     Returns a dict with keys ``passed``, ``failed``, ``skipped``, ``errors``,
-    ``xfailed``, ``xpassed`` (only keys found in the output are present).
+    ``xfailed``, ``xpassed``, ``deselected`` (only keys found in the output
+    are present).
     """
     result: dict[str, int] = {}
     # Walk backwards from the end — the summary line is always near the tail.
@@ -463,8 +468,12 @@ def _parse_pytest_summary(output: str) -> dict[str, int]:
         line = line.strip()
         if not line:
             continue
-        # Match "N passed", "N failed", "N skipped", "N errors", "N xfailed", "N xpassed"
-        for m in re.finditer(r"(\d+)\s+(passed|failed|skipped|errors|xfailed|xpassed)", line):
+        # Match pytest's complete outcome vocabulary.  Deselected tests are
+        # reported separately because they were not executed.
+        for m in re.finditer(
+            r"(\d+)\s+(passed|failed|skipped|errors|xfailed|xpassed|deselected)",
+            line,
+        ):
             result[m.group(2)] = int(m.group(1))
         # Also match "N error" (singular — pytest uses this sometimes).
         for m in re.finditer(r"(\d+)\s+error\b", line):
@@ -477,6 +486,186 @@ def _parse_pytest_summary(output: str) -> dict[str, int]:
         if line.startswith("FAILED") or line.startswith("SHORT TEST SUMMARY"):
             break
     return result
+
+
+def _normalise_nodeid(nodeid: str, repo_root: Path) -> str:
+    """Make an absolute pytest node id portable relative to *repo_root*."""
+    path, separator, suffix = nodeid.partition("::")
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            path = str(candidate.resolve().relative_to(repo_root.resolve()))
+        except ValueError:
+            pass
+    return path + (separator + suffix if separator else "")
+
+
+def _looks_like_test_file(path: str, repo_root: Path) -> bool:
+    """Accept only pytest collection-error paths, not logger output."""
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            path = str(candidate.resolve().relative_to(repo_root.resolve()))
+        except ValueError:
+            return False
+    return path.endswith(".py") and "::" not in path and ":" not in path
+
+
+_SKIPPED_PATH_LINE = re.compile(
+    r"^\[\d+\]\s+(?P<path>[^:\s]+\.py):\d+(?::.*)?$"
+)
+
+
+def _parse_skipped_path(value: str, repo_root: Path) -> str | None:
+    match = _SKIPPED_PATH_LINE.match(value.strip())
+    if not match:
+        return None
+    return _normalise_nodeid(match.group("path"), repo_root)
+
+
+def _looks_like_nodeid(nodeid: str) -> bool:
+    path, separator, _ = nodeid.partition("::")
+    return bool(separator and path.endswith(".py") and ":" not in path)
+
+
+def _file_output_is_readable(
+    output: str,
+    summary: dict[str, int],
+    node_report: dict[str, object],
+    returncode: int,
+) -> bool:
+    """Require an executed outcome and trustworthy exit/evidence."""
+    executed = sum(
+        summary.get(key, 0)
+        for key in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
+    )
+    evidence = bool(
+        node_report["failed_nodeids"] or node_report["collection_error_paths"]
+    )
+    if (
+        returncode != 0
+        and not evidence
+    ):
+        return False
+    if executed:
+        return True
+    # A selector may intentionally remove every test from this file.  That is
+    # readable at file scope; the whole-run tests_collected guard decides
+    # whether the invocation measured anything at all.
+    if summary.get("deselected", 0):
+        return returncode == 0
+    # Preserve the established exception for an intentionally empty file
+    # beside measured files.  A non-zero empty file remains unreadable.
+    return returncode == 0 and bool(
+        re.search(r"(?:^|\n)\s*no tests ran\b", output, re.IGNORECASE)
+    )
+
+
+def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
+    """Extract complete node outcomes from one child's uncropped output.
+
+    The parent runner deliberately prints only a short tail for failed files,
+    and prints no child output for green files.  This parser runs before that
+    presentation policy is applied, so the machine report retains every node
+    from every file.
+    """
+    collected: set[str] = set()
+    failed: set[str] = set()
+    collection_errors: set[str] = set()
+    skipped_paths: set[str] = set()
+    error_count = 0
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        fields = line.split(None, 1)
+        if len(fields) != 2:
+            continue
+        status, value = fields
+        if status not in {"PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR"}:
+            continue
+        nodeid = value.strip()
+        if status == "SKIPPED":
+            # pytest -rA's short skipped summary contains only file:line, not
+            # a nodeid.  Keep it out of collected coverage: inventing one
+            # would poison classifier membership and rename detection.  The
+            # skipped path is retained separately as an explicit limitation.
+            skipped_path = _parse_skipped_path(nodeid, repo_root)
+            if skipped_path is not None:
+                skipped_paths.add(skipped_path)
+                continue
+        if status in {"FAILED", "ERROR"}:
+            nodeid, _, _ = nodeid.partition(" - ")
+            nodeid = nodeid.rstrip()
+        nodeid = _normalise_nodeid(nodeid, repo_root)
+        if "::" not in nodeid and status == "ERROR":
+            if _looks_like_test_file(nodeid, repo_root):
+                collection_errors.add(nodeid)
+                error_count += 1
+            continue
+        if not _looks_like_nodeid(nodeid):
+            continue
+        collected.add(nodeid)
+        if status in {"FAILED", "ERROR"}:
+            failed.add(nodeid)
+    return {
+        "collected_nodeids": sorted(collected),
+        "failed_nodeids": sorted(failed),
+        "collection_error_paths": sorted(collection_errors),
+        "error_count": error_count,
+        "skipped_paths": sorted(skipped_paths),
+    }
+
+
+def _write_node_report(
+    path: Path,
+    file_reports: dict[str, dict[str, object]],
+) -> None:
+    """Persist a complete, gate-consumable report after all files finish."""
+    collected = sorted({
+        nodeid
+        for report in file_reports.values()
+        for nodeid in report["collected_nodeids"]
+    })
+    failed = sorted({
+        nodeid
+        for report in file_reports.values()
+        for nodeid in report["failed_nodeids"]
+    })
+    collection_errors = sorted({
+        item
+        for report in file_reports.values()
+        for item in report["collection_error_paths"]
+    })
+    skipped_paths = sorted({
+        item
+        for report in file_reports.values()
+        for item in report.get("skipped_paths", [])
+    })
+    tests_collected = sum(
+        int(report.get("tests_collected", 0))
+        for report in file_reports.values()
+    )
+    payload = {
+        "schema_version": _NODE_REPORT_SCHEMA,
+        "files": {key: file_reports[key] for key in sorted(file_reports)},
+        "collected_nodeids": collected,
+        "failed_nodeids": failed,
+        "collection_error_paths": collection_errors,
+        "error_count": sum(int(report["error_count"]) for report in file_reports.values()),
+        "tests_collected": tests_collected,
+        "skipped_paths": skipped_paths,
+        "collect_ok": not collection_errors,
+        "probe_ok": not collection_errors,
+        "readable": bool(file_reports) and all(
+            report.get("readable", False) for report in file_reports.values()
+        ),
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def _format_file(file: Path, repo_root: Path) -> str:
@@ -830,6 +1019,36 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--nodeids-file",
+        type=Path,
+        metavar="JSON",
+        help=(
+            "Explicit JSON probe request containing a nodeids list. Each "
+            "nodeid is passed losslessly to pytest; files sharing a nodeid "
+            "run together in one subprocess. Mutually exclusive with --files."
+        ),
+    )
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        help=(
+            "Repository/worktree in which to resolve files and run pytest. "
+            "Defaults to the checkout containing this runner."
+        ),
+    )
+    parser.add_argument(
+        "--node-report",
+        type=Path,
+        help=(
+            "Write a machine-readable complete per-node outcome report to this path."
+        ),
+    )
+    parser.add_argument(
+        "--no-duration-cache",
+        action="store_true",
+        help="Do not write test_durations.json into the execution root.",
+    )
+    parser.add_argument(
         "paths_positional",
         nargs="*",
         metavar="PATH",
@@ -858,6 +1077,7 @@ def main() -> int:
     OUR_FLAGS = {
         "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
+        "--nodeids-file", "--repo-root", "--node-report", "--no-duration-cache",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -957,10 +1177,42 @@ def main() -> int:
             print(f"error: --slice must be I/N (e.g. 1/4), got: {slice_raw!r}", file=sys.stderr)
             sys.exit(2)
 
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = (args.repo_root or Path(__file__).resolve().parent.parent).resolve()
 
+    if args.files and args.nodeids_file:
+        parser.error("--files and --nodeids-file are mutually exclusive")
+
+    # --nodeids-file: lossless probe selectors. The request object form is
+    # accepted because the finalizer persists the probe request as an object;
+    # a bare list remains useful for direct runner callers.
+    nodeids_by_file: Dict[Path, List[str]] = {}
+    if args.nodeids_file:
+        payload = json.loads(args.nodeids_file.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload = payload.get("nodeids")
+        if not isinstance(payload, list) or not payload or not all(
+            isinstance(item, str) and "::" in item for item in payload
+        ):
+            parser.error("--nodeids-file must contain a non-empty nodeids list")
+        for raw_nodeid in payload:
+            path_part, _, selector = raw_nodeid.partition("::")
+            candidate = Path(path_part)
+            if candidate.is_absolute():
+                try:
+                    candidate = candidate.resolve().relative_to(repo_root)
+                except ValueError:
+                    parser.error(f"probe nodeid is outside repo root: {raw_nodeid!r}")
+            file = (repo_root / candidate).resolve()
+            try:
+                file.relative_to(repo_root)
+            except ValueError:
+                parser.error(f"probe nodeid is outside repo root: {raw_nodeid!r}")
+            normalized = f"{file.relative_to(repo_root).as_posix()}::{selector}"
+            nodeids_by_file.setdefault(file, []).append(normalized)
+        files = sorted(nodeids_by_file)
+        roots = []
     # --files: explicit file list from the CI generate job — skip discovery.
-    if args.files:
+    elif args.files:
         files = [repo_root / f for f in _split_pathspec(args.files)]
         roots = []
     else:
@@ -1040,15 +1292,21 @@ def main() -> int:
     tests_passed = 0
     tests_failed = 0
     tests_skipped = 0
+    tests_xfailed = 0
+    tests_xpassed = 0
+    tests_deselected = 0
     # Every collected outcome, not just pass/fail: a legitimately all-skipped
     # (platform-gated) file reports "2 skipped" and must NOT trip the
     # nothing-ran guard, whereas a file that died before collection reports
     # nothing at all and must.
     tests_collected = 0
+    file_reports: dict[str, dict[str, object]] = {}
     lock = threading.Lock()
 
     def _on_done(file: Path, started_at: float, fut: "Future[Tuple[Path, int, str, Dict[str, int], float]]") -> None:
-        nonlocal files_done, tests_done, pass_count, fail_count, tests_passed, tests_failed, tests_skipped
+        nonlocal files_done, tests_done, pass_count, fail_count
+        nonlocal tests_passed, tests_failed, tests_skipped
+        nonlocal tests_xfailed, tests_xpassed, tests_deselected
         nonlocal tests_collected
         n_tests = test_counts.get(file, 0)
         try:
@@ -1059,6 +1317,16 @@ def main() -> int:
                 tests_done += n_tests
                 fail_count += 1
                 failures.append((file, f"runner crashed: {exc!r}", {}))
+                file_reports[_format_file(file, repo_root)] = {
+                    "collected_nodeids": [],
+                    "failed_nodeids": [],
+                    "collection_error_paths": [],
+                    "error_count": 0,
+                    "tests_collected": 0,
+                    "skipped_paths": [],
+                    "returncode": None,
+                    "readable": False,
+                }
                 _print_progress(
                     tests_done, approx_total_tests, file, 1,
                     time.monotonic() - started_at,
@@ -1074,11 +1342,24 @@ def main() -> int:
             tests_passed += summary.get("passed", 0)
             tests_failed += summary.get("failed", 0)
             tests_skipped += summary.get("skipped", 0)
+            tests_xfailed += summary.get("xfailed", 0)
+            tests_xpassed += summary.get("xpassed", 0)
+            tests_deselected += summary.get("deselected", 0)
             tests_collected += sum(
                 summary.get(k, 0)
                 for k in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
             )
             file_times.append((fpath, subproc_wall))
+            node_report = _parse_node_outcomes(output, repo_root)
+            node_report["tests_collected"] = sum(
+                summary.get(k, 0)
+                for k in ("passed", "failed", "skipped", "errors", "xfailed", "xpassed")
+            )
+            node_report["returncode"] = rc
+            node_report["readable"] = _file_output_is_readable(
+                output, summary, node_report, rc
+            )
+            file_reports[_format_file(fpath, repo_root)] = node_report
             if rc == 0:
                 pass_count += 1
             else:
@@ -1101,7 +1382,7 @@ def main() -> int:
             t0 = time.monotonic()
             fut = pool.submit(
                 _run_one_file, file, pytest_passthrough, repo_root,
-                args.file_timeout, args.file_retries,
+                args.file_timeout, args.file_retries, nodeids_by_file.get(file),
             )
             fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
             futures.append(fut)
@@ -1112,10 +1393,25 @@ def main() -> int:
             fut.result() if fut.exception() is None else None
 
     elapsed = time.monotonic() - started
+    if args.node_report:
+        # Persist the machine evidence before emitting the human summary.  If
+        # this write fails, the log must not contain a clean-looking receipt
+        # that a log-only consumer could accept.
+        _write_node_report(args.node_report, file_reports)
+
     print()
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0
-    skipped_note = f", {tests_skipped} skipped" if tests_skipped else ""
-    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{skipped_note} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
+    summary_notes = []
+    for count, label in (
+        (tests_skipped, "skipped"),
+        (tests_xfailed, "xfailed"),
+        (tests_xpassed, "xpassed"),
+        (tests_deselected, "deselected"),
+    ):
+        if count:
+            summary_notes.append(f", {count} {label}")
+    summary_suffix = "".join(summary_notes)
+    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{summary_suffix} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
 
     # Host-OS gating note: tests marked for another OS were skipped by the
     # conftest hook, not run. Say so explicitly — a green local run on Linux
@@ -1165,7 +1461,7 @@ def main() -> int:
     # partial test_durations.json; a CI merge step joins them later.
     # Locally, _save_durations merges with any existing cache so entries
     # from previous runs aren't lost.
-    if file_times:
+    if file_times and not args.no_duration_cache:
         _save_durations(file_times, repo_root)
         print(f"  Durations cached to {_DURATIONS_FILE} ({len(file_times)} files)")
 

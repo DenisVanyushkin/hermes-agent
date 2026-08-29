@@ -400,17 +400,68 @@ def _triage_one(repo: Path, evidence: dict, merge_sha: str) -> dict:
     return proposal
 
 
-def run_triage(*, state: Path | str, repo: Path | str) -> int:
+GATE_FAILURES_V2 = "upstream-sync-gate-failures/v2"
+
+
+def _failure_nodeids_for_triage(failures: dict) -> list[str]:
+    """Read the authoritative failure list for either persisted schema."""
+    if failures.get("schema_version") == GATE_FAILURES_V2:
+        blocking = failures.get("blocking_failures")
+        if not isinstance(blocking, list):
+            raise ValueError("v2 gate-failures has no blocking_failures list")
+        nodeids = []
+        for item in blocking:
+            if not isinstance(item, dict) or not isinstance(item.get("nodeid"), str):
+                raise ValueError("v2 blocking_failures contains an invalid entry")
+            nodeids.append(item["nodeid"])
+        return sorted(set(nodeids))
+    return sorted({item for item in (failures.get("new_failures") or []) if item})
+
+
+def run_triage(
+    *,
+    state: Path | str,
+    repo: Path | str,
+    expected_merge_sha: str | None = None,
+    expected_before: str | None = None,
+) -> int:
     """Diagnose every new failure the gate recorded; write gate-triage.json.
 
     Always returns 0 unless the state is unusable: the gate has already decided
     the merge does not land, and a triage that fell over must not turn that into
     a different outcome.
     """
+    if not expected_merge_sha or not expected_before:
+        raise ValueError("triage requires merge_sha and before identity")
     state, repo = Path(state), Path(repo)
     failures = _read_json(state / "gate-failures.json")
-    new_failures = [f for f in (failures.get("new_failures") or []) if f]
-    if not new_failures:
+    mismatches = []
+    if expected_merge_sha and failures.get("merge_sha") != expected_merge_sha:
+        mismatches.append(
+            f"merge_sha payload={failures.get('merge_sha', '')!r} expected={expected_merge_sha!r}"
+        )
+    if expected_before and failures.get("before") != expected_before:
+        mismatches.append(
+            f"before payload={failures.get('before', '')!r} expected={expected_before!r}"
+        )
+    if mismatches:
+        _write_json(state / "gate-triage.json", {
+            "schema": SCHEMA,
+            "status": "stale_evidence",
+            "merge_sha": failures.get("merge_sha") or "",
+            "before": failures.get("before") or "",
+            "reason": "no applicable triage evidence: " + "; ".join(mismatches),
+            "proposals": [],
+            "suspected_rename": [],
+            "created_at": _now(),
+            "slack_ts": None,
+        })
+        return 0
+    new_failures = _failure_nodeids_for_triage(failures)
+    suspected_rename = failures.get("suspected_rename") or []
+    if not isinstance(suspected_rename, list):
+        suspected_rename = []
+    if not new_failures and not suspected_rename:
         return 0
     merge_sha = failures.get("merge_sha") or ""
     prep = _read_json(state / "apply-prepare.json")
@@ -434,6 +485,7 @@ def run_triage(*, state: Path | str, repo: Path | str) -> int:
         "merge_sha": merge_sha,
         "before": failures.get("before") or "",
         "proposals": proposals,
+        "suspected_rename": suspected_rename,
         "created_at": _now(),
         "slack_ts": None,
     })
@@ -444,9 +496,16 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="triage a red upstream-sync fork-test gate")
     parser.add_argument("--state", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument("--expected-merge-sha", required=True)
+    parser.add_argument("--expected-before", required=True)
     args = parser.parse_args(argv)
     try:
-        return run_triage(state=args.state, repo=args.repo)
+        return run_triage(
+            state=args.state,
+            repo=args.repo,
+            expected_merge_sha=args.expected_merge_sha,
+            expected_before=args.expected_before,
+        )
     except Exception as exc:  # never fail the caller: the gate outcome stands
         print(f"triage failed: {exc}", file=sys.stderr)
         return 0

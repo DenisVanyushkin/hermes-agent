@@ -16,6 +16,7 @@ Three defects from the 2026-07-20 sync incident:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from scripts import upstream_sync_apply, upstream_sync_gate
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
@@ -52,6 +55,51 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _manifest_receipt_preamble() -> str:
+    """Make test doubles emit a receipt whose side comes from the checkout."""
+    return f'''PYTHON={sys.executable!r}
+GATE={str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")!r}
+SEL=""
+WT=""
+while [ $# -gt 0 ]; do case "$1" in
+  --selection-from) SEL="$2"; shift 2 ;;
+  --attempt-root|--boundary) shift 2 ;;
+  *) WT="$1"; shift ;;
+esac; done
+HEAD="$(${{PYTHON}} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$(${{PYTHON}} - "$SEL" "$HEAD" <<'PY'
+import json,sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text())
+print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")
+PY
+)"
+DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --stage final --digest "$DIGEST"
+echo 'fork test duration: seconds=2'
+'''
+
+
+def _manifest_receipt_after_parse_pre_only() -> str:
+    """Receipt command for doubles that already parsed and retained WT/SEL."""
+    python = str(sys.executable)
+    gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+    return f'''HEAD="$({python} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$({python} -c 'import json,sys; m=json.load(open(sys.argv[1])); print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")' "$SEL" "$HEAD")"
+{python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk '{{print $1}}')"
+'''
+
+
+def _manifest_receipt_after_parse() -> str:
+    python = str(sys.executable)
+    gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+    return (
+        _manifest_receipt_after_parse_pre_only()
+        + f'''{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$(sha256sum "$SEL" | awk '{{print $1}}')"\n'''
+    )
+
+
 def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     """Fake SCRIPTS_DIR whose scripts record invocations instead of acting.
 
@@ -74,8 +122,8 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     tests_stub = scripts / "run-fork-tests.sh"
     tests_stub.write_text(
         "#!/usr/bin/env bash\n"
-        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
-        "echo '1 failed, 5 passed in 2.00s'\n"
+        + _manifest_receipt_preamble()
+        + "echo '0 failed, 5 passed in 2.00s'\n"
     )
     tests_stub.chmod(0o755)
     # Copied by pattern, not by name: a hand-kept list silently omits every new
@@ -130,6 +178,14 @@ def _result(state: Path) -> dict:
     return json.loads((state / "finalize-result.json").read_text())
 
 
+def _latest_attempt(state: Path) -> Path:
+    attempts = sorted(
+        path for path in (state / "attempts").glob("*/*") if path.is_dir()
+    )
+    assert attempts
+    return attempts[-1]
+
+
 class TestFinalizeRequiresRebasedHead:
     def test_finalize_with_unrebased_head_fails_without_rollback(self, tmp_path, state):
         repo = _make_repo(tmp_path)
@@ -167,6 +223,16 @@ class TestFinalizeRequiresRebasedHead:
         assert "sync-local-customizations.sh" in logged
         assert "upstream-sync-smoketest.sh" in logged
 
+    def test_finalize_receipt_check_ignores_duration_sidecar(self, tmp_path, state):
+        repo = _make_repo(tmp_path)
+        parent = _git(repo, "rev-parse", "HEAD~1")
+
+        scripts, _ = _stub_scripts(tmp_path)
+        _request(state, "finalize", parent)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+
 
 class TestFinalizeNotifiesSlack:
     def _curl_stub(self, tmp_path: Path) -> tuple[Path, Path]:
@@ -195,7 +261,7 @@ class TestFinalizeNotifiesSlack:
             path_prepend=str(bin_dir),
         )
 
-        assert _result(state)["status"] == "ok", proc.stderr
+        assert proc.returncode == 0, proc.stderr
         logged = curl_log.read_text()
         assert "chat.postMessage" in logged
         assert "ok" in logged
@@ -313,8 +379,9 @@ class TestPersonalRemoteIntegrationAfterHistoryRewrite:
         inert = tmp_path / "inert-tests.sh"
         inert.write_text(
             "#!/usr/bin/env bash\n"
-            "echo FAILED tests/known.py::test_flaky - AssertionError\n"
-            "echo 1 failed, 5 passed in 2.00s\n"
+            + _manifest_receipt_preamble()
+            + "echo FAILED tests/known.py::test_flaky - AssertionError\n"
+            + "echo 1 failed, 5 passed in 2.00s\n"
         )
         inert.chmod(0o755)
         env = dict(os.environ)
@@ -570,6 +637,37 @@ def _make_divergent_repo(tmp_path: Path) -> tuple[Path, str, str]:
     return repo, local_head, upstream_head
 
 
+def _make_repo_with_deleted_upstream_test(tmp_path: Path) -> tuple[Path, str, str]:
+    """Local fork plus an upstream tip that deletes one test and adds another."""
+    repo = tmp_path / "manifest-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "local/customizations")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "test_upstream_kept.py").write_text("def test_kept(): pass\n")
+    deleted = tests / "test_upstream_deleted.py"
+    deleted.write_text("def test_deleted(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "upstream base")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    (tests / "test_fork_only.py").write_text("def test_fork_only(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fork test")
+    local_head = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "-qb", "up", base)
+    deleted.unlink()
+    (tests / "test_upstream_added.py").write_text("def test_added(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "upstream replaces test")
+    upstream_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "local/customizations")
+    return repo, local_head, upstream_head
+
+
 def _scratch_merge(repo: Path, state: Path, base: str, other: str, name="scratch") -> str:
     """Clone *repo* into the state dir, merge *other* into *base*, return the SHA."""
     scratch = state / name
@@ -599,6 +697,20 @@ def _apply_request(state: Path, *, upstream_sha, merge_sha, scratch_repo="scratc
     )
 
 
+def _gate_only_request(state: Path, *, before, after, boundary, attempt_id="test-run"):
+    (state / "finalize-request.json").write_text(
+        json.dumps(
+            {
+                "action": "gate-only",
+                "before": before,
+                "after": after,
+                "boundary": boundary,
+                "attempt_id": attempt_id,
+            }
+        )
+    )
+
+
 class TestApplyMergeFromScratchClone:
     def test_merge_parented_on_head_and_upstream_is_fast_forwarded(
         self, tmp_path, state
@@ -623,6 +735,8 @@ class TestApplyMergeFromScratchClone:
         logged = calls.read_text()
         assert f"sync-local-customizations.sh --post-update-only {local_head}" in logged
         assert "upstream-sync-smoketest.sh" in logged
+        detail = (state / "finalize-detail.log").read_text()
+        assert f"run_gate seam: mode=apply before={local_head} after={merge_sha} boundary={upstream_head}" in detail
 
     def test_merge_not_parented_on_live_head_is_refused(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
@@ -758,6 +872,121 @@ class TestScratchCloneIsAdoptedBeforeReading:
         assert "chown -R" in logged and str(state / "scratch") in logged, logged
 
 
+class TestSharedGateSeam:
+    @pytest.mark.parametrize("outcome", ["pass", "block", "unknown"])
+    def test_gate_only_uses_the_shared_gate_seam_without_landing(
+        self, tmp_path, state, outcome
+    ):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        _git(repo, "fetch", str(state / "scratch"), "HEAD")
+        scripts, calls = _stub_scripts(tmp_path)
+        if outcome == "block":
+            TestApplyMergeIsGatedOnForkTests()._node_aware_block_stub(scripts)
+        elif outcome == "unknown":
+            runner = scripts / "run-fork-tests.sh"
+            runner.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'collecting ...'\n"
+                "exit 137\n"
+            )
+            runner.chmod(0o755)
+
+        _gate_only_request(
+            state,
+            before=local_head,
+            after=merge_sha,
+            boundary=upstream_head,
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        res = json.loads((_latest_attempt(state) / "attempt-result.json").read_text())
+        expected_status = "ok" if outcome == "pass" else "failed"
+        assert res["status"] == expected_status, proc.stderr + res.get("detail", "")
+        assert res["gate_verdict"] == outcome
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        detail = res["detail"]
+        assert f"run_gate seam: mode=gate-only before={local_head} after={merge_sha} boundary={upstream_head}" in detail
+        assert f"run_gate outcome: mode=gate-only outcome={outcome}" in detail
+        generations = list((state / "attempts").glob("*/*"))
+        assert len(generations) == 1
+        assert (generations[0] / "gate-selection.json").exists()
+        assert (generations[0] / "attempt.json").exists()
+
+
+class TestGateOnlyIsolation:
+    def test_gate_only_preserves_all_production_state_and_writes_only_generation(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        _git(repo, "fetch", str(state / "scratch"), "HEAD")
+        scripts, _ = _stub_scripts(tmp_path)
+
+        # Seed every production-plane artifact so the assertion is about the
+        # whole state directory, not only the three files named in T19.
+        for name, content in {
+            "apply-prepare.json": '{"old":"prepare"}\n',
+            "pending.json": '{"old":"pending"}\n',
+            "finalize-result.json": '{"old":"result"}\n',
+            "finalize-detail.log": "old detail\n",
+            "gate-baseline.log": "old baseline\n",
+            "gate-post.log": "old post\n",
+            "gate-failures.json": '{"merge_sha":"old","before":"old","blocking_failures":[]}\n',
+            "gate-triage.json": '{"old":"triage"}\n',
+        }.items():
+            (state / name).write_text(content)
+
+        def snapshot():
+            out = {}
+            for path in state.rglob("*"):
+                rel = path.relative_to(state)
+                if rel.parts[0] == "attempts" or path.name in {
+                    "finalize-request.json",
+                    "finalize-request.processing.json",
+                    "finalize.lock",
+                }:
+                    continue
+                out[str(rel)] = path.read_bytes() if path.is_file() else None
+            return out
+
+        before_state = snapshot()
+        _gate_only_request(
+            state, before=local_head, after=merge_sha, boundary=upstream_head
+        )
+        proc = _run_finalize(repo, state, scripts)
+
+        assert proc.returncode == 0, proc.stderr
+        assert snapshot() == before_state
+        attempt = _latest_attempt(state)
+        result = json.loads((attempt / "attempt-result.json").read_text())
+        assert result["action"] == "gate-only"
+        assert result["status"] == "ok"
+        assert result["gate_verdict"] == "pass"
+
+    def test_gate_only_retries_create_append_only_generations(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        _git(repo, "fetch", str(state / "scratch"), "HEAD")
+        scripts, _ = _stub_scripts(tmp_path)
+
+        for _ in range(2):
+            _gate_only_request(
+                state, before=local_head, after=merge_sha, boundary=upstream_head
+            )
+            proc = _run_finalize(repo, state, scripts)
+            assert _latest_attempt(state).joinpath("attempt-result.json").exists(), proc.stderr
+
+        attempts = sorted(
+            path for path in (state / "attempts").glob("*/*") if path.is_dir()
+        )
+        assert len(attempts) == 2
+        assert attempts[0].name == "1"
+        assert attempts[1].name == "2"
+        assert (attempts[0] / "gate-selection.json").read_bytes()
+        assert (attempts[1] / "gate-selection.json").read_bytes()
+
+
 class TestApplyMergeIsGatedOnForkTests:
     """A plausible-looking resolution of a merge-both conflict can still be
     wrong, and the smoketest only proves the tree imports. The agent's merge is
@@ -770,12 +999,125 @@ class TestApplyMergeIsGatedOnForkTests:
         # (it contains g.txt, which only the upstream side adds).
         (scripts / "run-fork-tests.sh").write_text(
             "#!/usr/bin/env bash\n"
-            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
-            'if [ -f "$1/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
+            # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
+            # worktree больше не $1. Заодно записываем полученную границу —
+            # оба прогона гейта обязаны увидеть один и тот же полный SHA.
+            'WT=""; BND=""; SEL=""; ROOT=""\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --boundary) BND="$2"; shift 2 ;;\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --attempt-root) ROOT="$2"; shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            'esac; done\n'
+            'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
+            'printf "%s\\n" "$SEL" >> "$(dirname "$0")/selection-calls.log"\n'
+            'printf "%s\\n" "$ROOT" >> "$(dirname "$0")/attempt-root-calls.log"\n'
+            + _manifest_receipt_after_parse()
+            + "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            'if [ -f "$WT/g.txt" ]; then echo "FAILED tests/new.py::test_broken_by_merge - E"; fi\n'
             "echo '2 failed, 4 passed in 2.00s'\n"
         )
 
-    def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
+    def _node_aware_block_stub(
+        self,
+        scripts: Path,
+        *,
+        include_probe_final_receipt: bool = True,
+        missing_probe_request: str | None = None,
+        include_existing_upstream_failure: bool = False,
+    ) -> None:
+        """Emit valid structured evidence for a measured block.
+
+        The upstream-parent probe must pass the newly-added upstream node;
+        otherwise the gate correctly reports ``unknown`` rather than a block.
+        This double therefore distinguishes the probe worktree from the
+        baseline/post worktrees and uses paths that exist in the manifest.
+        """
+        python = str(sys.executable)
+        gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+        existing_upstream_failure = (
+            'if [ "$SIDE" = post ]; then\n'
+            "  echo 'PASSED tests/test_upstream_kept.py::test_kept'\n"
+            "  echo 'FAILED tests/test_upstream_kept.py::test_kept - AssertionError'\n"
+            "fi\n"
+            if include_existing_upstream_failure
+            else ""
+        )
+        probe_receipt_block = ""
+        if include_probe_final_receipt:
+            if missing_probe_request is not None:
+                probe_receipt_block += (
+                    f'  if [ "$(basename "$PROBE_REQUEST")" != "{missing_probe_request}" ]; then\n'
+                )
+            probe_receipt_block += (
+                f'  DIGEST="$({python} - "$PROBE_REQUEST" <<\'PY\'\n'
+                "import hashlib, json, sys\n"
+                "from pathlib import Path\n"
+                "request = json.loads(Path(sys.argv[1]).read_text())\n"
+                "payload = ''.join(f'{nodeid}\\n' for nodeid in request['nodeids'])\n"
+                "print(hashlib.sha256(payload.encode()).hexdigest())\n"
+                "PY\n"
+                ')"\n'
+                f'  {python} {gate} receipt --source legacy --stage final --digest "$DIGEST"\n'
+            )
+            if missing_probe_request is not None:
+                probe_receipt_block += "  fi\n"
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            'SEL=""; WT=""; PROBE=0; PROBE_REQUEST=""\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --attempt-root|--boundary) shift 2 ;;\n'
+            '  --probe-nodeids-from) PROBE=1; PROBE_REQUEST="$2"; shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            'esac; done\n'
+            'if [ "$PROBE" -eq 1 ]; then\n'
+            + probe_receipt_block
+            + (
+                "  echo 'PASSED tests/test_upstream_kept.py::test_kept'\n"
+                if include_existing_upstream_failure
+                else ""
+            )
+            + "  echo 'PASSED tests/test_fork_only.py::test_fork_only'\n"
+            + '  if [ -f "$WT/tests/test_upstream_added.py" ]; then\n'
+            + "    echo 'PASSED tests/test_upstream_added.py::test_added'\n"
+            + "  fi\n"
+            + "  echo '0 failed, 1 passed in 0.10s'\n"
+            "  exit 0\n"
+            "fi\n"
+            f'HEAD="$({python} -c \'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())\' "$WT")"\n'
+            f'SIDE="$({python} - "$SEL" "$HEAD" <<\'PY\'\n'
+            'import json,sys\n'
+            'from pathlib import Path\n'
+            'm=json.loads(Path(sys.argv[1]).read_text())\n'
+            'print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")\n'
+            'PY\n'
+            ')"\n'
+            f'{python} {gate} receipt --source manifest --side "$SIDE" --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
+            f'{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$(sha256sum "$SEL" | awk \'{{print $1}}\')"\n'
+            + existing_upstream_failure
+            + "echo 'PASSED tests/test_fork_only.py::test_fork_only'\n"
+            "echo 'FAILED tests/test_fork_only.py::test_fork_only - AssertionError'\n"
+            'if [ -f "$WT/tests/test_upstream_added.py" ]; then\n'
+            "  echo 'PASSED tests/test_upstream_added.py::test_added'\n"
+            "  echo 'FAILED tests/test_upstream_added.py::test_added - AssertionError'\n"
+            "  echo '2 failed, 1 passed in 0.10s'\n"
+            "else\n"
+            "  echo '1 failed, 1 passed in 0.10s'\n"
+            "fi\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+    def test_both_gate_runs_receive_the_same_upstream_boundary(self, tmp_path, state):
+        """Обе половины гейта меряют от одной и той же границы.
+
+        Граница решает, что считается тестом форка. Если два прогона получат
+        разные значения — например, один полный SHA, а другой remote-tracking
+        ref, который успел уехать, — сравнение «до и после» перестанет быть
+        сравнением: разойдётся сам сенсор, а не поведение мержа. Поэтому
+        проверяется не наличие опции, а совпадение значений и то, что это
+        именно утверждённый upstream_head, а не что-то выведенное заново.
+        """
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
         (state / "pending.json").write_text(json.dumps(
             {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
@@ -788,16 +1130,234 @@ class TestApplyMergeIsGatedOnForkTests:
         _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
         proc = _run_finalize(repo, state, scripts)
 
+        recorded = (scripts / "boundary-calls.log").read_text().split()
+        assert len(recorded) == 2, (
+            f"expected one boundary per gate run, got {recorded}; stderr={proc.stderr}"
+        )
+        assert set(recorded) == {upstream_head}, (
+            "the two gate runs did not measure from the approved upstream head; "
+            f"expected {upstream_head}, recorded {recorded}"
+        )
+        selections = (scripts / "selection-calls.log").read_text().splitlines()
+        assert len(selections) == 2
+        assert len(set(selections)) == 1 and selections[0], (
+            "both gate runs must consume the same persisted manifest; "
+            f"recorded {selections}"
+        )
+        selection = Path(selections[0])
+        assert selection.name == "gate-selection.json"
+        assert selection.parent.parent.parent == state / "attempts"
+        roots = (scripts / "attempt-root-calls.log").read_text().splitlines()
+        assert roots == [str(state / "attempts")] * 2, (
+            "both consumers must be confined to the finalizer's attempt root; "
+            f"recorded {roots}"
+        )
+
+    def test_node_probe_scope_finalizer_replaces_legacy_log_difference(
+        self, tmp_path, state
+    ):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._breaking_tests_stub(scripts)
+
+        gate_calls = tmp_path / "gate-helper-calls.log"
+        real_gate = REPO_ROOT / "scripts" / "upstream_sync_gate.py"
+        (scripts / "upstream_sync_gate.py").write_text(
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            f"log = Path({str(gate_calls)!r})\n"
+            f"real = {str(real_gate)!r}\n"
+            "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+            "with log.open('a', encoding='utf-8') as stream:\n"
+            "    stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if command == 'probe-request':\n"
+            "    print(json.dumps({'nodeids': [], 'paths': []}))\n"
+            "    raise SystemExit(0)\n"
+            "if command == 'classify-node-failures':\n"
+            "    print(json.dumps({'common_path': [], 'post_only_path': [], 'pre_existing': [], 'unknown': [], 'blocking_failures': []}))\n"
+            "    raise SystemExit(0)\n"
+            "os.execv(sys.executable, [sys.executable, real, *sys.argv[1:]])\n"
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        assert _result(state)["status"] == "ok", proc.stderr
+        commands = gate_calls.read_text().splitlines()
+        assert any(line.startswith("classify-node-failures") for line in commands), commands
+        assert not any(line.startswith("new-failures") for line in commands), commands
+        node_outcome = [line for line in commands if line.startswith("node-outcome")]
+        assert node_outcome, commands
+        assert all("--aggregate" in line for line in node_outcome), commands
+
+    def test_missing_runner_receipt_blocks_landing(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            "echo '1 failed, 5 passed in 2.00s'\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = (proc.stderr + proc.stdout + res.get("detail", "")).lower()
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate"
+        assert "receipt" in evidence
+        assert "preliminary receipt" in evidence
+        assert "final receipt" not in evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_preliminary_receipt_without_final_receipt_is_unreadable(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        runner = scripts / "run-fork-tests.sh"
+        runner.write_text(
+            "#!/usr/bin/env bash\n"
+            'WT=""; SEL=""\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --attempt-root|--boundary) shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            "esac; done\n"
+            + _manifest_receipt_after_parse_pre_only()
+            + "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            + "echo '1 failed, 5 passed in 2.00s'\n"
+            + "exit 137\n"
+        )
+        runner.chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = proc.stderr + proc.stdout + res.get("detail", "")
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate"
+        failures = json.loads((state / "gate-failures.json").read_text())
+        assert failures["unreadable_runs"] == [
+            {"source": "baseline", "stage": "receipt"}
+        ]
+        assert failures["blocking_failures"] == []
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_mismatched_runner_receipt_blocks_landing(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        (scripts / "run-fork-tests.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'fork test receipt: contract=v1 source=manifest manifest_sha256=wrong'\n"
+            "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+            "echo '1 failed, 5 passed in 2.00s'\n"
+        )
+        (scripts / "run-fork-tests.sh").chmod(0o755)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = (proc.stderr + proc.stdout + res.get("detail", "")).lower()
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate"
+        assert "receipt" in evidence
+        assert "preliminary receipt" in evidence
+        assert "final receipt" not in evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_merge_introducing_failures_is_not_landed(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._node_aware_block_stub(scripts)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
         res = _result(state)
         assert res["status"] == "failed", proc.stderr
         assert res["failed_stage"] == "test-gate"
-        assert "test_broken_by_merge" in res["detail"]
+        assert "tests/test_upstream_added.py::test_added" in res["detail"]
         assert _git(repo, "rev-parse", "HEAD") == local_head          # not landed
         assert (state / "pending.json").exists()                      # decision kept
         assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
         assert not calls.exists() or "rollback" not in calls.read_text()
         # The temporary test-gate worktree was removed.
         assert len(_git(repo, "worktree", "list").splitlines()) == 1
+        assert "run_gate outcome: mode=apply outcome=block" in (
+            state / "finalize-detail.log"
+        ).read_text()
+
+    def test_probe_without_final_receipt_is_unreadable(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+        self._node_aware_block_stub(scripts, include_probe_final_receipt=False)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        evidence = proc.stderr + proc.stdout + _result(state).get("detail", "")
+        assert _result(state)["status"] == "failed", evidence
+        assert "merged-isolated probe final receipt missing" in evidence, evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
+    def test_upstream_probe_without_final_receipt_is_unreadable(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "tests/test_upstream_kept.py").write_text(
+            "def test_kept(): assert False\n"
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "-c", "user.name=t", "-c", "user.email=t", "commit", "-qm", "change kept test")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+        self._node_aware_block_stub(
+            scripts,
+            missing_probe_request="gate-upstream-probe.filtered.request.json",
+            include_existing_upstream_failure=True,
+        )
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        evidence = proc.stderr + proc.stdout + _result(state).get("detail", "")
+        assert _result(state)["status"] == "failed", evidence
+        assert "upstream-parent probe final receipt missing" in evidence, evidence
+        assert _git(repo, "rev-parse", "HEAD") == local_head
 
     def test_pre_existing_failures_do_not_block(self, tmp_path, state):
         repo, local_head, upstream_head = _make_divergent_repo(tmp_path)
@@ -809,6 +1369,9 @@ class TestApplyMergeIsGatedOnForkTests:
 
         assert _result(state)["status"] == "ok", proc.stderr
         assert _git(repo, "rev-parse", "HEAD") == merge_sha
+        assert "run_gate outcome: mode=apply outcome=pass" in (
+            state / "finalize-detail.log"
+        ).read_text()
 
     def test_an_unreadable_test_run_refuses_to_land(self, tmp_path, state):
         """No summary line means the run was killed, not clean — the gate must
@@ -827,7 +1390,192 @@ class TestApplyMergeIsGatedOnForkTests:
         res = _result(state)
         assert res["status"] == "failed", proc.stderr
         assert res["failed_stage"] == "test-gate"
+        assert "run_gate outcome: mode=apply outcome=unknown" in (
+            state / "finalize-detail.log"
+        ).read_text()
         assert _git(repo, "rev-parse", "HEAD") == local_head
+
+
+class TestRunnerFinalizeReceiptSeam:
+    def test_real_runner_receipt_matches_finalize_contract(self, tmp_path):
+        """The production runner and finalize receipt protocol share one seam."""
+        repo = tmp_path / "receipt-repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "local/customizations")
+        _git(repo, "config", "user.email", "t@t")
+        _git(repo, "config", "user.name", "t")
+        (repo / "README.md").write_text("base\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base")
+        before = _git(repo, "rev-parse", "HEAD")
+        tests = repo / "tests"
+        tests.mkdir()
+        (tests / "test_receipt.py").write_text("def test_receipt(): pass\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "add test")
+        after = _git(repo, "rev-parse", "HEAD")
+
+        state = tmp_path / "state"
+        report = upstream_sync_gate.prepare_selection_attempt(
+            state,
+            before=before,
+            after=after,
+            boundary=before,
+            before_paths=[],
+            after_paths=["tests/test_receipt.py"],
+            boundary_paths=[],
+            changed_paths=[],
+        )
+        manifest = Path(report["attempt_dir"]) / "gate-selection.json"
+        stderr_log = tmp_path / "runner.stderr"
+        env = {
+            **os.environ,
+            "HERMES_PYTHON": sys.executable,
+            "HERMES_CONTROL_PYTHON": sys.executable,
+            "HERMES_UPSTREAM_SYNC_GATE": str(
+                REPO_ROOT / "scripts" / "upstream_sync_gate.py"
+            ),
+        }
+        proc = subprocess.run(
+            [
+                "bash",
+                str(REPO_ROOT / "scripts" / "run-fork-tests.sh"),
+                "--print-selection",
+                "--boundary",
+                before,
+                "--selection-from",
+                str(manifest),
+                "--attempt-root",
+                str(state / "attempts"),
+                str(repo),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        stderr_log.write_text(proc.stderr)
+
+        expected = upstream_sync_gate.fork_test_receipt(
+            source="manifest",
+            side="post",
+            digest=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        )
+        receipt_check = subprocess.run(
+            ["grep", "-Fqx", expected, str(stderr_log)],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert receipt_check.returncode == 0, proc.stderr
+        assert proc.stdout == "tests/test_receipt.py\n"
+
+
+class TestGateSelectionManifest:
+    def test_attempt_json_is_the_generation_commit_marker(self, tmp_path, monkeypatch):
+        """A generation is complete only after its binding metadata appears."""
+        real_replace = upstream_sync_gate.os.replace
+
+        def interrupt_commit_marker(source, destination):
+            if Path(destination).name == "attempt.json":
+                raise OSError("simulated interruption before generation commit")
+            real_replace(source, destination)
+
+        monkeypatch.setattr(
+            upstream_sync_gate.os, "replace", interrupt_commit_marker
+        )
+        with pytest.raises(OSError, match="before generation commit"):
+            upstream_sync_gate.prepare_selection_attempt(
+                tmp_path,
+                before="1" * 40,
+                after="2" * 40,
+                boundary="3" * 40,
+                before_paths=["tests/test_before.py"],
+                after_paths=["tests/test_after.py"],
+                boundary_paths=[],
+                changed_paths=[
+                    "tests/test_before.py",
+                    "tests/test_after.py",
+                ],
+            )
+
+        attempts = list((tmp_path / "attempts").glob("*/*"))
+        assert len(attempts) == 1
+        attempt = attempts[0]
+        assert (attempt / "gate-selection.json").exists()
+        assert not (attempt / "attempt.json").exists()
+
+    def test_interrupted_manifest_write_leaves_no_partial_file(
+        self, tmp_path, monkeypatch
+    ):
+        writer = getattr(upstream_sync_gate, "write_json_atomic", None)
+        assert callable(writer), "atomic selection-manifest writer is not implemented"
+        attempt = tmp_path / "attempts" / "candidate" / "1"
+        attempt.mkdir(parents=True)
+        target = attempt / "gate-selection.json"
+
+        def interrupt_replace(source, destination):
+            assert Path(source).parent == target.parent
+            assert Path(destination) == target
+            raise OSError("simulated interruption before rename")
+
+        monkeypatch.setattr(upstream_sync_gate.os, "replace", interrupt_replace)
+        with pytest.raises(OSError, match="simulated interruption"):
+            writer(target, {"schema_version": "test"})
+
+        assert not target.exists()
+        assert list(attempt.iterdir()) == []
+
+    def test_manifest_reports_deleted_path_as_pre_only(self, tmp_path, state):
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(
+            tmp_path
+        )
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, _ = _stub_scripts(tmp_path)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        attempts = sorted(
+            path
+            for path in (state / "attempts").glob("*/*")
+            if path.is_dir()
+        )
+        assert len(attempts) == 1, proc.stderr + (state / "finalize-detail.log").read_text()
+        attempt = attempts[0]
+        manifest = json.loads((attempt / "gate-selection.json").read_text())
+        deleted = "tests/test_upstream_deleted.py"
+        assert {item["path"]: item for item in manifest["tests"]}[deleted] == {
+            "path": deleted,
+            "exists_pre": True,
+            "exists_post": False,
+        }
+
+        metadata = json.loads((attempt / "attempt.json").read_text())
+        assert metadata["schema_version"] == "upstream-sync-gate-attempt/v1"
+        assert metadata["before"] == local_head
+        assert metadata["after"] == merge_sha
+        assert metadata["boundary"] == upstream_head
+        assert metadata["generation"] == 1
+        assert metadata["run_id"] == f"{metadata['candidate_id']}:1"
+        assert manifest["candidate_id"] == metadata["candidate_id"]
+        assert manifest["generation"] == metadata["generation"]
+        assert manifest["run_id"] == metadata["run_id"]
+        assert attempt.parent.name == metadata["candidate_id"]
+        assert attempt.name == str(metadata["generation"])
+        assert (attempt / "gate-baseline.log").exists()
+        assert (attempt / "gate-post.log").exists()
+
+        detail = (state / "finalize-detail.log").read_text()
+        report_line = next(
+            line.removeprefix("gate selection report: ")
+            for line in detail.splitlines()
+            if line.startswith("gate selection report: ")
+        )
+        report = json.loads(report_line)
+        assert report["pre_only_paths"] == [deleted]
+        assert report["pre_only_path_count"] == 1
 
 
 class TestHostRecordsDecisionsIntoMemory:
@@ -981,6 +1729,239 @@ def _resolver(tmp_path: Path, body: str) -> str:
     return f"{sys.executable} {r}"
 
 
+class TestAttemptInvariant:
+    """A resumable apply attempt is bound to both sides of its input pair."""
+
+    def _conflict_world(self, tmp_path: Path):
+        repo = _make_repo(tmp_path)
+        local_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-qb", "up", "HEAD~1")
+        (repo / "f.txt").write_text("upstream conflict\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream conflict")
+        upstream_head = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        return repo, local_head, upstream_head
+
+    def _seed_stale_attempt(
+        self, state: Path, repo: Path, *, local_head: str, upstream_head: str,
+        pending_local_head: str, pending_upstream_head: str,
+    ):
+        scratch = state / "scratch"
+        subprocess.run(
+            ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+            check=True,
+            capture_output=True,
+        )
+        _git(scratch, "config", "user.email", "t@t")
+        _git(scratch, "config", "user.name", "t")
+        _git(scratch, "checkout", "-q", "--detach", local_head)
+        merge = subprocess.run(
+            ["git", "-c", "rerere.enabled=false", "merge", "--no-edit", upstream_head],
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+        )
+        assert merge.returncode != 0
+        assert (scratch / ".git" / "MERGE_HEAD").read_text().strip() == upstream_head
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1",
+            "local_head": pending_local_head,
+            "upstream_head": pending_upstream_head,
+            "features": [],
+        }))
+        (state / "apply-prepare.json").write_text(json.dumps({
+            "schema": "upstream-sync-apply/v1",
+            "status": "ready",
+            "local_base": local_head,
+            "upstream_head": upstream_head,
+            "scratch": str(scratch),
+            "conflicts": ["f.txt"],
+        }))
+
+    def _prepare_or_resume(self, state: Path, repo: Path):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "upstream_sync_apply.py"),
+                "prepare-or-resume",
+                "--state", str(state),
+                "--live", str(repo),
+                "--scratch", "scratch",
+                "--in-flight-ok",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_attempt_archive_recovery_uses_pending_as_commit_marker(self, tmp_path, state, monkeypatch):
+        scratch = state / "scratch"
+        scratch.mkdir()
+        (scratch / "evidence.txt").write_text("old\n")
+        (state / "apply-prepare.json").write_text("{\"status\": \"ready\"}\n")
+        (state / "pending.json").write_text("{\"local_head\": \"old\"}\n")
+        real_replace = upstream_sync_apply.os.replace
+
+        def fail_after_scratch(source, destination):
+            result = real_replace(source, destination)
+            if Path(source).name == "scratch":
+                raise OSError("simulated interruption before commit marker")
+            return result
+
+        monkeypatch.setattr(upstream_sync_apply.os, "replace", fail_after_scratch)
+        with pytest.raises(OSError, match="commit marker"):
+            upstream_sync_apply._archive_stale_attempt(state, scratch)
+        assert (state / "pending.json").exists()
+        assert list((state / "apply-attempts").glob(".*.tmp"))
+
+        monkeypatch.setattr(upstream_sync_apply.os, "replace", real_replace)
+        upstream_sync_apply._archive_stale_attempt(state, scratch)
+        assert not (state / "pending.json").exists()
+        assert not list((state / "apply-attempts").glob(".*.tmp"))
+        archive = next((state / "apply-attempts").iterdir())
+        assert (archive / "pending.json").exists()
+        assert (archive / "scratch" / "evidence.txt").exists()
+
+    def _seed_pair_only_attempt(
+        self, state: Path, repo: Path, *, scratch_head: str,
+        pending_local_head: str, pending_upstream_head: str,
+        prep_local_base: str, prep_upstream_head: str, merge_head: str = "",
+    ):
+        scratch = state / "scratch"
+        subprocess.run(
+            ["git", "clone", "-q", "--shared", str(repo), str(scratch)],
+            check=True,
+            capture_output=True,
+        )
+        _git(scratch, "checkout", "-q", "--detach", scratch_head)
+        if merge_head:
+            (scratch / ".git" / "MERGE_HEAD").write_text(merge_head + "\n")
+        (state / "pending.json").write_text(json.dumps({
+            "schema": "upstream-sync-pending/v1",
+            "local_head": pending_local_head,
+            "upstream_head": pending_upstream_head,
+            "features": [],
+        }))
+        (state / "apply-prepare.json").write_text(json.dumps({
+            "schema": "upstream-sync-apply/v1",
+            "status": "ready",
+            "local_base": prep_local_base,
+            "upstream_head": prep_upstream_head,
+            "scratch": str(scratch),
+            "conflicts": [],
+        }))
+
+    def test_attempt_invariant_local_identity_is_checked_independently(self, tmp_path, state):
+        repo, stale_local, upstream_head = self._conflict_world(tmp_path)
+        (repo / "live.txt").write_text("moved\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "live moved")
+        live_head = _git(repo, "rev-parse", "HEAD")
+        self._seed_pair_only_attempt(
+            state, repo,
+            scratch_head=live_head,
+            pending_local_head=stale_local,
+            pending_upstream_head=upstream_head,
+            prep_local_base=live_head,
+            prep_upstream_head=upstream_head,
+        )
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        assert json.loads((state / "apply-prepare.json").read_text())["status"] == "new_conflicts"
+        assert list((state / "apply-attempts").glob("*/apply-prepare.json"))
+
+    def test_attempt_invariant_upstream_identity_is_checked_independently(self, tmp_path, state):
+        repo, local_head, old_upstream = self._conflict_world(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "upstream-later.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream moved")
+        new_upstream = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        self._seed_pair_only_attempt(
+            state, repo,
+            scratch_head=local_head,
+            pending_local_head=local_head,
+            pending_upstream_head=new_upstream,
+            prep_local_base=local_head,
+            prep_upstream_head=old_upstream,
+            merge_head=new_upstream,
+        )
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        assert json.loads((state / "apply-prepare.json").read_text())["status"] == "new_conflicts"
+        assert list((state / "apply-attempts").glob("*/apply-prepare.json"))
+
+    def test_attempt_invariant_stale_local_head_is_rotated_before_fresh_prepare(self, tmp_path, state):
+        repo, old_local, upstream_head = self._conflict_world(tmp_path)
+        self._seed_stale_attempt(
+            state, repo,
+            local_head=old_local,
+            upstream_head=upstream_head,
+            pending_local_head=old_local,
+            pending_upstream_head=upstream_head,
+        )
+        (repo / "local.txt").write_text("live moved\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "live moved")
+        live_head = _git(repo, "rev-parse", "HEAD")
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        pending = json.loads((state / "pending.json").read_text())
+        prep = json.loads((state / "apply-prepare.json").read_text())
+        assert pending["local_head"] == live_head
+        assert prep["local_base"] == live_head
+        assert prep["upstream_head"] == upstream_head
+        assert _git(state / "scratch", "rev-parse", "HEAD") == live_head
+        assert not (state / "scratch" / ".git" / "MERGE_HEAD").exists()
+        assert prep["status"] == "new_conflicts"
+        archives = list((state / "apply-attempts").glob("*/apply-prepare.json"))
+        assert len(archives) == 1
+        archive = archives[0].parent
+        assert (archive / "pending.json").exists()
+        assert (archive / "scratch" / ".git" / "MERGE_HEAD").read_text().strip() == upstream_head
+
+    def test_attempt_invariant_same_local_with_new_upstream_rotates_stale_resume(self, tmp_path, state):
+        repo, local_head, old_upstream = self._conflict_world(tmp_path)
+        _git(repo, "checkout", "-q", "up")
+        (repo / "upstream-later.txt").write_text("later\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "upstream moved")
+        new_upstream = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "local/customizations")
+        self._seed_stale_attempt(
+            state, repo,
+            local_head=local_head,
+            upstream_head=old_upstream,
+            pending_local_head=local_head,
+            pending_upstream_head=new_upstream,
+        )
+
+        proc = self._prepare_or_resume(state, repo)
+
+        assert proc.returncode == 4, proc.stderr + proc.stdout
+        pending = json.loads((state / "pending.json").read_text())
+        prep = json.loads((state / "apply-prepare.json").read_text())
+        assert pending["local_head"] == local_head
+        assert pending["upstream_head"] == new_upstream
+        assert prep["local_base"] == local_head
+        assert prep["upstream_head"] == new_upstream
+        assert _git(state / "scratch", "rev-parse", "HEAD") == local_head
+        assert not (state / "scratch" / ".git" / "MERGE_HEAD").exists()
+        assert prep["status"] == "new_conflicts"
+        archives = list((state / "apply-attempts").glob("*/apply-prepare.json"))
+        assert len(archives) == 1
+        archive = archives[0].parent
+        assert (archive / "pending.json").exists()
+        assert (archive / "scratch" / ".git" / "MERGE_HEAD").read_text().strip() == old_upstream
+
+
 class TestApplyDecisions:
     """The host applies a decided pending.json end to end: clone, mechanical +
     model resolution, commit, gate, land, publish, archive, memory, and a
@@ -1038,6 +2019,11 @@ class TestApplyDecisions:
         assert posts and posts[-1]["channel"] == "C0TEST" and posts[-1]["thread_ts"] == "1786.001"
         assert "applied" in posts[-1]["text"].lower()
         assert "f.txt" in posts[-1]["text"]
+        assert "*Fork test gate*" in posts[-1]["text"]
+        assert "verdict: `PASS`" in posts[-1]["text"]
+        assert "common_path: 0" in posts[-1]["text"]
+        assert "post_only_path: 0" in posts[-1]["text"]
+        assert not (state / "gate-failures.json").exists()
         # the clone is gone on success
         assert not (state / "scratch").exists()
 
@@ -1596,8 +2582,25 @@ class TestRedGateIsTriagedAndProposedToTheOperator:
         for a sentinel we planted."""
         (scripts / "run-fork-tests.sh").write_text(
             "#!/usr/bin/env bash\n"
+            # Новый argv-контракт: граница обязательна и идёт опцией, поэтому
+            # worktree больше не $1. Заодно записываем полученную границу —
+            # оба прогона гейта обязаны увидеть один и тот же полный SHA.
+            'WT=""; BND=""; SEL=""; PROBE=0\n'
+            'while [ $# -gt 0 ]; do case "$1" in\n'
+            '  --boundary) BND="$2"; shift 2 ;;\n'
+            '  --selection-from) SEL="$2"; shift 2 ;;\n'
+            '  --probe-nodeids-from) PROBE=1; shift 2 ;;\n'
+            '  *) WT="$1"; shift ;;\n'
+            'esac; done\n'
+            'printf "%s\\n" "$BND" >> "$(dirname "$0")/boundary-calls.log"\n'
+            + _manifest_receipt_after_parse()
+            + 'if [ "$PROBE" -eq 1 ]; then\n'
+            "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"
+            "  echo '1 failed, 5 passed in 2.00s'\n"
+            "  exit 0\n"
+            "fi\n"
             "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
-            'if [ -f "$1/g.txt" ] && grep -q "f() ==" "$1/tests/new.py"; then\n'
+            'if [ -f "$WT/g.txt" ] && grep -q "f() ==" "$WT/tests/new.py"; then\n'
             "  echo '____ test_broken_by_merge ____'\n"
             "  echo 'E   TypeError: f() missing 1 required positional argument'\n"
             "  echo 'FAILED tests/new.py::test_broken_by_merge - TypeError'\n"

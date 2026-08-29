@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -29,6 +30,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from scripts import run_tests_parallel, upstream_sync_gate
 
 
 # Both tests share the same handoff file: the leaker writes here, the
@@ -460,3 +463,314 @@ def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
         f"drive letter split off as a phantom root:\n{proc.stdout}"
     )
     assert "Discovered 1 test files" in proc.stdout, proc.stdout
+
+
+def test_runner_can_separate_script_location_from_execution_root(tmp_path: Path) -> None:
+    """A pinned runner may execute pytest against a different worktree."""
+    repo_root = Path(__file__).resolve().parent.parent
+    copied_runner = tmp_path / "pinned-checkout" / "scripts" / "run_tests_parallel.py"
+    copied_runner.parent.mkdir(parents=True)
+    shutil.copy2(repo_root / "scripts" / "run_tests_parallel.py", copied_runner)
+
+    target_root = tmp_path / "target-worktree"
+    test_file = target_root / "tests" / "test_target.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_target_tree_is_used():\n    assert True\n", encoding="utf-8")
+    report = tmp_path / "target.nodes.json"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(copied_runner),
+            "--repo-root",
+            str(target_root),
+            "--files",
+            "tests/test_target.py",
+            "--node-report",
+            str(report),
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert json.loads(report.read_text(encoding="utf-8"))["collected_nodeids"] == [
+        "tests/test_target.py::test_target_tree_is_used"
+    ]
+
+
+def test_node_report_includes_nodes_from_green_and_failed_files(tmp_path: Path) -> None:
+    """The machine report must not lose a whole file merely because it passed."""
+    repo_root = Path(__file__).resolve().parent.parent
+    target_root = tmp_path / "target-worktree"
+    tests_root = target_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "test_green.py").write_text(
+        "def test_green_one():\n    assert True\n\n"
+        "def test_green_two():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_red.py").write_text(
+        "def test_red():\n    assert False\n", encoding="utf-8"
+    )
+    report = tmp_path / "nodes.json"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "run_tests_parallel.py"),
+            "--repo-root",
+            str(target_root),
+            "--files",
+            "tests/test_green.py:tests/test_red.py",
+            "--node-report",
+            str(report),
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "2",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-rA",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode == 1, proc.stdout
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert set(payload["collected_nodeids"]) == {
+        "tests/test_green.py::test_green_one",
+        "tests/test_green.py::test_green_two",
+        "tests/test_red.py::test_red",
+    }
+    assert payload["failed_nodeids"] == ["tests/test_red.py::test_red"]
+    assert payload["tests_collected"] == 3
+
+
+def test_node_parser_ignores_application_error_log_lines() -> None:
+    parsed = run_tests_parallel._parse_node_outcomes(
+        "ERROR cron.scheduler:scheduler.py:4026 delivery failed\n",
+        Path("/repo"),
+    )
+
+    assert parsed["collection_error_paths"] == []
+    assert parsed["collected_nodeids"] == []
+
+
+def test_node_parser_does_not_treat_skipped_summary_as_a_nodeid() -> None:
+    parsed = run_tests_parallel._parse_node_outcomes(
+        "SKIPPED [1] tests/hermes_cli/test_gateway_service.py:931: macOS-only\n",
+        Path("/repo"),
+    )
+
+    assert parsed["collected_nodeids"] == []
+    assert parsed["failed_nodeids"] == []
+    assert parsed["skipped_paths"] == [
+        "tests/hermes_cli/test_gateway_service.py"
+    ]
+
+
+def test_node_report_distinguishes_no_tests_from_a_silent_kill(tmp_path: Path) -> None:
+    repo_root = tmp_path / "target-worktree"
+    tests_root = repo_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "test_empty.py").write_text(
+        "# deliberately contains no tests\n", encoding="utf-8"
+    )
+    (tests_root / "test_killed.py").write_text(
+        "import os\nos._exit(137)\n", encoding="utf-8"
+    )
+    report = tmp_path / "nodes.json"
+    runner = Path(__file__).resolve().parent.parent / "scripts" / "run_tests_parallel.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo-root",
+            str(repo_root),
+            "--files",
+            "tests/test_empty.py:tests/test_killed.py",
+            "--node-report",
+            str(report),
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["tests_collected"] == 0
+    assert payload["files"]["tests/test_empty.py"]["readable"] is True
+    assert payload["files"]["tests/test_killed.py"]["readable"] is False
+    assert payload["readable"] is False
+
+
+def test_node_report_distinguishes_infrastructure_rc_from_normal_test_failure(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "target-worktree"
+    tests_root = repo_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "conftest.py").write_text(
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    if exitstatus == 0:\n"
+        "        session.exitstatus = 7\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_infrastructure_rc.py").write_text(
+        "def test_passes_but_session_rc_is_nonzero():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (tests_root / "test_normal_failure.py").write_text(
+        "def test_normal_failure():\n    assert False\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "nodes.json"
+    runner = Path(__file__).resolve().parent.parent / "scripts" / "run_tests_parallel.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--repo-root",
+            str(repo_root),
+            "--files",
+            "tests/test_infrastructure_rc.py:tests/test_normal_failure.py",
+            "--node-report",
+            str(report),
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    infrastructure = payload["files"]["tests/test_infrastructure_rc.py"]
+    normal_failure = payload["files"]["tests/test_normal_failure.py"]
+    assert infrastructure["returncode"] != 0
+    assert infrastructure["failed_nodeids"] == []
+    assert infrastructure["readable"] is False
+    assert normal_failure["returncode"] != 0
+    assert normal_failure["failed_nodeids"] == [
+        "tests/test_normal_failure.py::test_normal_failure"
+    ]
+    assert normal_failure["readable"] is True
+
+
+def test_write_node_report_handles_worker_crash_report(tmp_path: Path) -> None:
+    report = tmp_path / "nodes.json"
+    run_tests_parallel._write_node_report(
+        report,
+        {
+            "tests/test_crashed.py": {
+                "collected_nodeids": [],
+                "failed_nodeids": [],
+                "collection_error_paths": [],
+                "error_count": 0,
+                "returncode": None,
+                "readable": False,
+            }
+        },
+    )
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["readable"] is False
+    assert payload["files"]["tests/test_crashed.py"]["returncode"] is None
+
+
+def test_node_report_write_failure_cannot_leave_a_green_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = tmp_path / "target-worktree"
+    tests_root = repo_root / "tests"
+    tests_root.mkdir(parents=True)
+    (tests_root / "test_pass.py").write_text(
+        "def test_pass():\n    assert True\n", encoding="utf-8"
+    )
+    report = tmp_path / "nodes.json"
+
+    def fail_to_write(*args, **kwargs):
+        raise OSError("simulated node report write failure")
+
+    monkeypatch.setattr(run_tests_parallel, "_write_node_report", fail_to_write)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(repo_root / "scripts" / "run_tests_parallel.py"),
+            "--repo-root",
+            str(repo_root),
+            "--files",
+            "tests/test_pass.py",
+            "--node-report",
+            str(report),
+            "--no-duration-cache",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
+    )
+
+    with pytest.raises(OSError, match="simulated node report write failure"):
+        run_tests_parallel.main()
+
+    output = capsys.readouterr().out
+    with pytest.raises(ValueError, match="summary"):
+        upstream_sync_gate.parse_test_outcomes(output, aggregate=True)

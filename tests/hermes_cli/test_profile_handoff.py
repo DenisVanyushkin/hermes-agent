@@ -36,13 +36,20 @@ def _read_json_output(result: subprocess.CompletedProcess[str]) -> dict:
     return json.loads(result.stdout)
 
 
+def _output_root(tmp_path: Path) -> Path:
+    # tests/conftest.py deliberately places the substituted HERMES_HOME under
+    # tmp_path; keep handoff output in a child so unrelated home files cannot
+    # be mistaken for produced artifacts.
+    return tmp_path / "output"
+
+
 def test_preview_mode_writes_nothing(tmp_path: Path):
     task, route_decision, approval_preview = _deploy_route_and_approval()
     result = preview_scribe_handoff(
         task,
         route_decision=route_decision,
         approval_preview=approval_preview,
-        output_root=tmp_path,
+        output_root=_output_root(tmp_path),
         write=False,
     )
 
@@ -50,7 +57,21 @@ def test_preview_mode_writes_nothing(tmp_path: Path):
     assert result.write_verified is False
     assert result.handoff.scribe_status == "handoff_incomplete"
     assert result.handoff.scribe_failure_reason == "hook_skipped"
-    assert not any(tmp_path.rglob("*.md"))
+    assert not any(_output_root(tmp_path).rglob("*.md"))
+
+
+def test_preview_output_root_is_not_polluted_by_hermes_home(tmp_path: Path):
+    task, route_decision, approval_preview = _deploy_route_and_approval()
+    result = preview_scribe_handoff(
+        task,
+        route_decision=route_decision,
+        approval_preview=approval_preview,
+        output_root=_output_root(tmp_path),
+        write=False,
+    )
+
+    assert result.write_performed is False
+    assert not any(_output_root(tmp_path).rglob("*.md"))
 
 
 def test_write_mode_creates_artifact_under_allowed_output_root(tmp_path: Path):

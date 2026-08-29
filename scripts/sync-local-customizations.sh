@@ -39,7 +39,9 @@ if [ "${1:-}" = "--post-update-only" ]; then
 fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
+if [ -n "${HERMES_REPO:-}" ]; then
+  REPO="$HERMES_REPO"
+elif [ -d "${PWD:-.}/.git" ] && [ -d "${PWD:-.}/agent" ] && [ -d "${PWD:-.}/gateway" ]; then
   REPO="${PWD}"
 elif [ -d "$SCRIPT_DIR/../agent" ] && [ -d "$SCRIPT_DIR/../gateway" ]; then
   REPO="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -537,7 +539,13 @@ BASE_BEFORE="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF" 2>/dev/null || t
 git_fetch_retry "$REPO" "$UPSTREAM_FETCH_URL" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
 BASE_AFTER="$(git -C "$REPO" rev-parse --short "$UPSTREAM_REF")"
-if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_REF" HEAD; then
+# Полный неизменяемый SHA разрешается ОДИН раз сразу после fetch и дальше
+# используется везде: merge-tree, сам merge и граница обоих прогонов. Если
+# граница будет полным SHA, а слияние останется по ref, остаётся гонка —
+# проверили одного кандидата, слили другого. BASE_AFTER короткий и годится
+# только для сообщения, идентичностью он быть не может.
+UPSTREAM_FULL="$(git -C "$REPO" rev-parse --verify "$UPSTREAM_REF^{commit}")"
+if [ "$BASE_BEFORE" = "$BASE_AFTER" ] && git -C "$REPO" merge-base --is-ancestor "$UPSTREAM_FULL" HEAD; then
   push_personal_branch
   report_noop "$BEFORE_HEAD"
   exit 0
@@ -554,7 +562,7 @@ PYTHON_BIN="${HERMES_PYTHON:-$REPO/venv/bin/python}"
 [ -x "$PYTHON_BIN" ] || PYTHON_BIN="$(command -v python3)"
 
 MERGE_TREE_OUT="$(mktemp)"
-git -C "$REPO" merge-tree --write-tree --name-only HEAD "$UPSTREAM_REF" >"$MERGE_TREE_OUT" 2>&1 || true
+git -C "$REPO" merge-tree --write-tree --name-only HEAD "$UPSTREAM_FULL" >"$MERGE_TREE_OUT" 2>&1 || true
 
 # set +e, а не `|| true`: подстановка с `|| true` возвращает код самого
 # присваивания, то есть всегда 0, и код 2 (не смогли разобрать вывод)
@@ -592,9 +600,13 @@ rm -f "$MERGE_TREE_OUT"
 # приземляется. Живая ветка не должна ни на секунду оказаться в состоянии,
 # которое мы ещё не проверили: гейтвей работает на этом же дереве.
 SYNC_WT="$(mktemp -d -t hermes-upstream-sync-XXXXXX)"
+SELECTION_STATE_DIR="$(mktemp -d -t hermes-upstream-selection-XXXXXX)"
+SELECTION_MANIFEST=""
+SELECTION_ATTEMPT_ROOT="$SELECTION_STATE_DIR/attempts"
 cleanup_sync_worktree() {
   git -C "$REPO" worktree remove --force "$SYNC_WT" >/dev/null 2>&1 || true
   rm -rf "$SYNC_WT"
+  rm -rf "$SELECTION_STATE_DIR"
 }
 trap cleanup_sync_worktree EXIT
 
@@ -604,11 +616,7 @@ TEST_CMD="${HERMES_SYNC_TEST_CMD:-$SCRIPT_DIR/run-fork-tests.sh}"
 [ -x "$TEST_CMD" ] || TEST_CMD="$REPO/scripts/run-fork-tests.sh"
 BASELINE_LOG_FILE="$(mktemp)"
 POST_LOG_FILE="$(mktemp)"
-
-# Ненулевой код прогона здесь нормален: падения и есть предмет измерения.
-if ! "$TEST_CMD" "$SYNC_WT" >"$BASELINE_LOG_FILE" 2>&1; then
-  :
-fi
+BEFORE_FULL="$(git -C "$REPO" rev-parse HEAD)"
 
 MERGE_LOG="$(mktemp)"
 # rerere is OFF for this merge on purpose. It is enabled in this repo's config
@@ -616,7 +624,7 @@ MERGE_LOG="$(mktemp)"
 # where "ours"/"theirs" are inverted relative to a merge — replaying them here
 # resolves conflicts backwards, and silently. The worktree shares .git with the
 # live repo, so it inherits both the setting and the recordings.
-if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_REF" >"$MERGE_LOG" 2>&1; then
+if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_FULL" >"$MERGE_LOG" 2>&1; then
   # Не всякая неудача merge — расхождение с merge-tree. Отсутствующая
   # git-identity, нехватка места, битый индекс дают тот же ненулевой код, и
   # обвинять в них merge-tree значит отправить расследование не туда.
@@ -634,15 +642,85 @@ if ! git -C "$SYNC_WT" -c rerere.enabled=false merge --no-edit "$UPSTREAM_REF" >
 fi
 rm -f "$MERGE_LOG"
 
-if ! "$TEST_CMD" "$SYNC_WT" >"$POST_LOG_FILE" 2>&1; then
+# The manifest is built only after the candidate merge exists. It is the one
+# persisted selection for both trees: changing the checkout changes only which
+# exists_pre/exists_post side the runner consumes, never the selected universe.
+SELECTION_BEFORE_PATHS="$(mktemp)"
+SELECTION_AFTER_PATHS="$(mktemp)"
+SELECTION_BOUNDARY_PATHS="$(mktemp)"
+SELECTION_CHANGED_PATHS="$(mktemp)"
+SELECTION_REPORT_FILE="$(mktemp)"
+git -C "$REPO" ls-tree -r -z --name-only "$BEFORE_FULL" -- tests/ >"$SELECTION_BEFORE_PATHS"
+MERGED_HEAD="$(git -C "$SYNC_WT" rev-parse HEAD)"
+git -C "$REPO" ls-tree -r -z --name-only "$MERGED_HEAD" -- tests/ >"$SELECTION_AFTER_PATHS"
+git -C "$REPO" ls-tree -r -z --name-only "$UPSTREAM_FULL" -- tests/ >"$SELECTION_BOUNDARY_PATHS"
+git -C "$REPO" diff --no-renames --name-only -z "$BEFORE_FULL" "$MERGED_HEAD" -- tests/ >"$SELECTION_CHANGED_PATHS"
+if ! "$PYTHON_BIN" "$GATE" prepare-selection \
+  --state-dir "$SELECTION_STATE_DIR" \
+  --before "$BEFORE_FULL" --after "$MERGED_HEAD" --boundary "$UPSTREAM_FULL" \
+  --before-paths "$SELECTION_BEFORE_PATHS" --after-paths "$SELECTION_AFTER_PATHS" \
+  --boundary-paths "$SELECTION_BOUNDARY_PATHS" --changed-paths "$SELECTION_CHANGED_PATHS" \
+  >"$SELECTION_REPORT_FILE"; then
+  echo "FAILED: could not build the bound test-selection manifest." >&2
+  exit 1
+fi
+SELECTION_MANIFEST="$("$PYTHON_BIN" - "$SELECTION_REPORT_FILE" <<'PY'
+import json, sys
+from pathlib import Path
+report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+attempt_dir = report.get("attempt_dir")
+if not isinstance(attempt_dir, str) or not attempt_dir:
+    raise SystemExit("prepare-selection returned no attempt_dir")
+print(Path(attempt_dir) / "gate-selection.json")
+PY
+)"
+SELECTION_DIGEST="$(sha256sum "$SELECTION_MANIFEST" | awk '{print $1}')"
+PRE_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side pre --digest "$SELECTION_DIGEST")"
+POST_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side post --digest "$SELECTION_DIGEST")"
+PRE_FINAL_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side pre --stage final --digest "$SELECTION_DIGEST")"
+POST_FINAL_RECEIPT="$("$PYTHON_BIN" "$GATE" receipt --source manifest --side post --stage final --digest "$SELECTION_DIGEST")"
+rm -f "$SELECTION_BEFORE_PATHS" "$SELECTION_AFTER_PATHS" "$SELECTION_BOUNDARY_PATHS" \
+  "$SELECTION_CHANGED_PATHS" "$SELECTION_REPORT_FILE"
+
+# Nonzero test-run codes are expected: failures are the measured outcome.
+git -C "$SYNC_WT" checkout --detach "$BEFORE_FULL" >/dev/null 2>&1
+if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
+  --attempt-root "$SELECTION_ATTEMPT_ROOT" --boundary "$UPSTREAM_FULL" "$SYNC_WT" \
+  >"$BASELINE_LOG_FILE" 2>&1; then
   :
+fi
+if ! grep -Fqx "$PRE_RECEIPT" "$BASELINE_LOG_FILE"; then
+  echo "FAILED: baseline runner preliminary receipt missing or measured the wrong manifest side." >&2
+  tail -n 5 "$BASELINE_LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -Fqx "$PRE_FINAL_RECEIPT" "$BASELINE_LOG_FILE"; then
+  echo "FAILED: baseline runner final receipt missing; test run unreadable, refusing to land the merge." >&2
+  tail -n 5 "$BASELINE_LOG_FILE" >&2
+  exit 1
+fi
+git -C "$SYNC_WT" checkout --detach "$MERGED_HEAD" >/dev/null 2>&1
+if ! "$TEST_CMD" --selection-from "$SELECTION_MANIFEST" \
+  --attempt-root "$SELECTION_ATTEMPT_ROOT" --boundary "$UPSTREAM_FULL" "$SYNC_WT" \
+  >"$POST_LOG_FILE" 2>&1; then
+  :
+fi
+if ! grep -Fqx "$POST_RECEIPT" "$POST_LOG_FILE"; then
+  echo "FAILED: post runner preliminary receipt missing or measured the wrong manifest side." >&2
+  tail -n 5 "$POST_LOG_FILE" >&2
+  exit 1
+fi
+if ! grep -Fqx "$POST_FINAL_RECEIPT" "$POST_LOG_FILE"; then
+  echo "FAILED: post runner final receipt missing; test run unreadable, refusing to land the merge." >&2
+  tail -n 5 "$POST_LOG_FILE" >&2
+  exit 1
 fi
 
 # Тот же приём, что и в гейте merge-tree: код 2 означает «сравнить не смогли»
 # и обязан отличаться от «новых падений нет».
 set +e
 NEW_FAILURES="$("$PYTHON_BIN" "$GATE" new-failures \
-  --baseline "$BASELINE_LOG_FILE" --post "$POST_LOG_FILE")"
+  --baseline "$BASELINE_LOG_FILE" --post "$POST_LOG_FILE" --aggregate)"
 NF_RC=$?
 set -e
 if [ "$NF_RC" -eq 2 ]; then
@@ -668,7 +746,6 @@ if [ -n "$NEW_FAILURES" ]; then
 fi
 rm -f "$BASELINE_LOG_FILE" "$POST_LOG_FILE"
 
-MERGED_HEAD="$(git -C "$SYNC_WT" rev-parse HEAD)"
 git -C "$REPO" branch "backup/pre-upstream-sync-$(date +%Y%m%d-%H%M%S)" HEAD >/dev/null 2>&1 || true
 
 if ! git -C "$REPO" merge --ff-only "$MERGED_HEAD" >/dev/null 2>&1; then
