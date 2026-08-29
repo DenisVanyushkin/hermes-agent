@@ -1919,6 +1919,7 @@ def test_b2_foreign_credit_is_explicit_when_own_families_are_blocked(tmp_path: P
         "credited_records": 1,
         "credited_from_other_queries_count": 1,
         "own_completed_families": 0,
+        "productive_families": 0,
         "credit_note": "credited_from_other_queries_while_own_families_blocked",
     }
     assert summary["geography_summary"]["pairwise"]["genuinely_location_independent|uk"]["jaccard"] == 0.0
@@ -1960,6 +1961,7 @@ def test_b2_credit_from_own_query_has_no_foreign_credit(tmp_path: Path) -> None:
         "credited_records": 1,
         "credited_from_other_queries_count": 0,
         "own_completed_families": 1,
+        "productive_families": 1,
         "credit_note": None,
     }
 

@@ -51,6 +51,7 @@ AcquisitionOutcome = Literal[
     "blocked",
     "degraded",
     "insufficient_breadth",
+    "insufficient_corroboration",
     "candidate_records_found",
     "no_candidate_records",
 ]
@@ -69,6 +70,7 @@ class AcquisitionOutcomeDecision:
 def matching_acquisition_rules(
     *,
     completed: int,
+    productive: int,
     blocked: int,
     degraded: int,
     minimum_independent_families: int,
@@ -101,7 +103,15 @@ def matching_acquisition_rules(
         ),
         (
             "candidate_records_found",
-            completed >= minimum_independent_families and credited > 0,
+            completed >= minimum_independent_families
+            and productive >= minimum_independent_families
+            and credited > 0,
+        ),
+        (
+            "insufficient_corroboration",
+            completed >= minimum_independent_families
+            and productive < minimum_independent_families
+            and credited > 0,
         ),
         (
             "no_candidate_records",
@@ -114,18 +124,22 @@ def matching_acquisition_rules(
 def resolve_acquisition_outcome(
     *,
     completed: int,
+    productive: int,
     blocked: int,
     degraded: int,
     minimum_independent_families: int,
     credited: int = 0,
 ) -> AcquisitionOutcomeDecision:
-    counts = (completed, blocked, degraded, credited)
+    counts = (completed, productive, blocked, degraded, credited)
     if any(value < 0 for value in counts):
         raise ValueError("acquisition counts must be non-negative")
     if minimum_independent_families < 1:
         raise ValueError("minimum independent families must be positive")
+    if productive > completed:
+        raise ValueError("productive families cannot exceed completed families")
     matches = matching_acquisition_rules(
         completed=completed,
+        productive=productive,
         blocked=blocked,
         degraded=degraded,
         minimum_independent_families=minimum_independent_families,
@@ -137,7 +151,11 @@ def resolve_acquisition_outcome(
             f"{completed=}, {blocked=}, {degraded=}, {minimum_independent_families=}, {credited=}"
         )
     outcome = matches[0]
-    if outcome in {"candidate_records_found", "no_candidate_records"}:
+    if outcome in {
+        "candidate_records_found",
+        "insufficient_corroboration",
+        "no_candidate_records",
+    }:
         return AcquisitionOutcomeDecision(
             acquisition_outcome=outcome,
             product_observability_state=None,
@@ -1765,6 +1783,10 @@ def run_probe(
             outcome: sum(record["outcome"] == outcome for record in pair_records)
             for outcome in ("completed", "blocked", "degraded")
         }
+        productive = sum(
+            record["outcome"] == "completed" and record["received_records"] > 0
+            for record in pair_records
+        )
         pair_record_by_key = {
             (record["cell_id"], record["source_family"]): record
             for record in pair_records
@@ -1800,6 +1822,7 @@ def run_probe(
             credited_records_provenance[cell_id] = "received_rows_fallback"
         decision = resolve_acquisition_outcome(
             completed=counts["completed"],
+            productive=productive,
             blocked=counts["blocked"],
             degraded=counts["degraded"],
             minimum_independent_families=cell_minimums[cell_id],
@@ -1815,6 +1838,7 @@ def run_probe(
             "credited_records": credited,
             "credited_from_other_queries_count": credited_from_other_queries_count,
             "own_completed_families": counts["completed"],
+            "productive_families": productive,
             "credit_note": (
                 "credited_from_other_queries_while_own_families_blocked"
                 if (
@@ -2168,8 +2192,20 @@ def validate_gate_a_run_evidence(evidence: Mapping[str, Any]) -> None:
         raise ValueError("family attempts are required")
     if "cell_states" in evidence:
         raise ValueError("legacy cell_states are forbidden")
-    if not dict(evidence.get("acquisition_outcomes") or {}):
+    acquisition_outcomes = dict(evidence.get("acquisition_outcomes") or {})
+    if not acquisition_outcomes:
         raise ValueError("acquisition outcomes are required")
+    allowed_outcomes = {
+        "not_attempted",
+        "blocked",
+        "degraded",
+        "insufficient_breadth",
+        "insufficient_corroboration",
+        "candidate_records_found",
+        "no_candidate_records",
+    }
+    if not set(acquisition_outcomes.values()) <= allowed_outcomes:
+        raise ValueError("unknown Gate A acquisition outcome")
     if evidence.get("evidence_hashes_verified") is not True:
         raise ValueError("evidence hashes must be verified")
     for name, path in dict(evidence.get("isolated_paths") or {}).items():

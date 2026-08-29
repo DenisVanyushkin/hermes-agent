@@ -41,6 +41,35 @@ def test_b1_two_completed_independent_families_can_credit_candidate_records(tmp_
 
     assert result.acquisition_outcomes["b1-cell"] == "candidate_records_found"
 
+def test_b1_credit_without_two_productive_families_is_insufficient_corroboration(
+    tmp_path: Path,
+) -> None:
+    result = _b1_run(
+        tmp_path,
+        {"alpha": [_b1_record("alpha-1")], "beta": []},
+        credited=1,
+    )
+
+    assert result.acquisition_outcomes["b1-cell"] == "insufficient_corroboration"
+    assert result.product_observability_state["b1-cell"] is None
+    assert result.product_observability_reason["b1-cell"] == "stage_4_evidence_absent"
+
+def test_b1_two_productive_families_still_find_candidate_records(tmp_path: Path) -> None:
+    result = _b1_run(
+        tmp_path,
+        {"alpha": [_b1_record("alpha-1")], "beta": [_b1_record("beta-1")]},
+        credited=1,
+    )
+
+    assert result.acquisition_outcomes["b1-cell"] == "candidate_records_found"
+
+def test_b1_empty_completed_families_remain_no_candidate_records(tmp_path: Path) -> None:
+    result = _b1_run(tmp_path, {"alpha": [], "beta": []})
+
+    assert result.acquisition_outcomes["b1-cell"] == "no_candidate_records"
+    assert result.product_observability_state["b1-cell"] is None
+    assert result.product_observability_reason["b1-cell"] == "stage_4_evidence_absent"
+
 def test_b1_degraded_attempt_beats_breadth_shortfall(tmp_path: Path) -> None:
     result = _b1_run(
         tmp_path,
@@ -92,32 +121,39 @@ def test_b1_transition_table_is_complete_and_non_overlapping() -> None:
     assert callable(transition), "B1 transition function is missing"
 
     for completed in range(4):
-        for blocked in range(4):
-            for degraded in range(4):
-                matches = acquisition_probe.matching_acquisition_rules(
-                    completed=completed,
-                    blocked=blocked,
-                    degraded=degraded,
-                    minimum_independent_families=2,
-                )
-                assert len(matches) == 1, (
-                    completed,
-                    blocked,
-                    degraded,
-                    matches,
-                )
-                decision = transition(
-                    completed=completed,
-                    blocked=blocked,
-                    degraded=degraded,
-                    minimum_independent_families=2,
-                    credited=1 if matches[0] == "candidate_records_found" else 0,
-                )
-                assert decision.acquisition_outcome == matches[0]
+        for productive in range(completed + 1):
+            for blocked in range(4):
+                for degraded in range(4):
+                    credited = 1 if completed >= 2 else 0
+                    matches = acquisition_probe.matching_acquisition_rules(
+                        completed=completed,
+                        productive=productive,
+                        blocked=blocked,
+                        degraded=degraded,
+                        minimum_independent_families=2,
+                        credited=credited,
+                    )
+                    assert len(matches) == 1, (
+                        completed,
+                        productive,
+                        blocked,
+                        degraded,
+                        matches,
+                    )
+                    decision = transition(
+                        completed=completed,
+                        productive=productive,
+                        blocked=blocked,
+                        degraded=degraded,
+                        minimum_independent_families=2,
+                        credited=credited,
+                    )
+                    assert decision.acquisition_outcome == matches[0]
 
 def test_b1_zero_attempts_are_not_attempted() -> None:
     decision = acquisition_probe.resolve_acquisition_outcome(
         completed=0,
+        productive=0,
         blocked=0,
         degraded=0,
         minimum_independent_families=2,
@@ -130,6 +166,7 @@ def test_b1_zero_attempts_are_not_attempted() -> None:
 def test_b1_only_blocked_attempts_are_blocked() -> None:
     decision = acquisition_probe.resolve_acquisition_outcome(
         completed=0,
+        productive=0,
         blocked=1,
         degraded=0,
         minimum_independent_families=2,
@@ -142,6 +179,7 @@ def test_b1_only_blocked_attempts_are_blocked() -> None:
 def test_b1_completed_breadth_without_credited_rows_has_no_candidate_records() -> None:
     decision = acquisition_probe.resolve_acquisition_outcome(
         completed=2,
+        productive=2,
         blocked=0,
         degraded=0,
         minimum_independent_families=2,
@@ -198,6 +236,29 @@ def test_b1_acquisition_outcomes_never_use_product_qualified_label(tmp_path: Pat
 
     assert all("qualified" not in outcome for outcome in result.acquisition_outcomes.values())
 
+def test_b1_validator_accepts_new_outcome_and_rejects_unknown_values() -> None:
+    evidence = {
+        "stage_counts": {
+            "raw_observed": 0,
+            "canonical_current": 0,
+            "minimum_evidence_sufficient": 0,
+        },
+        "provisional_labels": {},
+        "scheduled_attempts": 1,
+        "completed_attempts": 1,
+        "missed_attempts": 0,
+        "family_attempts": {"alpha": 1},
+        "acquisition_outcomes": {"uk": "insufficient_corroboration"},
+        "evidence_hashes_verified": True,
+        "isolated_paths": {},
+        "side_effects": {},
+    }
+
+    validate_gate_a_run_evidence(evidence)
+    evidence["acquisition_outcomes"] = {"uk": "future_unreviewed_outcome"}
+    with pytest.raises(ValueError, match="unknown Gate A acquisition outcome"):
+        validate_gate_a_run_evidence(evidence)
+
 def test_b1_legacy_summary_refuses_to_reconstruct_attempt_outcomes() -> None:
     legacy = Path(
         "/home/hermes/.hermes/job_intel/experiments/gate-a/"
@@ -252,4 +313,3 @@ def test_b1_summary_exposes_credited_records_provenance(tmp_path: Path) -> None:
     assert attributed.credited_records_provenance == {
         "b1-cell": "caller_supplied"
     }
-
