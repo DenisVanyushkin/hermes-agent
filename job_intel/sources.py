@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -497,17 +497,54 @@ def _browser_worker_payload(command: str, *args: str, timeout: int = 240) -> dic
     return payload
 
 
-def fetch_linkedin_vacancies(query: str, *, max_pages: int = 1) -> list[Vacancy]:
+def fetch_linkedin_vacancies(
+    query: str,
+    *,
+    location: str | None = None,
+    geo_id: str | None = None,
+    execution_plan: Mapping[str, Any] | None = None,
+    max_pages: int = 1,
+    run_id: str | None = None,
+    query_id: str | None = None,
+    cell_id: str | None = None,
+    allow_unauthenticated: bool = False,
+) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
+    fetch_linkedin_vacancies.last_errors = ()  # type: ignore[attr-defined]
     if not browser_native_available():
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
     _ensure_required_browser_profile("linkedin", config)
     try:
-        payload = _browser_worker_payload("linkedin", query, str(max_pages))
+        worker_args = ["linkedin", query, str(max_pages)]
+        if location:
+            worker_args.extend(["--location", location])
+        if geo_id:
+            worker_args.extend(["--geo-id", geo_id])
+        if run_id:
+            worker_args.extend(["--run-id", run_id])
+        if query_id:
+            worker_args.extend(["--query-id", query_id])
+        if cell_id:
+            worker_args.extend(["--cell-id", cell_id])
+        if allow_unauthenticated:
+            worker_args.append("--allow-unauthenticated")
+        if execution_plan is not None:
+            worker_args.extend(
+                [
+                    "--execution-plan-json",
+                    json.dumps(execution_plan, sort_keys=True, separators=(",", ":")),
+                ]
+            )
+        payload = _browser_worker_payload(*worker_args)
         fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
         fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
+        trace = payload.get("search_trace")
+        if isinstance(trace, dict) and trace.get("stop_reason") == "critical_degradation":
+            fetch_linkedin_vacancies.last_errors = (
+                str(trace.get("failure_reason") or "critical degradation"),
+            )  # type: ignore[attr-defined]
         return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc

@@ -8,6 +8,7 @@ import tomllib
 import yaml
 
 from job_intel.product_search.acquisition_probe import (
+    EXCLUSION_REASON_CATALOG,
     build_experiment_manifest,
     relocate_experiment_manifest,
     validate_experiment_manifest,
@@ -52,6 +53,10 @@ def valid_manifest(tmp_path: Path) -> dict:
         "config_sha256": "2" * 64,
         "source_sha256": "3" * 64,
         "unit_sha256": "4" * 64,
+        "exclusion_reason_codes": {
+            "version": EXCLUSION_REASON_CATALOG.version,
+            "sha256": EXCLUSION_REASON_CATALOG.sha256,
+        },
     }
 
 

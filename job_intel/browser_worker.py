@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import subprocess
@@ -11,7 +12,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from .browser_sourcing import (
@@ -32,6 +33,26 @@ _CDP_TARGETS = {
         "max_page_targets": 8,
     },
 }
+
+
+@dataclass
+class _DispatchCounters:
+    market_query_dispatch_count: int = 0
+    sudo_dispatch_count: int = 0
+
+    def reset(self) -> None:
+        self.market_query_dispatch_count = 0
+        self.sudo_dispatch_count = 0
+
+
+_DISPATCH_COUNTERS = _DispatchCounters()
+
+
+def _run_process(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    command = args[0] if args else kwargs.get("args")
+    if isinstance(command, (list, tuple)) and command and command[0] == "sudo":
+        _DISPATCH_COUNTERS.sudo_dispatch_count += 1
+    return subprocess.run(*args, **kwargs)
 
 
 def _browser_runtime_dir() -> Path:
@@ -60,12 +81,7 @@ def _prepare_browser_runtime_env() -> None:
     os.environ.setdefault("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", "/var/lib/job-intel/state/browser-diagnostics")
     os.environ.pop("JOB_INTEL_BROWSER_EXECUTABLE", None)
     os.environ.pop("JOB_INTEL_BROWSER_CHANNEL", None)
-    os.environ.pop("JOB_INTEL_BROWSER_CDP_URL", None)
     os.environ["JOB_INTEL_BROWSER_HEADLESS"] = "0"
-
-
-def _bootstrap_script() -> Path:
-    return Path(__file__).resolve().parents[1] / "scripts" / "browser-desktop-bootstrap.sh"
 
 
 def _cdp_ready(cdp_url: str, *, attempts: int = 1, delay_seconds: float = 1.0) -> bool:
@@ -166,87 +182,49 @@ def _endpoint_dirty(source: str, cdp_url: str) -> bool:
     return foreign > 0 or page_count > int(target.get("max_page_targets", 8))
 
 
-def _recycle_browser_desktop(source: str) -> None:
-    target = _CDP_TARGETS.get(source)
-    if not target:
-        return
-    cdp_url = str(target["cdp_url"])
-    port = urlparse(cdp_url).port or 0
-    profile = str(target["profile"])
-    kill_script = """
-set -e
-port="{port}"
-profile="{profile}"
-# Match both arguments independently: Chromium places --user-data-dir before
-# --remote-debugging-port, while renderer processes may use another order.
-pids="$(ps -u browser -o pid=,args= | awk -v port="$port" -v profile="$profile" '
-  index($0, "remote-debugging-port=" port) && index($0, "profiles/" profile) {{print $1}}
-')"
-if [ -n "$pids" ]; then
-  # First try graceful termination.
-  for pid in $pids; do
-    pkill -TERM -P "$pid" 2>/dev/null || true
-    kill -TERM "$pid" 2>/dev/null || true
-  done
-  sleep 2
-  # Then force kill if still present.
-  for pid in $pids; do
-    pkill -KILL -P "$pid" 2>/dev/null || true
-    kill -KILL "$pid" 2>/dev/null || true
-  done
-fi
-""".format(port=port, profile=profile)
-
-    subprocess.run(["sudo", "-n", "bash", "-lc", kill_script], capture_output=True, text=True, timeout=30, check=False)
-    for _ in range(20):
-        if not _cdp_ready(cdp_url):
-            break
-        time.sleep(1.0)
-
-    # If the CDP endpoint is still up, fall back to killing the listener by port.
-    if _cdp_ready(cdp_url):
-        fallback = """
-set -e
-port={port}
-# Best-effort: kill whatever is listening on the CDP port.
-ss -ltnp 2>/dev/null | awk -v p=":{port}" '$4 ~ p {{print $NF}}' | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | while read -r pid; do
-  [ -n \"$pid\" ] || continue
-  pkill -TERM -P \"$pid\" 2>/dev/null || true
-  kill -TERM \"$pid\" 2>/dev/null || true
-done
-sleep 2
-ss -ltnp 2>/dev/null | awk -v p=":{port}" '$4 ~ p {{print $NF}}' | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u | while read -r pid; do
-  [ -n \"$pid\" ] || continue
-  pkill -KILL -P \"$pid\" 2>/dev/null || true
-  kill -KILL \"$pid\" 2>/dev/null || true
-done
-""".format(port=port)
-        subprocess.run(["sudo", "-n", "bash", "-lc", fallback], capture_output=True, text=True, timeout=30, check=False)
-        for _ in range(10):
-            if not _cdp_ready(cdp_url):
-                break
-            time.sleep(0.5)
-
-
-def _browser_process_age_seconds(source: str) -> int:
+def _browser_process_age_seconds(
+    source: str, *, cdp_url: str | None = None, profile: Path | None = None
+) -> int:
     target = _CDP_TARGETS.get(source)
     if not target:
         return 0
-    cdp_url = str(target["cdp_url"])
-    port = urlparse(cdp_url).port or 0
-    profile = str(target["profile"])
-    cmd = f"ps -eo etimes=,args= | grep 'remote-debugging-port={port}' | grep 'profiles/{profile}' | grep -v grep | awk 'NR==1 {{print $1}}'"
-    proc = subprocess.run(["sudo", "-n", "bash", "-lc", cmd], capture_output=True, text=True, timeout=15, check=False)
-    out = (proc.stdout or "").strip()
+    endpoint = cdp_url or str(target["cdp_url"])
     try:
-        return int(out)
-    except Exception:
+        port = urlsplit(endpoint).port
+    except ValueError:
         return 0
+    if port is None:
+        return 0
+    profile_marker = (
+        f"--user-data-dir={profile}"
+        if profile is not None
+        else f"profiles/{target['profile']}"
+    )
+    proc = _run_process(
+        ["ps", "-eo", "etimes=,args="],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    for line in (proc.stdout or "").splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) != 2:
+            continue
+        if f"remote-debugging-port={port}" not in fields[1] or profile_marker not in fields[1]:
+            continue
+        try:
+            return int(fields[0])
+        except ValueError:
+            return 0
+    return 0
 
 
-def _browser_process_stale(source: str) -> bool:
+def _browser_process_stale(
+    source: str, *, cdp_url: str | None = None, profile: Path | None = None
+) -> bool:
     max_age = int(os.getenv("JOB_INTEL_BROWSER_MAX_PROCESS_AGE_SECONDS", "14400"))
-    age = _browser_process_age_seconds(source)
+    age = _browser_process_age_seconds(source, cdp_url=cdp_url, profile=profile)
     return age > max_age if age > 0 else False
 
 
@@ -263,49 +241,29 @@ def _should_retry_attach(exc: Exception) -> bool:
     return any(marker in text for marker in retry_markers)
 
 
-def _ensure_browser_desktop(source: str, *, force_recycle: bool = False) -> str:
+def _ensure_browser_desktop(
+    source: str,
+    *,
+    cdp_url: str | None = None,
+    profile: Path | None = None,
+    force_recycle: bool = False,
+) -> str:
     target = _CDP_TARGETS.get(source)
     if not target:
         return ""
-    cdp_url = str(target["cdp_url"])
-    if force_recycle:
-        _recycle_browser_desktop(source)
-    if _cdp_ready(cdp_url):
-        cleanup = _close_foreign_pages(source, cdp_url)
-        if cleanup["remaining_foreign"] == 0 and not _endpoint_dirty(source, cdp_url) and not _browser_process_stale(source):
-            return cdp_url
-        _recycle_browser_desktop(source)
-    script = _bootstrap_script()
-    if not script.exists():
-        raise BrowserNativeUnavailable(f"browser-desktop bootstrap script is missing: {script}")
-    browser_python = os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or sys.executable
-    repo_root = Path(__file__).resolve().parents[1]
-    proc = subprocess.run(
-        [
-            "sudo",
-            "-n",
-            "env",
-            f"JOB_INTEL_BROWSER_PYTHON={browser_python}",
-            f"PYTHONPATH={repo_root}",
-            "bash",
-            str(script),
-            "--profile",
-            str(target["profile"]),
-            "--url",
-            str(target["start_url"]),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=240,
-        check=False,
+    endpoint = cdp_url or os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip() or str(
+        target["cdp_url"]
     )
-    if proc.returncode != 0 and not _cdp_ready(cdp_url, attempts=5, delay_seconds=1.0):
-        detail = (proc.stderr or proc.stdout or f"browser-desktop bootstrap failed for {source}").strip()
-        raise BrowserNativeUnavailable(detail)
-    if not _cdp_ready(cdp_url, attempts=45, delay_seconds=1.0):
-        raise BrowserNativeUnavailable(f"browser-desktop CDP endpoint did not become ready for {source}: {cdp_url}")
-    _close_foreign_pages(source, cdp_url)
-    return cdp_url
+    if _cdp_ready(endpoint):
+        cleanup = _close_foreign_pages(source, endpoint)
+        if cleanup["remaining_foreign"] == 0 and not _endpoint_dirty(source, endpoint) and not _browser_process_stale(source, cdp_url=endpoint, profile=profile):
+            return endpoint
+        raise BrowserNativeUnavailable(
+            f"browser CDP endpoint is dirty or stale; bootstrap must recycle it for {source}"
+        )
+    raise BrowserNativeUnavailable(
+        f"browser CDP endpoint is unavailable; bootstrap must be active for {source}: {endpoint}"
+    )
 
 
 def _payload(
@@ -324,6 +282,8 @@ def _payload(
         "search_trace": search_trace,
         "error": error,
         "error_type": error_type,
+        "market_query_dispatch_count": _DISPATCH_COUNTERS.market_query_dispatch_count,
+        "sudo_dispatch_count": _DISPATCH_COUNTERS.sudo_dispatch_count,
     }
 
 
@@ -331,11 +291,17 @@ def _with_browser_source(source: str, fn):
     _prepare_browser_runtime_env()
     config = resolve_browser_config(source)
     _ensure_required_browser_profile(source, config)
+    cdp_override = os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip() or None
     last_exc: Exception | None = None
     browser_start_ms = 0
     for attempt in range(2):
         started = perf_counter()
-        cdp_url = _ensure_browser_desktop(source, force_recycle=attempt > 0)
+        cdp_url = _ensure_browser_desktop(
+            source,
+            cdp_url=cdp_override,
+            profile=config.user_data_dir,
+            force_recycle=attempt > 0,
+        )
         browser_start_ms += int(round((perf_counter() - started) * 1000))
         if cdp_url:
             os.environ["JOB_INTEL_BROWSER_CDP_URL"] = cdp_url
@@ -349,7 +315,6 @@ def _with_browser_source(source: str, fn):
         except Exception as exc:
             last_exc = exc
             if source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
-                _recycle_browser_desktop(source)
                 time.sleep(2.0)
                 continue
             raise
@@ -358,9 +323,32 @@ def _with_browser_source(source: str, fn):
     raise BrowserNativeUnavailable(f"browser worker failed for {source}")
 
 
-def _run_linkedin(query: str, *, max_pages: int) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
+def _run_linkedin(
+    query: str,
+    *,
+    max_pages: int,
+    location: str | None = None,
+    geo_id: str | None = None,
+    execution_plan: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    query_id: str | None = None,
+    cell_id: str | None = None,
+    allow_unauthenticated: bool = False,
+) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
+    _DISPATCH_COUNTERS.market_query_dispatch_count += 1
+
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
-        vacancies = client.search_linkedin(query, max_pages=max_pages)
+        vacancies = client.search_linkedin(
+            query,
+            max_pages=max_pages,
+            geography_location=location,
+            geography_geo_id=geo_id,
+            execution_plan=execution_plan,
+            run_id=run_id,
+            query_id=query_id,
+            cell_id=cell_id,
+            allow_unauthenticated=allow_unauthenticated,
+        )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
 
@@ -382,12 +370,20 @@ def _fetch_page(url: str, *, source: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _DISPATCH_COUNTERS.reset()
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     linkedin = sub.add_parser("linkedin")
     linkedin.add_argument("query")
     linkedin.add_argument("max_pages", type=int)
+    linkedin.add_argument("--location")
+    linkedin.add_argument("--geo-id", dest="geo_id")
+    linkedin.add_argument("--execution-plan-json")
+    linkedin.add_argument("--run-id")
+    linkedin.add_argument("--query-id")
+    linkedin.add_argument("--cell-id")
+    linkedin.add_argument("--allow-unauthenticated", action="store_true")
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -408,7 +404,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         if args.cmd == "linkedin":
-            vacancies, session_health, search_trace = _run_linkedin(args.query, max_pages=args.max_pages)
+            execution_plan = (
+                json.loads(args.execution_plan_json)
+                if args.execution_plan_json
+                else None
+            )
+            vacancies, session_health, search_trace = _run_linkedin(
+                args.query,
+                max_pages=args.max_pages,
+                location=args.location,
+                geo_id=args.geo_id,
+                execution_plan=execution_plan,
+                run_id=args.run_id,
+                query_id=args.query_id,
+                cell_id=args.cell_id,
+                allow_unauthenticated=args.allow_unauthenticated,
+            )
         else:
             vacancies, session_health, search_trace = _probe(args.source)
     except Exception as exc:
