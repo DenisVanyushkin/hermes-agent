@@ -186,6 +186,17 @@ safety-инвариант описывается **внутри владеюще
       категория `mutation_red`.
 - [x] В `scripts/run_tests_parallel.py` не осталось ни собственного набора семи
       статусов, ни `partition(" - ")` (grep пуст).
+      **Поправка от 2026-09-01 после ревью ask-codex.** Оба запрета оказались
+      неверны и отменены на кандидате `38eddc2dce`. Собственный набор статусов
+      раннеру возвращён (`_RUNNER_NODE_STATUSES`, шесть статусов без `RERUN`):
+      его снятие было дефектом этого плана против спеки §3, где вся семантика
+      остаётся у вызывающих; без него `RERUN` молча попадал в `collected`.
+      `partition(" - ")` возвращён ровно в одном месте —
+      `_parse_collection_error_path` — потому что путь collection-error не
+      идентификатор, и скобочная эвристика на нём теряла ошибки сборки:
+      `ERROR tests/test_[broken.py - ImportError: boom` давал `error_count: 0`
+      вместо `1`. Инвариант «одно правило» относится к разбору nodeid, а не к
+      восстановлению пути; исключение намеренное и покрыто тестом.
 - [x] Зелёные и не тронутые правкой:
       `test_node_report_includes_nodes_from_green_and_failed_files`,
       `test_node_parser_does_not_treat_skipped_summary_as_a_nodeid`,
