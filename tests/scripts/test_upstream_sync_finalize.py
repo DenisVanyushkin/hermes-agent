@@ -114,8 +114,8 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
 
     ``run-fork-tests.sh`` prints one fixed pytest-like log, so the baseline and
     post-merge runs compare equal and the apply-merge test gate passes unless a
-    test overrides the stub. The two Python helpers are the real ones: the gate
-    and the decision memory are pure functions worth exercising for real.
+    test overrides the stub. The gate, parser, and decision-memory helpers are
+    the real ones: they are pure functions worth exercising for real.
     """
     scripts = tmp_path / "scripts"
     scripts.mkdir()
@@ -140,6 +140,8 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
     # inside a subprocess - far from the line that forgot to add it.
     for helper in sorted((REPO_ROOT / "scripts").glob("upstream_sync_*.py")):
         (scripts / helper.name).write_text(helper.read_text())
+    parser_helper = REPO_ROOT / "scripts" / "pytest_status_lines.py"
+    (scripts / parser_helper.name).write_text(parser_helper.read_text())
     return scripts, calls
 
 

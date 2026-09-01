@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.pytest_status_lines import parse_status_line
+except ImportError:
+    from pytest_status_lines import parse_status_line
+
 
 SELECTION_MANIFEST_SCHEMA = "upstream-sync-test-selection/v1"
 ATTEMPT_SCHEMA = "upstream-sync-gate-attempt/v1"
@@ -911,7 +916,7 @@ _NO_TESTS_RAN = re.compile(r"^no tests ran in\s+[\d.]+s\s*$", re.MULTILINE)
 _SUMMARY_LINE = re.compile(
     r"^=*\s*(?P<counts>(?:\d+\s+(?:failed|passed|skipped|warnings?|errors?|error|"
     r"xfailed|xpassed|deselected)\b"
-    r"(?:,\s*)?)+)\s+in\s+[\d.]+s(?:\s+\(\d+:\d{2}:\d{2}\))?\s*$",
+    r"(?:,\s*)?)+)\s+in\s+[\d.]+s(?:\s+\(\d+:\d{2}:\d{2}\))?\s*=*\s*$",
     re.MULTILINE,
 )
 _COUNT_TOKEN = re.compile(
@@ -959,16 +964,18 @@ _AGGREGATE_NO_TESTS_FILE = re.compile(
 
 
 def _nodeid_from_status_line(line: str) -> str | None:
-    fields = line.split(None, 1)
-    if len(fields) != 2 or fields[0] not in {
+    parsed = parse_status_line(line)
+    if parsed is None or parsed.status not in {
         "PASSED", "FAILED", "XFAIL", "XPASS", "RERUN", "ERROR"
     }:
         return None
-    value = fields[1].partition(" - ")[0].strip()
-    path, separator, _ = value.partition("::")
+    nodeid = parsed.nodeid
+    if nodeid is None:
+        return None
+    path, separator, _ = nodeid.partition("::")
     if not separator or not path.endswith(".py") or ":" in path:
         return None
-    return value
+    return nodeid
 
 
 def _summary_counts(match: re.Match[str]) -> dict[str, int]:

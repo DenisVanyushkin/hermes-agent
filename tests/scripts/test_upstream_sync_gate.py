@@ -1109,6 +1109,76 @@ def test_outcomes_parser_collects_passed_nodes_for_classification():
     assert set(outcome["failed_nodeids"]).issubset(outcome["collected_nodeids"])
 
 
+def test_outcomes_parser_preserves_parameterized_dashes():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    assert callable(parser), "outcomes parser is not implemented"
+    old = "tests/test_dash.py::test_case[alpha - old]"
+    new = "tests/test_dash.py::test_case[alpha - new]"
+
+    outcome = parser(
+        f"FAILED {old} - RuntimeError: setup boom\n"
+        f"FAILED {new} - RuntimeError: setup boom\n"
+        "2 failed in 0.05s\n"
+    )
+
+    assert outcome["failed_nodeids"] == [new, old]
+
+
+def test_aggregate_outcomes_parser_preserves_framed_parameterized_dashes():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    assert callable(parser), "outcomes parser is not implemented"
+    old = "tests/test_dash.py::test_case[alpha - old]"
+    new = "tests/test_dash.py::test_case[alpha - new]"
+
+    outcome = parser(
+        "--- tests/test_dash.py ---\n"
+        f"║ FAILED {old} - RuntimeError: setup boom\n"
+        f"║ FAILED {new} - RuntimeError: setup boom\n"
+        "2 failed in 0.05s\n"
+        "=== Summary: 1 files, 0 tests passed, 2 failed "
+        "(100% complete) in 0.1s (1 workers) ===\n",
+        aggregate=True,
+    )
+
+    assert outcome["failed_nodeids"] == [new, old]
+
+
+def test_aggregate_parser_accepts_real_runner_failure_block():
+    parser = getattr(upstream_sync_gate, "parse_test_outcomes", None)
+    assert parser is not None
+    nodeid = "tests/test_dash.py::test_case[alpha - new]"
+    log = (
+        "=== Failure output ===\n"
+        "--- tests/test_dash.py ---\n"
+        f"FAILED {nodeid}\n"
+        "============================== 1 failed in 0.1s ==============================\n"
+        "=== Summary: 1 files, 0 tests passed, 1 failed (100% complete) in 0.1s (1 workers) ===\n"
+    )
+
+    outcome = parser(log, aggregate=True)
+
+    assert outcome["failed_nodeids"] == [nodeid]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "FAILED tests/test.py - setup boom",
+        "FAILED tests/test.txt::test_case - setup boom",
+        "FAILED tests/test.py:drive::test_case - setup boom",
+        "SKIPPED tests/test.py::test_case - skipped",
+    ],
+)
+def test_gate_status_filters_stay_at_the_call_site(line):
+    assert upstream_sync_gate._nodeid_from_status_line(line) is None
+
+
+def test_gate_still_accepts_rerun_status():
+    assert upstream_sync_gate._nodeid_from_status_line(
+        "RERUN tests/test.py::test_case - transient"
+    ) == "tests/test.py::test_case"
+
+
 def test_passed_baseline_node_is_classified_as_fork_regression(tmp_path):
     nodeid = "tests/test_scheduler.py::test_delivery_targets"
     pre_existing_nodeid = "tests/test_scheduler.py::test_already_broken"
@@ -1448,6 +1518,15 @@ _ERROR_FILE = (
     "def test_reaches_fixture():\n"
     "    pass\n"
 )
+_PARAMETERIZED_SETUP_ERROR_FILE = (
+    "import pytest\n\n"
+    "@pytest.fixture\n"
+    "def broken_setup():\n"
+    "    raise RuntimeError('setup boom')\n\n"
+    "@pytest.mark.parametrize('label', ['alpha - old', 'alpha - new'])\n"
+    "def test_case(label, broken_setup):\n"
+    "    pass\n"
+)
 _INFRA_CONFTST = (
     "def pytest_sessionfinish(session, exitstatus):\n"
     "    if exitstatus == 0:\n"
@@ -1544,6 +1623,10 @@ _READABILITY_MATRIX = [
         },
     ),
     _matrix_case(
+        "parameterized-setup-failure",
+        {"tests/test_parameterized_setup.py": _PARAMETERIZED_SETUP_ERROR_FILE},
+    ),
+    _matrix_case(
         "mixed-infrastructure-and-test-failure",
         {
             "tests/infra/conftest.py": _INFRA_CONFTST,
@@ -1611,7 +1694,7 @@ def test_real_runner_log_and_node_report_readability_matrix(
     tmp_path, name, files, selected_files, pytest_args, pytest_config
 ):
     """Every runner outcome category must have one verdict through both doors."""
-    assert len(_READABILITY_MATRIX) == 16
+    assert len(_READABILITY_MATRIX) == 17
     report = tmp_path / f"{name}-nodes.json"
     runner = _run_real_aggregate_runner(
         tmp_path,
@@ -1641,6 +1724,11 @@ def test_real_runner_log_and_node_report_readability_matrix(
         report_result.stderr,
         runner.stdout,
     )
+    if name == "parameterized-setup-failure":
+        log_outcome = json.loads(log_result.stdout)
+        report_outcome = json.loads(report_result.stdout)
+        assert log_outcome["failed_nodeids"] == report_outcome["failed_nodeids"]
+        assert len(log_outcome["failed_nodeids"]) == 2
 
 
 def test_deselected_file_beside_measured_file_is_readable_through_both_doors(
@@ -2093,6 +2181,50 @@ def test_node_outcome_reads_the_runner_machine_report(tmp_path):
         "error_count": 0,
         "collection_error_paths": [],
     }
+
+
+def test_node_report_door_ignores_a_corrupt_human_log(
+    monkeypatch, tmp_path, capsys
+):
+    report = tmp_path / "nodes.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": "run-tests-parallel/node-report/v1",
+                "files": {},
+                "collected_nodeids": ["tests/green.py::test_ok"],
+                "failed_nodeids": [],
+                "collection_error_paths": [],
+                "error_count": 0,
+                "tests_collected": 1,
+                "collect_ok": True,
+                "probe_ok": True,
+                "readable": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    log = tmp_path / "spoiled.log"
+    log.write_text("not pytest output\n", encoding="utf-8")
+
+    def fail_if_log_is_parsed(*args, **kwargs):
+        raise AssertionError("node-report door parsed the human log")
+
+    monkeypatch.setattr(
+        upstream_sync_gate, "parse_test_outcomes", fail_if_log_is_parsed
+    )
+    first_rc = upstream_sync_gate._main(
+        ["node-outcome", "--node-report", str(report)]
+    )
+    first_output = capsys.readouterr().out
+    log.write_text("ERROR tests/not-the-report.py::test_bad - boom\n", encoding="utf-8")
+    second_rc = upstream_sync_gate._main(
+        ["node-outcome", "--node-report", str(report)]
+    )
+    second_output = capsys.readouterr().out
+
+    assert first_rc == second_rc == 0
+    assert first_output == second_output
 
 
 def test_node_outcome_rejects_an_expected_node_missing_from_measured_collection(
