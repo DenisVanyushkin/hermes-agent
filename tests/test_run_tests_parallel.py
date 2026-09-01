@@ -468,9 +468,12 @@ def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
 def test_runner_can_separate_script_location_from_execution_root(tmp_path: Path) -> None:
     """A pinned runner may execute pytest against a different worktree."""
     repo_root = Path(__file__).resolve().parent.parent
-    copied_runner = tmp_path / "pinned-checkout" / "scripts" / "run_tests_parallel.py"
-    copied_runner.parent.mkdir(parents=True)
-    shutil.copy2(repo_root / "scripts" / "run_tests_parallel.py", copied_runner)
+    copied_scripts = tmp_path / "pinned-checkout" / "scripts"
+    copied_scripts.mkdir(parents=True)
+    for name in ("run_tests_parallel.py", "pytest_status_lines.py"):
+        shutil.copy2(repo_root / "scripts" / name, copied_scripts / name)
+        assert (copied_scripts / name).is_file()
+    copied_runner = copied_scripts / "run_tests_parallel.py"
 
     target_root = tmp_path / "target-worktree"
     test_file = target_root / "tests" / "test_target.py"
@@ -511,6 +514,60 @@ def test_runner_can_separate_script_location_from_execution_root(tmp_path: Path)
     assert json.loads(report.read_text(encoding="utf-8"))["collected_nodeids"] == [
         "tests/test_target.py::test_target_tree_is_used"
     ]
+
+
+def test_incomplete_bundle_fails_before_pytest(tmp_path: Path) -> None:
+    """A copied runner must fail clearly when its helper is absent."""
+    repo_root = Path(__file__).resolve().parent.parent
+    copied_scripts = tmp_path / "pinned-checkout" / "scripts"
+    copied_scripts.mkdir(parents=True)
+    copied_runner = copied_scripts / "run_tests_parallel.py"
+    shutil.copy2(repo_root / "scripts" / "run_tests_parallel.py", copied_runner)
+
+    target_root = tmp_path / "target-worktree"
+    test_file = target_root / "tests" / "test_target.py"
+    test_file.parent.mkdir(parents=True)
+    marker = tmp_path / "pytest-ran"
+    test_file.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['MARKER']).write_text('pytest ran')\n"
+        "def test_target_tree_is_used():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["MARKER"] = str(marker)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(copied_runner),
+            "--repo-root",
+            str(target_root),
+            "--files",
+            "tests/test_target.py",
+            "--file-retries",
+            "0",
+            "--file-timeout",
+            "30",
+            "--jobs",
+            "1",
+            "-q",
+        ],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode != 0
+    assert "ModuleNotFoundError" in proc.stdout
+    assert "pytest_status_lines" in proc.stdout
+    assert not marker.exists()
 
 
 def test_node_report_includes_nodes_from_green_and_failed_files(tmp_path: Path) -> None:
@@ -589,6 +646,36 @@ def test_node_parser_does_not_treat_skipped_summary_as_a_nodeid() -> None:
     assert parsed["failed_nodeids"] == []
     assert parsed["skipped_paths"] == [
         "tests/hermes_cli/test_gateway_service.py"
+    ]
+
+
+def test_node_parser_normalises_absolute_collection_error_paths(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    source = repo_root / "tests" / "test_boom.py"
+    parsed = run_tests_parallel._parse_node_outcomes(
+        f"ERROR {source} - ImportError: x\n",
+        repo_root,
+    )
+
+    assert parsed["collection_error_paths"] == ["tests/test_boom.py"]
+
+
+def test_node_parser_preserves_parameterized_dashes() -> None:
+    parsed = run_tests_parallel._parse_node_outcomes(
+        "\n".join(
+            [
+                "FAILED tests/test_dash.py::test_case[alpha - old] - setup boom",
+                "FAILED tests/test_dash.py::test_case[alpha - new] - setup boom",
+            ]
+        ),
+        Path("/repo"),
+    )
+
+    assert parsed["failed_nodeids"] == [
+        "tests/test_dash.py::test_case[alpha - new]",
+        "tests/test_dash.py::test_case[alpha - old]",
     ]
 
 

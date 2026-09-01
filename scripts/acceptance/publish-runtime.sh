@@ -19,6 +19,8 @@ TARGET_STATE="${HERMES_RUNTIME_TARGET_STATE_DIR:-$TARGET_ROOT/state}"
 RUNTIME_FILES=(
   upstream-sync-finalize.sh
   run-fork-tests.sh
+  run_tests_parallel.py
+  pytest_status_lines.py
   upstream_sync_gate.py
   sync-local-customizations.sh
   upstream-sync-smoketest.sh

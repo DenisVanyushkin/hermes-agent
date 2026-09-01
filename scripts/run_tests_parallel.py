@@ -53,6 +53,11 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+try:
+    from scripts.pytest_status_lines import parse_status_line
+except ImportError:
+    from pytest_status_lines import parse_status_line
+
 
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]
@@ -575,34 +580,32 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
     skipped_paths: set[str] = set()
     error_count = 0
     for raw_line in output.splitlines():
-        line = raw_line.strip()
-        if not line:
+        parsed = parse_status_line(raw_line)
+        if parsed is None:
             continue
-        fields = line.split(None, 1)
-        if len(fields) != 2:
-            continue
-        status, value = fields
-        if status not in {"PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR"}:
-            continue
-        nodeid = value.strip()
+        status = parsed.status
         if status == "SKIPPED":
             # pytest -rA's short skipped summary contains only file:line, not
             # a nodeid.  Keep it out of collected coverage: inventing one
             # would poison classifier membership and rename detection.  The
             # skipped path is retained separately as an explicit limitation.
-            skipped_path = _parse_skipped_path(nodeid, repo_root)
+            skipped_path = _parse_skipped_path(parsed.value, repo_root)
             if skipped_path is not None:
                 skipped_paths.add(skipped_path)
                 continue
-        if status in {"FAILED", "ERROR"}:
-            nodeid, _, _ = nodeid.partition(" - ")
-            nodeid = nodeid.rstrip()
-        nodeid = _normalise_nodeid(nodeid, repo_root)
-        if "::" not in nodeid and status == "ERROR":
-            if _looks_like_test_file(nodeid, repo_root):
-                collection_errors.add(nodeid)
+        nodeid = parsed.nodeid
+        if nodeid is None:
+            collection_path = parsed.value
+            if parsed.detail is not None:
+                collection_path = collection_path.removesuffix(
+                    f" - {parsed.detail}"
+                ).rstrip()
+            collection_path = _normalise_nodeid(collection_path, repo_root)
+            if status == "ERROR" and _looks_like_test_file(collection_path, repo_root):
+                collection_errors.add(collection_path)
                 error_count += 1
             continue
+        nodeid = _normalise_nodeid(nodeid, repo_root)
         if not _looks_like_nodeid(nodeid):
             continue
         collected.add(nodeid)
