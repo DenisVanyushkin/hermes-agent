@@ -62,6 +62,10 @@ except ImportError:
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]
 
+_RUNNER_NODE_STATUSES = frozenset(
+    {"PASSED", "FAILED", "SKIPPED", "XFAIL", "XPASS", "ERROR"}
+)
+
 # Directories to skip during discovery — these suites require real
 # external services (a model gateway, a docker daemon with a prebuilt
 # image, etc.) and are run in their own dedicated CI jobs:
@@ -516,6 +520,18 @@ def _looks_like_test_file(path: str, repo_root: Path) -> bool:
     return path.endswith(".py") and "::" not in path and ":" not in path
 
 
+def _parse_collection_error_path(raw_line: str, repo_root: Path) -> str | None:
+    """Recover a collection-error path without applying node-id heuristics."""
+    value = raw_line.strip()
+    if not value.startswith("ERROR "):
+        return None
+    path, _, _detail = value[len("ERROR ") :].partition(" - ")
+    path = _normalise_nodeid(path.strip(), repo_root)
+    if not _looks_like_test_file(path, repo_root):
+        return None
+    return path
+
+
 _SKIPPED_PATH_LINE = re.compile(
     r"^\[\d+\]\s+(?P<path>[^:\s]+\.py):\d+(?::.*)?$"
 )
@@ -584,6 +600,8 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
         if parsed is None:
             continue
         status = parsed.status
+        if status not in _RUNNER_NODE_STATUSES:
+            continue
         if status == "SKIPPED":
             # pytest -rA's short skipped summary contains only file:line, not
             # a nodeid.  Keep it out of collected coverage: inventing one
@@ -595,13 +613,8 @@ def _parse_node_outcomes(output: str, repo_root: Path) -> dict[str, object]:
                 continue
         nodeid = parsed.nodeid
         if nodeid is None:
-            collection_path = parsed.value
-            if parsed.detail is not None:
-                collection_path = collection_path.removesuffix(
-                    f" - {parsed.detail}"
-                ).rstrip()
-            collection_path = _normalise_nodeid(collection_path, repo_root)
-            if status == "ERROR" and _looks_like_test_file(collection_path, repo_root):
+            collection_path = _parse_collection_error_path(raw_line, repo_root)
+            if collection_path is not None:
                 collection_errors.add(collection_path)
                 error_count += 1
             continue

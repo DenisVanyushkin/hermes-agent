@@ -1,9 +1,10 @@
 """Parse the supported pytest status-line grammar.
 
-The helper covers status lines whose bracket payload is balanced.  It is
-purely syntactic: the structured node-report is authoritative downstream,
-while the human log is a legacy fallback.  Callers retain policy such as
-path validation, skipped-path handling, and readability decisions.
+The helper covers status lines where every `` - `` belonging to a node id is
+at positive bracket depth.  It is purely syntactic: the structured
+node-report is authoritative downstream, while the human log is a legacy
+fallback.  Callers retain policy such as path validation, skipped-path
+handling, and readability decisions.
 """
 
 from __future__ import annotations

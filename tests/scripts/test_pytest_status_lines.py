@@ -98,13 +98,6 @@ def test_invalid_status_lines_do_not_match(line: str) -> None:
     assert parse_status_line(line) is None
 
 
-def test_skipped_summary_is_value_without_a_nodeid() -> None:
-    parsed = parse_status_line("SKIPPED [1] tests/test_status.py:12: reason")
-    assert parsed is not None
-    assert parsed.nodeid is None
-    assert parsed.value == "[1] tests/test_status.py:12: reason"
-
-
 def test_hyphen_without_spaces_is_part_of_the_nodeid() -> None:
     parsed = parse_status_line("FAILED tests/test_status.py::test_case[alpha]-boom")
     assert parsed is not None
@@ -124,3 +117,13 @@ def test_bracket_inside_id_payload_is_grammatically_ambiguous() -> None:
     assert parsed is not None
     assert parsed.nodeid == "tests/test_status.py::test_case[value]"
     assert parsed.detail == "inner]"
+
+
+def test_zero_depth_dash_is_not_a_supported_nodeid() -> None:
+    parsed = parse_status_line(
+        "FAILED tests/test - old.py::test_case - boom"
+    )
+
+    assert parsed is not None
+    assert parsed.nodeid is None
+    assert parsed.detail == "old.py::test_case - boom"

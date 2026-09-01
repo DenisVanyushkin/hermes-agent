@@ -9,6 +9,7 @@ from pathlib import Path
 
 from scripts import run_tests_parallel, upstream_sync_gate
 
+from scripts.pytest_status_lines import parse_status_line
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "scripts" / "run_tests_parallel.py"
@@ -37,7 +38,11 @@ def test_unpaired_selector_is_unreadable_at_gate_boundary(tmp_path: Path) -> Non
     ``test_unreadable_merged_isolated_probe_refuses_to_land`` in the real
     finalizer harness. The ordering assertion below is source evidence only.
     """
-    nodeid = "tests/test_selector.py::test_case[alpha - broken"
+    raw_status = "FAILED tests/test_selector.py::test_case[alpha - broken - boom"
+    parsed_status = parse_status_line(raw_status)
+    assert parsed_status is not None
+    assert parsed_status.nodeid is not None
+    nodeid = parsed_status.nodeid
     repo = tmp_path / "probe-repo"
     test_file = repo / "tests" / "test_selector.py"
     test_file.parent.mkdir(parents=True)

@@ -661,6 +661,27 @@ def test_node_parser_normalises_absolute_collection_error_paths(
 
     assert parsed["collection_error_paths"] == ["tests/test_boom.py"]
 
+def test_node_parser_preserves_collection_error_with_unpaired_path_bracket(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    source = repo_root / "tests" / "test_[broken.py"
+    parsed = run_tests_parallel._parse_node_outcomes(
+        f"ERROR {source} - ImportError: boom\n",
+        repo_root,
+    )
+
+    assert parsed["collection_error_paths"] == ["tests/test_[broken.py"]
+    assert parsed["error_count"] == 1
+
+
+def test_node_parser_keeps_rerun_out_of_collected_nodes() -> None:
+    parsed = run_tests_parallel._parse_node_outcomes(
+        "RERUN tests/a.py::test_flaky - transient\n",
+        Path("/repo"),
+    )
+
+    assert parsed["collected_nodeids"] == []
 
 def test_node_parser_preserves_parameterized_dashes() -> None:
     parsed = run_tests_parallel._parse_node_outcomes(
