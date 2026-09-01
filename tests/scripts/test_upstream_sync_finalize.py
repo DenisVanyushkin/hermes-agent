@@ -1036,6 +1036,7 @@ class TestApplyMergeIsGatedOnForkTests:
         include_probe_final_receipt: bool = True,
         missing_probe_request: str | None = None,
         include_existing_upstream_failure: bool = False,
+        unreadable_merged_probe: bool = False,
     ) -> None:
         """Emit valid structured evidence for a measured block.
 
@@ -1083,6 +1084,14 @@ class TestApplyMergeIsGatedOnForkTests:
             '  *) WT="$1"; shift ;;\n'
             'esac; done\n'
             'if [ "$PROBE" -eq 1 ]; then\n'
+            + (
+                '  if [ "$(basename "$PROBE_REQUEST")" = "gate-upstream-probe.request.json" ]; then\n'
+                "    echo 'collecting merged-isolated probe'\n"
+                "    exit 137\n"
+                "  fi\n"
+                if unreadable_merged_probe
+                else ""
+            )
             + probe_receipt_block
             + (
                 "  echo 'PASSED tests/test_upstream_kept.py::test_kept'\n"
@@ -1519,6 +1528,41 @@ fi
         assert "run_gate outcome: mode=apply outcome=pass" in (
             state / "finalize-detail.log"
         ).read_text()
+
+    def test_unreadable_merged_isolated_probe_refuses_to_land(self, tmp_path, state):
+        """Execute the merged-isolated unreadable path through finalizer.
+
+        The parser/unit test proves malformed selector handling and the
+        finalizer source-order check proves availability is after that probe.
+        This test supplies the actual unreadable merged-isolated probe to the
+        real ``apply-merge`` harness, then proves the behavioral boundary:
+        ``run_gate`` records ``outcome=unknown`` and the merge does not land.
+        """
+        repo, local_head, upstream_head = _make_repo_with_deleted_upstream_test(
+            tmp_path
+        )
+        (state / "pending.json").write_text(json.dumps(
+            {"schema": "upstream-sync-pending/v1", "upstream_head": upstream_head,
+             "features": [{"id": "F1", "decision": "merge-both", "files": ["g.txt"],
+                           "local_subjects": ["tip"]}]}
+        ))
+        merge_sha = _scratch_merge(repo, state, local_head, upstream_head)
+        scripts, calls = _stub_scripts(tmp_path)
+        self._node_aware_block_stub(scripts, unreadable_merged_probe=True)
+
+        _apply_request(state, upstream_sha=upstream_head, merge_sha=merge_sha)
+        proc = _run_finalize(repo, state, scripts)
+
+        res = _result(state)
+        evidence = proc.stderr + proc.stdout + res.get("detail", "")
+        assert res["status"] == "failed", evidence
+        assert res["failed_stage"] == "test-gate", evidence
+        assert "merged-isolated probe final receipt missing" in evidence
+        assert "run_gate outcome: mode=apply outcome=unknown" in (
+            state / "finalize-detail.log"
+        ).read_text()
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        assert not calls.exists() or "sync-local-customizations.sh" not in calls.read_text()
 
     def test_an_unreadable_test_run_refuses_to_land(self, tmp_path, state):
         """No summary line means the run was killed, not clean — the gate must

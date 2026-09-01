@@ -25,14 +25,17 @@ def _run(nodeid: str, *, collected: set[str], failed: set[str]) -> dict:
     }
 
 
-def test_unpaired_selector_is_unreadable_and_blocking(tmp_path: Path) -> None:
-    """Protect the fail-closed direction and the merged-isolated ordering.
+def test_unpaired_selector_is_unreadable_at_gate_boundary(tmp_path: Path) -> None:
+    """Execute the malformed-selector path through the gate boundary.
 
     The malformed selector is intentionally accepted by the path-only
     admission checks, then sent through a real runner probe before any
-    availability filtering. Its unreadable result must survive the gate and
-    prevent landing. This protects the balanced-scan failure direction and
-    the order ``merged-isolated probe before upstream availability filter``.
+    availability filtering. Links 1–4 execute the admission, request, real
+    runner, and report-door behavior. The classifier/payload assertions then
+    prove the persisted unreadable input, but do not claim a landing decision;
+    the actual ``run_gate outcome=unknown`` and no-landing behavior executes in
+    ``test_unreadable_merged_isolated_probe_refuses_to_land`` in the real
+    finalizer harness. The ordering assertion below is source evidence only.
     """
     nodeid = "tests/test_selector.py::test_case[alpha - broken"
     repo = tmp_path / "probe-repo"
@@ -121,9 +124,8 @@ def test_unpaired_selector_is_unreadable_and_blocking(tmp_path: Path) -> None:
     assert outcome.returncode == 2
     assert "run_tests_parallel node report is unreadable" in outcome.stderr
 
-    # Link 5: model the rejected report at the classifier boundary and prove
-    # the persistence decision has non-zero unknown/unreadable counts, which
-    # is the finalizer's landing refusal condition.
+    # Classifier boundary: prove the persisted unreadable input that the real
+    # finalizer test consumes for its landing refusal.
     unreadable_isolated = {
         "collect_ok": False,
         "probe_ok": False,
@@ -150,9 +152,11 @@ def test_unpaired_selector_is_unreadable_and_blocking(tmp_path: Path) -> None:
     assert len(payload["unknown"]) + len(payload["unreadable_runs"]) > 0
 
 
-def test_finalizer_keeps_unreadable_probe_fail_closed() -> None:
+def test_finalizer_probes_before_availability_filter() -> None:
+    """Source-order evidence for rollback A; landing behavior is tested in
+    ``TestApplyMergeFromScratchClone`` with the real finalizer harness.
+    """
     source = FINALIZER.read_text(encoding="utf-8")
-
     # Rollback A (availability filtering before merged-isolated probing) would
     # move this boundary earlier and silently erase the malformed request.
     assert source.index(
@@ -160,15 +164,3 @@ def test_finalizer_keeps_unreadable_probe_fail_closed() -> None:
     ) < source.index(
         'probe_available_nodeids="$attempt_dir/gate-upstream-probe.available.nodeids.json"'
     )
-    # Rollback B (turning an unreadable probe into an empty success) would
-    # weaken the exact record that the landing decision counts as unknown.
-    assert (
-        'Path(sys.argv[1]).write_text(json.dumps({\n'
-        '    "collect_ok": False,\n'
-        '    "probe_ok": False,\n'
-        '    "collected_nodeids": [],\n'
-        '    "failed_nodeids": [],\n'
-        '    "error_count": 0,\n'
-        '    "collection_error_paths": [],\n'
-        '    "unreadable_runs": [{"source": sys.argv[2], "stage": "receipt"}],'
-    ) in source
