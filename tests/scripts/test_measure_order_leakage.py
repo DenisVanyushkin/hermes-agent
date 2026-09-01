@@ -112,6 +112,18 @@ def test_parse_node_statuses_preserves_two_parameterized_nodeids_with_dashes():
     }
 
 
+def test_parse_failed_nodeids_preserves_two_parameterized_nodeids_with_dashes():
+    log = (
+        "FAILED tests/a.py::test_value[alpha - old] - setup boom\n"
+        "FAILED tests/a.py::test_value[alpha - new] - setup boom\n"
+    )
+
+    assert measure.parse_failed_nodeids(log) == {
+        "tests/a.py::test_value[alpha - old]",
+        "tests/a.py::test_value[alpha - new]",
+    }
+
+
 def test_parse_node_statuses_keeps_tests_path_policy_at_call_site():
     log = (
         "FAILED src/a.py::test_outside - setup boom\n"

@@ -25,7 +25,6 @@ except ImportError:
     from pytest_status_lines import parse_status_line
 
 
-FAILED_LINE = re.compile(r"^FAILED (.+?)(?: - .*)?$")
 def classify_nodes(
     nodeids: list[str] | set[str],
     *,
@@ -92,10 +91,10 @@ def parse_failed_nodeids(log: str) -> set[str]:
     """Parse pytest's final ``FAILED nodeid`` lines from one log."""
     failed: set[str] = set()
     for line in log.splitlines():
-        match = FAILED_LINE.match(line.strip())
-        if not match:
+        parsed = parse_status_line(line)
+        if parsed is None or parsed.status != "FAILED" or parsed.nodeid is None:
             continue
-        nodeid = match.group(1).strip()
+        nodeid = parsed.nodeid
         if nodeid.startswith("tests/") and "::" in nodeid:
             failed.add(nodeid)
     return failed
