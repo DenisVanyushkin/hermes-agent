@@ -1,6 +1,9 @@
 # План: один разбор статусной строки pytest (issue #16)
 
-Реализует спеку [`docs/plans/2026-08-29-nodeid-parse-issue-16.md`](2026-08-29-nodeid-parse-issue-16.md).
+Реализует спеку [`docs/plans/2026-08-29-nodeid-parse-issue-16.md`](2026-08-29-nodeid-parse-issue-16.md),
+внесённую в репозиторий коммитом `717f6d5b16`. До него файл лежал в чекауте
+untracked, и provenance цитат этого плана из чистого снапшота не воспроизводился:
+цитаты читались, но сверить их с источником было не с чем.
 Закрывает https://github.com/DenisVanyushkin/hermes-agent/issues/16.
 
 Дата плана: 2026-09-01. Репозиторий `hermes-agent`, ветка `local/customizations`,
