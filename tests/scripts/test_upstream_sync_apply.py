@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.scripts.runtime_bundle_test_utils import copy_runtime_python_files
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APPLY = REPO_ROOT / "scripts" / "upstream_sync_apply.py"
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
@@ -496,8 +498,7 @@ class TestEndToEndWithTheHostFinalizer:
             + _manifest_final_receipt_tail()
         )
         tests_stub.chmod(0o755)
-        for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py"):
-            (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
+        copy_runtime_python_files(REPO_ROOT, scripts)
         return scripts
 
     def test_the_merge_lands_on_the_live_branch(self, world, tmp_path):

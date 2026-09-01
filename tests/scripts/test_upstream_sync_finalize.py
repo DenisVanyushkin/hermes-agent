@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from scripts import upstream_sync_apply, upstream_sync_gate
+from tests.scripts.runtime_bundle_test_utils import copy_runtime_python_files
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
@@ -135,13 +136,7 @@ def _stub_scripts(tmp_path: Path) -> tuple[Path, Path]:
         + "echo '0 failed, 5 passed in 2.00s'\n"
     )
     tests_stub.chmod(0o755)
-    # Copied by pattern, not by name: a hand-kept list silently omits every new
-    # helper, and the finalizer then fails at runtime with ModuleNotFoundError
-    # inside a subprocess - far from the line that forgot to add it.
-    for helper in sorted((REPO_ROOT / "scripts").glob("upstream_sync_*.py")):
-        (scripts / helper.name).write_text(helper.read_text())
-    parser_helper = REPO_ROOT / "scripts" / "pytest_status_lines.py"
-    (scripts / parser_helper.name).write_text(parser_helper.read_text())
+    copy_runtime_python_files(REPO_ROOT, scripts)
     return scripts, calls
 
 
