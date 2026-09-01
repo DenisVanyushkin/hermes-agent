@@ -905,7 +905,6 @@ def filter_probe_request(
     }
 
 
-_FAILED_LINE = re.compile(r"^FAILED\s+(\S+)")
 _COLLECTION_ERROR_LINE = re.compile(
     r"^ERROR\s+(?!collecting\b)(?P<path>[^\s:]+\.py)(?:\s+-.*)?$"
 )
