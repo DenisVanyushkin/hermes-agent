@@ -100,6 +100,29 @@ def test_parse_node_statuses_preserves_parameterized_nodeids_with_spaces():
     }
 
 
+def test_parse_node_statuses_preserves_two_parameterized_nodeids_with_dashes():
+    log = (
+        "FAILED tests/a.py::test_value[alpha - old] - setup boom\n"
+        "FAILED tests/a.py::test_value[alpha - new] - setup boom\n"
+    )
+
+    assert measure.parse_node_statuses(log) == {
+        "tests/a.py::test_value[alpha - old]": "FAILED",
+        "tests/a.py::test_value[alpha - new]": "FAILED",
+    }
+
+
+def test_parse_node_statuses_keeps_tests_path_policy_at_call_site():
+    log = (
+        "FAILED src/a.py::test_outside - setup boom\n"
+        "FAILED tests/a.py::test_inside - setup boom\n"
+    )
+
+    assert measure.parse_node_statuses(log) == {
+        "tests/a.py::test_inside": "FAILED"
+    }
+
+
 def test_standalone_results_mark_each_node_yes_or_no():
     results = {
         "tests/a.py::test_red": {"returncode": 1},

@@ -19,6 +19,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+try:
+    from scripts.pytest_status_lines import parse_status_line
+except ImportError:
+    from pytest_status_lines import parse_status_line
+
 
 FAILED_LINE = re.compile(r"^FAILED (.+?)(?: - .*)?$")
 def classify_nodes(
@@ -100,20 +105,12 @@ def parse_node_statuses(log: str) -> dict[str, str]:
     """Parse explicit per-node outcome lines from a pytest run log."""
     statuses: dict[str, str] = {}
     for line in log.splitlines():
-        fields = line.strip().split(None, 1)
-        if len(fields) != 2 or fields[0] not in {
-            "PASSED",
-            "FAILED",
-            "SKIPPED",
-            "XFAIL",
-            "XPASS",
-            "RERUN",
-            "ERROR",
-        }:
+        parsed = parse_status_line(line)
+        if parsed is None or parsed.nodeid is None:
             continue
-        nodeid = fields[1].partition(" - ")[0].strip()
+        nodeid = parsed.nodeid
         if nodeid.startswith("tests/") and "::" in nodeid:
-            statuses[nodeid] = fields[0]
+            statuses[nodeid] = parsed.status
     return statuses
 
 
