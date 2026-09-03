@@ -723,6 +723,7 @@ class PageProgressionObservation(BaseModel):
     job_ids: tuple[str, ...]
     page_classification: LinkedInPageClassification
     safety_reason: LinkedInSafetyReason | None
+    http_status: int | None
     final_url_start: int | None
     final_url_start_matches_requested: bool
     new_ids_vs_prior_offsets_count: int
@@ -950,6 +951,11 @@ def build_query_coverage_audit(
                 final_url=final_url,
                 job_ids=job_ids,
                 page_classification=str(page["page_classification"]),
+                http_status=(
+                    None
+                    if page.get("http_status") is None
+                    else int(page["http_status"])
+                ),
                 safety_reason=(
                     None
                     if page.get("safety_reason") is None

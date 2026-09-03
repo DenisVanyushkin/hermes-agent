@@ -213,7 +213,11 @@ AUTHWALL_HTML = (
 )
 
 
-def _client_over_two_offsets(monkeypatch, pages: dict[int, tuple[str, str]]):
+def _client_over_two_offsets(
+    monkeypatch,
+    pages: dict[int, tuple[str, str]],
+    statuses: dict[int, int | None] | None = None,
+):
     """Drive the real LinkedIn page loop over a declared two-offset plan.
 
     Only the fetch is replaced. The plan walk, the page observation, the abort
@@ -243,6 +247,7 @@ def _client_over_two_offsets(monkeypatch, pages: dict[int, tuple[str, str]]):
             final_url=final_url,
             html=html,
             html_sha256=f"{page_offset:064d}",
+            http_status=(statuses or {}).get(page_offset, 200),
             page_offset=page_offset,
             planned_scroll_steps=1,
             completed_scroll_steps=1,
@@ -531,13 +536,12 @@ def test_every_classification_is_one_of_the_five_declared_literals() -> None:
     }
 
 
-def test_the_status_branches_are_implemented_but_unreachable_from_the_page_loop() -> None:
-    """Named gap, asserted so it cannot become a silent claim.
+def test_the_status_branches_are_reachable_now_that_the_status_is_carried() -> None:
+    """This replaces the test that recorded the gap, now that it is closed.
 
-    BrowserFetchResult carries no HTTP status, so http_429_rate_limit,
-    http_401_antibot_or_auth, http_403_antibot_or_auth and
-    http_error_surface cannot arise from the page loop today. The logic is
-    complete and covered; carrying the status is a separate change.
+    The old one asserted that BrowserFetchResult had no status field and would
+    fail when it appeared. It appeared. The reasons below were implemented and
+    covered from the start; what was missing was the value reaching them.
     """
 
     assert (
@@ -555,9 +559,7 @@ def test_the_status_branches_are_implemented_but_unreachable_from_the_page_loop(
         )
         is None
     )
-    assert "status" not in {
-        field for field in bs.BrowserFetchResult.__dataclass_fields__
-    }
+    assert "http_status" in bs.BrowserFetchResult.__dataclass_fields__
 
 
 def test_the_page_loop_records_both_axes_for_every_page(
@@ -614,3 +616,196 @@ def test_the_page_loop_records_a_challenge_on_the_safety_axis(
     assert fetched == [0]
     assert page["safety_reason"] == "challenge_redirect"
     assert page["page_classification"] == "unknown_non_usable_surface"
+
+
+def test_the_fetch_result_carries_the_http_status() -> None:
+    """The status is evidence the page walk had no way to see.
+
+    Four values -- two rate-limit and anti-bot reasons and the http error
+    class -- were implemented and covered and could not arise, because
+    page.goto returns a response and the fetch discarded it. This replaces the
+    test that asserted the field's absence.
+    """
+
+    assert "http_status" in BrowserFetchResult.__dataclass_fields__
+
+
+def test_a_rate_limited_page_stops_the_declared_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """429 is the source refusing, and refusal belongs on the safety axis.
+
+    Unlike a sign-in wall, this one must stop the walk: continuing to ask a
+    source that is rate-limiting is how a bounded probe becomes a hammer.
+    """
+
+    client, fetched = _client_over_two_offsets(
+        monkeypatch,
+        {
+            0: ("https://www.linkedin.com/jobs/search?start=0", public_results_page()),
+            25: ("https://www.linkedin.com/jobs/search?start=25", public_results_page()),
+        },
+        statuses={0: 429},
+    )
+
+    assert fetched == [0]
+    assert client._last_search_trace["pages"][0]["safety_reason"] == "http_429_rate_limit"
+    assert client._last_search_trace["stop_reason"] == "critical_degradation"
+
+
+def test_a_server_error_page_is_classified_as_an_http_error_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The classification axis gains its fourth outcome, which was unreachable."""
+
+    client, _fetched = _client_over_two_offsets(
+        monkeypatch,
+        {
+            0: ("https://www.linkedin.com/jobs/search?start=0", "<html></html>"),
+            25: ("https://www.linkedin.com/jobs/search?start=25", public_results_page()),
+        },
+        statuses={0: 503},
+    )
+
+    assert (
+        client._last_search_trace["pages"][0]["page_classification"]
+        == "http_error_surface"
+    )
+
+
+def test_a_401_on_an_auth_wall_is_still_benign(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wall answering 401 is a wall, not a pushback.
+
+    Without this the status wiring would turn every logged-out auth wall into
+    an anti-bot reason and stop the walk on the most ordinary page there is.
+    """
+
+    client, fetched = _client_over_two_offsets(
+        monkeypatch,
+        {
+            0: ("https://www.linkedin.com/authwall?trk=jobs", AUTHWALL_HTML),
+            25: ("https://www.linkedin.com/jobs/search?start=25", public_results_page()),
+        },
+        statuses={0: 401},
+    )
+
+    assert fetched == [0, 25]
+    assert client._last_search_trace["pages"][0]["safety_reason"] is None
+    assert (
+        client._last_search_trace["pages"][0]["page_classification"]
+        == "auth_wall_surface"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The seam the status actually crosses: page.goto -> BrowserFetchResult.
+# Every other status test injects a BrowserFetchResult that already carries
+# one, so none of them execute fetch_page at all.
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status: int | None) -> None:
+        self.status = status
+
+
+class _FakeMouse:
+    def wheel(self, _dx: int, _dy: int) -> None:
+        return None
+
+
+class _FakePage:
+    """The narrow slice of the Playwright page that fetch_page touches."""
+
+    def __init__(self, *, response: object, html: str, final_url: str) -> None:
+        self._response = response
+        self._html = html
+        self.url = final_url
+        self.mouse = _FakeMouse()
+        self.goto_calls: list[str] = []
+
+    def goto(self, url: str, **_kwargs: object) -> object:
+        self.goto_calls.append(url)
+        return self._response
+
+    def wait_for_timeout(self, _ms: int) -> None:
+        return None
+
+    def content(self) -> str:
+        return self._html
+
+    def close(self) -> None:
+        return None
+
+
+class _FakeContext:
+    def __init__(self, page: _FakePage) -> None:
+        self._page = page
+
+    def new_page(self) -> _FakePage:
+        return self._page
+
+
+def _fetch_with_response(monkeypatch, response: object, *, label: str | None):
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+    )
+    page = _FakePage(
+        response=response,
+        html=public_results_page(),
+        final_url="https://www.linkedin.com/jobs/search?start=0",
+    )
+    monkeypatch.setattr(client, "_context", _FakeContext(page), raising=False)
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(client, "_write_attach_diagnostics", lambda **_kwargs: None)
+    monkeypatch.setattr(client, "_humanize_page", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        client, "_linkedin_dom_unique_job_ids", lambda _page: frozenset({"1"})
+    )
+    monkeypatch.setattr(
+        client, "_capture_page_diagnostics", lambda **_kwargs: "artifact-ref"
+    )
+    result = client.fetch_page(
+        "https://www.linkedin.com/jobs/search?start=0",
+        scrolls=0,
+        capture_label=label,
+    )
+    return result, page
+
+
+@pytest.mark.parametrize("status", (200, 429, 503, 401))
+@pytest.mark.parametrize("label", (None, "linkedin-search-0"))
+def test_the_navigation_status_survives_the_real_fetch_path(
+    monkeypatch: pytest.MonkeyPatch, status: int, label: str | None
+) -> None:
+    """Production fetch_page, production _do_goto, a response that has a status.
+
+    Both navigation branches are covered: the plain one and the one wrapped in
+    the wall timeout for LinkedIn search pages, which is a separate call site
+    and could drop the response on its own.
+    """
+
+    result, page = _fetch_with_response(
+        monkeypatch, _FakeResponse(status), label=label
+    )
+
+    assert page.goto_calls  # the navigation really happened
+    assert result.http_status == status
+
+
+@pytest.mark.parametrize("label", (None, "linkedin-search-0"))
+def test_a_navigation_that_returns_no_response_yields_no_status(
+    monkeypatch: pytest.MonkeyPatch, label: str | None
+) -> None:
+    """None is a value, not a gap.
+
+    A same-document navigation returns no response at all. Reading that as an
+    error would invent one, and a page carrying results would be recorded as
+    an http error surface.
+    """
+
+    result, _page = _fetch_with_response(monkeypatch, None, label=label)
+
+    assert result.http_status is None

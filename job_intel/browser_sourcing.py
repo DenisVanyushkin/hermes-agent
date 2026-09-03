@@ -193,7 +193,7 @@ class BrowserSessionHealth:
         payload["anti_bot_events"] = max(self.login_walls, self.auth_redirects) + self.extraction_degradation
         return payload
 
-    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False, page_load_seconds: float | None = None, page_depth: int | None = None) -> None:
+    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False, page_load_seconds: float | None = None, page_depth: int | None = None, http_status: int | None = None) -> None:
         self.pages_fetched += 1
         self.last_url = url
         if page_load_seconds is not None:
@@ -214,7 +214,9 @@ class BrowserSessionHealth:
             login_wall = False
         self.last_page_auth_redirect = auth_redirect
         self.last_page_login_wall = login_wall
-        self.last_page_safety_reason = _linkedin_safety_reason(url, html)
+        self.last_page_safety_reason = linkedin_safety_reason(
+            final_url=url, html=html, status=http_status
+        )
         if auth_redirect:
             self.auth_redirects += 1
         if login_wall:
@@ -274,6 +276,9 @@ class BrowserFetchResult:
     scroll_checkpoints: tuple[dict[str, Any], ...] = ()
     scroll_stop_reason: str = "legacy"
     scroll_failure_reason: str | None = None
+    # None is a real value, not a gap: a same-document navigation returns no
+    # response at all, and reading that as an error would invent one.
+    http_status: int | None = None
 
 
 def _linkedin_job_id_from_url(url: str) -> str | None:
@@ -835,9 +840,13 @@ def linkedin_safety_reason(
     challenge is therefore read from a structural node, and a rendered rate
     limit from rendered text with no cards beside it.
 
-    status is optional because BrowserFetchResult does not carry one yet, so
-    the three status branches are complete and tested but not reachable from
-    the page loop. Carrying the status is a separate change to the fetch path.
+    status is optional, and None is a value rather than a gap: a same-document
+    navigation returns no response at all, so there is no status to read, and
+    reading its absence as an error would invent one. When the navigation does
+    return a response, page.goto's status is carried on
+    BrowserFetchResult.http_status and reaches this function and
+    classify_linkedin_page from the page loop, which is what makes the three
+    status branches live rather than merely implemented.
     """
 
     if auth_cookie_present:
@@ -892,22 +901,6 @@ def classify_linkedin_page(
     if status is not None and status >= 400:
         return "http_error_surface"
     return "unknown_non_usable_surface"
-
-
-def _linkedin_safety_reason(url: str, html: str) -> str | None:
-    """Positive evidence that the source is pushing back, on its own axis.
-
-    A challenge is the source refusing; an auth wall is the source showing a
-    page. The old predicate answered both at once, which is why a benign wall
-    cancelled a declared plan. Absence of results is evidence of neither.
-
-    This is the page-loop entry point; the axis itself lives in
-    linkedin_safety_reason above, which the frozen driver defines. No HTTP
-    status reaches here yet, so the status branches stay unreachable from this
-    caller while remaining implemented and tested.
-    """
-
-    return linkedin_safety_reason(final_url=url, html=html)
 
 
 def _looks_like_auth_redirect(url: str, html: str) -> bool:
@@ -1812,13 +1805,21 @@ class BrowserSourceClient:
                     self._write_attach_diagnostics(label=f"{fetch_label}-reuse-page-opened", extra={"requested_url": url, "current_url": getattr(page, "url", "")})
                 self._sleep(source=self.config.source_name)
                 self._write_attach_diagnostics(label=f"{fetch_label}-goto-start", extra={"requested_url": url, "timeout_ms": self.config.navigation_timeout_ms, "reused_page": reuse_existing})
+                http_status: int | None = None
+
                 def _do_goto() -> None:
+                    nonlocal http_status
                     if source_key == "linkedin" and fetch_label.startswith("linkedin-search"):
                         wall = float(os.getenv("JOB_INTEL_BROWSER_GOTO_WALL_TIMEOUT_SECONDS", "70"))
                         with _WallTimeout(wall, f"Page.goto wall-timeout after {wall}s"):
-                            page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                            response = page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
                     else:
-                        page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                        response = page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                    # The navigation always returned this and the fetch always
+                    # dropped it, which is why every status-derived reason was
+                    # unreachable while being implemented and tested.
+                    status = getattr(response, "status", None)
+                    http_status = int(status) if isinstance(status, int) else None
                 try:
                     _do_goto()
                 except Exception as exc:
@@ -1892,6 +1893,7 @@ class BrowserSourceClient:
                     scroll_checkpoints=tuple(scroll_checkpoints),
                     scroll_stop_reason=scroll_stop_reason,
                     scroll_failure_reason=scroll_failure_reason,
+                    http_status=http_status,
                 )
             finally:
                 if page is not None and not reuse_existing:
@@ -1963,7 +1965,7 @@ class BrowserSourceClient:
         except Exception:
             return
 
-    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False, page_depth: int | None = None) -> None:
+    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False, page_depth: int | None = None, http_status: int | None = None) -> None:
         self._health.update(
             url=url,
             html=html,
@@ -1971,6 +1973,7 @@ class BrowserSourceClient:
             detail_page=detail_page,
             page_load_seconds=getattr(self, "_last_fetch_seconds", None),
             page_depth=page_depth,
+            http_status=http_status,
         )
 
     def _detail_candidates(self, html: str, *, page_url: str, source: str) -> list[str]:
@@ -2258,11 +2261,16 @@ class BrowserSourceClient:
                 {
                     "requested_url": page_result.requested_url,
                     "final_url": page_result.final_url,
+                    "http_status": page_result.http_status,
                     "page_classification": classify_linkedin_page(
-                        final_url=page_result.final_url, html=html
+                        final_url=page_result.final_url,
+                        html=html,
+                        status=page_result.http_status,
                     ),
                     "safety_reason": linkedin_safety_reason(
-                        final_url=page_result.final_url, html=html
+                        final_url=page_result.final_url,
+                        html=html,
+                        status=page_result.http_status,
                     ),
                     "html_sha256": page_result.html_sha256,
                     "dom_unique_job_ids": sorted(page_result.dom_unique_job_ids),
@@ -2285,7 +2293,12 @@ class BrowserSourceClient:
             # The final URL, not the requested one. Observing the request
             # made every redirect invisible to the safety axis: a walk that
             # ended on /checkpoint was recorded as a walk to the search page.
-            self._observe_page(page_result.final_url, html, len(page_vacancies))
+            self._observe_page(
+                page_result.final_url,
+                html,
+                len(page_vacancies),
+                http_status=page_result.http_status,
+            )
             trace["vacancies_extracted"] += len(page_vacancies)
             vacancies.extend(page_vacancies)
             started = time.perf_counter()
