@@ -11,6 +11,7 @@ import re
 import sqlite3
 import time
 from typing import Any, Callable, Iterable, Literal, Mapping
+from urllib.parse import parse_qs, urlparse
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -54,6 +55,7 @@ AcquisitionOutcome = Literal[
     "insufficient_corroboration",
     "candidate_records_found",
     "no_candidate_records",
+    "coverage_unestablished_credit_withheld",
 ]
 ProductObservabilityState = Literal["blocked", "not_observed"]
 CreditedRecordsProvenance = Literal["attributed", "caller_supplied", "received_rows_fallback"]
@@ -664,6 +666,330 @@ class EvidencePackage(BaseModel):
     captured_at: str
     redaction_class: str
     identity_hints: dict[str, str]
+
+
+PaginationOutcome = Literal[
+    "pagination_progression_observed_through",
+    "pagination_not_observed",
+    "pagination_ambiguous",
+]
+CoverageHoldReason = Literal[
+    "coverage_not_evaluated",
+    "pagination_evidence_unverifiable",
+    "coverage_audit_references_unknown_query",
+    "coverage_audit_incomplete_for_declared_queries",
+    "pagination_evidence_mixed_across_queries",
+    "progression_observed_sufficiency_policy_absent",
+    "pagination_progression_not_observed",
+    "pagination_evidence_ambiguous",
+]
+_PAGINATION_OUTCOME_REASON: dict[str, str] = {
+    "pagination_progression_observed_through": "progression_observed_sufficiency_policy_absent",
+    "pagination_not_observed": "pagination_progression_not_observed",
+    "pagination_ambiguous": "pagination_evidence_ambiguous",
+}
+
+
+def _url_start(url: str) -> int | None:
+    """The effective offset the page came back on, or None when absent."""
+
+    query = urlparse(url).query
+    values = parse_qs(query).get("start")
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except ValueError:
+        return None
+
+
+class PageProgressionObservation(BaseModel):
+    """One requested offset and what came back for it.
+
+    Every derived field is recomputed on read. A document whose stored value
+    disagrees with the recomputation is a parse error, not a value: the reader
+    never returns a model in which the self-description and the recount are
+    both treated as true.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested_offset: int
+    final_url: str
+    job_ids: tuple[str, ...]
+    final_url_start: int | None
+    final_url_start_matches_requested: bool
+    new_ids_vs_prior_offsets_count: int
+
+    @model_validator(mode="after")
+    def _recompute_page_derivations(self) -> "PageProgressionObservation":
+        start = _url_start(self.final_url)
+        if self.final_url_start != start:
+            raise ValueError(
+                "derived_field_mismatch:final_url_start "
+                f"expected={start} got={self.final_url_start}"
+            )
+        matches = start == self.requested_offset
+        if self.final_url_start_matches_requested != matches:
+            raise ValueError(
+                "derived_field_mismatch:final_url_start_matches_requested "
+                f"expected={matches} got={self.final_url_start_matches_requested}"
+            )
+        return self
+
+
+class QueryCoverageAudit(BaseModel):
+    """The progression audit for one query, and only for that query.
+
+    new_ids_vs_prior_offsets_count is a property of the sequence, not of a
+    page, so it is recomputed here, where the ordered pages live.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query_id: str
+    pages: tuple[PageProgressionObservation, ...]
+    pagination_outcome: PaginationOutcome
+
+    @model_validator(mode="after")
+    def _recompute_sequence_derivations(self) -> "QueryCoverageAudit":
+        seen: set[str] = set()
+        novel: list[int] = []
+        for index, page in enumerate(self.pages):
+            fresh = len([job_id for job_id in page.job_ids if job_id not in seen])
+            if page.new_ids_vs_prior_offsets_count != fresh:
+                raise ValueError(
+                    "derived_field_mismatch:new_ids_vs_prior_offsets_count "
+                    f"page={index} expected={fresh} "
+                    f"got={page.new_ids_vs_prior_offsets_count}"
+                )
+            seen.update(page.job_ids)
+            if index:
+                novel.append(fresh)
+        outcome = _fold_pagination_outcome(novel)
+        if self.pagination_outcome != outcome:
+            raise ValueError(
+                "derived_field_mismatch:pagination_outcome "
+                f"expected={outcome} got={self.pagination_outcome}"
+            )
+        return self
+
+
+def _fold_pagination_outcome(novel_counts: list[int]) -> str:
+    """The B.10 contract, over the novelty of every offset after the first.
+
+    A single zero is not a stopping rule: the sequence A, B, B, C would lose C.
+    Mixed novelty is ambiguous, and ambiguity never licenses a claim.
+    """
+
+    if not novel_counts:
+        return "pagination_not_observed"
+    if all(count > 0 for count in novel_counts):
+        return "pagination_progression_observed_through"
+    if all(count == 0 for count in novel_counts):
+        return "pagination_not_observed"
+    return "pagination_ambiguous"
+
+
+class CoverageAudit(BaseModel):
+    """The pair-level envelope. Built once, after every query has run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_state: Literal["parsed", "unverifiable"]
+    queries: tuple[QueryCoverageAudit, ...]
+    pagination_outcome: PaginationOutcome | None
+
+    @model_validator(mode="after")
+    def _recompute_pair_outcome(self) -> "CoverageAudit":
+        outcomes = {query.pagination_outcome for query in self.queries}
+        expected = outcomes.pop() if len(outcomes) == 1 else None
+        if self.pagination_outcome != expected:
+            raise ValueError(
+                "derived_field_mismatch:pagination_outcome "
+                f"expected={expected} got={self.pagination_outcome}"
+            )
+        return self
+
+
+class CoverageScope(BaseModel):
+    """Which queries of the pair were subject to the audit, and why.
+
+    query_plan_presence is the only input; everything else is recomputed on
+    read, so forging the subject flag or the audited set is a parse error.
+    Fidelity of query_plan_presence itself to the original execution plans is
+    NOT provable from the document -- the plans are not in it. That is a named
+    limitation, held instead by the fact that the sole builder takes no set of
+    audited ids at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query_plan_presence: tuple[tuple[str, bool], ...]
+    all_query_ids: tuple[str, ...]
+    audited_query_ids: tuple[str, ...]
+    audit_subject: bool
+
+    @model_validator(mode="after")
+    def _recompute_scope_derivations(self) -> "CoverageScope":
+        all_ids = tuple(query_id for query_id, _ in self.query_plan_presence)
+        audited = tuple(
+            query_id for query_id, has_plan in self.query_plan_presence if has_plan
+        )
+        if self.all_query_ids != all_ids:
+            raise ValueError(
+                f"derived_field_mismatch:all_query_ids expected={all_ids} "
+                f"got={self.all_query_ids}"
+            )
+        if self.audited_query_ids != audited:
+            raise ValueError(
+                f"derived_field_mismatch:audited_query_ids expected={audited} "
+                f"got={self.audited_query_ids}"
+            )
+        if self.audit_subject != bool(audited):
+            raise ValueError(
+                f"derived_field_mismatch:audit_subject expected={bool(audited)} "
+                f"got={self.audit_subject}"
+            )
+        return self
+
+
+class CoverageDecision(BaseModel):
+    """Fail-closed by construction: only a pair outside the audit goes unheld."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    held: bool
+    coverage_status: Literal["unestablished"]
+    reason: CoverageHoldReason | None
+
+
+def build_coverage_scope(pair_queries: Iterable[ProbeQuery]) -> CoverageScope:
+    """The one builder. It takes no audited-id set, so none can be supplied."""
+
+    presence = tuple(
+        (query.query_id, query.execution_plan is not None) for query in pair_queries
+    )
+    audited = tuple(query_id for query_id, has_plan in presence if has_plan)
+    return CoverageScope(
+        query_plan_presence=presence,
+        all_query_ids=tuple(query_id for query_id, _ in presence),
+        audited_query_ids=audited,
+        audit_subject=bool(audited),
+    )
+
+
+def resolve_coverage_hold(
+    audit: CoverageAudit | None, *, scope: CoverageScope
+) -> CoverageDecision:
+    """Total over every state the pair can be in. There is no default branch.
+
+    Coverage stays unestablished whatever the pagination check found, because
+    the owner set no sufficiency policy. What the outcome changes is the
+    reason, never the status and never the hold.
+    """
+
+    if not scope.audit_subject:
+        return CoverageDecision(held=False, coverage_status="unestablished", reason=None)
+    if audit is None:
+        reason = "coverage_not_evaluated"
+    elif audit.evidence_state == "unverifiable":
+        reason = "pagination_evidence_unverifiable"
+    else:
+        audited = set(scope.audited_query_ids)
+        present = {query.query_id for query in audit.queries}
+        if present - audited:
+            reason = "coverage_audit_references_unknown_query"
+        elif audited - present:
+            reason = "coverage_audit_incomplete_for_declared_queries"
+        elif audit.pagination_outcome is None:
+            reason = "pagination_evidence_mixed_across_queries"
+        else:
+            reason = _PAGINATION_OUTCOME_REASON[audit.pagination_outcome]
+    return CoverageDecision(held=True, coverage_status="unestablished", reason=reason)
+
+
+def build_query_coverage_audit(
+    query_id: str, trace: Mapping[str, Any]
+) -> QueryCoverageAudit:
+    """Stage one: one query's pages, derived from the trace the source carries.
+
+    Nothing pair-level is decided here. This runs once per query, inside the
+    query loop, where the other queries of the pair have not run yet.
+    """
+
+    observations: list[PageProgressionObservation] = []
+    seen: set[str] = set()
+    pages = trace.get("pages")
+    if not isinstance(pages, list):
+        raise ValueError("coverage_trace_pages_missing")
+    planned = list(trace.get("planned_page_offsets") or [])
+    for index, page in enumerate(pages):
+        if not isinstance(page, Mapping):
+            raise ValueError("coverage_trace_page_not_mapping")
+        job_ids = tuple(str(value) for value in page.get("dom_unique_job_ids") or ())
+        fresh = len([job_id for job_id in job_ids if job_id not in seen])
+        seen.update(job_ids)
+        final_url = str(page.get("final_url") or "")
+        start = _url_start(final_url)
+        requested = int(planned[index]) if index < len(planned) else 0
+        observations.append(
+            PageProgressionObservation(
+                requested_offset=requested,
+                final_url=final_url,
+                job_ids=job_ids,
+                final_url_start=start,
+                final_url_start_matches_requested=start == requested,
+                new_ids_vs_prior_offsets_count=fresh,
+            )
+        )
+    novel = [page.new_ids_vs_prior_offsets_count for page in observations[1:]]
+    return QueryCoverageAudit(
+        query_id=query_id,
+        pages=tuple(observations),
+        pagination_outcome=_fold_pagination_outcome(novel),
+    )
+
+
+def finalize_pair_coverage(
+    pair: dict[str, Any],
+    *,
+    pair_queries: tuple[ProbeQuery, ...],
+    query_audits: Mapping[str, Any],
+) -> None:
+    """Stage two: run once, after every query of the pair has been attempted.
+
+    Capture cannot do this. It runs per query -- four times, counting the
+    failure branches -- so at capture time a mixed outcome or a query missing
+    from the audit is not yet observable.
+    """
+
+    scope = build_coverage_scope(pair_queries)
+    audit: CoverageAudit | None = None
+    if scope.audit_subject:
+        collected = [
+            query_audits[query_id]
+            for query_id in query_audits
+            if isinstance(query_audits[query_id], QueryCoverageAudit)
+        ]
+        unverifiable = any(
+            not isinstance(value, QueryCoverageAudit) for value in query_audits.values()
+        )
+        if unverifiable:
+            audit = CoverageAudit(
+                evidence_state="unverifiable", queries=(), pagination_outcome=None
+            )
+        elif collected:
+            outcomes = {item.pagination_outcome for item in collected}
+            audit = CoverageAudit(
+                evidence_state="parsed",
+                queries=tuple(collected),
+                pagination_outcome=outcomes.pop() if len(outcomes) == 1 else None,
+            )
+    decision = resolve_coverage_hold(audit, scope=scope)
+    pair["coverage_scope"] = scope.model_dump()
+    pair["coverage_audit"] = audit.model_dump() if audit is not None else None
+    pair["coverage_decision"] = decision.model_dump()
 
 
 class ProbeResult(BaseModel):
@@ -1432,6 +1758,8 @@ def run_probe(
     cell_minimums: dict[str, int] = dict(minimum_independent_families_by_cell or {})
     pair_attempts: dict[tuple[str, str], dict[str, Any]] = {}
     pair_trace_evidence: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    pair_probe_queries: dict[tuple[str, str], list[ProbeQuery]] = {}
+    pair_query_coverage: dict[tuple[str, str], dict[str, Any]] = {}
     query_outcomes: dict[tuple[str, str], dict[str, AcquisitionOutcome]] = {}
     query_critical_degradation: dict[tuple[str, str], dict[str, bool]] = {}
 
@@ -1459,6 +1787,9 @@ def run_probe(
                 "artifact_references": [],
                 "critical_degradation": False,
                 "critical_degradation_reason": None,
+                "coverage_scope": None,
+                "coverage_audit": None,
+                "coverage_decision": None,
             },
         )
         configured = cell_minimums.get(query.cell_id)
@@ -1550,6 +1881,14 @@ def run_probe(
                     aggregated_counts[key] = aggregated_counts.get(key, 0) + value
                 artifact_references.extend(query_trace["artifact_references"])
                 scroll_checkpoints.extend(query_trace["scroll_checkpoints"])
+            if query.execution_plan is not None:
+                coverage = pair_query_coverage.setdefault(pair_key, {})
+                try:
+                    coverage[query.query_id] = build_query_coverage_audit(
+                        query.query_id, trace
+                    )
+                except (ValueError, TypeError) as exc:
+                    coverage[query.query_id] = f"unverifiable:{exc}"
             pair["extraction_counts"] = aggregated_counts or None
             pair["extraction_artifact_references"] = artifact_references
             pair["scroll_checkpoints"] = scroll_checkpoints
@@ -1572,6 +1911,9 @@ def run_probe(
         if query.query_id not in pair["query_ids"]:
             pair["query_ids"].append(query.query_id)
             pair["query_count"] = len(pair["query_ids"])
+        pair_probe_queries.setdefault((query.cell_id, query.source_family), []).append(
+            query
+        )
         query_critical_degradation.setdefault(
             (query.cell_id, query.source_family), {}
         ).setdefault(query.query_id, False)
@@ -1773,11 +2115,23 @@ def run_probe(
     credited_records_provenance: dict[str, CreditedRecordsProvenance] = {}
     degraded_families: dict[str, tuple[str, ...]] = {}
     blocked_families: dict[str, tuple[str, ...]] = {}
+    for pair_key, pair_record in pair_attempts.items():
+        finalize_pair_coverage(
+            pair_record,
+            pair_queries=tuple(pair_probe_queries.get(pair_key, ())),
+            query_audits=pair_query_coverage.get(pair_key, {}),
+        )
+
     for cell_id in cell_attempts:
         pair_records = [
             record
             for (record_cell_id, _), record in pair_attempts.items()
             if record_cell_id == cell_id
+        ]
+        coverage_held = [
+            record
+            for record in pair_records
+            if (record.get("coverage_decision") or {}).get("held")
         ]
         counts = {
             outcome: sum(record["outcome"] == outcome for record in pair_records)
@@ -1828,13 +2182,24 @@ def run_probe(
             minimum_independent_families=cell_minimums[cell_id],
             credited=credited,
         )
-        acquisition_outcomes[cell_id] = decision.acquisition_outcome
+        cell_outcome = decision.acquisition_outcome
+        if coverage_held and cell_outcome == "candidate_records_found":
+            cell_outcome = "coverage_unestablished_credit_withheld"
+        acquisition_outcomes[cell_id] = cell_outcome
         geography_cell = geography_summary.get("cells", {}).get(cell_id, {})
         credited_from_other_queries_count = int(
             geography_cell.get("credited_from_other_queries_count", 0)
         )
+        coverage_hold_reasons = tuple(
+            sorted(
+                {
+                    str((record.get("coverage_decision") or {}).get("reason"))
+                    for record in coverage_held
+                }
+            )
+        )
         acquisition_outcome_annotations[cell_id] = {
-            "acquisition_outcome": decision.acquisition_outcome,
+            "acquisition_outcome": cell_outcome,
             "credited_records": credited,
             "credited_from_other_queries_count": credited_from_other_queries_count,
             "own_completed_families": counts["completed"],
@@ -1849,6 +2214,13 @@ def run_probe(
                 else None
             ),
         }
+        if coverage_held:
+            # Only a cell that was actually held carries the reasons. A cell
+            # nothing measured keeps the annotation it always had, byte for
+            # byte, because nothing about it has been learned.
+            acquisition_outcome_annotations[cell_id][
+                "coverage_hold_reasons"
+            ] = coverage_hold_reasons
         product_observability_state[cell_id] = decision.product_observability_state
         product_observability_reason[cell_id] = decision.product_observability_reason
         degraded_families[cell_id] = tuple(
