@@ -17,7 +17,11 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
-from ..browser_sourcing import EXCLUSION_REASON_CATALOG
+from ..browser_sourcing import (
+    EXCLUSION_REASON_CATALOG,
+    LinkedInPageClassification,
+    LinkedInSafetyReason,
+)
 from .search_contract import SearchContract
 
 
@@ -717,6 +721,8 @@ class PageProgressionObservation(BaseModel):
     requested_offset: int
     final_url: str
     job_ids: tuple[str, ...]
+    page_classification: LinkedInPageClassification
+    safety_reason: LinkedInSafetyReason | None
     final_url_start: int | None
     final_url_start_matches_requested: bool
     new_ids_vs_prior_offsets_count: int
@@ -933,11 +939,22 @@ def build_query_coverage_audit(
         final_url = str(page.get("final_url") or "")
         start = _url_start(final_url)
         requested = int(planned[index]) if index < len(planned) else 0
+        if "page_classification" not in page:
+            # Absent rather than defaulted: a page recorded without its label
+            # is evidence we cannot read, and reading it as "unknown" would
+            # invent a classification nobody measured.
+            raise ValueError("coverage_trace_page_classification_missing")
         observations.append(
             PageProgressionObservation(
                 requested_offset=requested,
                 final_url=final_url,
                 job_ids=job_ids,
+                page_classification=str(page["page_classification"]),
+                safety_reason=(
+                    None
+                    if page.get("safety_reason") is None
+                    else str(page["safety_reason"])
+                ),
                 final_url_start=start,
                 final_url_start_matches_requested=start == requested,
                 new_ids_vs_prior_offsets_count=fresh,

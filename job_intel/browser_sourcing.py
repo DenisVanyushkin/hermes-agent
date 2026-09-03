@@ -55,7 +55,7 @@ from html import unescape
 from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping, get_args
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import urlopen
 
@@ -166,6 +166,22 @@ class BrowserSessionHealth:
     critical_degradation: bool = False
     critical_degradation_reason: str | None = None
     status: str = "healthy"
+    last_page_login_wall: bool = False
+    last_page_auth_redirect: bool = False
+    last_page_safety_reason: str | None = None
+
+    def page_requires_abort(self) -> bool:
+        """Whether the page just observed carried a safety reason.
+
+        Two changes from what this used to be, and they are separate. The
+        decision follows the page in hand rather than counters accumulated
+        since before the loop began. And it follows the safety axis rather
+        than the wall counters: a page that showed a sign-in wall said
+        something about itself, not about whether the next offset can be
+        asked. The counters remain, as telemetry.
+        """
+
+        return self.last_page_safety_reason is not None
 
     def snapshot(self) -> dict[str, Any]:
         age_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
@@ -190,9 +206,15 @@ class BrowserSessionHealth:
             self.pagination_depth_reached = max(self.pagination_depth_reached, self.pages_fetched)
         auth_redirect = _looks_like_auth_redirect(url, html)
         login_wall = _looks_like_login_wall(url, html)
-        if vacancies_found > 0 and _page_has_source_results(self.source, url, html):
+        # Not "and vacancies_found > 0": that count is taken after the role
+        # filter, so a page of real vacancies the filter happened to reject
+        # would have been recorded as a wall -- the same defect one step on.
+        if _page_has_source_results(self.source, url, html):
             auth_redirect = False
             login_wall = False
+        self.last_page_auth_redirect = auth_redirect
+        self.last_page_login_wall = login_wall
+        self.last_page_safety_reason = _linkedin_safety_reason(url, html)
         if auth_redirect:
             self.auth_redirects += 1
         if login_wall:
@@ -584,12 +606,23 @@ def _clean_html_text(value: str) -> str:
 
 
 def _looks_like_linkedin_results_page(url: str, html: str) -> bool:
-    lowered_url = url.lower()
-    lowered_html = html.lower()
-    return "linkedin.com/jobs/search" in lowered_url and (
-        "job-card-container__link" in lowered_html
-        or "job-card-list__title--link" in lowered_html
-        or "artdeco-entity-lockup__subtitle" in lowered_html
+    """A results page is one results were extracted from.
+
+    This used to name three CSS classes. All three belong to the authenticated
+    layout, so the logged-out page -- which carries the same vacancies under a
+    different dialect -- matched none of them and was read as a wall. Adding
+    the public names to the list would have moved the defect rather than fixed
+    it: the next dialect would fail the same way.
+
+    The question is answered by the parser instead, which already understands
+    both dialects, and answered before the role filter runs: whether a page
+    existed is not a matter of whether its vacancies were wanted.
+    """
+
+    if "linkedin.com/jobs/search" not in url.lower():
+        return False
+    return bool(
+        _linkedin_card_vacancies_from_html(html, page_url=url, apply_role_filter=False)
     )
 
 
@@ -708,6 +741,173 @@ def _looks_like_login_wall(url: str, html: str) -> bool:
             "continue to linkedin",
         )
     )
+
+
+# Declared once, as types. The tuples are read back out of the types rather
+# than written a second time: a tuple maintained beside a Literal is two
+# definitions of one contract, and the pair drifts the moment one is edited.
+LinkedInPageClassification = Literal[
+    "usable_result_surface",
+    "terminal_empty_surface",
+    "auth_wall_surface",
+    "http_error_surface",
+    "unknown_non_usable_surface",
+]
+LinkedInSafetyReason = Literal[
+    "unexpected_linkedin_auth_cookie",
+    "http_429_rate_limit",
+    "challenge_redirect",
+    "rendered_challenge",
+    "rendered_rate_limit",
+    "http_401_antibot_or_auth",
+    "http_403_antibot_or_auth",
+]
+LINKEDIN_PAGE_CLASSIFICATIONS = get_args(LinkedInPageClassification)
+LINKEDIN_SAFETY_REASONS = get_args(LinkedInSafetyReason)
+_LINKEDIN_EMPTY_STATE_HEADING = "we couldn't find a match for"
+_LINKEDIN_CHALLENGE_PATHS = ("/checkpoint", "/challenge", "/captcha")
+_LINKEDIN_AUTH_WALL_PATHS = ("/authwall", "/login", "/uas/login")
+_LINKEDIN_CHALLENGE_NODE = re.compile(
+    r"<(?:form|iframe|input)\b[^>]*(?:action|src|name|id)\s*=\s*[\"\'][^\"\']*"
+    r"(?:challenge|checkpoint|captcha)",
+    flags=re.I,
+)
+_LINKEDIN_RATE_LIMIT_TEXT = re.compile(
+    r"\b(too many requests|rate[- ]limit(?:ed|ing)?)\b", flags=re.I
+)
+
+
+def _normalize_linkedin_heading(value: str) -> str:
+    """Compare rendered text, not markup.
+
+    The empty-state heading in the corpus carries a typographic apostrophe
+    (U+2019), so a comparison against the ASCII form silently never matches.
+    The class name is no substitute: no-results is present on non-empty
+    authenticated pages too, which is why the heading is what is read.
+    """
+
+    return " ".join(
+        (value or "").replace("\u2019", "'").replace("\u00a0", " ").split()
+    ).lower()
+
+
+def _linkedin_headings(html: str) -> list[str]:
+    return [
+        _clean_html_text(match.group(1))
+        for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", html or "", flags=re.I | re.S)
+    ]
+
+
+def _is_linkedin_search_url(value: str) -> bool:
+    parsed = urlparse(value or "")
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "www.linkedin.com"
+        and (parsed.path or "").rstrip("/") == "/jobs/search"
+    )
+
+
+def _linkedin_public_card_count(url: str, html: str) -> int:
+    return len(
+        {
+            vacancy.source_id
+            for vacancy in _linkedin_card_vacancies_from_html(
+                html or "", page_url=url, apply_role_filter=False
+            )
+            if vacancy.source_id
+        }
+    )
+
+
+def linkedin_safety_reason(
+    *,
+    final_url: str,
+    html: str,
+    status: int | None = None,
+    auth_cookie_present: bool = False,
+) -> LinkedInSafetyReason | None:
+    """Positive evidence that the source pushed back. Ported from the frozen driver.
+
+    Every branch needs evidence of its own. Absence of results is evidence for
+    none of them, and the substring "captcha" is evidence for none of them
+    either: it appears on 288 of 288 captured pages in both modes, so a
+    predicate resting on it would have stopped every run ever made. A rendered
+    challenge is therefore read from a structural node, and a rendered rate
+    limit from rendered text with no cards beside it.
+
+    status is optional because BrowserFetchResult does not carry one yet, so
+    the three status branches are complete and tested but not reachable from
+    the page loop. Carrying the status is a separate change to the fetch path.
+    """
+
+    if auth_cookie_present:
+        return "unexpected_linkedin_auth_cookie"
+    if status == 429:
+        return "http_429_rate_limit"
+    path = (urlparse(final_url or "").path or "").lower()
+    if any(token in path for token in _LINKEDIN_CHALLENGE_PATHS):
+        return "challenge_redirect"
+    if _LINKEDIN_CHALLENGE_NODE.search(html or ""):
+        return "rendered_challenge"
+    cards = _linkedin_public_card_count(final_url, html)
+    rendered = " ".join([*_linkedin_headings(html), _clean_html_text(html or "")])
+    if cards == 0 and _LINKEDIN_RATE_LIMIT_TEXT.search(rendered):
+        return "rendered_rate_limit"
+    benign_authwall = status == 401 and any(
+        token in path for token in _LINKEDIN_AUTH_WALL_PATHS
+    )
+    if status in {401, 403} and cards == 0 and not benign_authwall:
+        return f"http_{status}_antibot_or_auth"
+    return None
+
+
+def classify_linkedin_page(
+    *, final_url: str, html: str, status: int | None = None
+) -> LinkedInPageClassification:
+    """Ordered, five outcomes, no sixth. Ported from the frozen driver.
+
+    The order is the contract. A page carrying cards is usable whatever else
+    it also shows, including its own sign-in call to action. A page with no
+    positive sign of any of the first four is unknown, never a wall: an
+    invented wall is a claim about a market nobody looked at.
+
+    /checkpoint is deliberately absent from the auth-wall paths. It belongs to
+    the safety axis as challenge_redirect, and the same page may carry a value
+    on each axis; that is two measurements, not a contradiction.
+    """
+
+    if _linkedin_public_card_count(final_url, html) > 0:
+        return "usable_result_surface"
+    if _is_linkedin_search_url(final_url) and any(
+        heading == _LINKEDIN_EMPTY_STATE_HEADING
+        or heading.startswith(_LINKEDIN_EMPTY_STATE_HEADING + " ")
+        for heading in (
+            _normalize_linkedin_heading(value) for value in _linkedin_headings(html)
+        )
+    ):
+        return "terminal_empty_surface"
+    path = (urlparse(final_url or "").path or "").lower()
+    if any(token in path for token in _LINKEDIN_AUTH_WALL_PATHS):
+        return "auth_wall_surface"
+    if status is not None and status >= 400:
+        return "http_error_surface"
+    return "unknown_non_usable_surface"
+
+
+def _linkedin_safety_reason(url: str, html: str) -> str | None:
+    """Positive evidence that the source is pushing back, on its own axis.
+
+    A challenge is the source refusing; an auth wall is the source showing a
+    page. The old predicate answered both at once, which is why a benign wall
+    cancelled a declared plan. Absence of results is evidence of neither.
+
+    This is the page-loop entry point; the axis itself lives in
+    linkedin_safety_reason above, which the frozen driver defines. No HTTP
+    status reaches here yet, so the status branches stay unreachable from this
+    caller while remaining implemented and tested.
+    """
+
+    return linkedin_safety_reason(final_url=url, html=html)
 
 
 def _looks_like_auth_redirect(url: str, html: str) -> bool:
@@ -1891,8 +2091,6 @@ class BrowserSourceClient:
             "session_observation": "not_observed",
         }
         started = time.perf_counter()
-        auth_login_walls = self._health.login_walls
-        auth_redirects = self._health.auth_redirects
         try:
             if allow_unauthenticated:
                 observation = self._validate_linkedin_auth(allow_unauthenticated=True)
@@ -2052,10 +2250,20 @@ class BrowserSourceClient:
                 unexplained_ids = sorted(accounting.unexplained_ids)
             for name, count in trace_counts.items():
                 trace["extraction_counts"][name] += count
+            # Both axes, recorded per page and read from the final URL. The
+            # classification says what the page was; the safety reason says
+            # whether the source pushed back. One page may carry a value on
+            # each, so they are two fields rather than one enum.
             trace["pages"].append(
                 {
                     "requested_url": page_result.requested_url,
                     "final_url": page_result.final_url,
+                    "page_classification": classify_linkedin_page(
+                        final_url=page_result.final_url, html=html
+                    ),
+                    "safety_reason": linkedin_safety_reason(
+                        final_url=page_result.final_url, html=html
+                    ),
                     "html_sha256": page_result.html_sha256,
                     "dom_unique_job_ids": sorted(page_result.dom_unique_job_ids),
                     "parsed_unique_job_ids_before_role_filter": parser_before_filter_ids,
@@ -2074,7 +2282,10 @@ class BrowserSourceClient:
                     "artifact_ref": page_result.artifact_ref,
                 }
             )
-            self._observe_page(page_url, html, len(page_vacancies))
+            # The final URL, not the requested one. Observing the request
+            # made every redirect invisible to the safety axis: a walk that
+            # ended on /checkpoint was recorded as a walk to the search page.
+            self._observe_page(page_result.final_url, html, len(page_vacancies))
             trace["vacancies_extracted"] += len(page_vacancies)
             vacancies.extend(page_vacancies)
             started = time.perf_counter()
@@ -2084,12 +2295,12 @@ class BrowserSourceClient:
                 else self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
             )
             vacancies.extend(detail_rows)
-            if (
-                self._health.login_walls > auth_login_walls
-                or self._health.auth_redirects > auth_redirects
-            ):
+            if self._health.page_requires_abort():
                 if plan is not None:
-                    reason = "login_wall_or_auth_redirect"
+                    reason = (
+                        self._health.last_page_safety_reason
+                        or "login_wall_or_auth_redirect"
+                    )
                     self._mark_critical_degradation(reason)
                     trace["failure_reason"] = reason
                     trace["stop_reason"] = "critical_degradation"

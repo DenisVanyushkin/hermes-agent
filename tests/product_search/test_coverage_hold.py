@@ -19,6 +19,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from typing import get_args
+
+import job_intel.browser_sourcing as bs_module
 import job_intel.product_search.acquisition_probe as acquisition_probe
 from job_intel.product_search.acquisition_probe import SourceIsolation, run_probe
 
@@ -39,6 +42,8 @@ def _linkedin_trace_without_progression() -> dict[str, object]:
             "requested_url": f"https://www.linkedin.com/jobs/search?start={offset}",
             "final_url": "https://www.linkedin.com/jobs/search?start=0&position=1&pageNum=0",
             "html_sha256": f"sha-{offset}",
+            "page_classification": "usable_result_surface",
+            "safety_reason": None,
             "dom_unique_job_ids": list(job_ids),
             "parsed_unique_job_ids_before_role_filter": list(job_ids),
             "returned_unique_job_ids": list(job_ids),
@@ -426,6 +431,8 @@ def _page(offset: int, job_ids: list[str], *, seen: set[str]) -> dict[str, objec
         "requested_offset": offset,
         "final_url": f"https://www.linkedin.com/jobs/search?start={offset}",
         "job_ids": tuple(job_ids),
+        "page_classification": "usable_result_surface",
+        "safety_reason": None,
         "final_url_start": offset,
         "final_url_start_matches_requested": True,
         "new_ids_vs_prior_offsets_count": fresh,
@@ -764,3 +771,87 @@ def test_admission_is_not_derivable_from_the_legacy_outcome(tmp_path: Path) -> N
     assert (
         held.acquisition_outcomes["b1-cell"] != released.acquisition_outcomes["b1-cell"]
     )
+
+
+def test_both_axes_reach_the_persisted_envelope(tmp_path: Path) -> None:
+    """The page label and the safety reason are in the artifact, per page.
+
+    Functions that classify correctly and are never called prove nothing about
+    what anyone will read. This asserts the recorded document, which is the
+    only place either value is observable.
+    """
+
+    _run_audited(tmp_path)
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    pages = _persisted_linkedin_pair(summary)["coverage_audit"]["queries"][0]["pages"]
+
+    assert [page["page_classification"] for page in pages] == [
+        "usable_result_surface",
+        "usable_result_surface",
+    ]
+    assert [page["safety_reason"] for page in pages] == [None, None]
+
+
+def test_a_page_recorded_without_its_classification_is_unreadable_evidence(
+    tmp_path: Path,
+) -> None:
+    """Absent, not defaulted.
+
+    Reading a missing label as "unknown" would invent a classification nobody
+    measured, and the invented value would then be indistinguishable from a
+    measured one. The pair is held as unverifiable instead.
+    """
+
+    trace = _linkedin_trace_without_progression()
+    for page in trace["pages"]:
+        del page["page_classification"]
+
+    with pytest.raises(ValueError):
+        acquisition_probe.build_query_coverage_audit("q-a", trace)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("page_classification", "not_a_declared_class"),
+        ("page_classification", "usable"),
+        ("safety_reason", "not_a_declared_reason"),
+    ),
+)
+def test_a_persisted_page_outside_the_declared_sets_is_rejected(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """The declared sets are the contract of the field, not a comment near it.
+
+    Both fields were plain str first, so the envelope accepted and stored
+    anything -- an abbreviated form like "usable", a value from a future
+    revision, a tampered one -- and the tuples of names beside them meant
+    nothing to the reader. An unknown value now makes the document unreadable
+    rather than becoming a new value nobody declared.
+    """
+
+    _run_audited(tmp_path)
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    document = _persisted_linkedin_pair(summary)["coverage_audit"]
+    document["queries"][0]["pages"][0][field] = value
+
+    with pytest.raises(ValidationError):
+        acquisition_probe.CoverageAudit.model_validate(document)
+
+
+def test_the_declared_sets_are_read_out_of_the_types_they_declare() -> None:
+    """One definition, not a tuple maintained beside a type.
+
+    A tuple written twice drifts the moment one copy is edited, and nothing
+    fails when it does. These are the type's own arguments, so they cannot
+    disagree with the type.
+    """
+
+    assert bs_module.LINKEDIN_PAGE_CLASSIFICATIONS == get_args(
+        bs_module.LinkedInPageClassification
+    )
+    assert bs_module.LINKEDIN_SAFETY_REASONS == get_args(
+        bs_module.LinkedInSafetyReason
+    )
+    assert len(bs_module.LINKEDIN_PAGE_CLASSIFICATIONS) == 5
+    assert len(bs_module.LINKEDIN_SAFETY_REASONS) == 7

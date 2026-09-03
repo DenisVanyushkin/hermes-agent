@@ -2315,18 +2315,16 @@ def test_gate_a_incomplete_page_plan_is_critical_and_not_a_clean_zero(
         **_kwargs: object,
     ) -> BrowserFetchResult:
         fetched_offsets.append(page_offset)
-        client._health.login_walls = 1
+        # The walk is stopped by a challenge, which is the one thing that
+        # stops it. This originally poked client._health.login_walls, which
+        # worked only while the abort compared cumulative counters. What the
+        # scenario needs is an early stop the production code honours, and
+        # after the axes were separated that is a safety reason: a sign-in
+        # wall now describes a page rather than cancelling a plan.
         return BrowserFetchResult(
             requested_url=_url,
-            final_url=_url,
-            html=(
-                '<html><head><script type="application/ld+json">'
-                '{"@context":"https://schema.org","@type":"JobPosting",'
-                '"title":"VP Product","url":"https://www.linkedin.com/jobs/view/123",'
-                '"hiringOrganization":{"name":"Spark"}}'
-                '</script></head><body>'
-                '<a href="/jobs/view/123">VP Product</a></body></html>'
-            ),
+            final_url="https://www.linkedin.com/checkpoint/challenge/verify",
+            html='<html><body>Please verify</body></html>',
             html_sha256="a" * 64,
             page_offset=page_offset,
             planned_scroll_steps=1,
