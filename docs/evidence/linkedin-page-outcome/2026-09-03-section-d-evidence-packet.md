@@ -163,9 +163,15 @@ known_limitations:
 working_tree_state:
   Три ревизии называются раздельно, чтобы это не выводилось из графа коммитов.
   candidate_revision — b87ca02eebe6fbea27e574c940e892f0042fab9c, код и тесты.
-  packet_revision    — коммит, содержащий этот файл, поверх candidate.
+  packet_revision    — коммит, содержащий этот файл. Его SHA внутри файла
+    привести НЕЛЬЗЯ: хэш коммита считается по содержимому, поэтому файл,
+    содержащий собственный SHA, построить невозможно. Вместо прозы —
+    команда, дающая вердикт:
+      git log -1 --format=%H -- docs/evidence/linkedin-page-outcome/2026-09-03-section-d-evidence-packet.md
+    Предыдущая ревизия пакета, для сверки цепочки:
+      40d8ab9becbad52494f42c87159313b1a96ae19f
   Дерево чисто на packet_revision: git status --porcelain пуст.
-  Замечание ревьюера, принято.
+  Замечание ревьюера, принято в исполнимой части.
 
 pending_authority_or_decisions:
   1. D4, узкий живой прогон на 2–3 заранее названных ячейках — нужен прямой
