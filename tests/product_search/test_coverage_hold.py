@@ -294,22 +294,48 @@ def _production_sources() -> list[pathlib.Path]:
     ]
 
 
-def test_probe_result_has_no_production_consumer() -> None:
-    """If this fails, the answer to question 0 has stopped being true.
+# The forms this scan covers, named rather than described. A previous revision
+# claimed to prove that no production consumer exists while checking two string
+# forms: a test that overstated its own reach, which is the defect this slice
+# is about.
+_KNOWN_CONSUMER_FORMS = (
+    "ProbeResult.model_validate",
+    "ProbeResult.model_validate_json",
+    "SELECT summary_json",
+    "select summary_json",
+    "summary_json FROM",
+    "summary_json from",
+)
+
+
+def test_no_production_module_reads_the_probe_summary_by_a_known_form() -> None:
+    """A tripwire on the routes we know of, claiming nothing beyond them.
 
     The plan declines to version the serialised result because nothing in
-    production reads it back. That is a measurement, not a principle, so it is
-    re-measured here rather than trusted.
+    production reads it back, and that is a measurement rather than a
+    principle, so it is re-measured. What it cannot be is exhaustive. Outside
+    its reach, named so that nobody has to guess: an ORM read, SQL assembled
+    from fragments, a filesystem read of the file through a variable, and any
+    read from a module outside job_intel.
+
+    An attempt to cover the filesystem route by pattern was removed rather
+    than kept: it fired on acquisition_probe itself, which writes the file,
+    and a guard that cannot tell writing from reading is worse than an absent
+    one, because it gets silenced.
+
+    The proof of absence at the time of writing is a separate reading of every
+    caller of run_probe and of every use of probe_runs, recorded in the plan
+    under question 0.
     """
 
-    readers = [
-        path
+    offenders = [
+        (path.name, form)
         for path in _production_sources()
-        if "ProbeResult.model_validate" in path.read_text(encoding="utf-8")
-        or "SELECT summary_json" in path.read_text(encoding="utf-8")
+        for form in _KNOWN_CONSUMER_FORMS
+        if form in path.read_text(encoding="utf-8")
     ]
 
-    assert readers == []
+    assert offenders == []
 
 
 def test_probe_result_still_forbids_extra_fields() -> None:
