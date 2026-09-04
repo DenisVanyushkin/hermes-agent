@@ -96,6 +96,16 @@ def test_a_page_that_matched_is_still_recorded_as_usable(matched_something: str)
 
 DETAIL_URL = "https://www.linkedin.com/jobs/view/4441999185/"
 
+# The identities the empty-state fixture carries, in the order the accounting
+# sorts them. Taken from the capture, not invented.
+FIXTURE_JOB_IDS = [
+    "4405267143",
+    "4441999185",
+    "4443878413",
+    "4453111327",
+    "4457950251",
+]
+
 
 def test_the_execution_plan_path_also_yields_no_rows(
     matched_nothing: str, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -125,7 +135,12 @@ def test_the_execution_plan_path_also_yields_no_rows(
         """
 
         def evaluate_all(self, _script: str) -> list[str]:
-            return []
+            # The identities the page really carries. Returning nothing here
+            # would have made the accounting assertions below pass without
+            # exercising anything: with no observed IDs there is nothing to
+            # classify, and the very failure this test exists to catch --
+            # five known IDs falling into `unexplained` -- cannot occur.
+            return [f"https://www.linkedin.com/jobs/view/{job_id}" for job_id in FIXTURE_JOB_IDS]
 
         def evaluate(self, _script: str) -> bool:
             return True
@@ -174,6 +189,13 @@ def test_the_execution_plan_path_also_yields_no_rows(
 
     assert vacancies == []
     assert page_trace["page_classification"] == "terminal_empty_surface"
+    # Not merely zero rows: the identities were observed, so the record must
+    # say why each yielded nothing. `unexplained` would claim we do not know,
+    # and we do -- the source said the search matched nothing.
+    assert page_trace["unexplained_dom_job_ids"] == []
+    assert page_trace["excluded_job_ids_by_reason"] == {
+        job_id: "source_declared_no_match_recommendation" for job_id in FIXTURE_JOB_IDS
+    }
 
 
 def test_the_statement_inside_a_script_does_not_empty_a_page(
@@ -214,3 +236,73 @@ def test_a_job_detail_page_is_not_a_search_that_matched_nothing(
     """
 
     assert extract_linkedin_vacancies_from_html(matched_nothing, page_url=DETAIL_URL) != []
+
+
+def test_the_reading_follows_the_redirect_not_the_request(
+    matched_nothing: str, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A search that ended somewhere else is not a search that matched nothing.
+
+    The classification beside this reading has taken the final URL ever since
+    redirects were found to be invisible to the safety axis. If the ingestion
+    side kept reading the requested URL, the two would disagree exactly when a
+    walk was redirected -- the case that matters most -- and rows would be
+    dropped on the strength of a statement made by a page nobody asked for.
+    """
+
+    monkeypatch.setenv("JOB_INTEL_BROWSER_DIAGNOSTICS_DIR", str(tmp_path / "diag"))
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", max_scrolls=0, noise_probability=0.0)
+    )
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda: None)
+
+    class _Locator:
+        def evaluate_all(self, _script: str) -> list[str]:
+            return [f"https://www.linkedin.com/jobs/view/{job_id}" for job_id in FIXTURE_JOB_IDS]
+
+        def evaluate(self, _script: str) -> bool:
+            return True
+
+        def count(self) -> int:
+            return 1
+
+        @property
+        def first(self) -> "_Locator":
+            return self
+
+    class _Page:
+        url = ""
+        mouse = types.SimpleNamespace(wheel=lambda *_args: None)
+
+        def goto(self, _url: str, **_kwargs) -> None:
+            # The walk was asked for a search and landed on a detail page.
+            self.url = DETAIL_URL
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return matched_nothing
+
+        def locator(self, selector: str) -> _Locator:
+            return _Locator()
+
+        def screenshot(self, *, path: str, full_page: bool) -> None:
+            pathlib.Path(path).write_bytes(b"png")
+
+        def title(self) -> str:
+            return "Detail"
+
+        def close(self) -> None:
+            return None
+
+    client._context = types.SimpleNamespace(new_page=lambda: _Page())  # type: ignore[attr-defined]
+
+    vacancies = client.search_linkedin(
+        "product",
+        geography_location="United Kingdom",
+        cell_id="uk",
+        execution_plan={"page_offsets": [0]},
+    )
+
+    assert vacancies != []

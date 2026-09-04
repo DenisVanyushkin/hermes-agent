@@ -20,20 +20,45 @@ of empty runs.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from job_intel import sources
 
 
-def test_the_linkedin_plan_asks_for_no_measured_term() -> None:
-    """Through the builder: the plan is what gets asked."""
+@pytest.mark.parametrize(
+    "day",
+    [date(2026, 9, 4), date(2026, 9, 5), date(2026, 9, 6), date(2026, 12, 31)],
+)
+def test_the_linkedin_plan_asks_for_no_measured_term(day: date) -> None:
+    """Through the builder, on days that ask different things.
 
-    plan = sources.rotating_linkedin_queries(limit=18)
+    The plan rotates its query text by the calendar day, so a single unpinned
+    call tests whichever combination today happens to select and says nothing
+    about the rest. Several days are named explicitly instead.
+    """
+
+    plan = sources.rotating_linkedin_queries(limit=18, as_of=day)
 
     assert plan
     for item in plan:
         offender = sources.linkedin_query_carries_measured_empty_term(item.query)
         assert offender is None, (offender, item.query)
+
+
+def test_no_day_of_the_rotation_asks_for_a_measured_term() -> None:
+    """Every text the rotation can produce, not a sample of days.
+
+    The query text advances one combination per full pass over the
+    geographies, so walking the combinations directly covers what a year of
+    days would and does not depend on when the suite runs.
+    """
+
+    for role in sources.ROLE_FAMILIES:
+        for context in sources.CONTEXT_FAMILIES:
+            text = " ".join(sources._linkedin_terms(role[1]) + sources._linkedin_terms(context[1]))
+            assert sources.linkedin_query_carries_measured_empty_term(text) is None, text
 
 
 def test_the_linkedin_plan_asks_for_the_replacement_instead() -> None:
@@ -43,9 +68,19 @@ def test_the_linkedin_plan_asks_for_the_replacement_instead() -> None:
     the defect.
     """
 
-    queries = " ".join(item.query for item in sources.rotating_linkedin_queries(limit=18))
+    # Pinned to the day the measurement was made, because only some days ask
+    # the context group that carried the term; an unpinned call passes today
+    # and fails tomorrow for a reason unrelated to the property.
+    queries = " ".join(
+        item.query
+        for item in sources.rotating_linkedin_queries(limit=18, as_of=date(2026, 9, 4))
+    )
 
     assert "artificial intelligence products" in queries
+    assert sources._linkedin_terms(("AI products", "digital products")) == (
+        "artificial intelligence products",
+        "digital products",
+    )
 
 
 def test_the_shared_vocabulary_is_left_alone() -> None:
@@ -65,7 +100,11 @@ def test_other_sources_still_ask_what_they_asked_before() -> None:
     """Not the vocabulary but a builder that reads it, since that is the path
     the other sources actually take."""
 
-    joined = " ".join(sources.rotating_source_queries("headhunter", limit=60))
+    # Eighty is the whole role-by-context-by-geography space, so the shuffle
+    # cannot decide the outcome. Sixty would have left a chance of missing the
+    # term and calling that a pass.
+    combos = len(sources.ROLE_FAMILIES) * len(sources.CONTEXT_FAMILIES) * len(sources.GEO_FAMILIES)
+    joined = " ".join(sources.rotating_source_queries("headhunter", limit=combos))
 
     assert "AI products" in joined
 

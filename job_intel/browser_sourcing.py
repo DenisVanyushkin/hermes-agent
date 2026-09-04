@@ -104,9 +104,17 @@ class ExclusionReasonCatalog:
 # call sites. A new reason needs review and a new version before it can hide a
 # parser loss behind an exclusion label.
 EXCLUSION_REASON_CATALOG = ExclusionReasonCatalog(
-    version="1.0",
-    codes=("role_filter",),
+    version="1.1",
+    codes=("role_filter", "source_declared_no_match_recommendation"),
 )
+
+# The reason a card was seen and not taken when the source itself said the
+# search matched nothing. Distinct from `role_filter`, which is our judgement
+# about a result; this one is the source's statement that there was no result
+# to judge. Recording it as an exclusion rather than leaving the identity
+# unexplained keeps the accounting honest in both directions: the cards were
+# observed, and they were not results.
+SOURCE_DECLARED_NO_MATCH_EXCLUSION = "source_declared_no_match_recommendation"
 
 
 def build_linkedin_search_url(
@@ -332,6 +340,7 @@ def classify_linkedin_dom_job_ids(
     parser_vacancies: list[Vacancy],
     returned_vacancies: list[Vacancy],
     excluded_by_reason: Mapping[str, str] | None = None,
+    blanket_exclusion_reason: str | None = None,
 ) -> LinkedInDomJobIdAccounting:
     """Assign every observed DOM ID exactly one auditable terminal outcome."""
 
@@ -359,6 +368,15 @@ def classify_linkedin_dom_job_ids(
     returned_ids = all_returned_ids & dom_ids
     returned_outside_dom_job_ids = all_returned_ids - dom_ids
     expected_excluded = parser_ids - duplicate_ids - returned_ids
+    if blanket_exclusion_reason is not None:
+        if excluded_by_reason is not None:
+            raise ValueError(
+                "pass either a per-ID exclusion mapping or a blanket reason, not both"
+            )
+        EXCLUSION_REASON_CATALOG.validate(blanket_exclusion_reason)
+        excluded_by_reason = {
+            job_id: blanket_exclusion_reason for job_id in sorted(expected_excluded)
+        }
     provided_excluded = dict(excluded_by_reason or {})
     if excluded_by_reason is None:
         excluded = {
@@ -2234,17 +2252,28 @@ class BrowserSourceClient:
             # -- the loop qualifies its own pre-filter rows and never calls
             # it. Guarding one branch would have left the other ingesting a
             # recommendation block while the trace recorded the page as empty.
-            if linkedin_search_matched_nothing(html, page_url=page_url):
-                pre_filter_vacancies: list[Vacancy] = []
+            #
+            # Read from the final URL, not the requested one, so a redirect
+            # cannot make this side disagree with the classification beside
+            # it, which has read the final URL since redirects were found to
+            # be invisible to the safety axis.
+            source_declared_no_match = linkedin_search_matched_nothing(
+                html, page_url=page_result.final_url or page_url
+            )
+            # Parsed either way. The cards on such a page were observed and
+            # the accounting is over observed identities: dropping them would
+            # move five known IDs into `unexplained`, which claims we do not
+            # know why they yielded nothing when we know exactly why.
+            pre_filter_vacancies = _linkedin_card_vacancies_from_html(
+                html, page_url=page_url, apply_role_filter=False
+            )
+            pre_filter_vacancies.extend(
+                _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
+                for jobposting in _jobposting_objects(html)
+            )
+            if source_declared_no_match:
                 page_vacancies: list[Vacancy] = []
             else:
-                pre_filter_vacancies = _linkedin_card_vacancies_from_html(
-                    html, page_url=page_url, apply_role_filter=False
-                )
-                pre_filter_vacancies.extend(
-                    _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
-                    for jobposting in _jobposting_objects(html)
-                )
                 page_vacancies = (
                     _qualify_linkedin_vacancies(pre_filter_vacancies)
                     if plan is not None
@@ -2257,6 +2286,11 @@ class BrowserSourceClient:
                     dom_job_ids=dom_ids,
                     parser_vacancies=pre_filter_vacancies,
                     returned_vacancies=page_vacancies,
+                    blanket_exclusion_reason=(
+                        SOURCE_DECLARED_NO_MATCH_EXCLUSION
+                        if source_declared_no_match
+                        else None
+                    ),
                 )
                 if plan is not None or dom_ids
                 else None
