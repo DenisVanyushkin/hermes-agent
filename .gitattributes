@@ -33,10 +33,15 @@ docker/entrypoint.sh text eol=lf
 *.svg   text eol=lf
 *.ps1   text eol=crlf
 
-# Frozen source captures, kept as the source served them. Trailing whitespace
-# inside them is part of the bytes that were observed, and the fixtures are
-# only evidence for as long as they are cuts of a real page rather than a
-# tidied version of one. Normalising them to satisfy a whitespace check would
-# trade a warning for a weaker artifact, so the check is switched off here
-# deliberately instead of its output being ignored.
-tests/product_search/fixtures/*.html -whitespace
+# Two frozen source captures, kept as the source served them. Their trailing
+# whitespace is part of the bytes that were observed, and a fixture is
+# evidence only while it is a cut of a real page rather than a tidied version
+# of one, so normalising it would trade a warning for a weaker artifact.
+#
+# Narrow on both axes on purpose. Named files rather than the directory,
+# because a future fixture has not earned the exemption and should have to
+# ask for it; and blank-at-eol rather than the whole check, because that is
+# the only class these two files were observed to trip. Switching the guard
+# off wholesale would have hidden defects nobody has measured here.
+tests/product_search/fixtures/linkedin-authenticated-empty-with-recommendations.html whitespace=-blank-at-eol
+tests/product_search/fixtures/linkedin-authenticated-results.html whitespace=-blank-at-eol
