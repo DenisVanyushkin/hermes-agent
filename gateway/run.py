@@ -464,10 +464,11 @@ def _pending_acks_note(
     if not isinstance(target, str) or ":" not in target:
         return None
     target_platform, _, target_user = target.partition(":")
-    digits = lambda v: "".join(ch for ch in str(v) if ch.isdigit())
     if target_platform.strip().lower() != str(platform).strip().lower():
         return None
-    if not digits(target_user) or digits(target_user) != digits(user_id):
+    target_aliases = _expand_whatsapp_auth_aliases(target_user)
+    user_aliases = _expand_whatsapp_auth_aliases(user_id)
+    if not target_aliases or not user_aliases or target_aliases.isdisjoint(user_aliases):
         return None
 
     def _parse(value):
