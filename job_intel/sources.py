@@ -781,8 +781,28 @@ CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("payments_fintech", ("payments", "fintech", "banking", "wallets")),
     ("platform_ecosystem", ("marketplace", "superapp", "ecosystem", "platform")),
     ("growth_revenue", ("monetization", "subscriptions", "consumer growth", "B2C")),
-    ("digital_transformation", ("digital products", "product transformation", "AI products")),
+    ("digital_transformation", ("digital products", "product transformation", "artificial intelligence products")),
 ]
+
+# Measured 2026-09-04 against the live source, one query per row, same role
+# group and the same geography (United Kingdom) throughout.
+#
+# Adding either of these as an OR alternative does not widen the result set --
+# it empties it. `(digital products OR AI products)` returned the source's own
+# `No matching jobs found.`; `(digital products OR product transformation OR
+# growth strategy)` returned seven cards; so did the same three-term group with
+# `artificial intelligence products` in place of `AI products`. Length is not
+# the cause: a 144-character query returned results where a 111-character one
+# did not. Nor is quoting a remedy -- `"AI products"` behaves exactly like the
+# bare form. Nor is it simply a short token: `VP Product`, `GM Product` and
+# `B2C` all live in these families and all return results.
+#
+# The mechanism is not established, and nothing here claims one. What is
+# established is that a term in this set destroys every result its group would
+# otherwise have contributed, which is why the vocabulary must not carry one.
+LINKEDIN_TERMS_MEASURED_TO_EMPTY_RESULTS = frozenset(
+    {"AI products", "ML products"}
+)
 
 GEO_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("remote_europe", ("remote", "Europe", "UK", "Germany")),
