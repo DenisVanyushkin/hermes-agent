@@ -7,7 +7,7 @@ import re
 import subprocess
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Mapping
@@ -803,6 +803,115 @@ def _join_group(terms: tuple[str, ...]) -> str:
     if len(terms) == 1:
         return terms[0]
     return " OR ".join(terms)
+
+
+@dataclass(frozen=True)
+class LinkedInQueryPlanItem:
+    """One daily LinkedIn search: what to look for, and where.
+
+    The two are separate on purpose. Since 2026-08-27 LinkedIn is given the
+    place as a target rather than as words inside the query, and a search
+    carrying neither a location nor a geoId is refused outright.
+    """
+
+    query: str
+    cell_id: str
+    location: str | None
+    geo_id: str | None
+
+
+def rotating_linkedin_queries(
+    *, limit: int = 18, as_of: date | None = None
+) -> list[LinkedInQueryPlanItem]:
+    """Role and context in the text; the place as a target beside it.
+
+    The geography axis is the verified mapping rather than ``GEO_FAMILIES``.
+    Those families are a mixed keyword vocabulary with no verified target
+    contract behind them -- some entries name a country, others a working
+    arrangement or a region (``remote``, ``Europe``, ``GCC``, ``APAC``) -- so
+    nothing there establishes that an entry is somewhere LinkedIn can be
+    pointed at. The mapping does establish it: each cell carries a target that
+    was compared against the live UI, and cells it marks ``unsupported`` are
+    skipped here. Skipping them is non-coverage, not a silent success.
+
+    **One target cell per query.** The cell is the unit the search contract
+    fixed (``PS-SOT-2026-08-10-v1``), where ``lanes -> cells -> cell_id`` is
+    the enumerable thing and ``family_attempt_contract`` requires every attempt
+    to record its cell. Five of the twenty-four *eligible* cells stand for
+    groups of countries rather than one -- ``dach``, ``benelux``, ``nordics``,
+    ``latin_america``, ``southeast_asia_other`` -- and each is a first-class
+    cell with its own ``primary_geography``. Groups are not peculiar to the
+    eligible set either: ``cee``, ``remaining_europe`` and ``east_asia_other``
+    are groups too, and they are among the five the mapping marks unsupported,
+    so of the twenty-nine contract cells at least eight are groups. The word
+    "country" does not appear in the contract at all.
+
+    That matters for reading the owner's decision of 2026-09-04, which chose
+    "one country per query, accepting roughly three times the request volume"
+    over one country per family. "Country" there was the offer's paraphrase of
+    the contract's unit, not a narrower unit being introduced: the choice on
+    the table was one of granularity, per query against per family, and the
+    finest granularity the contract enumerates is the cell. The default of 18
+    is the volume that decision priced at three times the previous six.
+
+    A cell qualifies on a location **or** a geoId; the source accepts either.
+    Every live cell currently carries a location and no geoId, so the geoId
+    path is exercised by tests rather than by production data.
+
+    Order is deterministic and exhaustive, not shuffled. The geography axis
+    advances one cell per query, so no place is asked twice until every
+    eligible place has been asked once; the calendar day picks the starting
+    offset, so consecutive days do not open on the same cell. That last claim
+    is why the offset counts *days* via ``toordinal`` and not the decimal
+    ``YYYYMMDD``: the decimal form jumps 72 across a leap-year February, which
+    is a whole number of cycles at 24 cells, and 2028-02-29 and 2028-03-01
+    would open on the same place. The query text advances only after a full
+    pass over the geographies, which keeps one text comparable across places.
+
+    Three separate claims, and it is worth keeping them apart because the
+    tests assert the first two and nothing can assert the third. Within one
+    plan, no cell repeats until every eligible cell has been used. Across
+    consecutive calendar days, the starting cell walks a full cycle, so a
+    twenty-four-day run of days opens on twenty-four different places. Neither
+    says anything about *coverage*: no state is carried between runs, so
+    nothing here establishes that those runs happened, that they finished, or
+    that the query-by-cell pairs they were meant to ask were ever asked. This
+    orders a plan; it does not witness an outcome.
+
+    ``as_of`` exists so a caller -- in practice a test -- can name the day
+    instead of reading the clock.
+    """
+
+    from .product_search.acquisition_probe import load_linkedin_geography_mapping
+
+    mapping = load_linkedin_geography_mapping()
+    cells = sorted(
+        cell
+        for cell, target in mapping.items()
+        if target.status == "verified" and (target.location or target.geo_id)
+    )
+    if not cells:
+        return []
+
+    combos = [
+        (role, context) for role in ROLE_FAMILIES for context in CONTEXT_FAMILIES
+    ]
+    offset = (as_of or datetime.now(timezone.utc).date()).toordinal()
+
+    plan: list[LinkedInQueryPlanItem] = []
+    for step in range(max(0, limit)):
+        cell = cells[(offset + step) % len(cells)]
+        role, context = combos[(offset + step // len(cells)) % len(combos)]
+        target = mapping[cell]
+        plan.append(
+            LinkedInQueryPlanItem(
+                query=f"({_join_group(role[1])}) ({_join_group(context[1])})".strip(),
+                cell_id=cell,
+                location=target.location,
+                geo_id=target.geo_id,
+            )
+        )
+    return plan
 
 
 def rotating_source_queries(source: str, *, limit: int = 6) -> list[str]:

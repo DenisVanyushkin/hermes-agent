@@ -83,6 +83,7 @@ from .sources import (
     fetch_headhunter_vacancies,
     fetch_linkedin_vacancies,
     normalize_search_hit,
+    rotating_linkedin_queries,
     rotating_source_queries,
     search_duckduckgo,
     search_remoteok_jobs,
@@ -536,14 +537,34 @@ def _collect_vacancies(
         statuses["linkedin"] = _skipped_source_status("linkedin", acquisition="browser-native")
     else:
         with (performance.span("source_acquisition.linkedin", parent_span_name="source_acquisition_total", source_name="linkedin") if performance else _null_span()) as perf_span:
-            linkedin_queries = rotating_source_queries("linkedin", limit=6)
+            # One place per search, as a target rather than as words in the
+            # query: LinkedIn refuses a search carrying neither a location nor
+            # a geoId, and the daily path had been passing neither since the
+            # guard was introduced on 2026-08-27.
+            linkedin_plan = rotating_linkedin_queries(limit=18)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
             linkedin_trace: dict[str, Any] = {}
             linkedin_started = perf_counter()
-            for query in linkedin_queries:
+            if not linkedin_plan:
+                # No eligible geography is a gap in our configuration, not a
+                # statement about the market. Falling through would leave the
+                # source `empty`, which reads downstream as "asked and found
+                # nothing" -- the same laundering of a coverage gap into a
+                # source fact that the geography guard exists to prevent.
+                linkedin_errors.append(
+                    "blocked_no_eligible_geography: the verified mapping offers no "
+                    "cell with a location or a geoId, so no search was attempted"
+                )
+            for item in linkedin_plan:
                 try:
-                    results = fetch_linkedin_vacancies(query, max_pages=2)
+                    results = fetch_linkedin_vacancies(
+                        item.query,
+                        max_pages=2,
+                        location=item.location,
+                        geo_id=item.geo_id,
+                        cell_id=item.cell_id,
+                    )
                     linkedin_hits += len(results)
                     vacancies.extend(results)
                     _aggregate_browser_trace(linkedin_trace, getattr(fetch_linkedin_vacancies, "last_trace", None))
