@@ -2,7 +2,7 @@
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
 from urllib.parse import urljoin
-from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick, whereami
+from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, resolve, series, shopping, tick, whereami
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -297,6 +297,36 @@ def _log_mail_result(conn, event_id, result, to=None):
         audit.log(conn, "mail.sent", {"event_id": event_id, "to": to})
     else:
         audit.log(conn, "mail.error", {"event_id": event_id, "error": result.get("error")})
+
+
+def _refresh_pending_acks(conn):
+    """Refresh the durable gateway projection after a mutating command."""
+    try:
+        cfg = gate.load_config()
+    except Exception:
+        cfg = {}
+    acks.write(conn, cfg=cfg)
+
+
+def cmd_resolve_turn(args):
+    """Resolve one gateway turn from strict JSON on stdin."""
+    try:
+        request = json.load(sys.stdin)
+    except (TypeError, json.JSONDecodeError):
+        print(json.dumps({"status": "unresolved", "residual": True,
+                          "reason": "malformed_request"}, ensure_ascii=False))
+        return 2
+    if not isinstance(request, dict):
+        print(json.dumps({"status": "unresolved", "residual": True,
+                          "reason": "malformed_request"}, ensure_ascii=False))
+        return 2
+    conn = famdb.connect()
+    try:
+        result = resolve.resolve_turn(conn, request, cfg=gate.load_config())
+    finally:
+        conn.close()
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
 
 def _maybe_email_event(conn, e, material_changed=True):
     """After a successful `cal add`/`cal update` whose participants
@@ -653,6 +683,7 @@ def cmd_cal_cancel(args):
     conn = famdb.connect()
     e = cal.cancel(conn, args.id)
     conn.commit()
+    _refresh_pending_acks(conn)
     # cal.cancel()'s "dropped_prep_plans" is transient (not persisted --
     # see cal.py's docstring), surfaced here so a human/LLM caller sees
     # which prep-plans got dropped as a side effect of the cancellation.
@@ -672,6 +703,7 @@ def cmd_cal_done(args):
     conn = famdb.connect()
     e = cal.done(conn, args.id)
     conn.commit()
+    _refresh_pending_acks(conn)
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
     else:
@@ -1088,6 +1120,7 @@ def cmd_rem_ack(args):
         raise ValueError(f"unknown event: {args.event_id}")
     count = rem.ack_chain(conn, args.event_id, scope=args.scope)
     conn.commit()
+    _refresh_pending_acks(conn)
     out = {"event_id": args.event_id, "acked": count, "scope": args.scope}
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
@@ -1101,6 +1134,7 @@ def cmd_rem_cancel(args):
         raise ValueError(f"unknown event: {args.event_id}")
     count = rem.cancel_chain(conn, args.event_id)
     conn.commit()
+    _refresh_pending_acks(conn)
     out = {"event_id": args.event_id, "cancelled": count}
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
@@ -3408,6 +3442,13 @@ def build_parser():
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                      help="machine-readable output")
 
+    sp = sub.add_parser("resolve")
+    resolve_sub = sp.add_subparsers(dest="resolve_cmd", required=True)
+    sprt = resolve_sub.add_parser("turn")
+    sprt.set_defaults(func=cmd_resolve_turn)
+    sprt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
     sp = sub.add_parser("react-hook",
                         help="apply a WhatsApp reaction event read from stdin")
     sp.set_defaults(func=cmd_react_hook)
@@ -3606,6 +3647,8 @@ def build_parser():
 
     spc = cal_sub.add_parser("cancel"); spc.set_defaults(func=cmd_cal_cancel)
     spc.add_argument("id", type=int)
+    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
 
     spser = cal_sub.add_parser("series")
     series_sub = spser.add_subparsers(dest="series_cmd", required=True)
@@ -3622,9 +3665,6 @@ def build_parser():
                        help="participant ref to remove from the series and its future untouched occurrences (repeatable)")
     spsu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
-    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
-                      help="machine-readable output")
-
     spd = cal_sub.add_parser("done"); spd.set_defaults(func=cmd_cal_done)
     spd.add_argument("id", type=int)
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,

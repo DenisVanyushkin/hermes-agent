@@ -49,6 +49,45 @@ SANDBOX_PATH = Path("/root/.hermes/private/amina/pending-acks.json")
 DUE_WINDOW_HOURS = 12
 
 
+def _event_candidates(conn, floor, now):
+    """Return active calendar events with a recent outbound reminder."""
+    rows = conn.execute(
+        "SELECT e.id, e.title, m.wa_message_id, m.created_at "
+        "FROM events e JOIN sent_messages m ON m.event_id=e.id "
+        "WHERE e.status='active' AND m.kind='reminder' "
+        "AND m.created_at >= ? AND m.created_at <= ? "
+        "ORDER BY e.id, m.created_at, m.id",
+        (floor.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")),
+    ).fetchall()
+    grouped = {}
+    for row in rows:
+        item = grouped.setdefault(row["id"], {
+            "kind": "event",
+            "ref_id": row["id"],
+            "event_id": row["id"],
+            "title": row["title"],
+            "current_state": "active",
+            "wa_message_ids": [],
+        })
+        if row["wa_message_id"] not in item["wa_message_ids"]:
+            item["wa_message_ids"].append(row["wa_message_id"])
+    return list(grouped.values())
+
+
+def _message_ids(conn, kind, ref_id):
+    ids = [row[0] for row in conn.execute(
+        "SELECT wa_message_id FROM sent_messages WHERE kind=? AND ref_id=?",
+        (kind, ref_id),
+    ).fetchall()]
+    ids.extend(row[0] for row in conn.execute(
+        "SELECT sm.wa_message_id FROM sent_message_refs smr "
+        "JOIN sent_messages sm ON sm.id=smr.sent_message_id "
+        "WHERE smr.kind=? AND smr.ref_id=?",
+        (kind, ref_id),
+    ).fetchall())
+    return list(dict.fromkeys(ids))
+
+
 def resolve_path():
     """Host path when its directory exists, else the sandbox path.
 
@@ -89,6 +128,9 @@ def build(conn, cfg=None, now_utc=None):
         item = {
             "kind": "med_intake",
             "id": row["intake_id"],
+            "ref_id": row["intake_id"],
+            "current_state": "pending",
+            "wa_message_ids": _message_ids(conn, "med", row["intake_id"]),
             "name": row["name"],
             "dose": med.get("dose") or "",
             "plan_ts_utc": row["plan_ts_utc"],
@@ -99,6 +141,8 @@ def build(conn, cfg=None, now_utc=None):
         if deferred:
             item["deferred"] = True
         items.append(item)
+
+    items.extend(_event_candidates(conn, floor, now))
 
     return {
         "generated_at": now_raw if isinstance(now_raw, str) else now.isoformat(),
@@ -114,7 +158,8 @@ def write(conn, cfg=None, path=None, now_utc=None):
     tells the gateway to stop injecting an already-answered question, so
     "nothing pending" must overwrite, not skip.
     """
-    target = Path(path) if path is not None else resolve_path()
+    target = Path(path) if path is not None else Path(
+        (cfg or {}).get("pending_acks_path") or resolve_path())
     try:
         snapshot = build(conn, cfg=cfg, now_utc=now_utc)
         tmp = target.with_name(target.name + ".tmp")

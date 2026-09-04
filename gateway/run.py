@@ -39,6 +39,7 @@ import shlex
 import site
 import sys
 import signal
+import subprocess
 import threading
 import time
 import traceback
@@ -440,6 +441,72 @@ def _read_pending_acks(path: str) -> Optional[dict]:
         return None
 
 
+_PENDING_ACK_RESIDUAL = "действие пока не записано"
+
+
+def _pending_ack_candidate(snapshot: Any, reply_to_message_id: Optional[str]) -> Optional[dict]:
+    """Return the sole typed candidate addressed by a quoted outbound id."""
+    if not isinstance(snapshot, dict) or not reply_to_message_id:
+        return None
+    matches = []
+    for item in snapshot.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        ids = item.get("wa_message_ids")
+        if isinstance(ids, list) and reply_to_message_id in ids:
+            matches.append(item)
+    return matches[0] if len(matches) == 1 else None
+
+
+async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
+    """Run the FAM prepass and return a receipt; all failures are residual."""
+    if _pending_acks_note(
+        snapshot,
+        source.platform.value if source.platform else "",
+        source.user_id or "",
+    ) is None:
+        return None
+    reply_id = getattr(event, "reply_to_message_id", None)
+    candidate = _pending_ack_candidate(snapshot, reply_id)
+    if candidate is None:
+        return None
+    repo_root = Path(__file__).resolve().parents[1]
+    fam_python = Path(_hermes_home) / "hermes-agent" / "venv" / "bin" / "python"
+    if not fam_python.exists():
+        fam_python = Path(sys.executable)
+    argv = [str(fam_python), "-m", "fam", "resolve", "turn", "--json"]
+    env = os.environ.copy()
+    fam_path = str(repo_root / "custom" / "fam")
+    env["PYTHONPATH"] = fam_path + os.pathsep + env.get("PYTHONPATH", "")
+    env["FAM_DB"] = str(cfg.get("fam_db_path") or Path(_hermes_home) / "private" / "amina" / "assistant.db")
+    if cfg.get("fam_config_path"):
+        env["FAM_CONFIG"] = str(cfg["fam_config_path"])
+    request = {
+        "platform": source.platform.value if source.platform else "",
+        "canonical_target": snapshot.get("target", ""),
+        "inbound_message_id": str(getattr(event, "message_id", "") or ""),
+        "reply_to_message_id": reply_id,
+        "user_text": str(getattr(event, "text", "") or ""),
+        "quoted_text": str(getattr(event, "reply_to_text", "") or ""),
+        "candidates": [candidate],
+    }
+    try:
+        completed = await asyncio.to_thread(
+            subprocess.run, argv, input=json.dumps(request, ensure_ascii=False),
+            capture_output=True, text=True, timeout=120, shell=False, env=env,
+            cwd=str(repo_root),
+        )
+        if completed.returncode != 0:
+            return {"residual": True, "reason": "fam_nonzero"}
+        receipt = json.loads((completed.stdout or "").strip())
+        if not isinstance(receipt, dict):
+            return {"residual": True, "reason": "malformed_fam_output"}
+        if receipt.get("status") == "applied" and receipt.get("trusted_sidecar"):
+            return receipt
+        return {"residual": True, "reason": receipt.get("reason", "unresolved")}
+    except Exception as exc:
+        logger.debug("pending-ack resolution failed", exc_info=True)
+        return {"residual": True, "reason": "fam_failure"}
 def _pending_acks_note(
     snapshot: Any,
     platform: str,
@@ -488,6 +555,11 @@ def _pending_acks_note(
     lines = []
     for item in items:
         if not isinstance(item, dict):
+            continue
+        if item.get("kind") == "event":
+            title = str(item.get("title") or "").strip()
+            if title:
+                lines.append(f"- событие «{title}» (id={item.get('ref_id')})")
             continue
         name = str(item.get("name") or "").strip()
         if not name:
@@ -19098,6 +19170,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
+        _pending_ack_residual = False
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
@@ -20373,6 +20446,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # -----------------------------------------------------------------
         try:
             _acks_path = ""
+            _acks_snapshot = None
             try:
                 _acks_cfg = _load_gateway_config()
                 _acks_path = str(
@@ -20381,13 +20455,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             except Exception:
                 _acks_path = ""
             if _acks_path:
+                _acks_snapshot = _read_pending_acks(_acks_path)
                 _acks_note = _pending_acks_note(
-                    _read_pending_acks(_acks_path),
+                    _acks_snapshot,
                     source.platform.value if source.platform else "",
                     source.user_id or "",
                 )
                 if _acks_note:
                     turn_sidecar_notes.append(_acks_note)
+                _prepass = await _resolve_pending_ack_turn(
+                    event, source, _acks_snapshot, _acks_cfg or {}
+                )
+                if _prepass:
+                    if _prepass.get("trusted_sidecar"):
+                        turn_sidecar_notes.append(_prepass["trusted_sidecar"])
+                    _pending_ack_residual = bool(_prepass.get("residual"))
         except Exception:
             logger.debug("pending-acks note skipped (non-fatal)", exc_info=True)
 
@@ -20610,6 +20692,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     agent_result, response, history_len=len(history),
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
+
+            if _pending_ack_residual and _PENDING_ACK_RESIDUAL not in response:
+                response = (response.rstrip() + "\n\n" + _PENDING_ACK_RESIDUAL).strip()
 
             # Turn-error alert to the admin channel (config-gated, no-op
             # without gateway.error_alerts). Runs after normalize/sanitize so

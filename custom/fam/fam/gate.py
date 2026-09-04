@@ -36,6 +36,9 @@ CONFIG_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "fam-config.examp
 
 
 def _resolve_config_path():
+    configured = os.environ.get("FAM_CONFIG")
+    if configured:
+        return Path(configured)
     for p in (CONFIG_PATH, SANDBOX_CONFIG_PATH):
         if p.exists():
             return p
