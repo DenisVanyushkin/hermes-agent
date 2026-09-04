@@ -566,3 +566,112 @@ async def test_pending_ack_s2_composition_applies_event_and_med(
     assert "Мисол приняла" in api_content
     assert gateway_run._PENDING_ACK_RESIDUAL not in api_content
     check.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_s2_composition_partial_preserves_applied_sidecar_with_residual(
+    monkeypatch, tmp_path
+):
+    """A real partial FAM result reaches the model and the user exactly once."""
+    import sqlite3
+
+    repo = __import__("pathlib").Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "private" / "amina" / "assistant.db"
+    db_path.parent.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({"FAM_DB": str(db_path), "PYTHONPATH": str(repo / "custom" / "fam")})
+    initialized = subprocess.run(
+        [sys.executable, "-m", "fam", "init", "--json"], cwd=repo,
+        env=env, capture_output=True, text=True,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO events(title,start_utc,created_at,updated_at) VALUES(?,?,?,?)",
+        ("Тренировка", "2099-09-04T12:00:00+00:00", now, now),
+    )
+    conn.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(1,'leave',?,?,?,?)", (now, "sent", now, now),
+    )
+    conn.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(1,'leave',?,?,?,NULL)", ("2099-09-04T12:00:00+00:00", "pending", now),
+    )
+    conn.execute(
+        "INSERT INTO meds(name,times,created_at,updated_at) VALUES(?,?,?,?)",
+        ("Мисол", json.dumps(["10:00"]), now, now),
+    )
+    conn.execute(
+        "INSERT INTO med_intakes(med_id,plan_ts_utc,status,created_at) VALUES(?,?,?,?)",
+        (1, now, "pending", now),
+    )
+    conn.execute(
+        "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
+        "VALUES('wa-rem-1','reminder',1,1,?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
+        "VALUES('wa-med-1','med',1,1,?)", (now,),
+    )
+    conn.commit()
+    snapshot_path = tmp_path / "pending-acks.json"
+    acks.write(conn, cfg={"target": "whatsapp:+77011102626"},
+               path=snapshot_path, now_utc=now)
+    conn.close()
+
+    classifier = tmp_path / "classifier-s2-partial.py"
+    classifier.write_text(
+        "import json\n"
+        "print(json.dumps({'dispositions':["
+        "{'kind':'event','ref_id':1,'disposition':'cancel_occurrence'},"
+        "{'kind':'med_intake','ref_id':1,'disposition':'not-a-med-disposition'}]}))\n",
+        encoding="utf-8",
+    )
+    fam_cfg = tmp_path / "fam-config-s2-partial.json"
+    fam_cfg.write_text(json.dumps({
+        "gate_model": "test-model", "gate_provider": "test-provider",
+        "classifier_command": [sys.executable, str(classifier)],
+        "pending_acks_path": str(snapshot_path),
+    }), encoding="utf-8")
+
+    runner = _runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_load_gateway_config",
+        lambda: {"pending_acks_file": str(snapshot_path),
+                 "fam_db_path": str(db_path), "fam_config_path": str(fam_cfg)},
+    )
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model", {"api_key": "test-key", "base_url": "http://provider.test/v1",
+                        "provider": "openai", "api_mode": "chat_completions"}
+    )
+    runner._session_db = None
+    captured = {}
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        captured["api_messages"] = api_kwargs["messages"]
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Записала тренировку", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call)
+    event = MessageEvent(
+        text="Сегодня пропущу тренировку\nМисол приняла",
+        source=_source(), message_id="wamid-inbound-s2-partial",
+        reply_to_message_id="wa-rem-1", reply_to_text="Напоминание о тренировке",
+    )
+
+    response = await runner._handle_message_with_agent(event, _source(), SESSION_KEY, 1)
+
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT status FROM events WHERE id=1").fetchone()[0] == "cancelled"
+    assert check.execute("SELECT status FROM med_intakes WHERE id=1").fetchone()[0] == "pending"
+    api_content = "\n".join(
+        message.get("content", "") for message in captured["api_messages"]
+    )
+    assert "Trusted FAM resolution: event 1" in api_content
+    assert response.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
+    check.close()
