@@ -933,65 +933,6 @@ def linkedin_search_matched_nothing(html: str, *, page_url: str) -> bool:
     )
 
 
-LinkedInGeographyCorrespondence = Literal[
-    "confirmed_geo_id",
-    "divergent_geo_id",
-    "resolved_from_free_text",
-    "unresolved",
-]
-
-_LINKEDIN_RESOLVED_GEO = re.compile(r'"\*geo"\s*:\s*"urn:li:fsd_geo:(\d+)"')
-
-
-def linkedin_resolved_geography(html: str) -> str | None:
-    """The geography the source says it searched, as its own identifier.
-
-    Read from the embedded `JobSearchMetadata`, which names the resolved
-    entity as `urn:li:fsd_geo:<id>`. This is the only place the page states
-    it.
-
-    The page title does not. `Jobs in United Kingdom` there is the `location`
-    parameter we sent, echoed back verbatim: a request carrying only a
-    `geoId` produces a title with no place in it at all, while the metadata
-    still names one. Reading correspondence off the title therefore compares
-    our own words with themselves, and would have called every cell confirmed
-    including one whose results contradicted its exclusion.
-    """
-
-    match = _LINKEDIN_RESOLVED_GEO.search(html or "")
-    return match.group(1) if match else None
-
-
-def classify_linkedin_geography_correspondence(
-    *,
-    requested_geo_id: str | None,
-    resolved_geo_id: str | None,
-) -> LinkedInGeographyCorrespondence:
-    """How much the record can say about what was actually searched.
-
-    Only an identifier can be compared with an identifier. When the request
-    carried a `geoId`, the resolved id either matches it or does not, and
-    both are facts. When the request carried only a place name, the source
-    resolved it to an entity of its choosing and the page never says which
-    words that entity stands for; `resolved_from_free_text` records exactly
-    that much and claims nothing further.
-
-    This is deliberately not a coverage verdict. Whether a cell resolved from
-    free text counts as searched is a question for the search contract, and
-    naming the state is what makes that question answerable at all.
-    """
-
-    if resolved_geo_id is None:
-        return "unresolved"
-    if not requested_geo_id:
-        return "resolved_from_free_text"
-    return (
-        "confirmed_geo_id"
-        if str(requested_geo_id) == str(resolved_geo_id)
-        else "divergent_geo_id"
-    )
-
-
 def classify_linkedin_page(
     *, final_url: str, html: str, status: int | None = None
 ) -> LinkedInPageClassification:
@@ -1276,11 +1217,6 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str, apply_role_f
         company_match = re.search(r'artdeco-entity-lockup__subtitle[^>]*>.*?<span[^>]*>\s*<!---->(?P<company>.*?)<!---->\s*</span>', tail, flags=re.S)
         location_match = re.search(r'job-card-container__metadata-wrapper.*?<li[^>]*>\s*<span[^>]*>\s*<!---->(?P<location>.*?)<!---->\s*</span>', tail, flags=re.S)
         company = _clean_html_text(company_match.group("company")) if company_match else "Unknown"
-        # Both, because normalisation is lossy in a way that hides geography.
-        # `Jakarta, Jakarta, Indonesia (Remote)` normalises to `Remote`, so a
-        # page of Indonesian results reads afterwards as a page of remote ones
-        # and a target-correspondence question can no longer be asked of it.
-        raw_location = _clean_html_text(location_match.group("location")) if location_match else ""
         location = _normalize_location_text(location_match.group("location")) if location_match else "Unknown"
         absolute = urljoin(page_url, match.group("href"))
         vacancies.append(Vacancy(
@@ -1291,11 +1227,7 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str, apply_role_f
             location=location or "Unknown",
             url=absolute,
             description=title,
-            metadata={
-                "source_url": page_url,
-                "href": match.group("href"),
-                "raw_location": raw_location,
-            },
+            metadata={"source_url": page_url, "href": match.group("href")},
         ))
     return _dedupe_vacancies(vacancies)
 
@@ -2428,7 +2360,6 @@ class BrowserSourceClient:
                 unexplained_ids = sorted(accounting.unexplained_ids)
             for name, count in trace_counts.items():
                 trace["extraction_counts"][name] += count
-            resolved_geo_id = linkedin_resolved_geography(html)
             # Both axes, recorded per page and read from the final URL. The
             # classification says what the page was; the safety reason says
             # whether the source pushed back. One page may carry a value on
@@ -2449,13 +2380,6 @@ class BrowserSourceClient:
                         status=page_result.http_status,
                     ),
                     "html_sha256": page_result.html_sha256,
-                    "requested_geography_location": geography_location,
-                    "requested_geography_geo_id": geography_geo_id,
-                    "source_resolved_geo_id": resolved_geo_id,
-                    "geography_correspondence": classify_linkedin_geography_correspondence(
-                        requested_geo_id=geography_geo_id,
-                        resolved_geo_id=resolved_geo_id,
-                    ),
                     "dom_unique_job_ids": sorted(page_result.dom_unique_job_ids),
                     "parsed_unique_job_ids_before_role_filter": parser_before_filter_ids,
                     "returned_unique_job_ids": returned_unique_ids,
