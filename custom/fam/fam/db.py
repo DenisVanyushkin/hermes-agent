@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
   actor TEXT NOT NULL DEFAULT 'agent',    -- agent|tick|admin
   payload TEXT NOT NULL DEFAULT '{}');    -- JSON
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts_utc);
+CREATE INDEX IF NOT EXISTS idx_audit_resolve_key
+  ON audit_log(kind, CASE WHEN json_valid(payload)
+                          THEN json_extract(payload, '$.idempotency_key') END);
 CREATE TABLE IF NOT EXISTS reminder_rules (
   id INTEGER PRIMARY KEY,
   scope TEXT NOT NULL,                    -- 'default' | 'slug:<slug>'

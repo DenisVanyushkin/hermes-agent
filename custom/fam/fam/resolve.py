@@ -56,10 +56,13 @@ def _call_classifier(prompt: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
         "--provider", str(cfg.get("gate_provider", "")),
         "-t", "clarify",
     ]
+    timeout = cfg.get("resolve_classifier_timeout_seconds", 45)
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        return None
     for _attempt in range(2):
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=90, shell=False,
+                argv, capture_output=True, text=True, timeout=timeout, shell=False,
             )
         except (subprocess.TimeoutExpired, OSError):
             continue
@@ -76,7 +79,12 @@ def _call_classifier(prompt: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
 
 def _load_existing(conn, key: str) -> dict[str, Any] | None:
     rows = conn.execute(
-        "SELECT payload FROM audit_log WHERE kind='resolve.turn' ORDER BY id DESC"
+        "SELECT payload FROM audit_log "
+        "WHERE kind='resolve.turn' "
+        "AND CASE WHEN json_valid(payload) "
+        "THEN json_extract(payload, '$.idempotency_key') END=? "
+        "ORDER BY id DESC LIMIT 1",
+        (key,),
     ).fetchall()
     for row in rows:
         try:

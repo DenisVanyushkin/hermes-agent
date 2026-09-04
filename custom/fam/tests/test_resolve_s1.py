@@ -16,6 +16,11 @@ def _event_with_outbound(db):
         "VALUES(?,?,?,?,?,?)",
         (event["id"], "leave", "2026-09-04T09:30:00+00:00", "sent", NOW, NOW),
     )
+    db.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(?,?,?,?,?,?)",
+        (event["id"], "leave", "2099-09-04T12:00:00+00:00", "pending", NOW, None),
+    )
     react.record_sent(db, "wa-rem-1", "reminder", event["id"], event_id=event["id"],
                       now_utc=NOW)
     plan_id = plans.add(db, "Взять документы", prep_for_event=event["id"], prep_when="departure")
@@ -51,7 +56,35 @@ def _cfg(tmp_path, output):
     )
     return {"gate_model": "test-model", "gate_provider": "test-provider",
             "classifier_command": ["/usr/bin/env", "python3", str(model)],
-            "pending_acks_path": str(tmp_path / "pending-acks.json")}
+            "pending_acks_path": str(tmp_path / "pending-acks.json"),
+            "resolve_classifier_timeout_seconds": 90}
+
+
+def _raw_cfg(tmp_path, source, timeout=90):
+    model = tmp_path / "classifier_raw.py"
+    model.write_text(source, encoding="utf-8")
+    return {"gate_model": "test-model", "gate_provider": "test-provider",
+            "classifier_command": ["/usr/bin/env", "python3", str(model)],
+            "pending_acks_path": str(tmp_path / "pending-acks.json"),
+            "resolve_classifier_timeout_seconds": timeout}
+
+
+def _assert_unresolved_without_mutation(db, result, event_id, other_id):
+    assert result["status"] == "unresolved"
+    assert result["residual"] is True
+    assert "trusted_sidecar" not in result
+    assert db.execute("SELECT status FROM events WHERE id=?", (event_id,)).fetchone()[0] == "active"
+    assert db.execute("SELECT status FROM events WHERE id=?", (other_id,)).fetchone()[0] == "active"
+    assert db.execute(
+        "SELECT COUNT(*) FROM reminders WHERE event_id=? AND status='pending'", (event_id,)
+    ).fetchone()[0] == 1
+
+
+def _event_pair(db):
+    event_id, _ = _event_with_outbound(db)
+    other = cal.add(db, "Другое", "2026-09-04T13:00:00+00:00")
+    db.commit()
+    return event_id, other["id"]
 
 
 def test_event_candidate_has_typed_shape_and_disappears_after_cancel(db):
@@ -65,6 +98,9 @@ def test_event_candidate_has_typed_shape_and_disappears_after_cancel(db):
     cal.cancel(db, event_id)
     db.commit()
     assert acks.build(db, now_utc=NOW)["items"] == []
+    assert db.execute(
+        "SELECT COUNT(*) FROM reminders WHERE event_id=? AND status='pending'", (event_id,)
+    ).fetchone()[0] == 0
 
 
 def test_resolve_turn_applies_effect_postcondition_and_audit(db, tmp_path, monkeypatch):
@@ -84,6 +120,9 @@ def test_resolve_turn_applies_effect_postcondition_and_audit(db, tmp_path, monke
     assert payloads[-1]["input_sha256"]
     assert payloads[-1]["output_sha256"]
     assert acks.build(db, now_utc=NOW)["items"] == []
+    assert db.execute(
+        "SELECT COUNT(*) FROM reminders WHERE event_id=? AND status='pending'", (event_id,)
+    ).fetchone()[0] == 0
 
 
 def test_resolve_turn_is_idempotent_by_turn_key(db, tmp_path, monkeypatch):
@@ -97,6 +136,122 @@ def test_resolve_turn_is_idempotent_by_turn_key(db, tmp_path, monkeypatch):
     second = resolve.resolve_turn(db, _request(event_id), cfg=cfg)
     assert first["status"] == second["status"] == "applied"
     assert len(calls) == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='cal.cancel'"
+    ).fetchone()[0] == 1
+
+
+def test_same_text_with_different_inbound_id_is_a_distinct_turn(db, tmp_path):
+    event_id, _ = _event_with_outbound(db)
+    cfg = _cfg(tmp_path, {"dispositions": [{"kind": "event", "ref_id": event_id,
+                                             "disposition": "cancel_occurrence"}]})
+    first = resolve.resolve_turn(db, _request(event_id), cfg=cfg)
+    second_request = _request(event_id)
+    second_request["inbound_message_id"] = "wa-in-2"
+    second = resolve.resolve_turn(db, second_request, cfg=cfg)
+    assert first["status"] == second["status"] == "applied"
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='cal.cancel'"
+    ).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    ("output", "reason"),
+    [
+        (None, "malformed"),
+        ({"disposition": "cancel_occurrence"}, "schema"),
+        ({"dispositions": [{"kind": "event", "ref_id": 999,
+                             "disposition": "cancel_occurrence"}]}, "ref_mismatch"),
+        ({"dispositions": [{"kind": "med_intake", "ref_id": 1,
+                             "disposition": "taken"}]}, "kind_mismatch"),
+        ({"dispositions": [{"kind": "event", "ref_id": 1,
+                             "disposition": "ambiguous"}]}, "ambiguous"),
+    ],
+)
+def test_classifier_failure_paths_are_fail_closed(db, tmp_path, output, reason):
+    event_id, other_id = _event_pair(db)
+    if reason == "malformed":
+        cfg = _raw_cfg(tmp_path, "print('not json')\n")
+    else:
+        cfg = _cfg(tmp_path, output)
+        if reason == "ref_mismatch":
+            cfg = _cfg(tmp_path, {"dispositions": [{
+                "kind": "event", "ref_id": event_id + 999,
+                "disposition": "cancel_occurrence"}]})
+        elif reason == "kind_mismatch":
+            cfg = _cfg(tmp_path, {"dispositions": [{
+                "kind": "med_intake", "ref_id": event_id,
+                "disposition": "taken"}]})
+        elif reason == "ambiguous":
+            cfg = _cfg(tmp_path, {"dispositions": [{
+                "kind": "event", "ref_id": event_id,
+                "disposition": "ambiguous"}]})
+    result = resolve.resolve_turn(db, _request(event_id), cfg=cfg)
+    _assert_unresolved_without_mutation(db, result, event_id, other_id)
+
+
+def test_classifier_schema_invalid_real_subprocess_is_fail_closed(db, tmp_path):
+    event_id, other_id = _event_pair(db)
+    cfg = _raw_cfg(tmp_path, "print('{\\\"dispositions\\\": []}')\n")
+    result = resolve.resolve_turn(db, _request(event_id), cfg=cfg)
+    _assert_unresolved_without_mutation(db, result, event_id, other_id)
+
+
+def test_classifier_nonzero_exit_is_fail_closed(db, tmp_path):
+    event_id, other_id = _event_pair(db)
+    cfg = _raw_cfg(tmp_path, "import sys\nprint('classifier failed')\nsys.exit(7)\n")
+    result = resolve.resolve_turn(db, _request(event_id), cfg=cfg)
+    _assert_unresolved_without_mutation(db, result, event_id, other_id)
+
+
+def test_classifier_timeout_retries_once_then_is_fail_closed(db, tmp_path):
+    event_id, other_id = _event_pair(db)
+    counter = tmp_path / "attempts"
+    source = (
+        "import pathlib,time\n"
+        f"p=pathlib.Path({str(counter)!r})\n"
+        "p.write_text(str(int(p.read_text() if p.exists() else '0') + 1))\n"
+        "time.sleep(0.2)\n"
+    )
+    result = resolve.resolve_turn(
+        db, _request(event_id), cfg=_raw_cfg(tmp_path, source, timeout=0.05)
+    )
+    _assert_unresolved_without_mutation(db, result, event_id, other_id)
+    assert counter.read_text() == "2"
+
+
+def test_postcondition_failure_rolls_back_without_sidecar(db, tmp_path, monkeypatch):
+    event_id, other_id = _event_pair(db)
+    cfg = _cfg(tmp_path, {"dispositions": [{"kind": "event", "ref_id": event_id,
+                                             "disposition": "cancel_occurrence"}]})
+    monkeypatch.setattr(resolve, "_postcondition", lambda *_args: False)
+    result = resolve.resolve_turn(db, _request(event_id), cfg=cfg)
+    _assert_unresolved_without_mutation(db, result, event_id, other_id)
+
+
+def test_second_rem_ack_is_observable_value_error(db, tmp_path):
+    event_id, _ = _event_with_outbound(db)
+    rem.ack_chain(db, event_id)
+    db.commit()
+    with pytest.raises(ValueError):
+        rem.ack_chain(db, event_id)
+
+
+def test_second_meds_take_is_observable_value_error(db):
+    db.execute(
+        "INSERT INTO meds(name,times,created_at,updated_at) "
+        "VALUES(?,?,?,?)",
+        ("Мисол", json.dumps(["10:00"]), NOW, NOW),
+    )
+    med_id = db.execute("SELECT id FROM meds ORDER BY id DESC LIMIT 1").fetchone()[0]
+    db.execute(
+        "INSERT INTO med_intakes(med_id,plan_ts_utc,status,created_at) VALUES(?,?,?,?)",
+        (med_id, NOW, "pending", NOW),
+    )
+    intake_id = db.execute("SELECT id FROM med_intakes ORDER BY id DESC LIMIT 1").fetchone()[0]
+    meds.take(db, intake_id, now_utc=NOW)
+    with pytest.raises(ValueError):
+        meds.take(db, intake_id, now_utc=NOW)
 
 
 def test_classifier_failure_is_fail_closed_with_residual(db, tmp_path, monkeypatch):

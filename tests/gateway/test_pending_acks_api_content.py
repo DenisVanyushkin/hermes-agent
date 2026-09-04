@@ -197,6 +197,84 @@ async def test_pending_acks_api_content_contains_note_for_lid_turn(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["classifier_failure", "postcondition_failed"])
+async def test_pending_ack_residual_does_not_block_delivery(monkeypatch, tmp_path, reason):
+    import subprocess
+
+    repo = __import__("pathlib").Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "assistant.db"
+    env = dict(os.environ)
+    env.update({"FAM_DB": str(db_path), "PYTHONPATH": str(repo / "custom" / "fam")})
+    initialized = subprocess.run(
+        [sys.executable, "-m", "fam", "init", "--json"], cwd=repo,
+        env=env, capture_output=True, text=True,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    snapshot = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target": "whatsapp:+77011102626",
+        "items": [{
+            "kind": "event", "ref_id": 1, "event_id": 1,
+            "title": "Врач", "current_state": "active",
+            "wa_message_ids": ["wa-rem-1"],
+        }],
+    }
+    classifier = tmp_path / "classifier.py"
+    if reason == "classifier_failure":
+        classifier.write_text("import sys\nsys.exit(7)\n", encoding="utf-8")
+    else:
+        classifier.write_text(
+            "import json\n"
+            "print(json.dumps({'dispositions':[{'kind':'event','ref_id':1,"
+            "'disposition':'cancel_occurrence'}]}))\n",
+            encoding="utf-8",
+        )
+    fam_cfg = tmp_path / "fam-config.json"
+    fam_cfg.write_text(json.dumps({
+        "gate_model": "test-model", "gate_provider": "test-provider",
+        "classifier_command": [sys.executable, str(classifier)],
+    }), encoding="utf-8")
+
+    runner = _runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(gateway_run, "_read_pending_acks", lambda _path: snapshot)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"pending_acks_file": str(tmp_path / "pending-acks.json"),
+                 "fam_db_path": str(db_path), "fam_config_path": str(fam_cfg)},
+    )
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model", {
+            "api_key": "test-key", "base_url": "http://provider.test/v1",
+            "provider": "openai", "api_mode": "chat_completions",
+        },
+    )
+    runner._session_db = None
+    captured = {}
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        captured["api_messages"] = api_kwargs["messages"]
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Готово", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call)
+
+    response = await runner._handle_message_with_agent(
+        _quoted_event(), _source(), SESSION_KEY, 1
+    )
+
+    user_messages = [
+        message["content"] for message in captured["api_messages"]
+        if message.get("role") == "user"
+    ]
+    assert user_messages
+    assert response.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
+
+
+
+@pytest.mark.asyncio
 async def test_pending_ack_composition_uses_real_fam_cli_and_db(
     monkeypatch, tmp_path
 ):
@@ -224,6 +302,10 @@ async def test_pending_ack_composition_uses_real_fam_cli_and_db(
     conn.execute(
         "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
         "VALUES(1,'leave',?,?,?,?)", (now, "sent", now, now),
+    )
+    conn.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(1,'leave',?,?,?,NULL)", ("2099-09-04T12:00:00+00:00", "pending", now),
     )
     conn.execute(
         "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
@@ -291,10 +373,14 @@ async def test_pending_ack_composition_uses_real_fam_cli_and_db(
     check = sqlite3.connect(db_path)
     assert check.execute("SELECT status FROM events WHERE id=1").fetchone()[0] == "cancelled"
     assert check.execute("SELECT status FROM plans WHERE prep_for_event_id=1").fetchone()[0] == "dropped"
+    assert check.execute(
+        "SELECT COUNT(*) FROM reminders WHERE event_id=1 AND status='pending'"
+    ).fetchone()[0] == 0
     assert json.loads(snapshot_path.read_text(encoding="utf-8"))["items"] == []
     api_content = "\n".join(message.get("content", "")
                                for message in captured["api_messages"])
     assert "событие «Врач»" in api_content
     assert "Trusted FAM resolution" in api_content
     assert "отмени это" in captured["api_messages"][-1]["content"]
+    assert gateway_run._PENDING_ACK_RESIDUAL not in api_content
     check.close()
