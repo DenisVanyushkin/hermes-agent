@@ -1,6 +1,6 @@
 ---
 name: amina-fam
-description: "fam CLI: calendar/people/places + reminders ('уже выходим/едем/собираемся/готовимся/на месте/знаю', 'не напоминай про это', 'какие напоминания', 'пропущу', 'не пойду', 'тренировки не будет', 'отмени тренировку/занятие' are reactions to a reminder/digest the agent itself already sent — use fam here too). Also for recording/checking events, 'who is X', 'where is Y', day/week/month views, or any household schedule/contacts/locations request."
+description: "fam CLI: calendar/people/places + reminders ('уже выходим/едем/собираемся/готовимся/на месте/знаю', 'не напоминай про это', 'какие напоминания' are reactions to a reminder/digest the agent itself already sent — use fam here too). Also for recording/checking events, 'who is X', 'where is Y', day/week/month views, or any household schedule/contacts/locations request."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v24 (rules 23–24: a taken slot must be confirmed with `--allow-overlap`; a foreign timezone is passed as its own offset and confirmed in both times; reminder reactions and cancellation verbs are explicit)._
+_Body version: v23 (rules 23–24: a taken slot must be confirmed with `--allow-overlap`; a foreign timezone is passed as its own offset and confirmed in both times)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -635,20 +635,6 @@ Cancel always applies to the whole remaining chain:
 - **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
   → `fam rem cancel EVENT_ID`. Cancel is ALWAYS whole-chain — it has no
   `--scope` option; never pass one.
-
-### Три разных действия: это не синонимы
-
-These commands have different targets and postconditions; never substitute one
-for another:
-
-| Фраза | Команда | Состояние события |
-| --- | --- | --- |
-| «уже выхожу», «едем» | `fam rem ack EVENT_ID` (scope по стадии) | остаётся `active` |
-| «не напоминай про это» | `fam rem cancel EVENT_ID` | остаётся `active` |
-| «не пойду», «пропущу», «тренировки не будет» | `fam cal cancel EVENT_ID` | `cancelled`; каскадит отмену напоминаний и prep-планов |
-
-`fam cal cancel` применим к нативному событию Hermes (`owner='hermes'`),
-но никогда к `owner='iphone'`: такое событие меняют на телефоне.
 - **"какие напоминания" (what's pending)** → `fam rem list --due --json`
   for what's about to fire, or `fam rem list --json` for everything.
 
@@ -673,12 +659,6 @@ silenced; state that no preparation stages remained and preserve any
 still-pending departure reminder. If the user then says they are leaving,
 acknowledge the full chain with `rem ack EVENT_ID` and confirm that remaining
 reminders were stopped.
-
-### Проверка `cancelled: 0`
-
-`cancelled: 0` from `fam rem cancel` only describes pending reminder rows; it
-does not prove that the event is irrelevant. For cancellation intent, inspect
-`fam cal show EVENT_ID` and check `events.status` before deciding what happened.
 
 ## Plan Verbs
 
