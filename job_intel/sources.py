@@ -781,11 +781,11 @@ CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("payments_fintech", ("payments", "fintech", "banking", "wallets")),
     ("platform_ecosystem", ("marketplace", "superapp", "ecosystem", "platform")),
     ("growth_revenue", ("monetization", "subscriptions", "consumer growth", "B2C")),
-    ("digital_transformation", ("digital products", "product transformation", "artificial intelligence products")),
+    ("digital_transformation", ("digital products", "product transformation", "AI products")),
 ]
 
-# Measured 2026-09-04 against the live source, one query per row, same role
-# group and the same geography (United Kingdom) throughout.
+# Measured 2026-09-04 against the live source, one query per row, the same
+# role group and the same geography (United Kingdom) throughout.
 #
 # Adding either of these as an OR alternative does not widen the result set --
 # it empties it. `(digital products OR AI products)` returned the source's own
@@ -797,12 +797,44 @@ CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
 # bare form. Nor is it simply a short token: `VP Product`, `GM Product` and
 # `B2C` all live in these families and all return results.
 #
-# The mechanism is not established, and nothing here claims one. What is
-# established is that a term in this set destroys every result its group would
-# otherwise have contributed, which is why the vocabulary must not carry one.
+# The mechanism is not established, and nothing here claims one. The claim is
+# also narrower than "this term always empties a search": the same context
+# group *without* a role group beside it returned seven cards with the term in
+# it. What was measured is the shape the daily plan actually asks -- a role
+# group AND a context group -- and in that shape the term destroys every
+# result the query would otherwise have returned.
 LINKEDIN_TERMS_MEASURED_TO_EMPTY_RESULTS = frozenset(
     {"AI products", "ML products"}
 )
+
+# The measurement is about LinkedIn, so the substitution is too. CONTEXT_FAMILIES
+# also feeds `rotating_source_queries` for every other source and
+# `discovery_queries`; editing it in place would have changed what HeadHunter
+# and company discovery search for on the strength of an experiment run against
+# a different source. `artificial intelligence products` was measured to return
+# results with the rest of the production LinkedIn group intact.
+LINKEDIN_TERM_SUBSTITUTIONS: dict[str, str] = {
+    "AI products": "artificial intelligence products",
+}
+
+
+def _linkedin_terms(terms: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(LINKEDIN_TERM_SUBSTITUTIONS.get(term, term) for term in terms)
+
+
+def linkedin_query_carries_measured_empty_term(text: str) -> str | None:
+    """Which measured term is in this query, if any.
+
+    Case-insensitive on purpose: the measurement is about the words, and
+    `ai products` would empty a search exactly as `AI products` does while
+    slipping past an equality check.
+    """
+
+    lowered = (text or "").casefold()
+    for term in LINKEDIN_TERMS_MEASURED_TO_EMPTY_RESULTS:
+        if term.casefold() in lowered:
+            return term
+    return None
 
 GEO_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("remote_europe", ("remote", "Europe", "UK", "Germany")),
@@ -925,7 +957,8 @@ def rotating_linkedin_queries(
         target = mapping[cell]
         plan.append(
             LinkedInQueryPlanItem(
-                query=f"({_join_group(role[1])}) ({_join_group(context[1])})".strip(),
+                query=f"({_join_group(_linkedin_terms(role[1]))}) "
+                f"({_join_group(_linkedin_terms(context[1]))})".strip(),
                 cell_id=cell,
                 location=target.location,
                 geo_id=target.geo_id,

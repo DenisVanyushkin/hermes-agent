@@ -870,12 +870,12 @@ def linkedin_safety_reason(
     return None
 
 
-_LINKEDIN_NO_MATCH_STATEMENT = re.compile(
-    r">[^<>]*\bno\s+matching\s+jobs\s+found\b[^<>]*<", re.I
-)
+_LINKEDIN_SCRIPTED_BLOCK = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+_LINKEDIN_NO_MATCH_PARAGRAPH = re.compile(r"<p\b[^>]*>(?P<text>[^<]{0,200})</p>", re.I)
+_LINKEDIN_NO_MATCH_TEXT = "no matching jobs found"
 
 
-def linkedin_search_matched_nothing(html: str) -> bool:
+def linkedin_search_matched_nothing(html: str, *, page_url: str) -> bool:
     """Did the source say this search matched nothing?
 
     An authenticated LinkedIn search that matches nothing does not render an
@@ -890,20 +890,29 @@ def linkedin_search_matched_nothing(html: str) -> bool:
     page that said nothing matched. The heading is corroboration, not the
     trigger, so a rename of the block cannot re-open ingestion.
 
-    The pattern matches text between tags, not attribute values, because an
-    attribute lives inside `<...>` while `>` text `<` does not. Script bodies
-    are text by that definition too; in the captured corpus the statement
-    appears exactly once on each page that has it and never on a page with
-    results, so that looseness costs nothing measured -- but it is looseness,
-    not a guarantee, and a page that quoted the phrase in embedded JSON would
-    be read as empty.
+    Read as rendered text of a paragraph, on a search URL, with script and
+    style bodies removed first. Each of those three narrowings answers a way
+    the looser reading was wrong: a page quoting the phrase in embedded JSON
+    would have been read as empty; a job detail page mentioning it would have
+    been too; and matching any text between any two tags is not the same as
+    finding the statement the page displays. Normalisation is shared with the
+    logged-out heading, so a typographic apostrophe or a non-breaking space
+    cannot make the comparison silently miss.
 
     This is not the existing `_LINKEDIN_EMPTY_STATE_HEADING`, which is the
     logged-out `h1`. The authenticated wording differs and lives in a `p`, so
     a reader keyed on the heading finds nothing here.
     """
 
-    return bool(_LINKEDIN_NO_MATCH_STATEMENT.search(html or ""))
+    if not _is_linkedin_search_url(page_url):
+        return False
+    body = _LINKEDIN_SCRIPTED_BLOCK.sub(" ", html or "")
+    return any(
+        _normalize_linkedin_heading(match.group("text")).startswith(
+            _LINKEDIN_NO_MATCH_TEXT
+        )
+        for match in _LINKEDIN_NO_MATCH_PARAGRAPH.finditer(body)
+    )
 
 
 def classify_linkedin_page(
@@ -929,7 +938,7 @@ def classify_linkedin_page(
     on each axis; that is two measurements, not a contradiction.
     """
 
-    if linkedin_search_matched_nothing(html):
+    if linkedin_search_matched_nothing(html, page_url=final_url):
         return "terminal_empty_surface"
     if _linkedin_public_card_count(final_url, html) > 0:
         return "usable_result_surface"
@@ -1286,7 +1295,7 @@ def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Va
     # `trace["pages"][...]["page_classification"]`, and no caller reads the
     # verdict. Recording the page honestly and still ingesting its
     # recommendation block would leave the defect exactly where it was.
-    if linkedin_search_matched_nothing(html):
+    if linkedin_search_matched_nothing(html, page_url=page_url):
         return []
     card_vacancies = _linkedin_card_vacancies_from_html(html, page_url=page_url)
     structured = [_vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url) for jobposting in _jobposting_objects(html)]
@@ -2219,18 +2228,28 @@ class BrowserSourceClient:
             html = page_result.html
             trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
             started = time.perf_counter()
-            pre_filter_vacancies = _linkedin_card_vacancies_from_html(
-                html, page_url=page_url, apply_role_filter=False
-            )
-            pre_filter_vacancies.extend(
-                _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
-                for jobposting in _jobposting_objects(html)
-            )
-            page_vacancies = (
-                _qualify_linkedin_vacancies(pre_filter_vacancies)
-                if plan is not None
-                else extract_linkedin_vacancies_from_html(html, page_url=page_url)
-            )
+            # The guard belongs here and not only in the extractor, because
+            # the extractor is only one of the two branches below: with an
+            # execution plan -- the shape the worker and the Gate A probe use
+            # -- the loop qualifies its own pre-filter rows and never calls
+            # it. Guarding one branch would have left the other ingesting a
+            # recommendation block while the trace recorded the page as empty.
+            if linkedin_search_matched_nothing(html, page_url=page_url):
+                pre_filter_vacancies: list[Vacancy] = []
+                page_vacancies: list[Vacancy] = []
+            else:
+                pre_filter_vacancies = _linkedin_card_vacancies_from_html(
+                    html, page_url=page_url, apply_role_filter=False
+                )
+                pre_filter_vacancies.extend(
+                    _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
+                    for jobposting in _jobposting_objects(html)
+                )
+                page_vacancies = (
+                    _qualify_linkedin_vacancies(pre_filter_vacancies)
+                    if plan is not None
+                    else extract_linkedin_vacancies_from_html(html, page_url=page_url)
+                )
             trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
             dom_ids = page_result.dom_unique_job_ids
             accounting = (
