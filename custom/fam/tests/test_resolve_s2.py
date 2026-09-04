@@ -131,6 +131,35 @@ def test_partial_second_ref_keeps_first_applied_and_second_open(db, tmp_path, mo
     ).fetchone()[0] == 0
 
 
+def test_partial_receipt_exposes_each_unresolved_ref_for_post_correlation(
+    db, tmp_path, monkeypatch
+):
+    event_id, intake_id = _fixture(db)
+    real_apply = resolve._apply
+
+    def fail_med(conn, candidate, disposition, request):
+        if candidate["kind"] == "med_intake":
+            raise RuntimeError("med executor failed")
+        return real_apply(conn, candidate, disposition, request)
+
+    monkeypatch.setattr(resolve, "_apply", fail_med)
+    result = resolve.resolve_turn(
+        db,
+        _request(event_id, intake_id),
+        cfg=_config(tmp_path, [
+            {"kind": "event", "ref_id": event_id, "disposition": "cancel_occurrence"},
+            {"kind": "med_intake", "ref_id": intake_id, "disposition": "taken"},
+        ]),
+    )
+
+    assert result["status"] == "partial"
+    assert result["unresolved_refs"] == [
+        {"kind": "med_intake", "ref_id": intake_id,
+         "reason": "effect_failed:RuntimeError",
+         "wa_message_ids": ["wa-med-s2"]}
+    ]
+
+
 @pytest.mark.parametrize("disposition", ["ambiguous", "unrelated"])
 def test_nonterminal_second_ref_does_not_block_confident_first(db, tmp_path, disposition):
     event_id, intake_id = _fixture(db)

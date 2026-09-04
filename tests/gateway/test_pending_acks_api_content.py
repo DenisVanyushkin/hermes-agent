@@ -16,7 +16,7 @@ from gateway.session import SessionEntry, SessionSource
 
 import sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "custom" / "fam"))
-from fam import acks
+from fam import acks, db
 
 
 NOW = "2026-07-23T04:25:00+00:00"
@@ -796,5 +796,190 @@ async def test_pending_ack_s3_composition_resolves_without_quote(
         message.get("content", "") for message in captured["api_messages"]
     )
     assert "Trusted FAM resolution: event 1" in api_content
+    assert gateway_run._PENDING_ACK_RESIDUAL not in response
+    check.close()
+def test_pending_ack_residual_plan_aggregates_unresolved_candidates_once():
+    receipt = {
+        "status": "partial",
+        "residual": True,
+        "unresolved_refs": [
+            {"kind": "event", "ref_id": 1, "reason": "ambiguous", "title": "Врач"},
+            {"kind": "med_intake", "ref_id": 3, "reason": "classifier_failure", "name": "Мисол"},
+        ],
+    }
+
+    plan = gateway_run._pending_ack_residual_plan(receipt, "Готово")
+
+    assert plan["message"] == gateway_run._PENDING_ACK_RESIDUAL
+    assert plan["candidate_keys"] == ["event:1", "med_intake:3"]
+
+
+def test_pending_ack_residual_plan_reuses_main_clarification():
+    receipt = {
+        "status": "unresolved",
+        "residual": True,
+        "unresolved_refs": [
+            {"kind": "event", "ref_id": 1, "reason": "ambiguous", "title": "Врач"},
+        ],
+    }
+
+    assert gateway_run._pending_ack_residual_plan(
+        receipt, "Уточни, отменять ли событие «Врач»?"
+    ) is None
+    assert gateway_run._pending_ack_residual_plan(receipt, "Приняла, спасибо") is not None
+
+
+@pytest.mark.parametrize("reason", ["unrelated", "snooze", "defer"])
+def test_pending_ack_residual_plan_suppresses_nonterminal_non_actionable(reason):
+    receipt = {
+        "status": "unresolved",
+        "residual": True,
+        "unresolved_refs": [
+            {"kind": "med_intake", "ref_id": 3, "reason": reason, "name": "Мисол"},
+        ],
+    }
+
+    assert gateway_run._pending_ack_residual_plan(receipt, "Готово") is None
+
+
+class _PostDeliveryRecordingAdapter:
+    def __init__(self):
+        self.sent = []
+        self.callbacks = {}
+
+    def register_post_delivery_callback(self, session_key, callback, *, generation=None):
+        if not callable(callback):
+            return
+        existing = self.callbacks.get(session_key)
+        if existing is None:
+            self.callbacks[session_key] = callback
+            return
+
+        async def chained():
+            import inspect
+            for item in (existing, callback):
+                result = item()
+                if inspect.isawaitable(result):
+                    await result
+
+        self.callbacks[session_key] = chained
+
+    def get_pending_message(self, session_key):
+        return None
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent.append(content)
+        return SimpleNamespace(success=True, message_id=f"m-{len(self.sent)}")
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_residual_is_separate_post_delivery_message(monkeypatch, tmp_path):
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = _PostDeliveryRecordingAdapter()
+    runner.adapters = {Platform.WHATSAPP: adapter}
+    plan = {"message": gateway_run._PENDING_ACK_RESIDUAL, "candidate_keys": ["event:1"]}
+
+    assert await runner._defer_pending_ack_residual_after_delivery(
+        _source(), SESSION_KEY, plan
+    ) is True
+    await adapter.send(_source().chat_id, "Основной ответ")
+    await adapter.callbacks[SESSION_KEY]()
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_s4_composition_delivers_main_then_one_residual(
+    monkeypatch, tmp_path
+):
+    """Real fam partial state is delivered as MAIN followed by one residual."""
+    import sqlite3
+
+    repo = __import__("pathlib").Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "private" / "amina" / "assistant.db"
+    db_path.parent.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({"FAM_DB": str(db_path), "PYTHONPATH": str(repo / "custom" / "fam")})
+    initialized = subprocess.run(
+        [sys.executable, "-m", "fam", "init", "--json"], cwd=repo,
+        env=env, capture_output=True, text=True,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    conn = db.connect(db_path)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for event_id, title, message_id in (
+        (1, "Врач", "wa-rem-s4-1"), (2, "Тренировка", "wa-rem-s4-2")
+    ):
+        conn.execute(
+            "INSERT INTO events(id,title,start_utc,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (event_id, title, "2099-09-04T12:00:00+00:00", now, now),
+        )
+        conn.execute(
+            "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (event_id, "leave", now, "sent", now, now),
+        )
+        conn.execute(
+            "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
+            "VALUES(?,?,?,?,?)",
+            (message_id, "reminder", 1, event_id, now),
+        )
+    conn.commit()
+    snapshot_path = tmp_path / "pending-acks.json"
+    acks.write(conn, cfg={"target": "whatsapp:+77011102626"},
+               path=snapshot_path, now_utc=now)
+    conn.close()
+
+    classifier = tmp_path / "classifier-s4.py"
+    classifier.write_text(
+        "import json\n"
+        "print(json.dumps({'dispositions':["
+        "{'kind':'event','ref_id':1,'disposition':'cancel_occurrence'},"
+        "{'kind':'event','ref_id':2,'disposition':'not-a-disposition'}]}))\n",
+        encoding="utf-8",
+    )
+    fam_cfg = tmp_path / "fam-config-s4.json"
+    fam_cfg.write_text(json.dumps({
+        "gate_model": "test-model", "gate_provider": "test-provider",
+        "classifier_command": [sys.executable, str(classifier)],
+        "pending_acks_path": str(snapshot_path),
+    }), encoding="utf-8")
+
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = _PostDeliveryRecordingAdapter()
+    runner.adapters = {Platform.WHATSAPP: adapter}
+    monkeypatch.setattr(
+        gateway_run, "_load_gateway_config",
+        lambda: {"pending_acks_file": str(snapshot_path),
+                 "fam_db_path": str(db_path), "fam_config_path": str(fam_cfg)},
+    )
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model", {"api_key": "test-key", "base_url": "http://provider.test/v1",
+                        "provider": "openai", "api_mode": "chat_completions"}
+    )
+    runner._session_db = None
+
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Основной ответ", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call)
+    event = MessageEvent(
+        text="Отмени одно событие, второе пока неясно",
+        source=_source(), message_id="wamid-inbound-s4",
+    )
+
+    response = await runner._handle_message_with_agent(event, _source(), SESSION_KEY, 1)
+    await adapter.send(_source().chat_id, response)
+    assert adapter.callbacks, (response, runner._session_state(SESSION_KEY).conversation.pending_ack_residuals)
+    assert callable(adapter.callbacks[SESSION_KEY])
+    await adapter.callbacks[SESSION_KEY]()
+
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT status FROM events WHERE id=1").fetchone()[0] == "cancelled"
+    assert check.execute("SELECT status FROM events WHERE id=2").fetchone()[0] == "active"
+    assert adapter.sent == ["Основной ответ", gateway_run._PENDING_ACK_RESIDUAL]
+    assert adapter.sent.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
     assert gateway_run._PENDING_ACK_RESIDUAL not in response
     check.close()

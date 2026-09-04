@@ -444,6 +444,75 @@ def _read_pending_acks(path: str) -> Optional[dict]:
 _PENDING_ACK_RESIDUAL = "действие пока не записано"
 
 
+def _pending_ack_unresolved_refs(candidates, reason):
+    refs = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        detail = {
+            key: candidate[key]
+            for key in ("kind", "ref_id", "title", "name", "last_outbound_at", "wa_message_ids")
+            if key in candidate
+        }
+        detail["reason"] = reason
+        refs.append(detail)
+    return refs
+
+
+def _pending_ack_candidate_key(detail):
+    key = f"{detail.get('kind', '')}:{detail.get('ref_id', '')}"
+    anchor = str(detail.get("last_outbound_at") or "").strip()
+    if not anchor and isinstance(detail.get("wa_message_ids"), list):
+        anchor = ",".join(str(item) for item in detail["wa_message_ids"])
+    return f"{key}@{anchor}" if anchor else key
+
+
+def _pending_ack_actionable_refs(receipt):
+    if not isinstance(receipt, dict) or not receipt.get("residual"):
+        return []
+    refs = receipt.get("unresolved_refs")
+    if not isinstance(refs, list):
+        return []
+    return [
+        item for item in refs
+        if isinstance(item, dict)
+        and str(item.get("reason") or "").strip().lower()
+        not in {"unrelated", "defer", "snooze"}
+    ]
+
+
+def _pending_ack_main_asks_clarification(response, refs):
+    text = str(response or "").strip().lower()
+    if "?" not in text and "？" not in text:
+        return False
+    question_words = (
+        "уточн", "подтверд", "отмен", "пропуст", "приня", "сделать",
+        "выбрать", "какой", "какое", "clarif", "confirm", "cancel",
+    )
+    if not any(word in text for word in question_words):
+        return False
+    labels = [
+        str(item.get(field) or "").strip().lower()
+        for item in refs
+        for field in ("title", "name")
+        if isinstance(item, dict) and str(item.get(field) or "").strip()
+    ]
+    return not labels or any(label in text for label in labels)
+
+
+def _pending_ack_residual_plan(receipt, response, seen_keys=None):
+    """Build one post-turn residual plan from a typed FAM receipt."""
+    refs = _pending_ack_actionable_refs(receipt)
+    seen = set(seen_keys or ())
+    refs = [item for item in refs if _pending_ack_candidate_key(item) not in seen]
+    if not refs:
+        return None
+    keys = [_pending_ack_candidate_key(item) for item in refs]
+    if _pending_ack_main_asks_clarification(response, refs):
+        return None
+    return {"message": _PENDING_ACK_RESIDUAL, "candidate_keys": keys}
+
+
 def _pending_ack_candidates(
     snapshot: Any, reply_to_message_id: Optional[str]
 ) -> Optional[list[dict]]:
@@ -532,16 +601,23 @@ async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
             cwd=str(repo_root),
         )
         if completed.returncode != 0:
-            return {"residual": True, "reason": "fam_nonzero"}
+            return {"residual": True, "reason": "fam_nonzero",
+                    "unresolved_refs": _pending_ack_unresolved_refs(candidates, "fam_nonzero")}
         receipt = json.loads((completed.stdout or "").strip())
         if not isinstance(receipt, dict):
-            return {"residual": True, "reason": "malformed_fam_output"}
+            return {"residual": True, "reason": "malformed_fam_output",
+                    "unresolved_refs": _pending_ack_unresolved_refs(candidates, "malformed_fam_output")}
         if receipt.get("trusted_sidecar"):
             return receipt
-        return {"residual": True, "reason": receipt.get("reason", "unresolved")}
+        if receipt.get("residual") and not receipt.get("unresolved_refs"):
+            receipt["unresolved_refs"] = _pending_ack_unresolved_refs(
+                candidates, receipt.get("reason", "unresolved")
+            )
+        return receipt
     except Exception as exc:
         logger.debug("pending-ack resolution failed", exc_info=True)
-        return {"residual": True, "reason": "fam_failure"}
+        return {"residual": True, "reason": "fam_failure",
+                "unresolved_refs": _pending_ack_unresolved_refs(candidates, "fam_failure")}
 def _pending_acks_note(
     snapshot: Any,
     platform: str,
@@ -19205,7 +19281,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
-        _pending_ack_residual = False
+        _pending_ack_residual = None
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
@@ -20504,7 +20580,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _prepass:
                     if _prepass.get("trusted_sidecar"):
                         turn_sidecar_notes.append(_prepass["trusted_sidecar"])
-                    _pending_ack_residual = bool(_prepass.get("residual"))
+                    _pending_ack_residual = _prepass
         except Exception:
             logger.debug("pending-acks note skipped (non-fatal)", exc_info=True)
 
@@ -20728,8 +20804,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
 
-            if _pending_ack_residual and _PENDING_ACK_RESIDUAL not in response:
-                response = (response.rstrip() + "\n\n" + _PENDING_ACK_RESIDUAL).strip()
+            if _pending_ack_residual:
+                seen = self._session_state(session_key).conversation.pending_ack_residuals
+                residual_plan = _pending_ack_residual_plan(
+                    _pending_ack_residual, response, seen.keys()
+                )
+                if residual_plan is not None:
+                    if not await self._defer_pending_ack_residual_after_delivery(
+                        source, session_key, residual_plan
+                    ):
+                        response = (response.rstrip() + "\n\n" + _PENDING_ACK_RESIDUAL).strip()
+                else:
+                    for item in _pending_ack_actionable_refs(_pending_ack_residual):
+                        seen[_pending_ack_candidate_key(item)] = "clarification"
 
             # Turn-error alert to the admin channel (config-gated, no-op
             # without gateway.error_alerts). Runs after normalize/sanitize so
@@ -21888,6 +21975,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "goal continuation: status send failed: %s",
                 getattr(result, "error", "unknown error"),
             )
+
+    async def _defer_pending_ack_residual_after_delivery(
+        self, source: Any, session_key: str, plan: dict[str, Any]
+    ) -> bool:
+        """Schedule one aggregated pending-ack residual after MAIN."""
+        adapter = self._adapter_for_source(source)
+        if not adapter:
+            return False
+        keys = list(plan.get("candidate_keys") or [])
+        if not keys or not hasattr(adapter, "register_post_delivery_callback"):
+            return False
+
+        async def _deliver() -> None:
+            try:
+                delivery_adapter = self._adapter_for_source(source) or adapter
+                result = await delivery_adapter.send(
+                    source.chat_id,
+                    plan.get("message") or _PENDING_ACK_RESIDUAL,
+                    metadata=self._thread_metadata_for_source(source),
+                )
+                if result is not None and getattr(result, "success", True):
+                    state = self._session_state(session_key).conversation
+                    for key in keys:
+                        state.pending_ack_residuals[key] = "sent"
+            except Exception:
+                logger.warning("pending-ack residual delivery failed", exc_info=True)
+
+        try:
+            generation = None
+            active = getattr(adapter, "_active_sessions", {}).get(session_key)
+            if active is not None:
+                generation = getattr(active, "_hermes_run_generation", None)
+            adapter.register_post_delivery_callback(
+                session_key, _deliver, generation=generation
+            )
+            return True
+        except Exception:
+            logger.debug("pending-ack residual registration failed", exc_info=True)
+            return False
 
     async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
         """Send a /goal status line after the main response is delivered.

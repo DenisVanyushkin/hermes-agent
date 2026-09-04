@@ -110,6 +110,9 @@ def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None)
         "kind": candidate.get("kind"), "ref_id": candidate.get("ref_id"),
         "disposition": None,
     }
+    for field in ("title", "name", "last_outbound_at", "wa_message_ids"):
+        if field in candidate:
+            receipt[field] = candidate[field]
     audit.log(conn, "resolve.turn", {
         "idempotency_key": key, "kind": candidate.get("kind"),
         "ref_id": candidate.get("ref_id"), "disposition": None,
@@ -164,6 +167,16 @@ def _receipt(candidate, disposition):
 def _aggregate_receipts(receipts):
     applied = [item for item in receipts if item.get("status") == "applied"]
     unresolved = [item for item in receipts if item.get("residual")]
+    unresolved_refs = []
+    for item in unresolved:
+        detail = {
+            key: item[key] for key in ("kind", "ref_id", "reason")
+            if key in item
+        }
+        for key in ("title", "name", "last_outbound_at", "wa_message_ids"):
+            if key in item:
+                detail[key] = item[key]
+        unresolved_refs.append(detail)
     if applied and not unresolved:
         return {
             "status": "applied", "residual": False,
@@ -181,13 +194,14 @@ def _aggregate_receipts(receipts):
                 for item in applied
             ],
             "unresolved": len(unresolved),
+            "unresolved_refs": unresolved_refs,
         }
         sidecars = [item["trusted_sidecar"] for item in applied
                     if item.get("trusted_sidecar")]
         if sidecars:
             result["trusted_sidecar"] = "\n".join(sidecars)
         return result
-    return {"status": "unresolved", "residual": True, "unresolved": len(unresolved)}
+    return {"status": "unresolved", "residual": True, "unresolved": len(unresolved), "unresolved_refs": unresolved_refs}
 
 
 def _apply(conn, candidate, disposition, request):
