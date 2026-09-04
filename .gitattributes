@@ -32,3 +32,11 @@ docker/entrypoint.sh text eol=lf
 *.html  text eol=lf
 *.svg   text eol=lf
 *.ps1   text eol=crlf
+
+# Frozen source captures, kept as the source served them. Trailing whitespace
+# inside them is part of the bytes that were observed, and the fixtures are
+# only evidence for as long as they are cuts of a real page rather than a
+# tidied version of one. Normalising them to satisfy a whitespace check would
+# trade a warning for a weaker artifact, so the check is switched off here
+# deliberately instead of its output being ignored.
+tests/product_search/fixtures/*.html -whitespace
