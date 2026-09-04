@@ -204,3 +204,99 @@ def test_write_is_atomic(db, tmp_path):
     acks.write(db, path=path, now_utc=NOW)
     assert json.loads(path.read_text(encoding="utf-8"))["items"] == []
     assert not list(tmp_path.glob("*.tmp*"))
+
+
+S3_NOW = "2026-09-04T12:00:00+00:00"
+S3_EXACTLY_INSIDE = "2026-09-04T10:00:00+00:00"
+S3_AFTER_WINDOW = "2026-09-04T09:59:00+00:00"
+S3_INSIDE = "2026-09-04T11:00:00+00:00"
+
+
+def _event_with_sent_reminders(
+    db, *, status="active", sent_times=(S3_INSIDE,),
+    created_at="2026-09-01T00:00:00+00:00",
+    start_utc="2026-09-10T00:00:00+00:00",
+):
+    event = db.execute(
+        "INSERT INTO events(title,start_utc,status,created_at,updated_at) "
+        "VALUES(?,?,?,?,?)",
+        ("S3 событие", start_utc, status, created_at, created_at),
+    )
+    event_id = event.lastrowid
+    for index, sent_at in enumerate(sent_times, start=1):
+        reminder = db.execute(
+            "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (event_id, "leave", sent_at, "sent", created_at, sent_at),
+        )
+        db.execute(
+            "INSERT INTO sent_messages("
+            "wa_message_id,kind,ref_id,event_id,created_at) VALUES(?,?,?,?,?)",
+            (f"wa-rem-{event_id}-{index}", "reminder", reminder.lastrowid,
+             event_id, sent_at),
+        )
+    db.commit()
+    return event_id
+
+
+@pytest.mark.parametrize(
+    ("case", "status", "sent_times", "expected"),
+    [
+        ("exactly_inside", "active", (S3_EXACTLY_INSIDE,), True),
+        ("after_window", "active", (S3_AFTER_WINDOW,), False),
+        ("cancelled", "cancelled", (S3_INSIDE,), False),
+        ("done", "done", (S3_INSIDE,), False),
+        ("active_without_pending", "active", (S3_INSIDE,), True),
+    ],
+)
+def test_open_resolution_candidates_window_matrix(
+    db, case, status, sent_times, expected
+):
+    from fam import rem
+
+    event_id = _event_with_sent_reminders(
+        db, status=status, sent_times=sent_times
+    )
+
+    candidates = rem.open_resolution_candidates(
+        db, now_utc=S3_NOW, max_age_min=120
+    )
+
+    assert bool([item for item in candidates if item["ref_id"] == event_id]) is expected, case
+
+
+def test_open_resolution_candidates_anchors_window_at_latest_outbound(
+    db,
+):
+    from fam import rem
+
+    event_id = _event_with_sent_reminders(
+        db,
+        sent_times=("2026-09-04T09:59:00+00:00", S3_INSIDE),
+        created_at="2026-09-01T00:00:00+00:00",
+        start_utc="2026-09-10T00:00:00+00:00",
+    )
+
+    candidates = rem.open_resolution_candidates(
+        db, now_utc=S3_NOW, max_age_min=120
+    )
+
+    matching = [item for item in candidates if item["ref_id"] == event_id]
+    assert len(matching) == 1
+    assert matching[0]["wa_message_ids"] == [
+        f"wa-rem-{event_id}-1", f"wa-rem-{event_id}-2"
+    ]
+
+
+def test_active_chains_keeps_pending_only_contract_for_s3_event(db):
+    from fam import rem
+
+    event_id = _event_with_sent_reminders(db, sent_times=(S3_INSIDE,))
+
+    assert rem.active_chains(db) == []
+    assert [
+        item["ref_id"]
+        for item in rem.open_resolution_candidates(
+            db, now_utc=S3_NOW, max_age_min=120
+        )
+    ] == [event_id]

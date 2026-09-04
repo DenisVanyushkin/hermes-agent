@@ -22,7 +22,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fam import meds
+from fam import meds, rem
 from fam.cal import ALMATY
 
 
@@ -49,29 +49,6 @@ SANDBOX_PATH = Path("/root/.hermes/private/amina/pending-acks.json")
 DUE_WINDOW_HOURS = 12
 
 
-def _event_candidates(conn, floor, now):
-    """Return active calendar events with a recent outbound reminder."""
-    rows = conn.execute(
-        "SELECT e.id, e.title, m.wa_message_id, m.created_at "
-        "FROM events e JOIN sent_messages m ON m.event_id=e.id "
-        "WHERE e.status='active' AND m.kind='reminder' "
-        "AND m.created_at >= ? AND m.created_at <= ? "
-        "ORDER BY e.id, m.created_at, m.id",
-        (floor.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")),
-    ).fetchall()
-    grouped = {}
-    for row in rows:
-        item = grouped.setdefault(row["id"], {
-            "kind": "event",
-            "ref_id": row["id"],
-            "event_id": row["id"],
-            "title": row["title"],
-            "current_state": "active",
-            "wa_message_ids": [],
-        })
-        if row["wa_message_id"] not in item["wa_message_ids"]:
-            item["wa_message_ids"].append(row["wa_message_id"])
-    return list(grouped.values())
 
 
 def _message_ids(conn, kind, ref_id):
@@ -142,7 +119,11 @@ def build(conn, cfg=None, now_utc=None):
             item["deferred"] = True
         items.append(item)
 
-    items.extend(_event_candidates(conn, floor, now))
+    items.extend(rem.open_resolution_candidates(
+        conn,
+        now_utc=now_raw,
+        max_age_min=(cfg or {}).get("reminder_max_age_min", 120),
+    ))
 
     return {
         "generated_at": now_raw if isinstance(now_raw, str) else now.isoformat(),

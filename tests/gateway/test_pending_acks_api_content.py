@@ -675,3 +675,126 @@ async def test_pending_ack_s2_composition_partial_preserves_applied_sidecar_with
     assert "Trusted FAM resolution: event 1" in api_content
     assert response.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
     check.close()
+
+
+def test_pending_ack_candidates_without_quote_returns_all_open_event_candidates():
+    snapshot = {
+        "target": "whatsapp:+77011102626",
+        "items": [
+            {"kind": "event", "ref_id": 66, "current_state": "active",
+             "wa_message_ids": ["wa-rem-66"]},
+            {"kind": "event", "ref_id": 67, "current_state": "active",
+             "wa_message_ids": ["wa-rem-67"]},
+            {"kind": "med_intake", "ref_id": 46, "current_state": "pending",
+             "wa_message_ids": ["wa-med-46"]},
+        ],
+    }
+
+    candidates = gateway_run._pending_ack_candidates(snapshot, None)
+
+    assert [(item["kind"], item["ref_id"]) for item in candidates] == [
+        ("event", 66), ("event", 67)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_s3_composition_resolves_without_quote(
+    monkeypatch, tmp_path
+):
+    """A no-quote event crosses the real fam CLI and disappears after cancel."""
+    import sqlite3
+
+    repo = __import__("pathlib").Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "private" / "amina" / "assistant.db"
+    db_path.parent.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({"FAM_DB": str(db_path), "PYTHONPATH": str(repo / "custom" / "fam")})
+    initialized = subprocess.run(
+        [sys.executable, "-m", "fam", "init", "--json"], cwd=repo,
+        env=env, capture_output=True, text=True,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO events(title,start_utc,created_at,updated_at) VALUES(?,?,?,?)",
+        ("Тренировка", "2099-09-04T12:00:00+00:00", now, now),
+    )
+    conn.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(1,'leave',?,?,?,?)",
+        (now, "sent", now, now),
+    )
+    conn.execute(
+        "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
+        "VALUES('wa-rem-s3','reminder',1,1,?)",
+        (now,),
+    )
+    conn.commit()
+    snapshot_path = tmp_path / "pending-acks.json"
+    acks.write(
+        conn, cfg={"target": "whatsapp:+77011102626"},
+        path=snapshot_path, now_utc=now,
+    )
+    initial_snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert [(item["kind"], item["ref_id"]) for item in initial_snapshot["items"]] == [
+        ("event", 1)
+    ]
+    conn.close()
+
+    classifier = tmp_path / "classifier-s3.py"
+    classifier.write_text(
+        "import json\n"
+        "print(json.dumps({'dispositions':["
+        "{'kind':'event','ref_id':1,'disposition':'cancel_occurrence'}]}))\n",
+        encoding="utf-8",
+    )
+    fam_cfg = tmp_path / "fam-config-s3.json"
+    fam_cfg.write_text(json.dumps({
+        "gate_model": "test-model", "gate_provider": "test-provider",
+        "classifier_command": [sys.executable, str(classifier)],
+        "pending_acks_path": str(snapshot_path),
+    }), encoding="utf-8")
+
+    runner = _runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_load_gateway_config",
+        lambda: {"pending_acks_file": str(snapshot_path),
+                 "fam_db_path": str(db_path), "fam_config_path": str(fam_cfg)},
+    )
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model", {"api_key": "test-key", "base_url": "http://provider.test/v1",
+                        "provider": "openai", "api_mode": "chat_completions"}
+    )
+    runner._session_db = None
+    captured = {}
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        captured["api_messages"] = api_kwargs["messages"]
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Отменила тренировку", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call)
+    event = MessageEvent(
+        text="Тренировки в этот раз не будет",
+        source=_source(), message_id="wamid-inbound-s3",
+    )
+    assert event.reply_to_message_id is None
+
+    response = await runner._handle_message_with_agent(event, _source(), SESSION_KEY, 1)
+
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT status FROM events WHERE id=1").fetchone()[0] == "cancelled"
+    assert check.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='resolve.turn'"
+    ).fetchone()[0] == 1
+    assert json.loads(snapshot_path.read_text(encoding="utf-8"))["items"] == []
+    api_content = "\n".join(
+        message.get("content", "") for message in captured["api_messages"]
+    )
+    assert "Trusted FAM resolution: event 1" in api_content
+    assert gateway_run._PENDING_ACK_RESIDUAL not in response
+    check.close()

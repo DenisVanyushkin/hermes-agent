@@ -177,3 +177,99 @@ def test_multi_ref_replay_returns_both_saved_receipts_without_second_effect(db, 
     assert db.execute(
         "SELECT COUNT(*) FROM audit_log WHERE kind='meds.take'"
     ).fetchone()[0] == 1
+
+
+def test_unrelated_leaves_no_quote_resolution_candidate_open(db, tmp_path):
+    from fam import acks
+
+    event_id, intake_id = _fixture(db)
+    request = _request(event_id, intake_id)
+    request["candidates"] = [request["candidates"][0]]
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [
+            {"kind": "event", "ref_id": event_id, "disposition": "unrelated"},
+        ]),
+    )
+
+    assert result["status"] == "unresolved"
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (event_id,)
+    ).fetchone()[0] == "active"
+    assert any(
+        item["ref_id"] == event_id
+        for item in acks.build(db, now_utc=NOW)["items"]
+    )
+
+
+def test_multiple_open_candidates_apply_only_explicit_ref(db, tmp_path):
+    event_id, intake_id = _fixture(db)
+    other = __import__("fam.cal", fromlist=["add"]).add(
+        db, "Другое событие", "2099-09-05T12:00:00+00:00"
+    )
+    react.record_sent(
+        db, "wa-rem-s3-other", "reminder", other["id"],
+        event_id=other["id"], now_utc=NOW,
+    )
+    db.commit()
+    request = _request(event_id, intake_id)
+    request["candidates"] = [
+        request["candidates"][0],
+        {
+            "kind": "event", "ref_id": other["id"], "event_id": other["id"],
+            "current_state": "active", "wa_message_ids": ["wa-rem-s3-other"],
+        },
+    ]
+
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [
+            {"kind": "event", "ref_id": other["id"],
+             "disposition": "cancel_occurrence"},
+        ]),
+    )
+
+    assert result["status"] == "partial"
+    assert [(item["kind"], item["ref_id"]) for item in result["applied"]] == [
+        ("event", other["id"])
+    ]
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (event_id,)
+    ).fetchone()[0] == "active"
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (other["id"],)
+    ).fetchone()[0] == "cancelled"
+
+
+def test_ambiguous_multiple_open_candidates_mutates_none(db, tmp_path):
+    event_id, intake_id = _fixture(db)
+    other = __import__("fam.cal", fromlist=["add"]).add(
+        db, "Ещё событие", "2099-09-06T12:00:00+00:00"
+    )
+    request = _request(event_id, intake_id)
+    request["candidates"] = [
+        request["candidates"][0],
+        {
+            "kind": "event", "ref_id": other["id"], "event_id": other["id"],
+            "current_state": "active", "wa_message_ids": [],
+        },
+    ]
+
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [
+            {"kind": "event", "ref_id": event_id, "disposition": "ambiguous"},
+            {"kind": "event", "ref_id": other["id"], "disposition": "ambiguous"},
+        ]),
+    )
+
+    assert result["status"] == "unresolved"
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (event_id,)
+    ).fetchone()[0] == "active"
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (other["id"],)
+    ).fetchone()[0] == "active"

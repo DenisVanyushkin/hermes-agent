@@ -337,6 +337,53 @@ def active_chains(conn, now_utc=None):
     return out
 
 
+def open_resolution_candidates(conn, now_utc=None, max_age_min=120):
+    """Return active event occurrences with a recent outbound reminder.
+
+    Unlike active_chains, this is the conversation-resolution view: an
+    occurrence remains open after every reminder was sent, until its latest
+    outbound reminder falls outside the configured response window.
+    """
+    now = _parse_utc(now_utc or _now())
+    try:
+        max_age = float(max_age_min)
+    except (TypeError, ValueError):
+        return []
+    if max_age < 0:
+        return []
+    floor = now - timedelta(minutes=max_age)
+    rows = conn.execute(
+        "SELECT e.id AS event_id, e.title AS title, "
+        "MAX(m.created_at) AS last_outbound_at "
+        "FROM events e JOIN sent_messages m ON m.event_id=e.id "
+        "WHERE e.status='active' AND m.kind='reminder' "
+        "GROUP BY e.id ORDER BY last_outbound_at, e.id"
+    ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            last_outbound = _parse_utc(row["last_outbound_at"])
+        except (TypeError, ValueError):
+            continue
+        if not floor <= last_outbound <= now:
+            continue
+        ids = conn.execute(
+            "SELECT wa_message_id FROM sent_messages "
+            "WHERE event_id=? AND kind='reminder' "
+            "ORDER BY created_at, id",
+            (row["event_id"],),
+        ).fetchall()
+        out.append({
+            "kind": "event",
+            "ref_id": row["event_id"],
+            "event_id": row["event_id"],
+            "title": row["title"],
+            "current_state": "active",
+            "wa_message_ids": [item["wa_message_id"] for item in ids],
+        })
+    return out
+
+
 def _seed_rule(conn, scope, stages):
     existing = conn.execute(
         "SELECT 1 FROM reminder_rules WHERE scope=?", (scope,)

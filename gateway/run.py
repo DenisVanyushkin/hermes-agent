@@ -447,14 +447,26 @@ _PENDING_ACK_RESIDUAL = "действие пока не записано"
 def _pending_ack_candidates(
     snapshot: Any, reply_to_message_id: Optional[str]
 ) -> Optional[list[dict]]:
-    """Return the quoted candidate plus due medication candidates.
+    """Return quoted resolution candidates or all open event candidates.
 
-    S2 deliberately keeps the quote as the required anchor.  Medication
-    candidates are fanned out from the fresh projection, while no-quote
-    addressing remains deferred to S3.
+    A quoted inbound message selects exactly one matching item and fans out
+    pending medication items. An unquoted inbound message selects all active
+    event candidates from the fresh projection; fam resolves each disposition
+    independently and leaves unrelated or ambiguous candidates open.
     """
-    if not isinstance(snapshot, dict) or not reply_to_message_id:
+    if not isinstance(snapshot, dict):
         return None
+    items = snapshot.get("items")
+    if not isinstance(items, list):
+        return None
+    if not reply_to_message_id:
+        event_candidates = [
+            item for item in items
+            if isinstance(item, dict)
+            and item.get("kind") == "event"
+            and item.get("current_state") == "active"
+        ]
+        return event_candidates or None
     matches = []
     for item in snapshot.get("items", []):
         if not isinstance(item, dict):
