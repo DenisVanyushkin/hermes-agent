@@ -11,7 +11,7 @@ from typing import Any
 
 from fam import acks, audit, cal, gate, meds, rem
 
-PROMPT_VERSION = "amina-ack-resolution-s1-v1"
+PROMPT_VERSION = "amina-ack-resolution-s2-v1"
 _EVENT_DISPOSITIONS = {"ack_chain_prepare", "ack_chain_all",
                        "cancel_reminders", "cancel_occurrence",
                        "unrelated", "ambiguous"}
@@ -24,10 +24,12 @@ def _json_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _turn_key(request: dict[str, Any], candidate: dict[str, Any]) -> str:
-    return "|".join(str(request.get(name, "")) for name in (
-        "platform", "canonical_target", "inbound_message_id")) + "|" + "|".join(
-        str(candidate.get(name, "")) for name in ("kind", "ref_id"))
+def _turn_key(request: dict[str, Any], candidate: dict[str, Any] | None = None) -> str:
+    parts = [str(request.get(name, "")) for name in (
+        "platform", "canonical_target", "inbound_message_id")]
+    if isinstance(candidate, dict):
+        parts.extend((str(candidate.get("kind", "")), str(candidate.get("ref_id", ""))))
+    return "|".join(parts)
 
 
 def _classifier_prompt(request: dict[str, Any]) -> str:
@@ -38,8 +40,9 @@ def _classifier_prompt(request: dict[str, Any]) -> str:
         "quoted_text": str(request.get("quoted_text") or ""),
         "instructions": (
             "Return strict JSON only: {\"dispositions\":[{\"kind\":...,'"
-            "ref_id':...,\"disposition\":...}]}. Choose one candidate; "
-            "never emit tool calls or commands."
+            "ref_id':...,\"disposition\":...}]}. Return one independent "
+            "disposition per candidate; use unrelated or ambiguous only for "
+            "the candidate it describes. Never emit tool calls or commands."
         ),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -83,9 +86,10 @@ def _load_existing(conn, key: str) -> dict[str, Any] | None:
         "WHERE kind='resolve.turn' "
         "AND CASE WHEN json_valid(payload) "
         "THEN json_extract(payload, '$.idempotency_key') END=? "
-        "ORDER BY id DESC LIMIT 1",
+        "ORDER BY id ASC",
         (key,),
     ).fetchall()
+    receipts = []
     for row in rows:
         try:
             payload = json.loads(row["payload"])
@@ -93,12 +97,19 @@ def _load_existing(conn, key: str) -> dict[str, Any] | None:
             continue
         if payload.get("idempotency_key") == key:
             receipt = payload.get("receipt")
-            return receipt if isinstance(receipt, dict) else None
-    return None
+            if isinstance(receipt, dict):
+                receipts.append(receipt)
+    if not receipts:
+        return None
+    return receipts[0] if len(receipts) == 1 else _aggregate_receipts(receipts)
 
 
 def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None):
-    receipt = {"status": "unresolved", "residual": True, "reason": reason}
+    receipt = {
+        "status": "unresolved", "residual": True, "reason": reason,
+        "kind": candidate.get("kind"), "ref_id": candidate.get("ref_id"),
+        "disposition": None,
+    }
     audit.log(conn, "resolve.turn", {
         "idempotency_key": key, "kind": candidate.get("kind"),
         "ref_id": candidate.get("ref_id"), "disposition": None,
@@ -114,21 +125,69 @@ def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None)
     return receipt
 
 
-def _strict_disposition(output, candidate):
+def _strict_dispositions(output, candidates):
+    """Validate model output independently against each candidate ref."""
+    result = {}
     if not isinstance(output, dict) or set(output) != {"dispositions"}:
-        return None
+        return result
     values = output["dispositions"]
-    if not isinstance(values, list) or len(values) != 1:
-        return None
-    value = values[0]
-    if not isinstance(value, dict) or set(value) != {"kind", "ref_id", "disposition"}:
-        return None
-    if value["kind"] != candidate.get("kind") or str(value["ref_id"]) != str(candidate.get("ref_id")):
-        return None
-    allowed = _MED_DISPOSITIONS if candidate.get("kind") == "med_intake" else _EVENT_DISPOSITIONS
-    if value["disposition"] not in allowed:
-        return None
-    return value["disposition"]
+    if not isinstance(values, list):
+        return result
+    candidate_map = {
+        (str(candidate.get("kind")), str(candidate.get("ref_id"))): candidate
+        for candidate in candidates
+    }
+    for value in values:
+        if not isinstance(value, dict) or set(value) != {"kind", "ref_id", "disposition"}:
+            continue
+        key = (str(value["kind"]), str(value["ref_id"]))
+        candidate = candidate_map.get(key)
+        if candidate is None or key in result:
+            continue
+        allowed = _MED_DISPOSITIONS if candidate.get("kind") == "med_intake" else _EVENT_DISPOSITIONS
+        result[key] = value["disposition"] if value["disposition"] in allowed else None
+    return result
+
+
+def _receipt(candidate, disposition):
+    return {
+        "status": "applied", "residual": False,
+        "kind": candidate.get("kind"), "ref_id": candidate.get("ref_id"),
+        "disposition": disposition,
+        "trusted_sidecar": (
+            f"[Trusted FAM resolution: {candidate.get('kind')} "
+            f"{candidate.get('ref_id')} applied and verified; do not repeat.]"
+        ),
+    }
+
+
+def _aggregate_receipts(receipts):
+    applied = [item for item in receipts if item.get("status") == "applied"]
+    unresolved = [item for item in receipts if item.get("residual")]
+    if applied and not unresolved:
+        return {
+            "status": "applied", "residual": False,
+            "dispositions": [
+                {key: item[key] for key in ("kind", "ref_id", "disposition")}
+                for item in applied
+            ],
+            "trusted_sidecar": "\n".join(item["trusted_sidecar"] for item in applied),
+        }
+    if applied:
+        result = {
+            "status": "partial", "residual": True,
+            "applied": [
+                {key: item[key] for key in ("kind", "ref_id", "disposition")}
+                for item in applied
+            ],
+            "unresolved": len(unresolved),
+        }
+        sidecars = [item["trusted_sidecar"] for item in applied
+                    if item.get("trusted_sidecar")]
+        if sidecars:
+            result["trusted_sidecar"] = "\n".join(sidecars)
+        return result
+    return {"status": "unresolved", "residual": True, "unresolved": len(unresolved)}
 
 
 def _apply(conn, candidate, disposition, request):
@@ -201,50 +260,64 @@ def _set_terminal_ack(conn, candidate, disposition):
 def resolve_turn(conn, request, cfg=None):
     cfg = cfg or {}
     candidates = request.get("candidates")
-    if not isinstance(candidates, list) or len(candidates) != 1 or not isinstance(candidates[0], dict):
+    if (not isinstance(candidates, list) or not candidates or
+            not all(isinstance(candidate, dict) for candidate in candidates)):
         candidate = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
         return _unresolved(conn, _turn_key(request, candidate), candidate, "invalid_candidates")
-    candidate = candidates[0]
-    key = _turn_key(request, candidate)
-    existing = _load_existing(conn, key)
-    if existing is not None:
-        return existing
-    prompt = _classifier_prompt(request)
+    existing_receipts = []
+    pending_candidates = []
+    for candidate in candidates:
+        candidate_key = _turn_key(request, candidate)
+        existing = _load_existing(conn, candidate_key)
+        if existing is None:
+            pending_candidates.append(candidate)
+        else:
+            existing_receipts.append(existing)
+    if not pending_candidates:
+        return _aggregate_receipts(existing_receipts)
+    classify_request = dict(request)
+    classify_request["candidates"] = pending_candidates
+    prompt = _classifier_prompt(classify_request)
     input_hash = _json_hash(request)
     output = _call_classifier(prompt, cfg)
     output_hash = _json_hash(output) if output is not None else None
-    disposition = _strict_disposition(output, candidate) if output is not None else None
-    if disposition is None or disposition in {"unrelated", "ambiguous"}:
-        return _unresolved(conn, key, candidate,
-                           "classifier_failure" if output is None else "ambiguous",
-                           input_hash, output_hash)
-    try:
-        changed, reason = _apply(conn, candidate, disposition, request)
-        if not changed or not _postcondition(conn, candidate, disposition):
-            conn.rollback()
-            return _unresolved(conn, key, candidate, reason or "postcondition_failed",
-                               input_hash, output_hash)
-        _set_terminal_ack(conn, candidate, disposition)
-        acks.write(conn, cfg=cfg, now_utc=request.get("now_utc"))
-        receipt = {
-            "status": "applied", "residual": False,
-            "disposition": disposition,
-            "trusted_sidecar": (
-                f"[Trusted FAM resolution: {candidate.get('kind')} "
-                f"{candidate.get('ref_id')} applied and verified; do not repeat.]"
-            ),
-        }
-        audit.log(conn, "resolve.turn", {
-            "idempotency_key": key, "kind": candidate.get("kind"),
-            "ref_id": candidate.get("ref_id"), "event_id": candidate.get("event_id"),
-            "disposition": disposition, "model": cfg.get("gate_model"),
-            "prompt_version": PROMPT_VERSION, "input_sha256": input_hash,
-            "output_sha256": output_hash, "postcondition": True,
-            "receipt": receipt,
-        })
-        conn.commit()
-        return receipt
-    except Exception as exc:  # noqa: BLE001 -- every resolver failure is residual
-        conn.rollback()
-        return _unresolved(conn, key, candidate, f"effect_failed:{type(exc).__name__}",
-                           input_hash, output_hash)
+    dispositions = _strict_dispositions(output, candidates) if output is not None else {}
+    results = list(existing_receipts)
+    for candidate in pending_candidates:
+        key = _turn_key(request, candidate)
+        candidate_key = (str(candidate.get("kind")), str(candidate.get("ref_id")))
+        disposition = dispositions.get(candidate_key)
+        if output is None:
+            reason = "classifier_failure"
+        elif disposition is None:
+            reason = "invalid_disposition"
+        elif disposition in {"unrelated", "ambiguous"}:
+            reason = disposition
+        else:
+            try:
+                changed, reason = _apply(conn, candidate, disposition, request)
+                if not changed or not _postcondition(conn, candidate, disposition):
+                    conn.rollback()
+                    reason = reason or "postcondition_failed"
+                else:
+                    _set_terminal_ack(conn, candidate, disposition)
+                    acks.write(conn, cfg=cfg, now_utc=request.get("now_utc"))
+                    receipt = _receipt(candidate, disposition)
+                    audit.log(conn, "resolve.turn", {
+                        "idempotency_key": key, "kind": candidate.get("kind"),
+                        "ref_id": candidate.get("ref_id"), "event_id": candidate.get("event_id"),
+                        "disposition": disposition, "model": cfg.get("gate_model"),
+                        "prompt_version": PROMPT_VERSION, "input_sha256": input_hash,
+                        "output_sha256": output_hash, "postcondition": True,
+                        "receipt": receipt,
+                    })
+                    conn.commit()
+                    results.append(receipt)
+                    continue
+            except Exception as exc:  # noqa: BLE001 -- every ref is residual
+                conn.rollback()
+                reason = f"effect_failed:{type(exc).__name__}"
+        results.append(_unresolved(conn, key, candidate, reason,
+                                   input_hash, output_hash))
+
+    return _aggregate_receipts(results)

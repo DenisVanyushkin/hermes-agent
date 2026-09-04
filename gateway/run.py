@@ -444,8 +444,15 @@ def _read_pending_acks(path: str) -> Optional[dict]:
 _PENDING_ACK_RESIDUAL = "действие пока не записано"
 
 
-def _pending_ack_candidate(snapshot: Any, reply_to_message_id: Optional[str]) -> Optional[dict]:
-    """Return the sole typed candidate addressed by a quoted outbound id."""
+def _pending_ack_candidates(
+    snapshot: Any, reply_to_message_id: Optional[str]
+) -> Optional[list[dict]]:
+    """Return the quoted candidate plus due medication candidates.
+
+    S2 deliberately keeps the quote as the required anchor.  Medication
+    candidates are fanned out from the fresh projection, while no-quote
+    addressing remains deferred to S3.
+    """
     if not isinstance(snapshot, dict) or not reply_to_message_id:
         return None
     matches = []
@@ -455,7 +462,23 @@ def _pending_ack_candidate(snapshot: Any, reply_to_message_id: Optional[str]) ->
         ids = item.get("wa_message_ids")
         if isinstance(ids, list) and reply_to_message_id in ids:
             matches.append(item)
-    return matches[0] if len(matches) == 1 else None
+    if len(matches) != 1:
+        return None
+    candidates = [matches[0]]
+    candidates.extend(
+        item for item in snapshot.get("items", [])
+        if isinstance(item, dict)
+        and item.get("kind") == "med_intake"
+        and item.get("current_state") == "pending"
+        and item is not matches[0]
+    )
+    return candidates
+
+
+def _pending_ack_candidate(snapshot: Any, reply_to_message_id: Optional[str]) -> Optional[dict]:
+    """Compatibility helper for callers that need the quoted item only."""
+    candidates = _pending_ack_candidates(snapshot, reply_to_message_id)
+    return candidates[0] if candidates else None
 
 
 async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
@@ -467,8 +490,8 @@ async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
     ) is None:
         return None
     reply_id = getattr(event, "reply_to_message_id", None)
-    candidate = _pending_ack_candidate(snapshot, reply_id)
-    if candidate is None:
+    candidates = _pending_ack_candidates(snapshot, reply_id)
+    if candidates is None:
         return None
     repo_root = Path(__file__).resolve().parents[1]
     fam_python = Path(_hermes_home) / "hermes-agent" / "venv" / "bin" / "python"
@@ -488,7 +511,7 @@ async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
         "reply_to_message_id": reply_id,
         "user_text": str(getattr(event, "text", "") or ""),
         "quoted_text": str(getattr(event, "reply_to_text", "") or ""),
-        "candidates": [candidate],
+        "candidates": candidates,
     }
     try:
         completed = await asyncio.to_thread(
@@ -501,7 +524,7 @@ async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
         receipt = json.loads((completed.stdout or "").strip())
         if not isinstance(receipt, dict):
             return {"residual": True, "reason": "malformed_fam_output"}
-        if receipt.get("status") == "applied" and receipt.get("trusted_sidecar"):
+        if receipt.get("trusted_sidecar"):
             return receipt
         return {"residual": True, "reason": receipt.get("reason", "unresolved")}
     except Exception as exc:

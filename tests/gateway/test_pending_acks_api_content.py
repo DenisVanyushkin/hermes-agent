@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -118,6 +119,65 @@ def _runner(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: 100_000,
     )
     return runner
+
+
+def test_pending_ack_candidates_fan_out_quote_and_due_medication():
+    snapshot = {
+        "items": [
+            {"kind": "event", "ref_id": 66, "wa_message_ids": ["wa-rem-66"]},
+            {"kind": "med_intake", "ref_id": 46, "current_state": "pending",
+             "wa_message_ids": ["wa-med-46"]},
+        ]
+    }
+    candidates = gateway_run._pending_ack_candidates(snapshot, "wa-rem-66")
+    assert [(item["kind"], item["ref_id"]) for item in candidates] == [
+        ("event", 66), ("med_intake", 46)
+    ]
+    assert gateway_run._pending_ack_candidates(snapshot, None) is None
+
+
+@pytest.mark.asyncio
+async def test_partial_pending_ack_preserves_applied_sidecar_with_residual(
+    monkeypatch, tmp_path
+):
+    snapshot = {
+        "target": "whatsapp:+77011102626",
+        "items": [
+            {"kind": "event", "ref_id": 66, "wa_message_ids": ["wa-rem-66"]},
+            {"kind": "med_intake", "ref_id": 46, "current_state": "pending",
+             "wa_message_ids": ["wa-med-46"]},
+        ],
+    }
+    partial = {
+        "status": "partial",
+        "residual": True,
+        "applied": [{"kind": "event", "ref_id": 66,
+                     "disposition": "cancel_occurrence"}],
+        "unresolved": 1,
+        "trusted_sidecar": "[Trusted FAM resolution: event 66 applied and verified; do not repeat.]",
+    }
+
+    monkeypatch.setattr(gateway_run, "_pending_acks_note", lambda *_args: "note")
+    monkeypatch.setattr(
+        gateway_run,
+        "_pending_ack_candidates",
+        lambda *_args: snapshot["items"],
+    )
+
+    async def fake_to_thread(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=["fam"], returncode=0,
+            stdout=json.dumps(partial), stderr="",
+        )
+
+    monkeypatch.setattr(gateway_run.asyncio, "to_thread", fake_to_thread)
+    result = await gateway_run._resolve_pending_ack_turn(
+        _quoted_event(), _source(), snapshot, {"fam_db_path": str(tmp_path / "assistant.db")}
+    )
+
+    assert result["status"] == "partial"
+    assert result["residual"] is True
+    assert "Trusted FAM resolution" in result["trusted_sidecar"]
 
 
 @pytest.mark.asyncio
@@ -382,5 +442,127 @@ async def test_pending_ack_composition_uses_real_fam_cli_and_db(
     assert "событие «Врач»" in api_content
     assert "Trusted FAM resolution" in api_content
     assert "отмени это" in captured["api_messages"][-1]["content"]
+    assert gateway_run._PENDING_ACK_RESIDUAL not in api_content
+    check.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_s2_composition_applies_event_and_med(
+    monkeypatch, tmp_path
+):
+    import sqlite3
+    import subprocess
+
+    repo = __import__("pathlib").Path(__file__).resolve().parents[2]
+    db_path = tmp_path / "private" / "amina" / "assistant.db"
+    db_path.parent.mkdir(parents=True)
+    env = dict(os.environ)
+    env.update({"FAM_DB": str(db_path), "PYTHONPATH": str(repo / "custom" / "fam")})
+    initialized = subprocess.run(
+        [sys.executable, "-m", "fam", "init", "--json"], cwd=repo,
+        env=env, capture_output=True, text=True,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO events(title,start_utc,created_at,updated_at) VALUES(?,?,?,?)",
+        ("Тренировка", "2099-09-04T12:00:00+00:00", now, now),
+    )
+    conn.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(1,'leave',?,?,?,?)", (now, "sent", now, now),
+    )
+    conn.execute(
+        "INSERT INTO reminders(event_id,kind,fire_at_utc,status,created_at,sent_at) "
+        "VALUES(1,'leave',?,?,?,NULL)", ("2099-09-04T12:00:00+00:00", "pending", now),
+    )
+    conn.execute(
+        "INSERT INTO meds(name,times,created_at,updated_at) VALUES(?,?,?,?)",
+        ("Мисол", json.dumps(["10:00"]), now, now),
+    )
+    conn.execute(
+        "INSERT INTO med_intakes(med_id,plan_ts_utc,status,created_at) VALUES(?,?,?,?)",
+        (1, now, "pending", now),
+    )
+    conn.execute(
+        "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
+        "VALUES('wa-rem-1','reminder',1,1,?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO sent_messages(wa_message_id,kind,ref_id,event_id,created_at) "
+        "VALUES('wa-med-1','med',1,1,?)", (now,),
+    )
+    conn.execute(
+        "INSERT INTO plans(title,status,prep_for_event_id,prep_when,created_at) VALUES(?,?,?,?,?)",
+        ("Взять форму", "open", 1, "departure", now),
+    )
+    conn.commit()
+    acks.write(conn, cfg={"target": "whatsapp:+77011102626"},
+               path=tmp_path / "pending-acks.json", now_utc=now)
+    conn.close()
+
+    classifier = tmp_path / "classifier-s2.py"
+    classifier.write_text(
+        "import json\n"
+        "print(json.dumps({'dispositions':["
+        "{'kind':'event','ref_id':1,'disposition':'cancel_occurrence'},"
+        "{'kind':'med_intake','ref_id':1,'disposition':'taken'}]}))\n",
+        encoding="utf-8",
+    )
+    fam_cfg = tmp_path / "fam-config-s2.json"
+    fam_cfg.write_text(json.dumps({
+        "gate_model": "test-model", "gate_provider": "test-provider",
+        "classifier_command": [sys.executable, str(classifier)],
+        "pending_acks_path": str(tmp_path / "pending-acks.json"),
+    }), encoding="utf-8")
+
+    runner = _runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        gateway_run, "_load_gateway_config",
+        lambda: {"pending_acks_file": str(tmp_path / "pending-acks.json"),
+                 "fam_db_path": str(db_path), "fam_config_path": str(fam_cfg)},
+    )
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model", {"api_key": "test-key", "base_url": "http://provider.test/v1",
+                        "provider": "openai", "api_mode": "chat_completions"}
+    )
+    runner._session_db = None
+    captured = {}
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        captured["api_messages"] = api_kwargs["messages"]
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Записала оба", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call)
+    event = MessageEvent(
+        text="Сегодня пропущу тренировку\nМисол приняла",
+        source=_source(), message_id="wamid-inbound-s2",
+        reply_to_message_id="wa-rem-1", reply_to_text="Напоминание о тренировке",
+    )
+
+    await runner._handle_message_with_agent(event, _source(), SESSION_KEY, 1)
+
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT status FROM events WHERE id=1").fetchone()[0] == "cancelled"
+    assert check.execute("SELECT status FROM med_intakes WHERE id=1").fetchone()[0] == "taken"
+    assert check.execute(
+        "SELECT status FROM plans WHERE prep_for_event_id=1"
+    ).fetchone()[0] == "dropped"
+    assert check.execute(
+        "SELECT COUNT(*) FROM reminders WHERE event_id=1 AND status='pending'"
+    ).fetchone()[0] == 0
+    assert json.loads((tmp_path / "pending-acks.json").read_text(encoding="utf-8"))["items"] == []
+    api_content = "\n".join(
+        message.get("content", "") for message in captured["api_messages"]
+    )
+    assert "Trusted FAM resolution: event 1" in api_content
+    assert "Trusted FAM resolution: med_intake 1" in api_content
+    assert "Сегодня пропущу тренировку" in api_content
+    assert "Мисол приняла" in api_content
     assert gateway_run._PENDING_ACK_RESIDUAL not in api_content
     check.close()
