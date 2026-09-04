@@ -1,16 +1,20 @@
 """Verify the source-declared count law over the frozen corpora. Fail-closed.
 
-The first version of this script printed its findings and exited zero whatever
-it found, skipped a missing corpus in silence, and never checked the capped
-`1,000+` captures at all -- while the note beside it claimed those were
-covered. A verdict command that cannot fail is not a verdict, so every
-assertion below exits non-zero on violation and the corpus itself is pinned by
-hash rather than discovered by glob.
+Two earlier versions of this file could not fail where it mattered. The first
+printed its findings and exited zero whatever it found, and never looked at the
+capped captures at all. The second gained a pinned corpus and a non-zero exit
+but still accepted a regression of the parse itself, a capped capture with no
+query header, and an "empty" page recognised only by two absences.
+
+Every check below therefore asserts an expected value rather than reporting an
+observed one, and every branch that could pass by omission has a positive
+requirement instead.
 """
 
 from __future__ import annotations
 
 import hashlib
+import html as html_module
 import pathlib
 import re
 import sys
@@ -31,23 +35,47 @@ EXPECTED = {
         24,
     ),
 }
-# Aggregate over sorted (name, sha256) of every capture. One line pins the
-# whole corpus: a changed, added or removed capture moves it.
 CORPUS_SHA256 = "3cc479812ec782b7f71f7209574d0ef06dd6f5b4f0c12f6e6072643d7589f9a7"
 OBSERVED_OUTPUT_CAP = 60
-# The only captures allowed to carry no count. Both are genuine empty result
-# surfaces; naming them keeps "absent" from becoming a silent skip.
-EXPECTED_COUNTLESS = 2
+# Asserted, not reported. A regression of the parse itself changes these
+# numbers while every per-capture rule still passes, which is exactly how the
+# previous version accepted `1,000+` being read as an exact count.
+EXPECTED_STATS = {
+    "captures": 120,
+    "exact": 75,
+    "lower_bound": 43,
+    "absent": 2,
+    "unparseable": 0,
+    "exact_match": 39,
+    "exact_gap": 36,
+}
 
 COUNT = re.compile(r'results-context-header__job-count">([^<]*)')
 QUERY = re.compile(r'results-context-header__query-search">([^<]*)')
 URN = re.compile(r"urn:li:jobPosting:(\d+)")
+H1 = re.compile(r"<h1\b[^>]*>(.*?)</h1>", re.S | re.I)
+# Positive evidence of an empty result surface. The rendered heading, not the
+# `no-results` class: that class is present on non-empty authenticated pages
+# too, so it distinguishes nothing on its own.
+EMPTY_HEADING_PREFIX = "we couldn't find a match for"
+EMPTY_MARKER_VERSION = "h1-normalised/2026-09-04"
 
 failures: list[str] = []
 
 
 def fail(message: str) -> None:
     failures.append(message)
+
+
+def normalise(text: str) -> str:
+    stripped = html_module.unescape(re.sub(r"<[^>]+>", " ", text))
+    return " ".join(stripped.replace("’", "'").replace(" ", " ").split()).lower()
+
+
+def has_empty_marker(html: str) -> bool:
+    return any(
+        normalise(m.group(1)).startswith(EMPTY_HEADING_PREFIX) for m in H1.finditer(html)
+    )
 
 
 def captures() -> list[tuple[str, pathlib.Path]]:
@@ -74,7 +102,7 @@ def corpus_digest(items: list[tuple[str, pathlib.Path]]) -> str:
 def parse_count(raw: str | None) -> tuple[str, int | None]:
     if raw is None:
         return ("absent", None)
-    text = raw.replace(",", "").replace(" ", "").strip()
+    text = raw.replace(",", "").replace(" ", "").strip()
     if text.endswith("+"):
         head = text[:-1]
         return ("lower_bound", int(head)) if head.isdigit() else ("unparseable", None)
@@ -89,75 +117,80 @@ def main() -> int:
         return 1
 
     digest = corpus_digest(items)
-    if CORPUS_SHA256 != "__PINNED__" and digest != CORPUS_SHA256:
+    if digest != CORPUS_SHA256:
         fail(f"corpus digest {digest} != pinned {CORPUS_SHA256}")
 
-    kinds = {"exact": 0, "lower_bound": 0, "absent": 0, "unparseable": 0}
-    exact_match = exact_gap = 0
-    ambiguous: list[str] = []
+    stats = {key: 0 for key in EXPECTED_STATS}
+    stats["captures"] = len(items)
 
     for label, path in items:
+        where = f"{label}/{path.name}"
         html = path.read_text(errors="replace")
         counts = COUNT.findall(html)
         queries = QUERY.findall(html)
         if len(counts) > 1:
-            fail(f"{label}/{path.name}: {len(counts)} count selectors, expected at most 1")
-        if len(queries) > 1:
-            fail(f"{label}/{path.name}: {len(queries)} query selectors, expected at most 1")
-
+            fail(f"{where}: {len(counts)} count selectors, expected at most 1")
         raw = counts[0].strip() if counts else None
         kind, value = parse_count(raw)
-        kinds[kind] += 1
-        # The identity unit is named on purpose: unique job URNs over the
-        # serialised snapshot. It is a snapshot surrogate, not the product's
-        # collected result identities, and the note says so.
+        stats[kind] += 1
         urns = len(set(URN.findall(html)))
+        empty = has_empty_marker(html)
+
+        if kind == "absent":
+            # Positive evidence, not two absences. A page with no count and no
+            # ids could be anything; the rendered empty-state heading is what
+            # says the source answered and answered with nothing.
+            if not empty:
+                fail(f"{where}: no count and no empty-state heading -- surface unidentified")
+            if urns != 0:
+                fail(f"{where}: empty surface carries {urns} job urns")
+            if queries:
+                fail(f"{where}: empty surface carries {len(queries)} query headers")
+            continue
+
+        # Any parsed count must be bound to exactly one rendered query header.
+        # "At most one" let a capped capture lose its binding unnoticed.
+        if len(queries) != 1:
+            fail(f"{where}: {len(queries)} query selectors for a {kind} count, expected exactly 1")
+        if empty:
+            fail(f"{where}: empty-state heading on a capture that reports a count")
 
         if kind == "unparseable":
-            fail(f"{label}/{path.name}: count {raw!r} did not parse")
-        elif kind == "absent":
-            if urns != 0 or queries:
-                fail(
-                    f"{label}/{path.name}: no count, but {urns} urns and "
-                    f"{len(queries)} query headers -- not an empty surface"
-                )
+            fail(f"{where}: count {raw!r} did not parse")
         elif kind == "exact":
-            if not queries:
-                fail(f"{label}/{path.name}: exact count without a query header")
             if value == OBSERVED_OUTPUT_CAP:
-                ambiguous.append(f"{label}/{path.name}")
+                fail(f"{where}: exact count equals the cap; completeness and truncation "
+                     "are indistinguishable and this case has no rule")
             elif value < OBSERVED_OUTPUT_CAP:
                 if urns == value:
-                    exact_match += 1
+                    stats["exact_match"] += 1
                 else:
-                    fail(f"{label}/{path.name}: exact {value} below cap but {urns} urns")
+                    fail(f"{where}: exact {value} below cap but {urns} snapshot urns")
             else:
                 if urns == OBSERVED_OUTPUT_CAP:
-                    exact_gap += 1
+                    stats["exact_gap"] += 1
                 else:
-                    fail(f"{label}/{path.name}: exact {value} above cap but {urns} urns")
+                    fail(f"{where}: exact {value} above cap but {urns} snapshot urns")
         elif kind == "lower_bound":
-            # Never checked by the first version of this script, while the note
-            # claimed it was.
             if urns != OBSERVED_OUTPUT_CAP:
-                fail(f"{label}/{path.name}: lower bound {raw} but {urns} urns")
+                fail(f"{where}: lower bound {raw} but {urns} snapshot urns")
 
-    if kinds["absent"] != EXPECTED_COUNTLESS:
-        fail(f"captures without a count: {kinds['absent']}, expected {EXPECTED_COUNTLESS}")
-    if ambiguous:
-        fail(f"exact count equal to the cap is unhandled: {ambiguous}")
+    for key, expected in EXPECTED_STATS.items():
+        if stats[key] != expected:
+            fail(f"stat {key}: expected {expected}, observed {stats[key]}")
 
-    print(
-        f"captures={len(items)} exact={kinds['exact']} lower_bound={kinds['lower_bound']} "
-        f"absent={kinds['absent']} exact_match={exact_match} exact_gap={exact_gap}"
-    )
+    print(" ".join(f"{key}={stats[key]}" for key in EXPECTED_STATS))
     print(f"corpus_sha256={digest}")
+    print(f"empty_marker={EMPTY_MARKER_VERSION}")
 
     if failures:
         for line in failures:
             print(f"FAIL {line}", file=sys.stderr)
         return 1
-    print("OK collected == min(declared, cap) holds for every capture")
+    # Two formulas, stated separately: one of them is censored at the source
+    # and cannot be checked against a value nobody published.
+    print("OK exact: snapshot_unique_job_urns == min(declared, cap)")
+    print("OK lower_bound: snapshot_unique_job_urns == cap")
     return 0
 
 
