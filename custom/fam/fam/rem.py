@@ -237,8 +237,6 @@ def ack_chain(conn, event_id, scope="all"):
     if scope == "prepare":
         sql += " AND kind='prepare'"
     cur = conn.execute(sql, params)
-    if cur.rowcount == 0:
-        raise ValueError(f"no pending reminders for event {event_id}")
     audit.log(conn, "rem.ack",
               {"event_id": event_id, "count": cur.rowcount, "scope": scope})
     return cur.rowcount

@@ -229,12 +229,15 @@ def test_postcondition_failure_rolls_back_without_sidecar(db, tmp_path, monkeypa
     _assert_unresolved_without_mutation(db, result, event_id, other_id)
 
 
-def test_second_rem_ack_is_observable_value_error(db, tmp_path):
+def test_second_rem_ack_is_idempotent_success_with_zero_effect(db):
     event_id, _ = _event_with_outbound(db)
-    rem.ack_chain(db, event_id)
+    assert rem.ack_chain(db, event_id) == 1
     db.commit()
-    with pytest.raises(ValueError):
-        rem.ack_chain(db, event_id)
+    assert rem.ack_chain(db, event_id) == 0
+    db.commit()
+    assert db.execute(
+        "SELECT COUNT(*) FROM reminders WHERE event_id=? AND status='pending'", (event_id,)
+    ).fetchone()[0] == 0
 
 
 def test_second_meds_take_is_observable_value_error(db):
