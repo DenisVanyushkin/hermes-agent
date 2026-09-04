@@ -870,6 +870,42 @@ def linkedin_safety_reason(
     return None
 
 
+_LINKEDIN_NO_MATCH_STATEMENT = re.compile(
+    r">[^<>]*\bno\s+matching\s+jobs\s+found\b[^<>]*<", re.I
+)
+
+
+def linkedin_search_matched_nothing(html: str) -> bool:
+    """Did the source say this search matched nothing?
+
+    An authenticated LinkedIn search that matches nothing does not render an
+    empty list. It states `No matching jobs found.` and then offers a block
+    headed `Jobs you may be interested in`, whose cards carry exactly the
+    markup results carry. Reading those as results turns a question nobody
+    answered into an answer.
+
+    Keyed on the statement rather than on the recommendation heading, and on
+    the statement alone rather than on both: the statement is the source's own
+    claim about the query, and acting on it can only ever discard rows from a
+    page that said nothing matched. The heading is corroboration, not the
+    trigger, so a rename of the block cannot re-open ingestion.
+
+    The pattern matches text between tags, not attribute values, because an
+    attribute lives inside `<...>` while `>` text `<` does not. Script bodies
+    are text by that definition too; in the captured corpus the statement
+    appears exactly once on each page that has it and never on a page with
+    results, so that looseness costs nothing measured -- but it is looseness,
+    not a guarantee, and a page that quoted the phrase in embedded JSON would
+    be read as empty.
+
+    This is not the existing `_LINKEDIN_EMPTY_STATE_HEADING`, which is the
+    logged-out `h1`. The authenticated wording differs and lives in a `p`, so
+    a reader keyed on the heading finds nothing here.
+    """
+
+    return bool(_LINKEDIN_NO_MATCH_STATEMENT.search(html or ""))
+
+
 def classify_linkedin_page(
     *, final_url: str, html: str, status: int | None = None
 ) -> LinkedInPageClassification:
@@ -880,11 +916,21 @@ def classify_linkedin_page(
     positive sign of any of the first four is unknown, never a wall: an
     invented wall is a claim about a market nobody looked at.
 
+    One thing does outrank the cards, and only one: the source stating that
+    this search matched nothing. Card-first precedence exists to stop a
+    sign-in prompt from disqualifying real results -- it is about what else
+    the page shows *around* its results. A page that says nothing matched is
+    not showing results at all, so the cards on it are somebody else's
+    question, and letting them win would record a market as looked-at on the
+    strength of a recommendation block.
+
     /checkpoint is deliberately absent from the auth-wall paths. It belongs to
     the safety axis as challenge_redirect, and the same page may carry a value
     on each axis; that is two measurements, not a contradiction.
     """
 
+    if linkedin_search_matched_nothing(html):
+        return "terminal_empty_surface"
     if _linkedin_public_card_count(final_url, html) > 0:
         return "usable_result_surface"
     if _is_linkedin_search_url(final_url) and any(
@@ -1234,6 +1280,14 @@ def _extract_linkedin_company_hint(html: str) -> str | None:
     return None
 
 def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+    # A search that matched nothing yields nothing, whatever cards the page
+    # goes on to offer. The check is here rather than in the classifier
+    # because the classifier decides nothing: it is called once, to write
+    # `trace["pages"][...]["page_classification"]`, and no caller reads the
+    # verdict. Recording the page honestly and still ingesting its
+    # recommendation block would leave the defect exactly where it was.
+    if linkedin_search_matched_nothing(html):
+        return []
     card_vacancies = _linkedin_card_vacancies_from_html(html, page_url=page_url)
     structured = [_vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url) for jobposting in _jobposting_objects(html)]
     # Do not ingest generic link-based LinkedIn rows here: they are a major source of
