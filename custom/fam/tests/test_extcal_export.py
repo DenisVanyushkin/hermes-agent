@@ -68,7 +68,7 @@ def test_write_calendar_unset_is_zero_network_noop(db, monkeypatch):
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=""), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
-                       "deleted": 0, "retained": 0, "errors": []}
+                       "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
 
 
@@ -299,7 +299,7 @@ def test_participant_set_change_triggers_a_fresh_put_via_body_hash(db, monkeypat
 
     c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:10:00+00:00")
     assert c2 == {"exported": 0, "updated": 1, "unchanged": 0,
-                  "deleted": 0, "retained": 0, "errors": []}
+                  "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert calls == ["PUT", "PUT"]
 
 
@@ -327,7 +327,7 @@ def test_second_export_of_unchanged_event_touches_no_network(db, monkeypatch):
     # differ if it were part of the hash) but the SAME event content.
     c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:15:00+00:00")
     assert c2 == {"exported": 0, "updated": 0, "unchanged": 1,
-                  "deleted": 0, "retained": 0, "errors": []}
+                  "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert calls == ["PUT"]  # no new network call at all
 
 
@@ -346,7 +346,7 @@ def test_changed_time_triggers_put_with_if_match_etag(db, monkeypatch):
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     href = _seed_export_row(db, event["id"], etag='"old-etag"',
-                             body_hash="not-the-real-hash")
+                             body_hash="v2:" + "0" * 64)
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["updated"] == 1
@@ -358,10 +358,10 @@ def test_changed_time_triggers_put_with_if_match_etag(db, monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# requirement #5: 412 conflict -> re-read (GET) + retry ONCE
+# S4: 412 proves the current remote body before any retry
 # ---------------------------------------------------------------------
 
-def test_412_conflict_is_reread_and_retried_once_then_succeeds(db, monkeypatch):
+def test_412_remote_desired_is_recorded_without_retry(db, monkeypatch):
     calls = []
 
     def fake_open(req, timeout):
@@ -370,22 +370,22 @@ def test_412_conflict_is_reread_and_retried_once_then_succeeds(db, monkeypatch):
         if method == "PUT" and calls.count("PUT") == 1:
             return extcal.Response(412, b"", {})
         if method == "GET":
-            return extcal.Response(200, b"", {"ETag": '"fresh-etag"'})
-        if method == "PUT" and calls.count("PUT") == 2:
-            return extcal.Response(201, b"", {"ETag": '"final-etag"'})
+            return extcal.Response(
+                200, extcal._build_export_vevent(event, "", [], TEST_NOW).encode(),
+                {"ETag": '"fresh-etag"'})
         raise AssertionError(f"unexpected extra call: {calls}")
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
-    _seed_export_row(db, event["id"], etag='"old-etag"', body_hash="not-the-real-hash")
+    _seed_export_row(db, event["id"], etag='"old-etag"', body_hash="v2:" + "0" * 64)
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["updated"] == 1
     assert counts["errors"] == []
-    assert calls == ["PUT", "GET", "PUT"]
+    assert calls == ["PUT", "GET"]
 
     row = db.execute("SELECT * FROM ext_exports WHERE event_id=?", (event["id"],)).fetchone()
-    assert row["etag"] == '"final-etag"'
+    assert row["etag"] == '"fresh-etag"'
 
 
 def test_412_conflict_retry_also_failing_is_recorded_as_one_error_not_retried_again(db, monkeypatch):
@@ -406,7 +406,7 @@ def test_412_conflict_retry_also_failing_is_recorded_as_one_error_not_retried_ag
     assert counts["exported"] == 0
     assert len(counts["errors"]) == 1
     assert counts["errors"][0]["action"] == "insert"
-    assert calls.count("PUT") == 2  # exactly one retry -- never a second
+    assert calls.count("PUT") == 1
     assert calls.count("GET") == 1
 
 
@@ -459,7 +459,7 @@ def test_cancelled_event_triggers_delete_and_drops_ext_exports_row(db, monkeypat
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
-                       "deleted": 1, "retained": 0, "errors": []}
+                       "deleted": 1, "retained": 0, "errors": [], "conflicts": []}
     assert calls == [("DELETE", href, '"e5"')]
 
     assert db.execute(
@@ -481,7 +481,7 @@ def test_done_event_previously_exported_is_also_deleted(db, monkeypatch):
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
-    _seed_export_row(db, event["id"])
+    _seed_export_row(db, event["id"], body_hash="v2:" + "0" * 64)
     cal.done(db, event["id"])
     db.commit()
 
@@ -504,7 +504,7 @@ def test_owner_flipped_away_from_hermes_after_export_is_also_deleted(db, monkeyp
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
-    _seed_export_row(db, event["id"])
+    _seed_export_row(db, event["id"], body_hash="v2:" + "0" * 64)
     db.execute("UPDATE events SET owner='iphone' WHERE id=?", (event["id"],))
     db.commit()
 
@@ -527,7 +527,7 @@ def test_start_moved_beyond_horizon_after_export_is_retained_and_updated(db, mon
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
-    _seed_export_row(db, event["id"])
+    _seed_export_row(db, event["id"], body_hash="v2:" + "0" * 64)
     # TEST_NOW is 2037-07-15; default extcal_horizon_weeks=8 -> window ends
     # ~2037-09-09. Push start_utc well past that.
     db.execute("UPDATE events SET start_utc=? WHERE id=?",
@@ -553,7 +553,7 @@ def test_deleted_href_is_treated_as_already_gone_success(db, monkeypatch):
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
-    _seed_export_row(db, event["id"])
+    _seed_export_row(db, event["id"], body_hash="v2:" + "0" * 64)
     cal.cancel(db, event["id"])
     db.commit()
 
@@ -578,7 +578,7 @@ def test_owner_iphone_event_never_exported(db, monkeypatch):
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
-                       "deleted": 0, "retained": 0, "errors": []}
+                       "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
 
 
 # ---------------------------------------------------------------------
@@ -608,7 +608,7 @@ def test_adopted_event_with_external_uid_is_never_exported(db, monkeypatch):
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
-                       "deleted": 0, "retained": 0, "errors": []}
+                       "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
 
 

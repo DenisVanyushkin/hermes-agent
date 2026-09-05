@@ -2883,56 +2883,114 @@ def _export_to_ics_utc(value):
     return dt.strftime("%Y%m%dT%H%M%SZ") if dt is not None else None
 
 
-def _export_body_hash(event, location, participants):
-    """sha256 over EXACTLY (title, start_utc, end_utc, location,
-    participant names) -- the fields that matter to what her phone
-    actually displays. Text is normalized via `_pc_norm_text` and
-    datetimes via `_coerce_utc_dt`/`_iso` (the SAME normalization
-    `_event_diff` applies to both sides of its own comparison), so a
-    harmless formatting difference in the STORED start_utc/end_utc string
-    (`+00:00` vs `Z`, a dropped `:00` seconds field, ...) is never
-    mistaken for a real change -- exactly the "лишний PUT" this hash
-    exists to gate (requirement #4).
+_EXPORT_HASH_V1 = "v1"
+_EXPORT_HASH_V2 = "v2"
 
-    Participants (fix-round 1, finding N1) are folded in via
-    `mail.participant_names` -- fix-round 2, finding R1: this is now the
-    ONLY place that join is implemented (this module used to keep its own
-    copy of the identical one-liner; see `mail.participant_names`'s own
-    docstring for why that was worth removing rather than leaving as a
-    harmless-looking duplicate). `_export_participants`' own query is
-    already `ORDER BY name COLLATE NOCASE`, so the join is stable across
-    ticks regardless of insert order, and a participant-set edit (add/
-    remove/rename) changes this hash and therefore DOES trigger a fresh
-    PUT -- unlike a location edit that resolves to the same place name,
-    there is no "same meaning, different spelling" case to normalize away
-    here beyond the ordering already handled by the query itself.
 
-    Deliberately EXCLUDED from the hash:
-      - `id`/the UID: constant per event for as long as it is exported at
-        all -- it is already the `ext_exports` row's own primary key, not
-        something that needs to also be inside the hash of its BODY;
-      - DTSTAMP: a fresh wall-clock value every single time this function
-        would be called to build a NEW body -- including it would force a
-        PUT on literally every tick, defeating the whole point of this
-        hash;
-      - status: only `status='active'` events ever reach this function at
-        all (`export_own`'s own eligibility query) -- a transition to
-        cancelled/done routes through the DELETE path instead (see
-        `_export_delete_event`), never through a PUT whose hash this
-        gates, so status never actually varies among the rows that call
-        this.
-    """
-    start_dt = _coerce_utc_dt(event.get("start_utc"))
-    end_dt = _coerce_utc_dt(event.get("end_utc"))
-    fields = (
-        _pc_norm_text(event.get("title")),
-        _iso(start_dt) or "",
-        _iso(end_dt) or "",
+def _export_semantic_hash(uid, title, start_utc, end_utc, location,
+                          participant_names, version):
+    fields = []
+    if version == _EXPORT_HASH_V2:
+        fields.append(_pc_norm_text(uid))
+    fields.extend((
+        _pc_norm_text(title),
+        _iso(_coerce_utc_dt(start_utc)) or "",
+        _iso(_coerce_utc_dt(end_utc)) or "",
         _pc_norm_text(location),
-        mail.participant_names(participants),
-    )
+        _pc_norm_text(participant_names),
+    ))
     raw = "\x1f".join(fields)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _export_body_hash_v1(event, location, participants):
+    """Legacy bare hash used before S4 (UID excluded)."""
+    return _export_semantic_hash(
+        _export_uid(event["id"]), event.get("title"), event.get("start_utc"),
+        event.get("end_utc"), location, mail.participant_names(participants),
+        _EXPORT_HASH_V1)
+
+
+def _export_body_hash_v2(event, location, participants):
+    """Current hash, including the stable event UID and version prefix."""
+    end_utc = event.get("end_utc")
+    if end_utc is None:
+        start_dt = _coerce_utc_dt(event.get("start_utc"))
+        end_utc = start_dt + timedelta(hours=1) if start_dt else None
+    return "v2:" + _export_semantic_hash(
+        _export_uid(event["id"]), event.get("title"), event.get("start_utc"),
+        end_utc, location, mail.participant_names(participants), _EXPORT_HASH_V2)
+
+
+def _export_body_hash(event, location, participants):
+    """Versioned v2 hash over the managed exported fields.
+
+    A stored value with no prefix is interpreted as v1 exactly; its length
+    and hexadecimal shape are never used as a version heuristic.
+    """
+    return _export_body_hash_v2(event, location, participants)
+
+
+def _export_stored_hash(value):
+    value = value or ""
+    for version in (_EXPORT_HASH_V1, _EXPORT_HASH_V2):
+        prefix = version + ":"
+        if value.startswith(prefix):
+            return version, value[len(prefix):]
+    return _EXPORT_HASH_V1, value
+
+
+def _export_hash_for_version(event, location, participants, version):
+    end_utc = event.get("end_utc")
+    if version == _EXPORT_HASH_V2 and end_utc is None:
+        start_dt = _coerce_utc_dt(event.get("start_utc"))
+        end_utc = start_dt + timedelta(hours=1) if start_dt else None
+    return _export_semantic_hash(
+        _export_uid(event["id"]), event.get("title"), event.get("start_utc"),
+        end_utc, location, mail.participant_names(participants), version)
+
+
+def _export_hash_state(event, location, participants, stored):
+    """Classify one journal value without inspecting its payload shape."""
+    version, payload = _export_stored_hash(stored)
+    legacy = _export_hash_for_version(event, location, participants, _EXPORT_HASH_V1)
+    current = _export_hash_for_version(event, location, participants, _EXPORT_HASH_V2)
+    if version == _EXPORT_HASH_V2 and payload == current:
+        return "unchanged", "v2:" + current
+    if version == _EXPORT_HASH_V1 and payload == legacy:
+        return "rebaseline", "v2:" + current
+    return "changed", "v2:" + current
+
+
+def _remote_description_names(text):
+    for line in _unfold(text or ""):
+        parsed = _split_property_line(line)
+        if parsed and parsed[0] == "DESCRIPTION":
+            value = _unescape_text(parsed[2])
+            prefix = "Участники: "
+            if value.startswith(prefix):
+                return value[len(prefix):]
+    return ""
+
+
+def _export_remote_hashes(text):
+    """Return v1/v2 semantic hashes for exactly one valid VEVENT."""
+    components, count = _parse_ics_components(text or "")
+    if count != 1 or len(components) != 1:
+        return None
+    component = components[0]
+    uid = component.get("uid")
+    if not uid or component.get("dtstart_utc") is None:
+        return None
+    names = _remote_description_names(text)
+    values = {}
+    for version in (_EXPORT_HASH_V1, _EXPORT_HASH_V2):
+        values[version] = _export_semantic_hash(
+            uid, component.get("summary"), component.get("dtstart_utc"),
+            component.get("dtend_utc"), component.get("location"), names,
+            version)
+    values["uid"] = uid
+    return values
 
 
 def _build_export_vevent(event, location, participants, now_dt):
@@ -3046,14 +3104,12 @@ def _export_put(cfg, url, body, etag, request):
 
 
 def _export_reread_etag(cfg, url, request):
-    """Requirement #5's "перечитать" half of "перечитать и повторить один
-    раз": a plain GET of the resource we just failed to PUT (412), to pick
-    up whatever etag it actually holds right now. Returns None (never
-    raises) on any failure -- the caller (`_export_put_event`) treats a
-    None fresh etag as "retry unconditionally, no If-Match at all", which
-    is safe here specifically because this collection holds nothing but
-    our own prior writes -- there is no THIRD PARTY's concurrent edit this
-    unconditional retry could ever clobber."""
+    """Read the current ETag after a 412.
+
+    A missing ETag is only a read failure. This helper never authorizes an
+    unconditional retry; callers must prove that their conditional write
+    cannot clobber a concurrent edit.
+    """
     resp = request("GET", url, headers=_export_headers(cfg), timeout=DEFAULT_TIMEOUT)
     if resp is None or resp.status not in (200, 207):
         return None
@@ -3230,327 +3286,6 @@ def resolve_export_issue(conn, event_id, target=_EXPORT_ISSUE_TARGET):
     """Clear the terminal export issue for one target/event pair."""
     return _export_issue_resolve(conn, event_id, target)
 
-
-
-def _export_put_event(conn, cfg, request, event, exp, location, participants, new_hash, now_dt):
-    """One event -> PUT (fresh insert when `exp` is None, update -- same
-    href/etag -- otherwise). Raises `_ExportFailure` on any non-2xx
-    outcome after the one 412 retry (requirement #5); writes the
-    `ext_exports` bookkeeping row itself on success, but does NOT commit
-    (that is `_export_commit_one`'s job, same contract as `apply_changes`'
-    own `_apply_*` helpers)."""
-    is_update = exp is not None
-    href = exp["href"] if is_update else _export_href(
-        cfg.get("extcal_write_calendar"), event["id"])
-    etag = exp.get("etag") if is_update else None
-    body = _build_export_vevent(event, location, participants, now_dt)
-
-    ok, new_etag, status, conflict = _export_put(cfg, href, body, etag, request)
-    if conflict:
-        # Requirement #5: exactly one re-read-and-retry on a 412 ETag
-        # conflict -- never a second retry, regardless of THIS attempt's
-        # own outcome.
-        fresh_etag = _export_reread_etag(cfg, href, request)
-        ok, new_etag, status, _conflict2 = _export_put(cfg, href, body, fresh_etag, request)
-    if not ok:
-        raise _ExportFailure(f"PUT {href} failed (status={status})", status=status)
-    _export_record(conn, event["id"], href, new_etag, new_hash, _iso(now_dt))
-
-
-def _export_delete_event(conn, cfg, request, event_id, exp):
-    """One previously-exported event that is no longer eligible (design
-    doc requirement #6: cancelled/deleted -- and, by this function's own
-    scoping in `export_own`, also 'done', re-owned away from 'hermes', or
-    scrolled outside the window, which are exactly as wrong to leave
-    behind on her phone as a plain cancellation) -> DELETE its iCloud
-    resource and drop its `ext_exports` row. Raises `_ExportFailure` on a
-    non-2xx/non-404 DELETE outcome; does NOT commit (see
-    `_export_put_event`'s own docstring for the shared contract).
-
-    `exp.get("href")` missing (should not happen in practice -- see
-    `_export_record`, which always writes href together with body_hash --
-    but defensive regardless) skips the network call entirely: there is
-    nothing on the server this row could even point at, so the only
-    correct action is dropping the local bookkeeping row.
-    """
-    href = exp.get("href")
-    if href:
-        ok, status = _export_delete(cfg, href, exp.get("etag"), request)
-        if not ok:
-            raise _ExportFailure(f"DELETE {href} failed (status={status})", status=status)
-    conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
-
-
-def _export_commit_one(conn, event_id, action, count_key, counts, fn,
-                       now_utc=None):
-    """Run one export with per-row transaction and diagnostic isolation."""
-    try:
-        fn()
-    except Exception as e:
-        status = getattr(e, "status", None)
-        reason_code = getattr(e, "reason_code", "export_error")
-        exception_type = type(e).__name__[:100]
-        safe_error = reason_code
-        if status is not None:
-            safe_error += f" (status={status})"
-        error_entry = {
-            "event_id": event_id,
-            "action": action,
-            "error": safe_error,
-            "reason_code": reason_code,
-            "http_status": status,
-            "audit_recorded": False,
-        }
-        counts["errors"].append(error_entry)
-
-        try:
-            conn.rollback()
-        except Exception:
-            return
-
-        issue_recorded = True
-        issue_write_error = None
-        issue_exception_type = None
-        try:
-            _export_issue_upsert(
-                conn, event_id, action, status=status,
-                kind="error", reason_code=reason_code, now_utc=now_utc)
-        except sqlite3.IntegrityError as issue_exc:
-            issue_recorded = False
-            issue_exception_type = type(issue_exc).__name__[:100]
-            try:
-                event_exists = conn.execute(
-                    "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
-            except Exception:
-                issue_write_error = "issue_lookup_error"
-            else:
-                issue_write_error = (
-                    "issue_integrity_error" if event_exists
-                    else "orphan_event")
-        except Exception as issue_exc:
-            issue_recorded = False
-            issue_write_error = "issue_write_error"
-            issue_exception_type = type(issue_exc).__name__[:100]
-
-        audit_payload = {
-            "event_id": event_id,
-            "action": _export_issue_action(action),
-            "kind": "error",
-            "reason_code": reason_code,
-            "http_status": status,
-            "exception_type": exception_type,
-            "issue_recorded": issue_recorded,
-        }
-        if issue_write_error:
-            audit_payload["issue_write_error"] = issue_write_error
-        if issue_exception_type:
-            audit_payload["issue_exception_type"] = issue_exception_type
-
-        try:
-            audit.log(conn, "cal.ext.export_error", audit_payload)
-            conn.commit()
-            error_entry["audit_recorded"] = True
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
-        return
-    _export_issue_resolve(conn, event_id)
-    counts[count_key] += 1
-    audit.log(conn, "cal.ext.export", {
-        "event_id": event_id, "action": _export_issue_action(action)})
-    conn.commit()
-
-
-
-def _export_plan(conn, cfg, now_dt):
-    """Plan reverse writes from explicit lifecycle reasons.
-
-    The horizon gates a first export only.  Once an event has an
-    ``ext_exports`` row, an active past event is retained without any
-    network operation and an active future event remains eligible for an
-    ordinary PUT/unchanged comparison even when it is beyond the horizon.
-    """
-    cfg = cfg or {}
-    horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
-    window_start = now_dt - timedelta(days=1)
-    window_end = now_dt + timedelta(weeks=horizon_weeks)
-    events = {
-        row["id"]: dict(row)
-        for row in conn.execute("SELECT * FROM events").fetchall()
-    }
-    exported = {
-        row["event_id"]: dict(row)
-        for row in conn.execute("SELECT * FROM ext_exports").fetchall()
-    }
-    plan = []
-
-    def write_entry(event, exp, reason):
-        location = _export_location(conn, event)
-        participants = _export_participants(conn, event["id"])
-        new_hash = _export_body_hash(event, location, participants)
-        action = "update" if exp is not None else "insert"
-        if exp is not None and exp.get("body_hash") == new_hash:
-            action = "unchanged"
-        return {
-            "event_id": event["id"], "action": action, "reason": reason,
-            "event": event, "export": exp, "location": location,
-            "participants": participants, "new_hash": new_hash,
-        }
-
-    for event_id, exp in exported.items():
-        event = events.get(event_id)
-        if event is None:
-            # A physical event deletion is unsupported by the domain, but
-            # preserve the established cleanup behavior for an orphan row.
-            plan.append({"event_id": event_id, "action": "delete",
-                         "reason": "cancelled", "event": None,
-                         "export": exp})
-            continue
-        status = event.get("status")
-        if status == "cancelled":
-            reason = "cancelled"
-        elif status == "done":
-            reason = "done"
-        elif event.get("owner") != "hermes":
-            reason = "owner_changed"
-        elif event.get("external_uid") is not None:
-            reason = "external_uid"
-        else:
-            start_dt = _coerce_utc_dt(event.get("start_utc"))
-            if start_dt is None:
-                plan.append({"event_id": event_id, "action": "retain",
-                             "reason": "not_yet_eligible", "event": event,
-                             "export": exp})
-                continue
-            if start_dt < window_start:
-                plan.append({"event_id": event_id, "action": "retain",
-                             "reason": "past_retained", "event": event,
-                             "export": exp})
-                continue
-            reason = "future_retained" if start_dt > window_end else "in_window"
-            plan.append(write_entry(event, exp, reason))
-            continue
-        plan.append({"event_id": event_id, "action": "delete", "reason": reason,
-                     "event": event, "export": exp})
-
-    for event in events.values():
-        if event["id"] in exported:
-            continue
-        if (event.get("owner") != "hermes"
-                or event.get("external_uid") is not None
-                or event.get("status") != "active"):
-            continue
-        start_dt = _coerce_utc_dt(event.get("start_utc"))
-        if start_dt is None or start_dt < window_start:
-            continue
-        if start_dt > window_end:
-            plan.append({"event_id": event["id"], "action": "retain",
-                         "reason": "not_yet_eligible", "event": event,
-                         "export": None})
-            continue
-        plan.append(write_entry(event, None, "in_window"))
-    return plan
-
-
-def export_own(conn, cfg, request=None, now_utc=None):
-    """Reverse write (Task 7): PUT every `owner='hermes'` event inside
-    `[today-1d, today+extcal_horizon_weeks]` (recurring series' individual
-    occurrences included automatically -- they are ordinary materialized
-    `events` rows with `owner='hermes'` by default, same query, no special
-    casing needed) into the "Гермес" collection (`extcal_write_calendar`),
-    without VALARM -- so her iPhone shows them without ringing for them.
-    `owner='iphone'` rows are NEVER touched here (the query's own `WHERE
-    owner='hermes'` makes them structurally unreachable, the same
-    guarantee `plan_changes`' rule #3 gives the import direction).
-
-    Adopted rows excluded (final review, finding N3): an `owner='hermes'`
-    row with a non-NULL `external_uid` was imported from HER OWN iCloud
-    calendar and later adopted (`fam cal adopt`) -- it already lives in
-    her calendar under its original CalDAV resource; that resource is
-    untouched by adoption (only its VALARM is stripped, via `drop_valarm`,
-    a completely separate write path below). Exporting it here as well
-    would PUT a second copy into the "Гермес" collection, so she would
-    see every adopted occurrence twice on her phone: once under its
-    original calendar, once more under "Гермес". The eligibility query's
-    own `AND external_uid IS NULL` excludes exactly these rows -- a plain
-    Hermes-native event (never touched by extcal's import direction at
-    all) always has `external_uid IS NULL`, so this changes nothing for
-    the common case this function existed for before adoption existed.
-
-    Returns counts: `{exported, updated, unchanged, deleted, retained, errors}`.
-      - `exported`: a brand-new PUT (no prior `ext_exports` row).
-      - `updated`: a PUT for an event whose `body_hash` changed since its
-        last export (time/title/location edit).
-      - `unchanged`: `body_hash` matched -- ZERO network calls for this
-        event (requirement #4).
-      - `deleted`: a DELETE for an explicit lifecycle change (cancelled,
-        done, re-owned away from 'hermes', or a legacy external UID).
-      - `retained`: an existing active past export, or a new event beyond
-        the first-export horizon, that makes no network call.
-      - `errors`: a list of `{event_id, action, error}` dicts, one per
-        event whose PUT/DELETE ultimately failed -- mirrors
-        `apply_changes`' own `errors` shape closely enough that a caller
-        (T7's `cli.py` tick wiring) can fold both into one `tick.error`
-        message the same way (requirement #10).
-
-    `extcal_write_calendar` unset/blank -> hard no-op (requirement #8):
-    returns the all-zero counts above IMMEDIATELY -- this is the ONLY
-    early-return branch in this function, and it comes before even a
-    single `conn.execute()`, let alone a network call. This matters for a
-    fresh install: T10 (a separate, later task) is what actually creates
-    the "Гермес" collection in her iCloud and fills in this config key;
-    until then, this function must be provably inert.
-
-    Never calls `gate.deliver` (invariant #1, same as every other extcal
-    entry point) -- this module does not even import `gate`, so there is
-    structurally nothing on any path here that could reach it.
-
-    Never raises: every per-event PUT/DELETE goes through
-    `_export_commit_one`'s per-row try/except (same isolation contract as
-    `apply_changes`' own `_apply_one`) -- one event's transport failure,
-    malformed row, or unexpected exception is recorded in `errors` and
-    every OTHER event in this same batch still gets processed.
-    """
-    cfg = cfg or {}
-    write_url = (cfg.get("extcal_write_calendar") or "").strip()
-    counts = {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0,
-              "retained": 0, "errors": []}
-    if not write_url:
-        return counts
-    request = request or _request
-
-    now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
-    for item in _export_plan(conn, cfg, now_dt):
-        event_id = item["event_id"]
-        action = item["action"]
-        if action == "retain":
-            if _export_issue_resolve(conn, event_id):
-                conn.commit()
-            counts["retained"] += 1
-            continue
-        if action == "unchanged":
-            if _export_issue_resolve(conn, event_id):
-                conn.commit()
-            counts["unchanged"] += 1
-            continue
-        if action == "delete":
-            _export_commit_one(
-                conn, event_id, action, "deleted", counts,
-                lambda item=item, event_id=event_id: _export_delete_event(
-                    conn, cfg, request, event_id, item["export"]),
-                now_utc=now_dt)
-            continue
-        count_key = "updated" if action == "update" else "exported"
-        _export_commit_one(
-            conn, event_id, action, count_key, counts,
-            lambda item=item: _export_put_event(
-                conn, cfg, request, item["event"], item["export"],
-                item["location"], item["participants"], item["new_hash"], now_dt),
-            now_utc=now_dt)
-
-    return counts
 
 
 # ---- adopt: strip VALARM from HER OWN copy (Task 9) ------------------
@@ -3746,3 +3481,505 @@ def drop_valarm(cfg, href, etag, request=None):
     if not ok:
         return False, None, f"PUT {href} failed (status={status})"
     return True, new_etag, None
+
+# ---- S4: conditional export reconciliation -------------------------------
+
+# ---- S4: conditional export reconciliation -------------------------------
+
+
+class _ExportConflict(Exception):
+    """A remote edit was proved to differ from both local snapshots."""
+
+    def __init__(self, event_id, action="update"):
+        super().__init__("remote conflict")
+        self.event_id = event_id
+        self.action = action
+        self.reason_code = "conflict"
+
+
+def _s4_get_resource(cfg, url, request):
+    if not url or not _scheme_and_host_ok(url):
+        return None
+    try:
+        return request("GET", url, headers=_export_headers(cfg),
+                       timeout=DEFAULT_TIMEOUT)
+    except Exception as exc:
+        raise _ExportFailure("GET failed", reason_code="invalid_response") from exc
+
+
+def _s4_remote_state(response, event):
+    if response is None or response.status not in (200, 207):
+        raise _ExportFailure("GET returned no usable resource",
+                             status=getattr(response, "status", None),
+                             reason_code="invalid_response")
+    hashes = _export_remote_hashes(response.text or "")
+    expected_uid = _export_uid(event["id"])
+    if hashes is None or hashes.get("uid") != expected_uid:
+        raise _ExportFailure("GET resource UID mismatch", status=response.status,
+                             reason_code="invalid_response")
+    etag = (response.headers.get("ETag") or response.headers.get("Etag")
+            or response.headers.get("etag"))
+    return hashes, etag
+
+
+def _s4_record_success(conn, event_id, href, etag, new_hash, now_dt):
+    _export_record(conn, event_id, href, etag, new_hash, _iso(now_dt))
+
+
+def _s4_put_after_412(conn, cfg, request, event, exp, href, body,
+                      new_hash, now_dt):
+    response = _s4_get_resource(cfg, href, request)
+    if response is not None and response.status in (404, 410):
+        raise _ExportFailure("resource disappeared after PUT 412",
+                             status=response.status,
+                             reason_code="invalid_response")
+    remote, fresh_etag = _s4_remote_state(response, event)
+    desired = new_hash[3:] if new_hash.startswith("v2:") else new_hash
+    if remote["v2"] == desired:
+        _s4_record_success(conn, event["id"], href, fresh_etag, new_hash, now_dt)
+        return
+
+    last_version, last_hash = _export_stored_hash(
+        exp.get("body_hash") if exp is not None else None)
+    if exp is not None and remote[last_version] == last_hash:
+        ok, etag, status, conflict = _export_put(
+            cfg, href, body, fresh_etag, request)
+        if conflict:
+            raise _ExportFailure("repeated PUT 412", status=412)
+        if not ok:
+            raise _ExportFailure(f"PUT {href} failed (status={status})",
+                                 status=status)
+        _s4_record_success(conn, event["id"], href, etag, new_hash, now_dt)
+        return
+    raise _ExportConflict(event["id"], "update" if exp is not None else "insert")
+
+
+def _s4_legacy_preflight(conn, cfg, request, event, exp, location,
+                         participants, href, body, new_hash, now_dt):
+    version, stored = _export_stored_hash(exp.get("body_hash"))
+    if version != _EXPORT_HASH_V1:
+        return False
+    legacy = _export_hash_for_version(event, location, participants, _EXPORT_HASH_V1)
+    if stored == legacy:
+        _s4_record_success(conn, event["id"], href, exp.get("etag"),
+                           new_hash, now_dt)
+        return True
+    response = _s4_get_resource(cfg, href, request)
+    remote, fresh_etag = _s4_remote_state(response, event)
+    desired = new_hash[3:]
+    if remote["v2"] == desired:
+        _s4_record_success(conn, event["id"], href, fresh_etag, new_hash, now_dt)
+        return True
+    if remote["v1"] == stored:
+        ok, etag, status, conflict = _export_put(
+            cfg, href, body, fresh_etag, request)
+        if conflict:
+            _s4_put_after_412(conn, cfg, request, event, exp, href, body,
+                              new_hash, now_dt)
+        elif not ok:
+            raise _ExportFailure(f"PUT {href} failed (status={status})",
+                                 status=status)
+        else:
+            _s4_record_success(conn, event["id"], href, etag, new_hash, now_dt)
+        return True
+    raise _ExportConflict(event["id"], "update")
+
+
+def _export_put_event(conn, cfg, request, event, exp, location, participants,
+                      new_hash, now_dt):
+    is_update = exp is not None
+    href = exp["href"] if is_update else _export_href(
+        cfg.get("extcal_write_calendar"), event["id"])
+    etag = exp.get("etag") if is_update else None
+    body = _build_export_vevent(event, location, participants, now_dt)
+    if is_update and _s4_legacy_preflight(
+            conn, cfg, request, event, exp, location, participants,
+            href, body, new_hash, now_dt):
+        return
+    ok, new_etag, status, conflict = _export_put(cfg, href, body, etag, request)
+    if conflict:
+        _s4_put_after_412(conn, cfg, request, event, exp, href, body,
+                          new_hash, now_dt)
+    elif not ok:
+        raise _ExportFailure(f"PUT {href} failed (status={status})", status=status)
+    else:
+        _s4_record_success(conn, event["id"], href, new_etag, new_hash, now_dt)
+
+
+def _s4_delete_event(conn, cfg, request, event_id, exp):
+    href = exp.get("href")
+    if not href:
+        conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
+        return
+    ok, status = _export_delete(cfg, href, exp.get("etag"), request)
+    if ok:
+        conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
+        return
+    if status != 412:
+        raise _ExportFailure(f"DELETE {href} failed (status={status})", status=status)
+    response = _s4_get_resource(cfg, href, request)
+    if response is not None and response.status in (404, 410):
+        conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
+        return
+    fake_event = {"id": event_id}
+    remote, fresh_etag = _s4_remote_state(response, fake_event)
+    if remote["uid"] != _export_uid(event_id):
+        raise _ExportFailure("DELETE GET resource UID mismatch",
+                             status=response.status,
+                             reason_code="invalid_response")
+    ok, status = _export_delete(cfg, href, fresh_etag, request)
+    if not ok:
+        raise _ExportFailure(f"DELETE {href} failed (status={status})", status=status)
+    conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
+
+
+def _s4_plan_entry(conn, event, exp, reason):
+    location = _export_location(conn, event)
+    participants = _export_participants(conn, event["id"])
+    state, new_hash = _export_hash_state(
+        event, location, participants, exp.get("body_hash") if exp else None)
+    if exp is None:
+        action = "insert"
+    elif state == "unchanged":
+        action = "unchanged"
+    elif state == "rebaseline":
+        action = "rebaseline"
+    else:
+        action = "update"
+    return {"event_id": event["id"], "action": action, "reason": reason,
+            "event": event, "export": exp, "location": location,
+            "participants": participants, "new_hash": new_hash,
+            "hash_state": state}
+
+
+def _export_plan(conn, cfg, now_dt):
+    cfg = cfg or {}
+    horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
+    window_start = now_dt - timedelta(days=1)
+    window_end = now_dt + timedelta(weeks=horizon_weeks)
+    events = {row["id"]: dict(row)
+              for row in conn.execute("SELECT * FROM events").fetchall()}
+    exported = {row["event_id"]: dict(row)
+                for row in conn.execute("SELECT * FROM ext_exports").fetchall()}
+    quarantined = {
+        row["event_id"] for row in conn.execute(
+            "SELECT event_id FROM extcal_export_issues "
+            "WHERE target='hermes' AND kind='conflict'").fetchall()
+    }
+    plan = []
+    for event_id, exp in exported.items():
+        event = events.get(event_id)
+        if event_id in quarantined:
+            plan.append({"event_id": event_id, "action": "quarantine",
+                         "reason": "conflict", "event": event, "export": exp})
+            continue
+        if event is None:
+            plan.append({"event_id": event_id, "action": "delete",
+                         "reason": "cancelled", "event": None, "export": exp})
+            continue
+        status = event.get("status")
+        if status == "cancelled":
+            reason = "cancelled"
+        elif status == "done":
+            reason = "done"
+        elif event.get("owner") != "hermes":
+            reason = "owner_changed"
+        elif event.get("external_uid") is not None:
+            reason = "external_uid"
+        else:
+            start_dt = _coerce_utc_dt(event.get("start_utc"))
+            if start_dt is None or start_dt < window_start:
+                entry = _s4_plan_entry(
+                    conn, event, exp,
+                    "past_retained" if start_dt else "not_yet_eligible")
+                if entry["action"] in ("update", "insert"):
+                    entry["action"] = "retain"
+                plan.append(entry)
+                continue
+            reason = "future_retained" if start_dt > window_end else "in_window"
+            plan.append(_s4_plan_entry(conn, event, exp, reason))
+            continue
+        plan.append({"event_id": event_id, "action": "delete", "reason": reason,
+                     "event": event, "export": exp})
+    for event in events.values():
+        if event["id"] in quarantined:
+            plan.append({"event_id": event["id"], "action": "quarantine",
+                         "reason": "conflict", "event": event, "export": None})
+            continue
+        if event["id"] in exported:
+            continue
+        if (event.get("owner") != "hermes" or event.get("external_uid") is not None
+                or event.get("status") != "active"):
+            continue
+        start_dt = _coerce_utc_dt(event.get("start_utc"))
+        if start_dt is None or start_dt < window_start:
+            continue
+        if start_dt > window_end:
+            plan.append({"event_id": event["id"], "action": "retain",
+                         "reason": "not_yet_eligible", "event": event,
+                         "export": None})
+        else:
+            plan.append(_s4_plan_entry(conn, event, None, "in_window"))
+    return plan
+
+
+def _s4_record_conflict(conn, event_id, action, counts, now_dt):
+    prior = conn.execute(
+        "SELECT kind FROM extcal_export_issues WHERE target='hermes' AND event_id=?",
+        (event_id,)).fetchone()
+    conn.rollback()
+    _export_issue_upsert(conn, event_id, action, status=412, kind="conflict",
+                         reason_code="conflict", now_utc=now_dt)
+    entry = {"event_id": event_id, "action": action,
+             "reason_code": "conflict", "http_status": 412}
+    counts["conflicts"].append(entry)
+    if prior is None or prior["kind"] != "conflict":
+        audit.log(conn, "cal.ext.conflict", {
+            "event_id": event_id, "action": _export_issue_action(action),
+            "reason_code": "conflict"})
+    conn.commit()
+
+
+def _export_commit_one(conn, event_id, action, count_key, counts, fn,
+                       now_utc=None):
+    try:
+        fn()
+    except _ExportConflict:
+        try:
+            _s4_record_conflict(conn, event_id, action, counts,
+                                _coerce_utc_dt(now_utc) or datetime.now(timezone.utc))
+        except Exception as exc:
+            conn.rollback()
+            counts["errors"].append({
+                "event_id": event_id, "action": action,
+                "error": "export_error", "reason_code": "export_error",
+                "http_status": getattr(exc, "status", None),
+                "audit_recorded": False})
+        return
+    except Exception as e:
+        status = getattr(e, "status", None)
+        reason_code = getattr(e, "reason_code", "export_error")
+        safe_error = reason_code[:280]
+        if status is not None:
+            safe_error = f"{safe_error} (status={status})"[:300]
+        counts["errors"].append({
+            "event_id": event_id, "action": action, "error": safe_error,
+            "reason_code": reason_code, "http_status": status,
+            "audit_recorded": False})
+        try:
+            conn.rollback()
+            issue_recorded = True
+            issue_write_error = None
+            issue_exception_type = None
+            try:
+                _export_issue_upsert(
+                    conn, event_id, action, status=status, kind="error",
+                    reason_code=reason_code, now_utc=now_utc)
+            except sqlite3.IntegrityError as issue_exc:
+                issue_recorded = False
+                issue_exception_type = type(issue_exc).__name__[:100]
+                event_exists = conn.execute(
+                    "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
+                issue_write_error = "issue_integrity_error" if event_exists else "orphan_event"
+            except Exception as issue_exc:
+                issue_recorded = False
+                issue_write_error = "issue_write_error"
+                issue_exception_type = type(issue_exc).__name__[:100]
+            payload = {"event_id": event_id, "action": _export_issue_action(action),
+                       "kind": "error", "reason_code": reason_code,
+                       "http_status": status, "exception_type": type(e).__name__[:100],
+                       "issue_recorded": issue_recorded}
+            if issue_write_error:
+                payload["issue_write_error"] = issue_write_error
+            if issue_exception_type:
+                payload["issue_exception_type"] = issue_exception_type
+            audit.log(conn, "cal.ext.export_error", payload)
+            conn.commit()
+            counts["errors"][-1]["audit_recorded"] = True
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return
+    _export_issue_resolve(conn, event_id)
+    counts[count_key] += 1
+    audit.log(conn, "cal.ext.export", {
+        "event_id": event_id, "action": _export_issue_action(action)})
+    conn.commit()
+
+
+def _s4_rebaseline(conn, item, now_dt):
+    exp = item["export"]
+    _export_record(conn, item["event_id"], exp.get("href"), exp.get("etag"),
+                   item["new_hash"], _iso(now_dt))
+
+
+def export_own(conn, cfg, request=None, now_utc=None):
+    cfg = cfg or {}
+    write_url = (cfg.get("extcal_write_calendar") or "").strip()
+    counts = {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0,
+              "retained": 0, "errors": [], "conflicts": []}
+    if not write_url:
+        return counts
+    request = request or _request
+    now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
+    for item in _export_plan(conn, cfg, now_dt):
+        event_id, action = item["event_id"], item["action"]
+        if action == "quarantine":
+            counts["retained"] += 1
+            continue
+        if action == "retain":
+            if _export_issue_resolve(conn, event_id):
+                conn.commit()
+            counts["retained"] += 1
+            continue
+        if action == "rebaseline":
+            _export_commit_one(
+                conn, event_id, action, "unchanged", counts,
+                lambda item=item: _s4_rebaseline(conn, item, now_dt),
+                now_utc=now_dt)
+            continue
+        if action == "unchanged":
+            if _export_issue_resolve(conn, event_id):
+                conn.commit()
+            counts["unchanged"] += 1
+            continue
+        if action == "delete":
+            _export_commit_one(
+                conn, event_id, action, "deleted", counts,
+                lambda item=item: _s4_delete_event(
+                    conn, cfg, request, event_id, item["export"]),
+                now_utc=now_dt)
+            continue
+        count_key = "updated" if action == "update" else "exported"
+        _export_commit_one(
+            conn, event_id, action, count_key, counts,
+            lambda item=item: _export_put_event(
+                conn, cfg, request, item["event"], item["export"],
+                item["location"], item["participants"], item["new_hash"], now_dt),
+            now_utc=now_dt)
+    return counts
+
+# ---- S4: explicit conflict resolution ------------------------------------
+
+# ---- S4: explicit conflict resolution ------------------------------------
+
+
+def _s4_remote_component(response, event):
+    remote, etag = _s4_remote_state(response, event)
+    components, count = _parse_ics_components(response.text or "")
+    if count != 1 or len(components) != 1:
+        raise _ExportFailure("remote VEVENT is ambiguous",
+                             reason_code="invalid_response")
+    component = dict(components[0])
+    component["participant_names"] = _remote_description_names(response.text)
+    component["etag"] = etag
+    component["hashes"] = remote
+    return component
+
+
+def _s4_remote_participant_names(component):
+    raw = component.get("participant_names") or ""
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
+
+def _s4_local_participant_names(event):
+    return [p.get("name") for p in event.get("participants") or [] if p.get("name")]
+
+
+def _s4_apply_remote(conn, event_id, component):
+    location = component.get("location") or ""
+    place_id = _resolve_place_ref(conn, location)
+    if location and place_id is None:
+        raise _ExportFailure("remote LOCATION has no known place",
+                             reason_code="invalid_response")
+    event = cal.get(conn, event_id)
+    if event is None:
+        raise _ExportFailure("event no longer exists", reason_code="invalid_response")
+    cal.update(
+        conn, event_id,
+        title=component.get("summary") or "",
+        start_utc=component["dtstart_utc"].isoformat(),
+        end_utc=component["dtend_utc"].isoformat(),
+        place=place_id,
+        rm_person=_s4_local_participant_names(event),
+        add_person=_s4_remote_participant_names(component),
+    )
+    return cal.get(conn, event_id)
+
+
+def resolve_conflict(conn, event_id, target="hermes", decision=None,
+                     request=None, cfg=None, now_utc=None):
+    """Resolve one conflict after an explicit operator choice.
+
+    Both choices prove the remote UID before any local write. The keep-remote
+    branch applies managed fields through cal.update, whose road and reminder
+    hooks remain inside this transaction. Any failure rolls the complete
+    local transaction back and leaves the issue and journal unchanged.
+    """
+    if target != _EXPORT_ISSUE_TARGET:
+        raise _ExportFailure("unsupported conflict target",
+                             reason_code="invalid_response")
+    if decision not in ("keep-remote", "force-push"):
+        raise _ExportFailure("explicit resolution choice required",
+                             reason_code="conflict")
+    issue = conn.execute(
+        "SELECT * FROM extcal_export_issues "
+        "WHERE target=? AND event_id=? AND kind='conflict'",
+        (target, event_id)).fetchone()
+    if issue is None:
+        raise _ExportFailure("conflict not found", reason_code="not_found")
+    exp = conn.execute(
+        "SELECT * FROM ext_exports WHERE event_id=?", (event_id,)).fetchone()
+    event = cal.get(conn, event_id)
+    if event is None:
+        raise _ExportFailure("conflict event is no longer resolvable",
+                             reason_code="not_found")
+    cfg = cfg or {}
+    request = request or _request
+    href = exp["href"] if exp is not None else _export_href(
+        cfg.get("extcal_write_calendar"), event_id)
+    if not href:
+        raise _ExportFailure("conflict resource is no longer resolvable",
+                             reason_code="not_found")
+    response = _s4_get_resource(cfg, href, request)
+    if response is not None and response.status in (404, 410):
+        raise _ExportFailure("conflict resource disappeared",
+                             status=response.status, reason_code="not_found")
+    component = _s4_remote_component(response, event)
+    now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
+
+    try:
+        if decision == "force-push":
+            location = _export_location(conn, event)
+            participants = _export_participants(conn, event_id)
+            new_hash = _export_body_hash(event, location, participants)
+            body = _build_export_vevent(event, location, participants, now_dt)
+            ok, new_etag, status, conflict = _export_put(
+                cfg, href, body, component["etag"], request)
+            if conflict:
+                raise _ExportFailure("resolve force-push received 412",
+                                     status=412)
+            if not ok:
+                raise _ExportFailure("resolve force-push PUT failed",
+                                     status=status)
+            _export_record(conn, event_id, href, new_etag, new_hash,
+                           _iso(now_dt))
+        else:
+            event = _s4_apply_remote(conn, event_id, component)
+            location = _export_location(conn, event)
+            participants = _export_participants(conn, event_id)
+            new_hash = _export_body_hash(event, location, participants)
+            _export_record(conn, event_id, href, component["etag"],
+                           new_hash, _iso(now_dt))
+    except Exception:
+        conn.rollback()
+        raise
+
+    _export_issue_resolve(conn, event_id, target)
+    audit.log(conn, "cal.ext.resolve", {
+        "event_id": event_id, "target": target, "decision": decision})
+    conn.commit()
+    return {"event_id": event_id, "target": target, "decision": decision,
+            "resolved": True}

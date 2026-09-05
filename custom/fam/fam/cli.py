@@ -2953,6 +2953,51 @@ def cmd_cal_ext_probe(args):
             print(f"  - {e}")
     return 0
 
+
+def cmd_cal_ext_conflicts(args):
+    """List safe, operator-resolvable export conflicts."""
+    conn = famdb.connect()
+    rows = conn.execute(
+        "SELECT event_id, target, action, reason_code, first_seen_utc, "
+        "last_seen_utc FROM extcal_export_issues WHERE kind='conflict' "
+        "ORDER BY event_id, target"
+    ).fetchall()
+    out = [dict(row) for row in rows]
+    if getattr(args, "json", False):
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        for row in out:
+            print(f"{row['event_id']}	{row['target']}	{row['action']}	"
+                  f"{row['reason_code']}	{row['first_seen_utc']}	"
+                  f"{row['last_seen_utc']}")
+    return 0
+
+
+def cmd_cal_ext_resolve(args):
+    """Apply one explicit conflict choice through extcal's transaction."""
+    conn = famdb.connect()
+    try:
+        result = extcal.resolve_conflict(
+            conn, args.event_id, target=args.target or "hermes",
+            decision="force-push" if args.force_push else "keep-remote",
+            cfg=gate.load_config(),
+        )
+    except Exception as exc:
+        conn.rollback()
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "reason": getattr(
+                exc, "reason_code", "export_error")}, ensure_ascii=False))
+        else:
+            print(f"cal-ext resolve failed: {getattr(exc, 'reason_code', 'export_error')}")
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+    else:
+        print(f"cal-ext conflict resolved: event_id={result['event_id']} "
+              f"target={result['target']} decision={result['decision']}")
+    return 0
+
+
 def _fmt_plan(p):
     line = f"{p['id']}\t{p['title']}\t[{p['status']}]"
     if p.get("deadline"):
@@ -3980,6 +4025,23 @@ def build_parser():
     spp = cal_ext_sub.add_parser("probe"); spp.set_defaults(func=cmd_cal_ext_probe)
     spp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    spc = cal_ext_sub.add_parser("conflicts")
+    spc.set_defaults(func=cmd_cal_ext_conflicts)
+    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
+
+    spr = cal_ext_sub.add_parser("resolve")
+    spr.set_defaults(func=cmd_cal_ext_resolve)
+    spr.add_argument("event_id", type=int)
+    spr.add_argument("--target", choices=("hermes",), default=None)
+    choice = spr.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--keep-remote", action="store_true",
+                        help="accept the verified iCloud fields")
+    choice.add_argument("--force-push", action="store_true",
+                        help="explicitly overwrite iCloud with Hermes fields")
+    spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
 
     sp = sub.add_parser("meds")
     meds_sub = sp.add_subparsers(dest="meds_cmd", required=True)

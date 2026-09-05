@@ -66,7 +66,7 @@ def test_active_past_journal_is_retained_without_network(db):
     counts = extcal.export_own(db, _cfg(), request=request, now_utc=TEST_NOW)
     assert counts == {
         "exported": 0, "updated": 0, "unchanged": 0,
-        "deleted": 0, "retained": 1, "errors": [],
+        "deleted": 0, "retained": 1, "errors": [], "conflicts": [],
     }
     assert calls == []
     assert db.execute(
