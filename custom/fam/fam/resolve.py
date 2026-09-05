@@ -14,12 +14,28 @@ from typing import Any
 
 from fam import acks, audit, cal, gate, meds, rem
 
-PROMPT_VERSION = "amina-ack-resolution-s2-v1"
+PROMPT_VERSION = "amina-ack-resolution-s2-v2"
 RECEIPT_SCHEMA_VERSION = 1
 _EVENT_DISPOSITIONS = {"ack_chain_prepare", "ack_chain_all",
                        "cancel_reminders", "cancel_occurrence",
                        "unrelated", "ambiguous"}
 _MED_DISPOSITIONS = {"taken", "skipped", "unrelated", "ambiguous"}
+
+
+_EVENT_DISPOSITION_DESCRIPTIONS = {
+    "ack_chain_prepare": "Acknowledge the reminder and prepare for the event.",
+    "ack_chain_all": "Acknowledge the event and stop all future reminders.",
+    "cancel_reminders": "Cancel future reminders but leave the event active.",
+    "cancel_occurrence": "Cancel the event occurrence and its reminders.",
+    "unrelated": "The user text does not refer to this event.",
+    "ambiguous": "The user text does not identify a confident action for this event.",
+}
+_MED_DISPOSITION_DESCRIPTIONS = {
+    "taken": "The user says this medication dose was taken.",
+    "skipped": "The user says this medication dose was skipped.",
+    "unrelated": "The user text does not refer to this medication dose.",
+    "ambiguous": "The user text does not identify a confident action for this dose.",
+}
 
 
 def _json_hash(value: Any) -> str:
@@ -42,7 +58,12 @@ def _classifier_prompt(request: dict[str, Any]) -> str:
         "candidate": request.get("candidates", []),
         "user_text": str(request.get("user_text") or ""),
         "quoted_text": str(request.get("quoted_text") or ""),
+        "allowed_dispositions": {
+            "event": _EVENT_DISPOSITION_DESCRIPTIONS,
+            "med_intake": _MED_DISPOSITION_DESCRIPTIONS,
+        },
         "instructions": (
+            "Use only the disposition strings listed for the candidate's kind. "
             "Return strict JSON only: {\"dispositions\":[{\"kind\":...,'"
             "ref_id':...,\"disposition\":...}]}. Return one independent "
             "disposition per candidate; use unrelated or ambiguous only for "

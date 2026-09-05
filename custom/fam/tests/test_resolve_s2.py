@@ -5,6 +5,26 @@ import pytest
 from fam import cal, meds, react, resolve
 
 
+def test_classifier_prompt_lists_allowed_dispositions_by_kind():
+    prompt = resolve._classifier_prompt({
+        "candidates": [
+            {"kind": "event", "ref_id": 211},
+            {"kind": "med_intake", "ref_id": 47},
+        ],
+        "user_text": "Сегодня пропущу тренировку",
+        "quoted_text": "Напоминание о тренировке",
+    })
+    payload = json.loads(prompt)
+    allowed = payload["allowed_dispositions"]
+
+    for kind, dispositions in (
+        ("event", resolve._EVENT_DISPOSITIONS),
+        ("med_intake", resolve._MED_DISPOSITIONS),
+    ):
+        kind_prompt = json.dumps(allowed[kind], ensure_ascii=False)
+        for disposition in dispositions:
+            assert disposition in kind_prompt
+
 NOW = "2026-09-04T10:00:00+00:00"
 INCIDENT_TEXT = "Сегодня пропущу тренировку\nМисол приняла"
 
