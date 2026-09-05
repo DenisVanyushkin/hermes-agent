@@ -2963,6 +2963,8 @@ def cmd_cal_ext_conflicts(args):
         "ORDER BY event_id, target"
     ).fetchall()
     out = [dict(row) for row in rows]
+    audit.log(conn, "cal.ext.conflicts", {"count": len(out)})
+    conn.commit()
     if getattr(args, "json", False):
         print(json.dumps(out, ensure_ascii=False))
     else:
@@ -2978,7 +2980,7 @@ def cmd_cal_ext_resolve(args):
     conn = famdb.connect()
     try:
         result = extcal.resolve_conflict(
-            conn, args.event_id, target=args.target or "hermes",
+            conn, args.event_id, target=args.target,
             decision="force-push" if args.force_push else "keep-remote",
             cfg=gate.load_config(),
         )
@@ -4034,7 +4036,7 @@ def build_parser():
     spr = cal_ext_sub.add_parser("resolve")
     spr.set_defaults(func=cmd_cal_ext_resolve)
     spr.add_argument("event_id", type=int)
-    spr.add_argument("--target", choices=("hermes",), default=None)
+    spr.add_argument("--target", choices=("hermes", "taya"), default=None)
     choice = spr.add_mutually_exclusive_group(required=True)
     choice.add_argument("--keep-remote", action="store_true",
                         help="accept the verified iCloud fields")

@@ -2889,6 +2889,7 @@ _EXPORT_HASH_V2 = "v2"
 
 def _export_semantic_hash(uid, title, start_utc, end_utc, location,
                           participant_names, version):
+    'Build the canonical semantic digest for one hash formula version.'
     fields = []
     if version == _EXPORT_HASH_V2:
         fields.append(_pc_norm_text(uid))
@@ -2932,6 +2933,7 @@ def _export_body_hash(event, location, participants):
 
 
 def _export_stored_hash(value):
+    'Decode the explicit stored hash prefix; an unprefixed value is v1.'
     value = value or ""
     for version in (_EXPORT_HASH_V1, _EXPORT_HASH_V2):
         prefix = version + ":"
@@ -2941,6 +2943,7 @@ def _export_stored_hash(value):
 
 
 def _export_hash_for_version(event, location, participants, version):
+    'Calculate the local semantic hash using the requested compatibility version.'
     end_utc = event.get("end_utc")
     if version == _EXPORT_HASH_V2 and end_utc is None:
         start_dt = _coerce_utc_dt(event.get("start_utc"))
@@ -2974,7 +2977,12 @@ def _remote_description_names(text):
 
 
 def _export_remote_hashes(text):
-    """Return v1/v2 semantic hashes for exactly one valid VEVENT."""
+    """Return v1/v2 semantic hashes for exactly one valid VEVENT.
+
+    The v1 compatibility hash preserves the pre-S4 empty-end convention when
+    the server response has no explicit DTEND; v2 uses the current event
+    normalization, including its one-hour fallback.
+    """
     components, count = _parse_ics_components(text or "")
     if count != 1 or len(components) != 1:
         return None
@@ -2982,13 +2990,20 @@ def _export_remote_hashes(text):
     uid = component.get("uid")
     if not uid or component.get("dtstart_utc") is None:
         return None
+    has_explicit_dtend = any(
+        parsed is not None and parsed[0] == "DTEND"
+        for line in _unfold(text or "")
+        for parsed in [_split_property_line(line)]
+    )
     names = _remote_description_names(text)
     values = {}
     for version in (_EXPORT_HASH_V1, _EXPORT_HASH_V2):
+        end_utc = component.get("dtend_utc")
+        if version == _EXPORT_HASH_V1 and not has_explicit_dtend:
+            end_utc = None
         values[version] = _export_semantic_hash(
             uid, component.get("summary"), component.get("dtstart_utc"),
-            component.get("dtend_utc"), component.get("location"), names,
-            version)
+            end_utc, component.get("location"), names, version)
     values["uid"] = uid
     return values
 
@@ -3061,6 +3076,7 @@ def _export_href(write_url, event_id):
 
 
 def _export_headers(cfg, extra=None):
+    'Build safe CalDAV request headers, including optional configured authentication.'
     headers = {}
     auth = _auth_header(cfg)
     if auth:
@@ -3254,11 +3270,13 @@ _EXPORT_ISSUE_TARGET = "hermes"
 
 
 def _export_issue_action(action):
+    'Map a planner action to the database issue action enum.'
     return "put" if action in ("insert", "update") else action
 
 
 def _export_issue_upsert(conn, event_id, action, status=None, kind="error",
                          reason_code="export_error", now_utc=None):
+    'Insert or refresh one terminal export issue without committing the caller transaction.'
     now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
     now = now_dt.isoformat(timespec="microseconds")
     db_action = _export_issue_action(action)
@@ -3276,6 +3294,7 @@ def _export_issue_upsert(conn, event_id, action, status=None, kind="error",
 
 
 def _export_issue_resolve(conn, event_id, target=_EXPORT_ISSUE_TARGET):
+    'Remove the export issue for one event and target, returning affected rows.'
     cur = conn.execute(
         "DELETE FROM extcal_export_issues WHERE target=? AND event_id=?",
         (target, event_id))
@@ -3497,7 +3516,8 @@ class _ExportConflict(Exception):
         self.reason_code = "conflict"
 
 
-def _s4_get_resource(cfg, url, request):
+def _export_get_resource(cfg, url, request):
+    'Perform one guarded CalDAV GET through the injected transport seam.'
     if not url or not _scheme_and_host_ok(url):
         return None
     try:
@@ -3507,7 +3527,8 @@ def _s4_get_resource(cfg, url, request):
         raise _ExportFailure("GET failed", reason_code="invalid_response") from exc
 
 
-def _s4_remote_state(response, event):
+def _export_remote_state(response, event):
+    'Parse one GET response, prove its expected UID, and return hashes and ETag.'
     if response is None or response.status not in (200, 207):
         raise _ExportFailure("GET returned no usable resource",
                              status=getattr(response, "status", None),
@@ -3522,21 +3543,23 @@ def _s4_remote_state(response, event):
     return hashes, etag
 
 
-def _s4_record_success(conn, event_id, href, etag, new_hash, now_dt):
+def _export_record_success(conn, event_id, href, etag, new_hash, now_dt):
+    'Write the successful export journal row without committing the caller transaction.'
     _export_record(conn, event_id, href, etag, new_hash, _iso(now_dt))
 
 
-def _s4_put_after_412(conn, cfg, request, event, exp, href, body,
+def _export_reconcile_412(conn, cfg, request, event, exp, href, body,
                       new_hash, now_dt):
-    response = _s4_get_resource(cfg, href, request)
+    'Resolve one PUT 412 with desired, last, or conflict three-way semantics.'
+    response = _export_get_resource(cfg, href, request)
     if response is not None and response.status in (404, 410):
         raise _ExportFailure("resource disappeared after PUT 412",
                              status=response.status,
                              reason_code="invalid_response")
-    remote, fresh_etag = _s4_remote_state(response, event)
+    remote, fresh_etag = _export_remote_state(response, event)
     desired = new_hash[3:] if new_hash.startswith("v2:") else new_hash
     if remote["v2"] == desired:
-        _s4_record_success(conn, event["id"], href, fresh_etag, new_hash, now_dt)
+        _export_record_success(conn, event["id"], href, fresh_etag, new_hash, now_dt)
         return
 
     last_version, last_hash = _export_stored_hash(
@@ -3549,64 +3572,67 @@ def _s4_put_after_412(conn, cfg, request, event, exp, href, body,
         if not ok:
             raise _ExportFailure(f"PUT {href} failed (status={status})",
                                  status=status)
-        _s4_record_success(conn, event["id"], href, etag, new_hash, now_dt)
+        _export_record_success(conn, event["id"], href, etag, new_hash, now_dt)
         return
     raise _ExportConflict(event["id"], "update" if exp is not None else "insert")
 
 
-def _s4_legacy_preflight(conn, cfg, request, event, exp, location,
+def _export_legacy_preflight(conn, cfg, request, event, exp, location,
                          participants, href, body, new_hash, now_dt):
+    'Handle a stored v1 journal row before an eligible write-consuming export.'
     version, stored = _export_stored_hash(exp.get("body_hash"))
     if version != _EXPORT_HASH_V1:
         return False
     legacy = _export_hash_for_version(event, location, participants, _EXPORT_HASH_V1)
     if stored == legacy:
-        _s4_record_success(conn, event["id"], href, exp.get("etag"),
+        _export_record_success(conn, event["id"], href, exp.get("etag"),
                            new_hash, now_dt)
         return True
-    response = _s4_get_resource(cfg, href, request)
-    remote, fresh_etag = _s4_remote_state(response, event)
+    response = _export_get_resource(cfg, href, request)
+    remote, fresh_etag = _export_remote_state(response, event)
     desired = new_hash[3:]
     if remote["v2"] == desired:
-        _s4_record_success(conn, event["id"], href, fresh_etag, new_hash, now_dt)
+        _export_record_success(conn, event["id"], href, fresh_etag, new_hash, now_dt)
         return True
     if remote["v1"] == stored:
         ok, etag, status, conflict = _export_put(
             cfg, href, body, fresh_etag, request)
         if conflict:
-            _s4_put_after_412(conn, cfg, request, event, exp, href, body,
+            _export_reconcile_412(conn, cfg, request, event, exp, href, body,
                               new_hash, now_dt)
         elif not ok:
             raise _ExportFailure(f"PUT {href} failed (status={status})",
                                  status=status)
         else:
-            _s4_record_success(conn, event["id"], href, etag, new_hash, now_dt)
+            _export_record_success(conn, event["id"], href, etag, new_hash, now_dt)
         return True
     raise _ExportConflict(event["id"], "update")
 
 
 def _export_put_event(conn, cfg, request, event, exp, location, participants,
                       new_hash, now_dt):
+    'Export one event with version compatibility and conditional 412 handling.'
     is_update = exp is not None
     href = exp["href"] if is_update else _export_href(
         cfg.get("extcal_write_calendar"), event["id"])
     etag = exp.get("etag") if is_update else None
     body = _build_export_vevent(event, location, participants, now_dt)
-    if is_update and _s4_legacy_preflight(
+    if is_update and _export_legacy_preflight(
             conn, cfg, request, event, exp, location, participants,
             href, body, new_hash, now_dt):
         return
     ok, new_etag, status, conflict = _export_put(cfg, href, body, etag, request)
     if conflict:
-        _s4_put_after_412(conn, cfg, request, event, exp, href, body,
+        _export_reconcile_412(conn, cfg, request, event, exp, href, body,
                           new_hash, now_dt)
     elif not ok:
         raise _ExportFailure(f"PUT {href} failed (status={status})", status=status)
     else:
-        _s4_record_success(conn, event["id"], href, new_etag, new_hash, now_dt)
+        _export_record_success(conn, event["id"], href, new_etag, new_hash, now_dt)
 
 
-def _s4_delete_event(conn, cfg, request, event_id, exp):
+def _export_delete_event(conn, cfg, request, event_id, exp):
+    'Delete one managed resource with idempotent 404/410 and UID-proof retry handling.'
     href = exp.get("href")
     if not href:
         conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
@@ -3617,12 +3643,12 @@ def _s4_delete_event(conn, cfg, request, event_id, exp):
         return
     if status != 412:
         raise _ExportFailure(f"DELETE {href} failed (status={status})", status=status)
-    response = _s4_get_resource(cfg, href, request)
+    response = _export_get_resource(cfg, href, request)
     if response is not None and response.status in (404, 410):
         conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
         return
     fake_event = {"id": event_id}
-    remote, fresh_etag = _s4_remote_state(response, fake_event)
+    remote, fresh_etag = _export_remote_state(response, fake_event)
     if remote["uid"] != _export_uid(event_id):
         raise _ExportFailure("DELETE GET resource UID mismatch",
                              status=response.status,
@@ -3633,7 +3659,8 @@ def _s4_delete_event(conn, cfg, request, event_id, exp):
     conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
 
 
-def _s4_plan_entry(conn, event, exp, reason):
+def _export_plan_entry(conn, event, exp, reason):
+    'Classify one journaled or new event without performing network I/O.'
     location = _export_location(conn, event)
     participants = _export_participants(conn, event["id"])
     state, new_hash = _export_hash_state(
@@ -3653,6 +3680,7 @@ def _s4_plan_entry(conn, event, exp, reason):
 
 
 def _export_plan(conn, cfg, now_dt):
+    'Build the lifecycle plan, applying ownership, horizon, retention, and quarantine rules.'
     cfg = cfg or {}
     horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
     window_start = now_dt - timedelta(days=1)
@@ -3689,7 +3717,7 @@ def _export_plan(conn, cfg, now_dt):
         else:
             start_dt = _coerce_utc_dt(event.get("start_utc"))
             if start_dt is None or start_dt < window_start:
-                entry = _s4_plan_entry(
+                entry = _export_plan_entry(
                     conn, event, exp,
                     "past_retained" if start_dt else "not_yet_eligible")
                 if entry["action"] in ("update", "insert"):
@@ -3697,7 +3725,7 @@ def _export_plan(conn, cfg, now_dt):
                 plan.append(entry)
                 continue
             reason = "future_retained" if start_dt > window_end else "in_window"
-            plan.append(_s4_plan_entry(conn, event, exp, reason))
+            plan.append(_export_plan_entry(conn, event, exp, reason))
             continue
         plan.append({"event_id": event_id, "action": "delete", "reason": reason,
                      "event": event, "export": exp})
@@ -3719,11 +3747,12 @@ def _export_plan(conn, cfg, now_dt):
                          "reason": "not_yet_eligible", "event": event,
                          "export": None})
         else:
-            plan.append(_s4_plan_entry(conn, event, None, "in_window"))
+            plan.append(_export_plan_entry(conn, event, None, "in_window"))
     return plan
 
 
-def _s4_record_conflict(conn, event_id, action, counts, now_dt):
+def _export_record_conflict(conn, event_id, action, counts, now_dt):
+    'Persist one conflict issue and its edge audit signal without transport escalation.'
     prior = conn.execute(
         "SELECT kind FROM extcal_export_issues WHERE target='hermes' AND event_id=?",
         (event_id,)).fetchone()
@@ -3742,11 +3771,12 @@ def _s4_record_conflict(conn, event_id, action, counts, now_dt):
 
 def _export_commit_one(conn, event_id, action, count_key, counts, fn,
                        now_utc=None):
+    'Run one planned row with transaction and per-row failure isolation.'
     try:
         fn()
     except _ExportConflict:
         try:
-            _s4_record_conflict(conn, event_id, action, counts,
+            _export_record_conflict(conn, event_id, action, counts,
                                 _coerce_utc_dt(now_utc) or datetime.now(timezone.utc))
         except Exception as exc:
             conn.rollback()
@@ -3809,13 +3839,15 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn,
     conn.commit()
 
 
-def _s4_rebaseline(conn, item, now_dt):
+def _export_rebaseline(conn, item, now_dt):
+    'Upgrade one equivalent legacy journal row locally to the current hash.'
     exp = item["export"]
     _export_record(conn, item["event_id"], exp.get("href"), exp.get("etag"),
                    item["new_hash"], _iso(now_dt))
 
 
 def export_own(conn, cfg, request=None, now_utc=None):
+    'Reconcile the Hermes write target and return separated export, error, conflict, and retention counts.'
     cfg = cfg or {}
     write_url = (cfg.get("extcal_write_calendar") or "").strip()
     counts = {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0,
@@ -3837,7 +3869,7 @@ def export_own(conn, cfg, request=None, now_utc=None):
         if action == "rebaseline":
             _export_commit_one(
                 conn, event_id, action, "unchanged", counts,
-                lambda item=item: _s4_rebaseline(conn, item, now_dt),
+                lambda item=item: _export_rebaseline(conn, item, now_dt),
                 now_utc=now_dt)
             continue
         if action == "unchanged":
@@ -3848,7 +3880,7 @@ def export_own(conn, cfg, request=None, now_utc=None):
         if action == "delete":
             _export_commit_one(
                 conn, event_id, action, "deleted", counts,
-                lambda item=item: _s4_delete_event(
+                lambda item=item: _export_delete_event(
                     conn, cfg, request, event_id, item["export"]),
                 now_utc=now_dt)
             continue
@@ -3866,8 +3898,9 @@ def export_own(conn, cfg, request=None, now_utc=None):
 # ---- S4: explicit conflict resolution ------------------------------------
 
 
-def _s4_remote_component(response, event):
-    remote, etag = _s4_remote_state(response, event)
+def _export_remote_component(response, event):
+    'Parse and validate the single remote VEVENT used by conflict resolution.'
+    remote, etag = _export_remote_state(response, event)
     components, count = _parse_ics_components(response.text or "")
     if count != 1 or len(components) != 1:
         raise _ExportFailure("remote VEVENT is ambiguous",
@@ -3879,16 +3912,19 @@ def _s4_remote_component(response, event):
     return component
 
 
-def _s4_remote_participant_names(component):
+def _export_remote_participant_names(component):
+    'Extract domain participant names from the remote component description.'
     raw = component.get("participant_names") or ""
     return [name.strip() for name in raw.split(",") if name.strip()]
 
 
-def _s4_local_participant_names(event):
+def _export_local_participant_names(event):
+    'Extract current local participant names for domain reconciliation.'
     return [p.get("name") for p in event.get("participants") or [] if p.get("name")]
 
 
-def _s4_apply_remote(conn, event_id, component):
+def _export_apply_remote(conn, event_id, component):
+    'Apply verified remote managed fields through the domain calendar hooks.'
     location = component.get("location") or ""
     place_id = _resolve_place_ref(conn, location)
     if location and place_id is None:
@@ -3903,13 +3939,13 @@ def _s4_apply_remote(conn, event_id, component):
         start_utc=component["dtstart_utc"].isoformat(),
         end_utc=component["dtend_utc"].isoformat(),
         place=place_id,
-        rm_person=_s4_local_participant_names(event),
-        add_person=_s4_remote_participant_names(component),
+        rm_person=_export_local_participant_names(event),
+        add_person=_export_remote_participant_names(component),
     )
     return cal.get(conn, event_id)
 
 
-def resolve_conflict(conn, event_id, target="hermes", decision=None,
+def resolve_conflict(conn, event_id, target=None, decision=None,
                      request=None, cfg=None, now_utc=None):
     """Resolve one conflict after an explicit operator choice.
 
@@ -3918,12 +3954,22 @@ def resolve_conflict(conn, event_id, target="hermes", decision=None,
     hooks remain inside this transaction. Any failure rolls the complete
     local transaction back and leaves the issue and journal unchanged.
     """
-    if target != _EXPORT_ISSUE_TARGET:
-        raise _ExportFailure("unsupported conflict target",
-                             reason_code="invalid_response")
     if decision not in ("keep-remote", "force-push"):
         raise _ExportFailure("explicit resolution choice required",
                              reason_code="conflict")
+    if target is None:
+        candidates = conn.execute(
+            "SELECT * FROM extcal_export_issues "
+            "WHERE event_id=? AND kind='conflict' ORDER BY target",
+            (event_id,)).fetchall()
+        if len(candidates) != 1:
+            reason = "target required for ambiguous conflict" if candidates else "conflict not found"
+            code = "conflict" if candidates else "not_found"
+            raise _ExportFailure(reason, reason_code=code)
+        target = candidates[0]["target"]
+    if target != _EXPORT_ISSUE_TARGET:
+        raise _ExportFailure("unsupported conflict target",
+                             reason_code="invalid_response")
     issue = conn.execute(
         "SELECT * FROM extcal_export_issues "
         "WHERE target=? AND event_id=? AND kind='conflict'",
@@ -3943,11 +3989,11 @@ def resolve_conflict(conn, event_id, target="hermes", decision=None,
     if not href:
         raise _ExportFailure("conflict resource is no longer resolvable",
                              reason_code="not_found")
-    response = _s4_get_resource(cfg, href, request)
+    response = _export_get_resource(cfg, href, request)
     if response is not None and response.status in (404, 410):
         raise _ExportFailure("conflict resource disappeared",
                              status=response.status, reason_code="not_found")
-    component = _s4_remote_component(response, event)
+    component = _export_remote_component(response, event)
     now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
 
     try:
@@ -3956,18 +4002,26 @@ def resolve_conflict(conn, event_id, target="hermes", decision=None,
             participants = _export_participants(conn, event_id)
             new_hash = _export_body_hash(event, location, participants)
             body = _build_export_vevent(event, location, participants, now_dt)
-            ok, new_etag, status, conflict = _export_put(
-                cfg, href, body, component["etag"], request)
-            if conflict:
-                raise _ExportFailure("resolve force-push received 412",
-                                     status=412)
-            if not ok:
-                raise _ExportFailure("resolve force-push PUT failed",
-                                     status=status)
-            _export_record(conn, event_id, href, new_etag, new_hash,
-                           _iso(now_dt))
+            desired_payload = new_hash[3:] if new_hash.startswith("v2:") else new_hash
+            if component["hashes"]["v2"] == desired_payload:
+                # A prior force-push may have reached iCloud before its local
+                # commit failed. Re-read proof repairs the journal without a
+                # second PUT.
+                _export_record(conn, event_id, href, component["etag"],
+                               new_hash, _iso(now_dt))
+            else:
+                ok, new_etag, status, conflict = _export_put(
+                    cfg, href, body, component["etag"], request)
+                if conflict:
+                    raise _ExportFailure("resolve force-push received 412",
+                                         status=412)
+                if not ok:
+                    raise _ExportFailure("resolve force-push PUT failed",
+                                         status=status)
+                _export_record(conn, event_id, href, new_etag, new_hash,
+                               _iso(now_dt))
         else:
-            event = _s4_apply_remote(conn, event_id, component)
+            event = _export_apply_remote(conn, event_id, component)
             location = _export_location(conn, event)
             participants = _export_participants(conn, event_id)
             new_hash = _export_body_hash(event, location, participants)
