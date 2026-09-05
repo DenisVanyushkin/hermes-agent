@@ -80,6 +80,7 @@ def test_extcal_staleness_stale_is_degraded_with_age(db):
     result = health.extcal_staleness(
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=now)
     assert result["status"] == "degraded"
+    assert "не запускался" in result["detail"]
     assert "10.0" in result["detail"]
     assert result["last_ok_ts"] == old
 

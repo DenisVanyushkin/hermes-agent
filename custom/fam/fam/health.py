@@ -61,16 +61,18 @@ def extcal_staleness(conn, cfg, now_utc=None):
     *failed run*, never the absence of any run at all.
 
     Three-way read, pure (never writes conn or meta):
+    The shared result field last_ok_ts carries the
+    extcal_last_run timestamp for this probe.
     - `extcal_enabled` falsy -> "ok", silent: sync is deliberately off,
       that is not a degradation. Must be checked BEFORE looking at
       `extcal_last_run` -- a prod box with the sync never turned on has no
       such key either, and that is the *other*, non-degraded, reason for
       it being absent.
     - enabled but `meta.extcal_last_run` missing entirely -> "degraded":
-      the sync has never once completed successfully, distinct from
+      the sync has never run, distinct from
       merely being stale.
     - enabled and present but older than `extcal_stale_hours` -> "degraded"
-      with the human-readable age.
+      with the human-readable age since the last run.
     - enabled and fresh -> "ok".
     """
     if not cfg.get("extcal_enabled"):
@@ -78,7 +80,7 @@ def extcal_staleness(conn, cfg, now_utc=None):
     last = famdb.meta_get(conn, "extcal_last_run")
     if not last:
         return _result("extcal_staleness", "degraded",
-                        "extcal включён, но синк ни разу не отработал успешно")
+                        "extcal включён, но синк ни разу не запускался")
     now_dt = datetime.now(timezone.utc) if now_utc is None else now_utc
     if isinstance(now_dt, str):
         now_dt = datetime.fromisoformat(now_dt)
@@ -89,7 +91,7 @@ def extcal_staleness(conn, cfg, now_utc=None):
         age_hours = age.total_seconds() / 3600
         return _result(
             "extcal_staleness", "degraded",
-            f"синк iCloud не отвечал успехом {age_hours:.1f}ч "
+            f"Синк iCloud не запускался {age_hours:.1f}ч "
             f"(порог {stale_hours}ч)",
             last_ok_ts=last)
     return _result("extcal_staleness", "ok", "свежо", last_ok_ts=last)

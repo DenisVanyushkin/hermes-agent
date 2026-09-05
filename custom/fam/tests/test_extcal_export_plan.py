@@ -173,7 +173,7 @@ def test_cmd_tick_cal_ext_composes_retention_and_resets_export_streak(
     assert out["export"]["errors"] == []
     assert calls == []
     assert famdb.meta_get(
-        db, cli._extcal_streak_meta_key(cli._EXTCAL_STREAK_APPLY_KEY)
+        db, cli._extcal_streak_meta_key(cli._EXTCAL_STREAK_IMPORT_APPLY_KEY)
     ) == "0"
     assert famdb.meta_get(db, "extcal_last_ok") == TEST_NOW
     assert _audit_rows(db, "cal.ext.sync") == []

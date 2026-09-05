@@ -813,7 +813,7 @@ def test_export_error_below_streak_threshold_does_not_escalate_but_is_still_audi
         db, monkeypatch):
     """Design decision (streak-alerting hardening, 2026-08): export
     errors are folded into the SAME consecutive-failure streak as
-    import/apply errors (`cli._EXTCAL_STREAK_APPLY_KEY`), not escalated
+    import/apply errors (`cli._EXTCAL_STREAK_IMPORT_APPLY_KEY`), not escalated
     to `tick.error` on the first occurrence. Rationale (see the
     streak-alerting-report.md for the full writeup): a failing PUT to
     her "Гермес" collection has the same practical shape as an

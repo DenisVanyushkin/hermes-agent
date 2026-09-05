@@ -275,3 +275,7 @@ def test_split_streaks_are_wired_through_real_cal_ext_pipeline(
     assert famdb.meta_get(
         db, "extcal_fail_streak:__import_apply__") == "0"
     assert famdb.meta_get(db, "extcal_fail_streak:__export__") == "2"
+
+
+def test_legacy_apply_streak_constant_is_removed():
+    assert not hasattr(cli, "_EXTCAL_STREAK_APPLY_KEY")

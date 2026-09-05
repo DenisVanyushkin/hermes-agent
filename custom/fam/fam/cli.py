@@ -1888,9 +1888,6 @@ _EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
 _EXTCAL_STREAK_DISCOVERY_KEY = "__discovery__"
 _EXTCAL_STREAK_IMPORT_APPLY_KEY = "__import_apply__"
 _EXTCAL_STREAK_EXPORT_KEY = "__export__"
-# Kept as an internal compatibility alias for existing callers/tests.  The
-# legacy "__apply__" meta key is never written and is removed by db.init_db.
-_EXTCAL_STREAK_APPLY_KEY = _EXTCAL_STREAK_IMPORT_APPLY_KEY
 
 # Cap on how many bodies ONE tick may re-fetch one-by-one after a delta
 # entry arrived without <C:calendar-data> (see `_cal_ext_sync`). A
@@ -2760,9 +2757,9 @@ def cmd_tick_cal_ext(args):
     #     configured but 0 matched" class -- there is no calendar to
     #     blame, so it gets its own counter, not folded into any real
     #     calendar's;
-    #   - `_EXTCAL_STREAK_APPLY_KEY` for `apply_changes`/`export_own`
-    #     per-row errors. These are folded into the SAME streak-gated
-    #     path (not escalated immediately) deliberately: they already
+    #   - _EXTCAL_STREAK_IMPORT_APPLY_KEY covers apply_changes errors.
+    #     _EXTCAL_STREAK_EXPORT_KEY covers export_own errors; both use one
+    #     streak-gated path (not escalated immediately) deliberately: they
     #     freeze every calendar's sync-token progress this tick (the
     #     blanket gate below, untouched by this change) and the design
     #     doc's own recorded live case is `database is locked` from the
