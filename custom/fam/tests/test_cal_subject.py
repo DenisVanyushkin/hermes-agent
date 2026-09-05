@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from fam import audit, cal, extcal, people, rem, series
+from fam import audit, cal, cli, extcal, people, rem, series
 
 
 def _seed(db):
@@ -84,3 +84,103 @@ def test_reminders_use_participants_not_subject(db):
     assert not any(r["scope"] == "slug:taya" for r in rem.applicable_rules(db, cal.get(db, event["id"])))
     event = cal.add(db, "Тренировка", "2030-01-08T11:00:00+00:00", subject_person_id=amina["id"], participants=["Тая"])
     assert any(r["scope"] == "slug:taya" for r in rem.applicable_rules(db, cal.get(db, event["id"])))
+
+
+def test_group_subject_rejected_on_all_four_cli_writers(db, capsys):
+    _, taya, group = _seed(db)
+    assert cli.main(["cal", "add", "--title", "one", "--start", "2030-01-08T10:00:00+00:00", "--for-person", "татешки"]) == 2
+    capsys.readouterr()
+    assert cli.main(["cal", "add", "--title", "weekly", "--repeat", "weekly", "--days", "tue", "--start-time", "10:00", "--until", "2030-02-01", "--for-person", "татешки"]) == 2
+    capsys.readouterr()
+    event = cal.add(db, "existing", "2030-01-08T11:00:00+00:00")
+    s = series.add(db, "series", "tue", "12:00", until_local="2030-02-01")
+    series.generate(db, now_utc="2030-01-01T00:00:00+00:00")
+    db.commit()
+    assert cli.main(["cal", "update", str(event["id"]), "--for-person", "татешки"]) == 2
+    capsys.readouterr()
+    assert cli.main(["cal", "series", "update", str(s["id"]), "--for-person", "татешки"]) == 2
+    capsys.readouterr()
+    assert db.execute("SELECT COUNT(*) FROM events WHERE subject_person_id=?", (group["id"],)).fetchone()[0] == 0
+    assert db.execute("SELECT COUNT(*) FROM event_series WHERE subject_person_id=?", (group["id"],)).fetchone()[0] == 0
+    assert db.execute("SELECT subject_person_id FROM events WHERE id=?", (event["id"],)).fetchone()[0] is None
+    assert db.execute("SELECT subject_person_id FROM event_series WHERE id=?", (s["id"],)).fetchone()[0] is None
+
+
+def test_series_clear_subject_clears_future_occurrences(db, capsys):
+    _, taya, _ = _seed(db)
+    s = series.add(db, "series", "tue", "10:00", until_local="2030-02-01", subject_person_id=taya["id"])
+    series.generate(db, now_utc="2030-01-01T00:00:00+00:00")
+    db.commit()
+    assert cli.main(["cal", "series", "update", str(s["id"]), "--clear-for-person", "--json"]) == 0
+    capsys.readouterr()
+    assert db.execute("SELECT subject_person_id FROM event_series WHERE id=?", (s["id"],)).fetchone()[0] is None
+    assert db.execute("SELECT COUNT(*) FROM events WHERE series_id=? AND subject_person_id IS NOT NULL", (s["id"],)).fetchone()[0] == 0
+
+
+def test_series_subject_preserves_individual_denis_override(db):
+    amina, taya, _ = _seed(db)
+    denis = people.add(db, "Денис", slug="denis")
+    s = series.add(db, "series", "tue", "10:00", until_local="2030-02-01", subject_person_id=amina["id"])
+    series.generate(db, now_utc="2030-01-01T00:00:00+00:00")
+    ids = [r["id"] for r in db.execute("SELECT id FROM events WHERE series_id=? ORDER BY start_utc", (s["id"],))]
+    cal.update(db, ids[0], subject_person_id=denis["id"])
+    series.update_participants(db, s["id"], subject_person_id=taya["id"], now_utc="2030-01-01T00:00:00+00:00")
+    values = {r["id"]: r["subject_person_id"] for r in db.execute("SELECT id, subject_person_id FROM events WHERE series_id=?", (s["id"],))}
+    assert values[ids[0]] == denis["id"]
+    assert all(values[event_id] == taya["id"] for event_id in ids[1:])
+
+
+def test_day_range_filter_and_no_flag_regression(db):
+    _, taya, _ = _seed(db)
+    cal.add(db, "Тая", "2030-01-08T05:00:00+00:00", subject_person_id=taya["id"])
+    cal.add(db, "Общее", "2030-01-08T06:00:00+00:00")
+    db.commit()
+    all_day = {e["title"] for e in cal.day(db, "2030-01-08")}
+    subject_day = {e["title"] for e in cal.day(db, "2030-01-08", subject_person_id=taya["id"])}
+    all_range = {e["title"] for e in cal.list_range(db, "2030-01-08T00:00:00+00:00", "2030-01-09T00:00:00+00:00")}
+    subject_range = {e["title"] for e in cal.list_range(db, "2030-01-08T00:00:00+00:00", "2030-01-09T00:00:00+00:00", subject_person_id=taya["id"])}
+    assert all_day == {"Тая", "Общее"}
+    assert subject_day == subject_range == {"Тая"}
+    assert all_range == all_day
+
+
+def test_fresh_and_v13_migrated_schema_match_and_history_stays_null(tmp_path):
+    import sqlite3
+    from fam import db as famdb
+    fresh = famdb.connect(str(tmp_path / "fresh.db"))
+    famdb.init_db(fresh)
+    shape = lambda conn, table: {r["name"]: (r["type"], r["notnull"], r["dflt_value"], r["pk"]) for r in conn.execute(f"PRAGMA table_info({table})")}
+    fresh_shape = {table: shape(fresh, table) for table in ("events", "event_series")}
+    legacy = sqlite3.connect(str(tmp_path / "legacy.db"))
+    legacy.row_factory = sqlite3.Row
+    legacy.executescript(famdb.SCHEMA)
+    legacy.execute("PRAGMA foreign_keys=OFF")
+    legacy.execute("ALTER TABLE events RENAME TO events_with_subject")
+    legacy.execute("""CREATE TABLE events (
+        id INTEGER PRIMARY KEY, title TEXT NOT NULL, start_utc TEXT NOT NULL,
+        end_utc TEXT, place_id INTEGER REFERENCES places(id),
+        transport TEXT NOT NULL DEFAULT 'unknown' CHECK (transport IN ('car','walk','public','unknown')),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled','done')),
+        notes TEXT NOT NULL DEFAULT '', travel_min INTEGER, travel_min_road INTEGER,
+        road_checked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    legacy.execute("""INSERT INTO events SELECT id,title,start_utc,end_utc,place_id,transport,status,notes,travel_min,travel_min_road,road_checked_at,created_at,updated_at FROM events_with_subject""")
+    legacy.execute("DROP TABLE events_with_subject")
+    legacy.execute("ALTER TABLE event_series RENAME TO event_series_with_subject")
+    legacy.execute("""CREATE TABLE event_series (
+        id INTEGER PRIMARY KEY, title TEXT NOT NULL, place_id INTEGER REFERENCES places(id),
+        weekdays TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT,
+        transport TEXT NOT NULL DEFAULT 'unknown' CHECK (transport IN ('car','walk','public','unknown')),
+        notes TEXT NOT NULL DEFAULT '', until_local TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    legacy.execute("""INSERT INTO event_series SELECT id,title,place_id,weekdays,start_time,end_time,transport,notes,until_local,status,created_at,updated_at FROM event_series_with_subject""")
+    legacy.execute("DROP TABLE event_series_with_subject")
+    legacy.execute("INSERT INTO meta(key,value) VALUES('schema_version','13')")
+    legacy.execute("INSERT INTO events(title,start_utc,created_at,updated_at) VALUES('history','2030-01-08T10:00:00+00:00','2030-01-01','2030-01-01')")
+    legacy.commit()
+    famdb.init_db(legacy)
+    migrated_shape = {table: shape(legacy, table) for table in ("events", "event_series")}
+    assert migrated_shape == fresh_shape
+    assert legacy.execute("SELECT subject_person_id FROM events WHERE title='history'").fetchone()[0] is None
+    assert legacy.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "14"
+    fresh.close(); legacy.close()
