@@ -1,7 +1,10 @@
 """S6 route planner and write-only target tests."""
 
 import json
+import sqlite3
 import types
+
+import pytest
 
 from fam import cal, extcal, gate, people
 
@@ -438,15 +441,20 @@ def test_real_cmd_tick_cal_ext_executes_global_route(db, monkeypatch, capsys):
         == 1
     )
 
+
 def test_v15_migration_from_v14_creates_only_taya_journal(db):
     db.execute("DROP TABLE ext_exports_taya")
     db.execute("UPDATE meta SET value='14' WHERE key='schema_version'")
     db.commit()
     from fam import db as famdb
+
     famdb.init_db(db)
     assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 0
     assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 0
-    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
+    assert (
+        db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+        == "15"
+    )
 
 
 def test_route_transition_back_to_hermes_is_destination_first(db):
@@ -473,9 +481,175 @@ def test_route_transition_back_to_hermes_is_destination_first(db):
 
 def test_empty_live_set_has_zero_route_count(db):
     counts = extcal.export_own(
-        db, cfg(), request=lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("empty planner must not call transport")), now_utc=NOW)
+        db,
+        cfg(),
+        request=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("empty planner must not call transport")
+        ),
+        now_utc=NOW,
+    )
     assert counts == {
-        "exported": 0, "updated": 0, "unchanged": 0, "deleted": 0,
-        "retained": 0, "errors": [], "conflicts": [],
+        "exported": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "deleted": 0,
+        "retained": 0,
+        "errors": [],
+        "conflicts": [],
     }
+
+
+def test_taya_route_requires_seed_and_slug_is_unique(db, monkeypatch):
+    row = event(db)
+    monkeypatch.setattr(
+        extcal.cal,
+        "subject_for_event",
+        lambda _db, _event: {"slug": "taya", "id": 999, "name": "Тая"},
+    )
+    plan = extcal._export_route_plan(db, cfg(), extcal._coerce_utc_dt(NOW))
+    assert len(plan) == 1
+    assert {
+        key: plan[0][key]
+        for key in ("event_id", "action", "reason", "export", "target")
+    } == {
+        "event_id": row["id"],
+        "action": "configuration-error",
+        "reason": "invalid_response",
+        "export": None,
+        "target": "taya",
+    }
+
+    db.rollback()
+    people.add(db, "Тая", slug="taya")
+    db.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        people.add(db, "Тая 2", slug="taya")
+    db.rollback()
+
+
+def test_taya_export_has_no_valarm_and_never_delivers_gate(db, monkeypatch):
+    _, taya = seed_people(db)
+    direct = event(db, taya["id"], title="direct Taya")
+    transition = event(db, taya["id"], title="transition Taya")
+    hermes = event(db, title="direct Hermes")
+    journal(db, "ext_exports", transition["id"], HERMES)
+    bodies = []
+    calls = []
+    builders = []
+    original_builder = extcal._build_export_vevent
+
+    def build_vevent(*args, **kwargs):
+        builders.append(args[0]["id"])
+        return original_builder(*args, **kwargs)
+
+    monkeypatch.setattr(extcal, "_build_export_vevent", build_vevent)
+
+    monkeypatch.setattr(
+        gate,
+        "deliver",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Taya export must not deliver a gate message")
+        ),
+    )
+
+    def request(method, url, **kwargs):
+        calls.append((method, url))
+        if method == "PUT":
+            body = kwargs["body"]
+            bodies.append(body.decode() if isinstance(body, bytes) else body)
+            return extcal.Response(201, b"", {"ETag": '"taya-e1"'})
+        return extcal.Response(204, b"", {})
+
+    counts = extcal.export_own(db, cfg(), request=request, now_utc=NOW)
+
+    assert counts["exported"] == 3
+    assert counts["deleted"] == 1
+    assert direct["id"] != transition["id"]
+    assert hermes["id"] not in (direct["id"], transition["id"])
+    assert len(bodies) == 3
+    assert all("VALARM" not in body for body in bodies)
+    assert len(builders) == 3
+    assert {method for method, _ in calls} == {"PUT", "DELETE"}
+    assert [method for method, _ in calls].count("PUT") == 3
+    assert [method for method, _ in calls].count("DELETE") == 1
+    assert any(url.startswith(HERMES) for method, url in calls if method == "PUT")
+    assert any(url.startswith(TAYA) for method, url in calls if method == "PUT")
+
+
+def test_adopted_events_and_plans_never_reach_taya_reconciler(db):
+    _, taya = seed_people(db)
+    adopted = event(db, taya["id"], title="adopted phone event")
+    db.execute(
+        "UPDATE events SET owner='iphone', external_uid=? WHERE id=?",
+        ("iphone-adopted-1", adopted["id"]),
+    )
+    db.execute(
+        "INSERT INTO plans(title, person_id, deadline, status, created_at) "
+        "VALUES (?, ?, ?, 'open', ?)",
+        ("Taya preparation", taya["id"], "2037-07-20", NOW),
+    )
+    db.commit()
+    calls = []
+
+    counts = extcal.export_own(
+        db,
+        cfg(),
+        request=lambda *args, **kwargs: calls.append(args),
+        now_utc=NOW,
+    )
+
+    assert counts["exported"] == 0
+    assert counts["updated"] == 0
+    assert counts["deleted"] == 0
+    assert calls == []
+    assert (
+        db.execute(
+            "SELECT COUNT(*) FROM ext_exports_taya WHERE event_id=?", (adopted["id"],)
+        ).fetchone()[0]
+        == 0
+    )
+
+
+def test_subject_filter_ids_match_view_dry_run_and_global_route_plan(db, monkeypatch):
+    _, taya = seed_people(db)
+    taya_row = event(db, taya["id"], title="subject filtered Taya")
+    event(db, title="unrelated Hermes")
+    original_subject_for_event = cal.subject_for_event
+    calls = []
+
+    def subject_for_event(*args, **kwargs):
+        calls.append(args[1].get("id") if isinstance(args[1], dict) else None)
+        return original_subject_for_event(*args, **kwargs)
+
+    monkeypatch.setattr(cal, "subject_for_event", subject_for_event)
+    viewed = {
+        row["id"]
+        for row in cal.list_range(
+            db,
+            "2037-07-15T00:00:00+00:00",
+            "2037-07-21T00:00:00+00:00",
+            subject_person_id=taya["id"],
+        )
+    }
+    from fam import cli
+
+    export_plan = extcal._export_plan(
+        db,
+        cfg(),
+        extcal._coerce_utc_dt(NOW),
+        subject_person_id=taya["id"],
+        target="taya",
+    )
+    dry_run_ids = set(
+        cli._dry_run_export_summary(export_plan)["target_event_ids"]["taya"]
+    )
+    route_ids = {
+        item["event_id"]
+        for item in extcal._export_route_plan(db, cfg(), extcal._coerce_utc_dt(NOW))
+        if item.get("target") == "taya"
+    }
+
+    assert viewed == {taya_row["id"]}
+    assert dry_run_ids == viewed
+    assert route_ids == viewed
+    assert len(calls) >= 3
