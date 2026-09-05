@@ -20932,12 +20932,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 response = _sanitize_gateway_final_response(source.platform, response)
 
+            pending_ack_raw_response = response
+            response = _strip_pending_ack_clarification_markers(response)
             if _pending_ack_residual:
                 seen = self._session_state(session_key).conversation.pending_ack_residuals
                 residual_plan = _pending_ack_residual_plan(
-                    _pending_ack_residual, response, seen.keys()
+                    _pending_ack_residual, pending_ack_raw_response, seen.keys()
                 )
-                response = _strip_pending_ack_clarification_markers(response)
                 if residual_plan is not None:
                     if not await self._defer_pending_ack_residual_after_delivery(
                         source, session_key, residual_plan

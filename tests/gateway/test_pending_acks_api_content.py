@@ -660,8 +660,11 @@ async def test_pending_ack_s2_composition_partial_preserves_applied_sidecar_with
 
     def fake_model_call(self, api_kwargs, **_kwargs):
         captured["api_messages"] = api_kwargs["messages"]
-        marker_match = gateway_run._PENDING_ACK_CLARIFICATION_MARKER_RE.search(
+        markers = gateway_run._PENDING_ACK_CLARIFICATION_MARKER_RE.finditer(
             "\n".join(message.get("content", "") for message in api_kwargs["messages"])
+        )
+        marker_match = next(
+            match for match in markers if "candidate=med_intake:1@" in match.group(0)
         )
         assert marker_match
         captured["marker"] = marker_match.group(0)
@@ -1091,3 +1094,32 @@ def test_pending_ack_process_timeout_kills_process_group(monkeypatch, tmp_path):
 
     assert result.returncode != 0
     assert killed == [(51001, signal.SIGKILL)]
+@pytest.mark.asyncio
+async def test_pending_ack_marker_stripped_without_pending_receipt(
+    monkeypatch, tmp_path
+):
+    runner = _runner(monkeypatch, tmp_path)
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model", {
+            "api_key": "test-key", "base_url": "http://provider.test/v1",
+            "provider": "openai", "api_mode": "chat_completions",
+        },
+    )
+    runner._session_db = None
+    marker = gateway_run._pending_ack_clarification_marker({
+        "kind": "event", "ref_id": 66, "last_outbound_at": "anchor",
+    })
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=f"Ответ {marker}", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call)
+
+    response = await runner._handle_message_with_agent(
+        _event(), _source(), SESSION_KEY, 1
+    )
+
+    assert response == "Ответ"
