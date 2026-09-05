@@ -2966,6 +2966,7 @@ def _export_hash_state(event, location, participants, stored):
 
 
 def _remote_description_names(text):
+    """Extract the participant-name payload from a managed ICS description."""
     for line in _unfold(text or ""):
         parsed = _split_property_line(line)
         if parsed and parsed[0] == "DESCRIPTION":
@@ -3720,7 +3721,10 @@ def _export_plan(conn, cfg, now_dt):
                 entry = _export_plan_entry(
                     conn, event, exp,
                     "past_retained" if start_dt else "not_yet_eligible")
-                if entry["action"] in ("update", "insert"):
+                # Retention is a lifecycle decision independent of hash
+                # equality. The only local touch allowed outside the window
+                # is the one-time v1 -> v2 rebaseline.
+                if entry["action"] != "rebaseline":
                     entry["action"] = "retain"
                 plan.append(entry)
                 continue

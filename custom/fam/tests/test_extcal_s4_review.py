@@ -73,6 +73,25 @@ def _make_conflict(db, event):
     return counts
 
 
+def test_past_equivalent_rebaseline_then_retained_on_next_tick(db):
+    event = _event(db, start="2037-07-10T13:00:00+00:00")
+    legacy = extcal._export_body_hash_v1(event, "", [])
+    _seed_export(db, event, legacy)
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append(method)
+        pytest.fail("past retained event must never use the network")
+
+    first = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    second = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+
+    assert first["unchanged"] == 1
+    assert first["retained"] == 0
+    assert second["unchanged"] == 0
+    assert second["retained"] == 1
+    assert calls == []
+
 def test_marked_legacy_equivalent_rebaselines_without_network(db):
     event = _event(db)
     legacy = extcal._export_body_hash_v1(event, "", [])
