@@ -85,6 +85,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_audit_resolve_key
   ON audit_log(kind, CASE WHEN json_valid(payload)
                           THEN json_extract(payload, '$.idempotency_key') END);
+CREATE TABLE IF NOT EXISTS resolve_receipts (
+  idempotency_key TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  ref_id INTEGER NOT NULL,
+  receipt TEXT NOT NULL,
+  created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reminder_rules (
   id INTEGER PRIMARY KEY,
   scope TEXT NOT NULL,                    -- 'default' | 'slug:<slug>'
@@ -257,6 +263,25 @@ def _ensure_column(conn, table, column, add_ddl):
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {add_ddl}")
 
+
+def migrate_resolve_receipts(conn):
+    """Install the resolve receipt store on an existing FAM database.
+
+    ``connect()`` intentionally only opens SQLite, so the resolve CLI calls
+    this migration before reading or writing a resolution receipt.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS resolve_receipts ("
+        "idempotency_key TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+        "ref_id INTEGER NOT NULL, receipt TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_resolve_key "
+        "ON audit_log(kind, CASE WHEN json_valid(payload) "
+        "THEN json_extract(payload, '$.idempotency_key') END)"
+    )
+    conn.commit()
 def init_db(conn):
     conn.executescript(SCHEMA)
     # schema 2b: migrate pre-2b tables that predate these columns

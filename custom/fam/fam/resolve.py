@@ -6,16 +6,18 @@ Nothing is considered applied until the postcondition is true.
 """
 import hashlib
 import json
+import sqlite3
 import subprocess
 from typing import Any
 
 from fam import acks, audit, cal, gate, meds, rem
 
 PROMPT_VERSION = "amina-ack-resolution-s2-v1"
+RECEIPT_SCHEMA_VERSION = 1
 _EVENT_DISPOSITIONS = {"ack_chain_prepare", "ack_chain_all",
                        "cancel_reminders", "cancel_occurrence",
                        "unrelated", "ambiguous"}
-_MED_DISPOSITIONS = {"taken", "skipped", "snooze", "unrelated", "ambiguous"}
+_MED_DISPOSITIONS = {"taken", "skipped", "unrelated", "ambiguous"}
 
 
 def _json_hash(value: Any) -> str:
@@ -80,7 +82,29 @@ def _call_classifier(prompt: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_receipt(receipt):
+    if not isinstance(receipt, dict):
+        return None
+    result = dict(receipt)
+    result.setdefault("schema_version", RECEIPT_SCHEMA_VERSION)
+    return result
+
+
 def _load_existing(conn, key: str) -> dict[str, Any] | None:
+    try:
+        row = conn.execute(
+            "SELECT receipt FROM resolve_receipts WHERE idempotency_key=?",
+            (key,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is not None:
+        try:
+            receipt = _normalize_receipt(json.loads(row["receipt"]))
+        except (TypeError, json.JSONDecodeError):
+            receipt = None
+        if receipt is not None:
+            return receipt
     rows = conn.execute(
         "SELECT payload FROM audit_log "
         "WHERE kind='resolve.turn' "
@@ -97,15 +121,25 @@ def _load_existing(conn, key: str) -> dict[str, Any] | None:
             continue
         if payload.get("idempotency_key") == key:
             receipt = payload.get("receipt")
-            if isinstance(receipt, dict):
-                receipts.append(receipt)
+            normalized = _normalize_receipt(receipt)
+            if normalized is not None:
+                receipts.append(normalized)
     if not receipts:
         return None
     return receipts[0] if len(receipts) == 1 else _aggregate_receipts(receipts)
 
 
+def _store_receipt(conn, key, candidate, receipt, created_at=""):
+    conn.execute(
+        "INSERT INTO resolve_receipts(idempotency_key, kind, ref_id, "
+        "receipt, created_at) VALUES(?,?,?,?,?)",
+        (key, candidate.get("kind"), int(candidate["ref_id"]),
+         json.dumps(receipt, ensure_ascii=False, sort_keys=True),
+         created_at),
+    )
 def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None):
     receipt = {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "status": "unresolved", "residual": True, "reason": reason,
         "kind": candidate.get("kind"), "ref_id": candidate.get("ref_id"),
         "disposition": None,
@@ -154,6 +188,7 @@ def _strict_dispositions(output, candidates):
 
 def _receipt(candidate, disposition):
     return {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
         "status": "applied", "residual": False,
         "kind": candidate.get("kind"), "ref_id": candidate.get("ref_id"),
         "disposition": disposition,
@@ -179,6 +214,7 @@ def _aggregate_receipts(receipts):
         unresolved_refs.append(detail)
     if applied and not unresolved:
         return {
+            "schema_version": RECEIPT_SCHEMA_VERSION,
             "status": "applied", "residual": False,
             "dispositions": [
                 {key: item[key] for key in ("kind", "ref_id", "disposition")}
@@ -188,6 +224,7 @@ def _aggregate_receipts(receipts):
         }
     if applied:
         result = {
+            "schema_version": RECEIPT_SCHEMA_VERSION,
             "status": "partial", "residual": True,
             "applied": [
                 {key: item[key] for key in ("kind", "ref_id", "disposition")}
@@ -201,13 +238,16 @@ def _aggregate_receipts(receipts):
         if sidecars:
             result["trusted_sidecar"] = "\n".join(sidecars)
         return result
-    return {"status": "unresolved", "residual": True, "unresolved": len(unresolved), "unresolved_refs": unresolved_refs}
+    return {"schema_version": RECEIPT_SCHEMA_VERSION, "status": "unresolved", "residual": True, "unresolved": len(unresolved), "unresolved_refs": unresolved_refs}
 
 
 def _apply(conn, candidate, disposition, request):
     kind = candidate.get("kind")
     ref_id = int(candidate["ref_id"])
     if kind == "event":
+        event = cal.get(conn, ref_id)
+        if event is None or event["owner"] != "hermes":
+            return False, "owner_not_hermes"
         if disposition == "ack_chain_prepare":
             rem.ack_chain(conn, ref_id, scope="prepare")
         elif disposition == "ack_chain_all":
@@ -223,11 +263,6 @@ def _apply(conn, candidate, disposition, request):
             meds.take(conn, ref_id)
         elif disposition == "skipped":
             meds.skip(conn, ref_id)
-        elif disposition == "snooze":
-            until = request.get("snooze_until_utc")
-            if not isinstance(until, str) or not until:
-                return False, "missing_snooze_until"
-            meds.defer(conn, ref_id, until)
         else:
             return False, "non_terminal"
     else:
@@ -308,14 +343,20 @@ def resolve_turn(conn, request, cfg=None):
         elif disposition in {"unrelated", "ambiguous"}:
             reason = disposition
         else:
+            receipt = None
             try:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = _load_existing(conn, key)
+                if existing is not None:
+                    conn.rollback()
+                    results.append(existing)
+                    continue
                 changed, reason = _apply(conn, candidate, disposition, request)
                 if not changed or not _postcondition(conn, candidate, disposition):
                     conn.rollback()
                     reason = reason or "postcondition_failed"
                 else:
                     _set_terminal_ack(conn, candidate, disposition)
-                    acks.write(conn, cfg=cfg, now_utc=request.get("now_utc"))
                     receipt = _receipt(candidate, disposition)
                     audit.log(conn, "resolve.turn", {
                         "idempotency_key": key, "kind": candidate.get("kind"),
@@ -325,12 +366,19 @@ def resolve_turn(conn, request, cfg=None):
                         "output_sha256": output_hash, "postcondition": True,
                         "receipt": receipt,
                     })
+                    _store_receipt(
+                        conn, key, candidate, receipt,
+                        created_at=request.get("now_utc") or "",
+                    )
                     conn.commit()
-                    results.append(receipt)
-                    continue
             except Exception as exc:  # noqa: BLE001 -- every ref is residual
                 conn.rollback()
+                receipt = None
                 reason = f"effect_failed:{type(exc).__name__}"
+            if receipt is not None:
+                acks.write(conn, cfg=cfg, now_utc=request.get("now_utc"))
+                results.append(receipt)
+                continue
         results.append(_unresolved(conn, key, candidate, reason,
                                    input_hash, output_hash))
 

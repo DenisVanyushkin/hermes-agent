@@ -302,3 +302,255 @@ def test_ambiguous_multiple_open_candidates_mutates_none(db, tmp_path):
     assert db.execute(
         "SELECT status FROM events WHERE id=?", (other["id"],)
     ).fetchone()[0] == "active"
+
+
+def test_open_resolution_candidates_exclude_iphone_owned_event(db):
+    from fam import rem
+
+    event = cal.add(db, "iPhone event", "2099-09-07T12:00:00+00:00")
+    db.execute("UPDATE events SET owner='iphone' WHERE id=?", (event["id"],))
+    react.record_sent(
+        db, "wa-iphone-rem", "reminder", event["id"],
+        event_id=event["id"], now_utc=NOW,
+    )
+    db.commit()
+
+    assert rem.open_resolution_candidates(db, now_utc=NOW) == []
+
+
+def test_ack_then_next_projection_does_not_reemit_event_candidate(db, tmp_path):
+    from fam import acks
+
+    event_id, _ = _fixture(db)
+    request = _request(event_id, 0)
+    request["candidates"] = [request["candidates"][0]]
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [{
+            "kind": "event", "ref_id": event_id,
+            "disposition": "ack_chain_all",
+        }]),
+    )
+
+    assert result["status"] == "applied"
+    assert not any(
+        item.get("kind") == "event" and item.get("ref_id") == event_id
+        for item in acks.build(db, now_utc=NOW)["items"]
+    )
+
+
+def test_projection_is_written_after_effect_commit(db, tmp_path, monkeypatch):
+    import sqlite3
+
+    event_id, _ = _fixture(db)
+    request = _request(event_id, 0)
+    request["candidates"] = [request["candidates"][0]]
+    observer = sqlite3.connect(str(tmp_path / "assistant.db"))
+    observed = []
+
+    def observe_projection(*_args, **_kwargs):
+        observed.append(
+            observer.execute(
+                "SELECT status FROM events WHERE id=?", (event_id,)
+            ).fetchone()[0]
+        )
+
+    monkeypatch.setattr(resolve.acks, "write", observe_projection)
+    try:
+        result = resolve.resolve_turn(
+            db,
+            request,
+            cfg=_config(tmp_path, [{
+                "kind": "event", "ref_id": event_id,
+                "disposition": "cancel_occurrence",
+            }]),
+        )
+    finally:
+        observer.close()
+
+    assert result["status"] == "applied"
+    assert observed == ["cancelled"]
+
+
+def test_text_resolver_does_not_accept_unsupported_snooze(db, tmp_path):
+    event_id, intake_id = _fixture(db)
+    request = _request(event_id, intake_id)
+    request["candidates"] = [request["candidates"][1]]
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [{
+            "kind": "med_intake", "ref_id": intake_id,
+            "disposition": "snooze",
+        }]),
+    )
+
+    assert "snooze" not in resolve._MED_DISPOSITIONS
+    assert result["status"] == "unresolved"
+    assert result["unresolved_refs"][0]["reason"] == "invalid_disposition"
+    assert db.execute(
+        "SELECT status FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()[0] == "pending"
+
+
+def test_applied_receipt_is_stored_in_unique_receipt_table(db, tmp_path):
+    import sqlite3
+
+    event_id, _ = _fixture(db)
+    request = _request(event_id, 0)
+    request["candidates"] = [request["candidates"][0]]
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [{
+            "kind": "event", "ref_id": event_id,
+            "disposition": "cancel_occurrence",
+        }]),
+    )
+
+    assert result["status"] == "applied"
+    row = db.execute(
+        "SELECT idempotency_key, receipt FROM resolve_receipts"
+    ).fetchone()
+    assert row is not None
+    assert json.loads(row["receipt"])["status"] == "applied"
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            "INSERT INTO resolve_receipts(idempotency_key, kind, ref_id, "
+            "receipt, created_at) VALUES(?,?,?,?,?)",
+            (row["idempotency_key"], "event", event_id,
+             row["receipt"], NOW),
+        )
+
+
+def test_resolver_rejects_stale_iphone_event_candidate(db, tmp_path):
+    event = cal.add(db, "iPhone event", "2099-09-08T12:00:00+00:00")
+    db.execute("UPDATE events SET owner='iphone' WHERE id=?", (event["id"],))
+    react.record_sent(
+        db, "wa-stale-iphone-rem", "reminder", event["id"],
+        event_id=event["id"], now_utc=NOW,
+    )
+    db.commit()
+    request = _request(event["id"], 0)
+    request["candidates"] = [request["candidates"][0]]
+    result = resolve.resolve_turn(
+        db,
+        request,
+        cfg=_config(tmp_path, [{
+            "kind": "event", "ref_id": event["id"],
+            "disposition": "cancel_occurrence",
+        }]),
+    )
+
+    assert result["status"] == "unresolved"
+    assert result["unresolved_refs"][0]["reason"] == "owner_not_hermes"
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (event["id"],)
+    ).fetchone()[0] == "active"
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='cal.cancel'"
+    ).fetchone()[0] == 0
+
+
+def test_legacy_audit_receipt_replays_when_new_store_row_is_missing(
+    db, tmp_path, monkeypatch
+):
+    event_id, _ = _fixture(db)
+    request = _request(event_id, 0)
+    request["candidates"] = [request["candidates"][0]]
+    cfg = _config(tmp_path, [{
+        "kind": "event", "ref_id": event_id,
+        "disposition": "cancel_occurrence",
+    }])
+    first = resolve.resolve_turn(db, request, cfg=cfg)
+    key = resolve._turn_key(request, request["candidates"][0])
+    db.execute(
+        "DELETE FROM resolve_receipts WHERE idempotency_key=?", (key,)
+    )
+    db.commit()
+    monkeypatch.setattr(
+        resolve, "_call_classifier",
+        lambda *_args, **_kwargs: pytest.fail("legacy receipt was not reused"),
+    )
+
+    second = resolve.resolve_turn(db, request, cfg=cfg)
+
+    assert first["status"] == second["status"] == "applied"
+    assert second["dispositions"] == first["dispositions"]
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (event_id,)
+    ).fetchone()[0] == "cancelled"
+
+
+
+def test_concurrent_same_ref_persists_one_effect_and_one_receipt(
+    db, tmp_path
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from fam import db as famdb
+
+    event_id, _ = _fixture(db)
+    request = _request(event_id, 0)
+    request["candidates"] = [request["candidates"][0]]
+    cfg = _config(tmp_path, [{
+        "kind": "event", "ref_id": event_id,
+        "disposition": "cancel_occurrence",
+    }])
+    path = str(tmp_path / "assistant.db")
+
+    def resolve_from_separate_connection():
+        conn = famdb.connect(path)
+        try:
+            return resolve.resolve_turn(conn, request, cfg=cfg)
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _unused: resolve_from_separate_connection(), (1, 2)
+        ))
+
+    assert [result["status"] for result in results] == ["applied", "applied"]
+    assert db.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE kind='cal.cancel'"
+    ).fetchone()[0] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM resolve_receipts"
+    ).fetchone()[0] == 1
+
+
+def test_committed_ref_receipt_survives_projection_crash(
+    db, tmp_path, monkeypatch
+):
+    """A crash after one commit can replay that ref without reapplying it."""
+    event_id, intake_id = _fixture(db)
+    request = _request(event_id, intake_id)
+    cfg = _config(tmp_path, [
+        {"kind": "event", "ref_id": event_id,
+         "disposition": "cancel_occurrence"},
+        {"kind": "med_intake", "ref_id": intake_id, "disposition": "taken"},
+    ])
+    real_write = resolve.acks.write
+
+    def crash_after_first_commit(*_args, **_kwargs):
+        monkeypatch.setattr(resolve.acks, "write", real_write)
+        raise RuntimeError("projection crash")
+
+    monkeypatch.setattr(resolve.acks, "write", crash_after_first_commit)
+    with pytest.raises(RuntimeError, match="projection crash"):
+        resolve.resolve_turn(db, request, cfg=cfg)
+
+    assert db.execute(
+        "SELECT status FROM events WHERE id=?", (event_id,)
+    ).fetchone()[0] == "cancelled"
+    assert db.execute(
+        "SELECT COUNT(*) FROM resolve_receipts"
+    ).fetchone()[0] == 1
+
+    replayed = resolve.resolve_turn(db, request, cfg=cfg)
+
+    assert replayed["status"] == "applied"
+    assert db.execute(
+        "SELECT status FROM med_intakes WHERE id=?", (intake_id,)
+    ).fetchone()[0] == "taken"

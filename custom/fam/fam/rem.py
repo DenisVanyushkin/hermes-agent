@@ -356,7 +356,8 @@ def open_resolution_candidates(conn, now_utc=None, max_age_min=120):
         "SELECT e.id AS event_id, e.title AS title, "
         "MAX(m.created_at) AS last_outbound_at "
         "FROM events e JOIN sent_messages m ON m.event_id=e.id "
-        "WHERE e.status='active' AND m.kind='reminder' "
+        "WHERE e.status='active' AND e.owner='hermes' "
+        "AND m.kind='reminder' AND m.ack_status='none' "
         "GROUP BY e.id ORDER BY last_outbound_at, e.id"
     ).fetchall()
     out = []
@@ -369,7 +370,7 @@ def open_resolution_candidates(conn, now_utc=None, max_age_min=120):
             continue
         ids = conn.execute(
             "SELECT wa_message_id FROM sent_messages "
-            "WHERE event_id=? AND kind='reminder' "
+            "WHERE event_id=? AND kind='reminder' AND ack_status='none' "
             "ORDER BY created_at, id",
             (row["event_id"],),
         ).fetchall()

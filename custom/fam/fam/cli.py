@@ -322,6 +322,7 @@ def cmd_resolve_turn(args):
         return 2
     conn = famdb.connect()
     try:
+        famdb.migrate_resolve_receipts(conn)
         result = resolve.resolve_turn(conn, request, cfg=gate.load_config())
     finally:
         conn.close()

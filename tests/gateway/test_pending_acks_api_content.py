@@ -150,6 +150,9 @@ async def test_partial_pending_ack_preserves_applied_sidecar_with_residual(
     }
     partial = {
         "status": "partial",
+        "schema_version": 1,
+        "unresolved_refs": [{"kind": "med_intake", "ref_id": 46,
+                             "reason": "invalid_disposition"}],
         "residual": True,
         "applied": [{"kind": "event", "ref_id": 66,
                      "disposition": "cancel_occurrence"}],
@@ -983,3 +986,22 @@ async def test_pending_ack_s4_composition_delivers_main_then_one_residual(
     assert adapter.sent.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
     assert gateway_run._PENDING_ACK_RESIDUAL not in response
     check.close()
+
+
+@pytest.mark.parametrize("receipt", [
+    {"schema_version": 99, "status": "applied", "residual": False,
+     "kind": "event", "ref_id": 1, "disposition": "cancel_occurrence"},
+    {"schema_version": 1, "status": "bogus", "residual": True},
+    {"schema_version": 1, "status": "applied", "residual": False,
+     "kind": "event", "ref_id": 1, "disposition": "cancel_occurrence",
+     "trusted_sidecar": True},
+    {"schema_version": 1, "status": "applied", "residual": False,
+     "kind": "event", "ref_id": 99, "disposition": "cancel_occurrence"},
+])
+def test_pending_ack_receipt_validator_rejects_invalid_envelopes(receipt):
+    candidates = [{
+        "kind": "event", "ref_id": 1,
+        "current_state": "active", "wa_message_ids": ["wa-rem-1"],
+    }]
+
+    assert gateway_run._validate_pending_ack_receipt(receipt, candidates) is None

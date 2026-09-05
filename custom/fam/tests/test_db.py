@@ -869,3 +869,31 @@ def test_ext_exports_table_shape_and_cascade(db):
     db.commit()
     count = db.execute("SELECT COUNT(*) c FROM ext_exports").fetchone()["c"]
     assert count == 0
+
+
+def test_resolve_receipt_migration_adds_table_to_existing_db(tmp_path):
+    from fam import db as famdb
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE resolve_receipts")
+    conn.execute("DROP INDEX idx_audit_resolve_key")
+    conn.commit()
+
+    famdb.migrate_resolve_receipts(conn)
+
+    tables = {
+        row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    indexes = {
+        row["name"] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    assert "resolve_receipts" in tables
+    assert "idx_audit_resolve_key" in indexes
+    conn.close()

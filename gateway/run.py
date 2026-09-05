@@ -562,6 +562,87 @@ def _pending_ack_candidate(snapshot: Any, reply_to_message_id: Optional[str]) ->
     return candidates[0] if candidates else None
 
 
+_PENDING_ACK_RECEIPT_SCHEMA_VERSION = 1
+_PENDING_ACK_RECEIPT_STATUSES = {"applied", "partial", "unresolved"}
+_PENDING_ACK_DISPOSITIONS = {
+    "ack_chain_prepare", "ack_chain_all", "cancel_reminders",
+    "cancel_occurrence", "taken", "skipped", "unrelated", "ambiguous",
+}
+
+
+def _validate_pending_ack_receipt(receipt, candidates):
+    """Accept only a versioned FAM receipt for the requested refs."""
+    if not isinstance(receipt, dict):
+        return None
+    if receipt.get("schema_version") != _PENDING_ACK_RECEIPT_SCHEMA_VERSION:
+        return None
+    status = receipt.get("status")
+    if status not in _PENDING_ACK_RECEIPT_STATUSES:
+        return None
+    residual = receipt.get("residual")
+    if not isinstance(residual, bool):
+        return None
+    if residual != (status != "applied"):
+        return None
+    sidecar = receipt.get("trusted_sidecar")
+    if sidecar is not None and not isinstance(sidecar, str):
+        return None
+    requested = {
+        (str(item.get("kind")), str(item.get("ref_id")))
+        for item in candidates or ()
+        if isinstance(item, dict)
+    }
+
+    def valid_ref(item, require_disposition=False):
+        if not isinstance(item, dict):
+            return None
+        key = (str(item.get("kind")), str(item.get("ref_id")))
+        if key not in requested:
+            return None
+        if (require_disposition and
+                item.get("disposition") not in _PENDING_ACK_DISPOSITIONS):
+            return None
+        return key
+
+    applied = []
+    unresolved = []
+    if status == "applied":
+        if isinstance(receipt.get("dispositions"), list):
+            applied = receipt["dispositions"]
+        elif all(field in receipt for field in ("kind", "ref_id", "disposition")):
+            applied = [receipt]
+        else:
+            return None
+        if not applied:
+            return None
+    elif status == "partial":
+        applied = receipt.get("applied")
+        unresolved = receipt.get("unresolved_refs")
+        if not isinstance(applied, list) or not isinstance(unresolved, list):
+            return None
+        if not applied or not unresolved:
+            return None
+        if receipt.get("unresolved") != len(unresolved):
+            return None
+    else:
+        unresolved = receipt.get("unresolved_refs")
+        if not isinstance(unresolved, list) or not unresolved:
+            return None
+
+    seen = set()
+    for item in applied:
+        key = valid_ref(item, require_disposition=True)
+        if key is None or key in seen:
+            return None
+        seen.add(key)
+    for item in unresolved:
+        key = valid_ref(item)
+        if key is None or key in seen:
+            return None
+        seen.add(key)
+    return receipt
+
+
 async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
     """Run the FAM prepass and return a receipt; all failures are residual."""
     if _pending_acks_note(
@@ -603,12 +684,12 @@ async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
         if completed.returncode != 0:
             return {"residual": True, "reason": "fam_nonzero",
                     "unresolved_refs": _pending_ack_unresolved_refs(candidates, "fam_nonzero")}
-        receipt = json.loads((completed.stdout or "").strip())
-        if not isinstance(receipt, dict):
-            return {"residual": True, "reason": "malformed_fam_output",
-                    "unresolved_refs": _pending_ack_unresolved_refs(candidates, "malformed_fam_output")}
-        if receipt.get("trusted_sidecar"):
-            return receipt
+        receipt = _validate_pending_ack_receipt(
+            json.loads((completed.stdout or "").strip()), candidates
+        )
+        if receipt is None:
+            return {"residual": True, "reason": "invalid_receipt",
+                    "unresolved_refs": _pending_ack_unresolved_refs(candidates, "invalid_receipt")}
         if receipt.get("residual") and not receipt.get("unresolved_refs"):
             receipt["unresolved_refs"] = _pending_ack_unresolved_refs(
                 candidates, receipt.get("reason", "unresolved")
