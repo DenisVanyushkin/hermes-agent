@@ -200,7 +200,7 @@ def test_unexpected_export_exception_keeps_type_only_in_audit(db):
 
 
 
-def test_non_orphan_issue_integrity_error_is_not_swallowed(db, monkeypatch):
+def test_non_orphan_issue_integrity_error_is_observable(db, monkeypatch):
     event = _event(db, "Existing event")
     monkeypatch.setattr(
         extcal, "_export_issue_upsert",
@@ -211,9 +211,50 @@ def test_non_orphan_issue_integrity_error_is_not_swallowed(db, monkeypatch):
     def boom():
         raise extcal._ExportFailure("transport failed", status=500)
 
-    with pytest.raises(sqlite3.IntegrityError):
-        extcal._export_commit_one(
-            db, event["id"], "update", "updated", {"errors": []}, boom)
+    counts = {"errors": []}
+    extcal._export_commit_one(
+        db, event["id"], "update", "updated", counts, boom,
+        now_utc=TEST_NOW)
+
+    payload = json.loads(db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
+    ).fetchone()["payload"])
+    assert payload["issue_recorded"] is False
+    assert payload["issue_write_error"] == "issue_integrity_error"
+    assert payload["issue_exception_type"] == "IntegrityError"
+    assert payload["exception_type"] == "_ExportFailure"
+
+
+def test_issue_write_failure_does_not_sink_next_export(db, monkeypatch):
+    first = _event(db, "First event")
+    second = _event(db, "Second event")
+
+    def request(method, url, **kwargs):
+        if f"fam-{first['id']}@" in url:
+            return extcal.Response(500, b"SECRET ICS BODY", {})
+        return extcal.Response(201, b"", {"ETag": '"e2"'})
+
+    original = extcal._export_issue_upsert
+
+    def fail_first_issue(conn, event_id, *args, **kwargs):
+        if event_id == first["id"]:
+            raise sqlite3.IntegrityError("CHECK constraint failed")
+        return original(conn, event_id, *args, **kwargs)
+
+    monkeypatch.setattr(extcal, "_export_issue_upsert", fail_first_issue)
+    counts = extcal.export_own(
+        db, _cfg(), request=request, now_utc=TEST_NOW)
+
+    assert len(counts["errors"]) == 1
+    assert counts["exported"] == 1
+    assert db.execute(
+        "SELECT 1 FROM ext_exports WHERE event_id=?", (second["id"],)
+    ).fetchone() is not None
+    first_audit = json.loads(db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
+    ).fetchone()["payload"])
+    assert first_audit["issue_recorded"] is False
+    assert first_audit["issue_write_error"] == "issue_integrity_error"
 
 
 

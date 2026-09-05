@@ -3283,7 +3283,7 @@ def _export_delete_event(conn, cfg, request, event_id, exp):
 
 def _export_commit_one(conn, event_id, action, count_key, counts, fn,
                        now_utc=None):
-    """Run one export with isolated transaction and safe issue accounting."""
+    """Run one export with per-row transaction and diagnostic isolation."""
     try:
         fn()
     except Exception as e:
@@ -3293,28 +3293,44 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn,
         safe_error = reason_code
         if status is not None:
             safe_error += f" (status={status})"
-        counts["errors"].append({
+        error_entry = {
             "event_id": event_id,
             "action": action,
             "error": safe_error,
             "reason_code": reason_code,
             "http_status": status,
-        })
+            "audit_recorded": False,
+        }
+        counts["errors"].append(error_entry)
 
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            return
+
         issue_recorded = True
         issue_write_error = None
+        issue_exception_type = None
         try:
             _export_issue_upsert(
                 conn, event_id, action, status=status,
                 kind="error", reason_code=reason_code, now_utc=now_utc)
-        except sqlite3.IntegrityError:
-            event_exists = conn.execute(
-                "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
-            if event_exists:
-                raise
+        except sqlite3.IntegrityError as issue_exc:
             issue_recorded = False
-            issue_write_error = "orphan_event"
+            issue_exception_type = type(issue_exc).__name__[:100]
+            try:
+                event_exists = conn.execute(
+                    "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
+            except Exception:
+                issue_write_error = "issue_lookup_error"
+            else:
+                issue_write_error = (
+                    "issue_integrity_error" if event_exists
+                    else "orphan_event")
+        except Exception as issue_exc:
+            issue_recorded = False
+            issue_write_error = "issue_write_error"
+            issue_exception_type = type(issue_exc).__name__[:100]
 
         audit_payload = {
             "event_id": event_id,
@@ -3327,8 +3343,18 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn,
         }
         if issue_write_error:
             audit_payload["issue_write_error"] = issue_write_error
-        audit.log(conn, "cal.ext.export_error", audit_payload)
-        conn.commit()
+        if issue_exception_type:
+            audit_payload["issue_exception_type"] = issue_exception_type
+
+        try:
+            audit.log(conn, "cal.ext.export_error", audit_payload)
+            conn.commit()
+            error_entry["audit_recorded"] = True
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         return
     _export_issue_resolve(conn, event_id)
     counts[count_key] += 1
