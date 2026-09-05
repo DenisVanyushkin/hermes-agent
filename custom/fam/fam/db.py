@@ -223,6 +223,17 @@ CREATE TABLE IF NOT EXISTS ext_exports (
   etag TEXT,
   body_hash TEXT,
   synced_at TEXT);
+CREATE TABLE IF NOT EXISTS extcal_export_issues (
+  target TEXT NOT NULL CHECK (target IN ('hermes','taya')),
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+  action TEXT NOT NULL CHECK (action IN ('put','delete')),
+  kind TEXT NOT NULL CHECK (kind IN ('error','conflict')),
+  http_status INTEGER,
+  reason_code TEXT NOT NULL CHECK (
+    reason_code IN ('export_error','conflict','not_found','invalid_response')),
+  first_seen_utc TEXT NOT NULL,
+  last_seen_utc TEXT NOT NULL,
+  PRIMARY KEY(target, event_id));
 """
 
 def resolve_db_path():
@@ -472,14 +483,14 @@ def init_db(conn):
     _ensure_column(conn, "med_intakes", "gate_reason", "gate_reason TEXT")
     # S2 data cleanup: the old aggregate apply streak is not a
     # meaningful value after the split.  This is deliberately DML only:
-    # schema_version remains 12, and the legacy value is not migrated.
+    # schema_version remains unchanged by the cleanup itself; v13 owns the new table.
     conn.execute(
         "DELETE FROM meta WHERE key IN (?, ?)",
         ("extcal_fail_streak:__apply__", "extcal_fail_alerted:__apply__"))
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','13')")
     conn.execute(
-        "UPDATE meta SET value='12' WHERE key='schema_version'")
+        "UPDATE meta SET value='13' WHERE key='schema_version'")
     conn.commit()
 
 

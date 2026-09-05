@@ -3185,13 +3185,49 @@ def _export_record(conn, event_id, href, etag, body_hash, synced_at):
 
 
 class _ExportFailure(Exception):
-    """Raised by `_export_put_event`/`_export_delete_event` for a
-    recognized (non-crash) PUT/DELETE failure -- every attempt (including
-    the one 412 retry, for PUT) came back a non-2xx/non-404 status, or no
-    response at all. Caught by `_export_commit_one` exactly like any other
-    exception (same per-row isolation contract as `apply_changes`' own
-    `_apply_one`), but carries a clean, pre-formatted message instead of a
-    bare exception type name."""
+    """Safe classification for a failed export transport operation."""
+
+    def __init__(self, message, status=None, reason_code="export_error"):
+        super().__init__(message)
+        self.status = status
+        self.reason_code = reason_code
+
+
+_EXPORT_ISSUE_TARGET = "hermes"
+
+
+def _export_issue_action(action):
+    return "put" if action in ("insert", "update") else action
+
+
+def _export_issue_upsert(conn, event_id, action, status=None, kind="error",
+                         reason_code="export_error"):
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    db_action = _export_issue_action(action)
+    conn.execute(
+        "INSERT INTO extcal_export_issues("
+        "target,event_id,action,kind,http_status,reason_code,"
+        "first_seen_utc,last_seen_utc) VALUES(?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(target,event_id) DO UPDATE SET "
+        "action=excluded.action, kind=excluded.kind, "
+        "http_status=excluded.http_status, reason_code=excluded.reason_code, "
+        "last_seen_utc=excluded.last_seen_utc",
+        (_EXPORT_ISSUE_TARGET, event_id, db_action, kind, status,
+         reason_code, now, now),
+    )
+
+
+def _export_issue_resolve(conn, event_id, target=_EXPORT_ISSUE_TARGET):
+    cur = conn.execute(
+        "DELETE FROM extcal_export_issues WHERE target=? AND event_id=?",
+        (target, event_id))
+    return cur.rowcount
+
+
+def resolve_export_issue(conn, event_id, target=_EXPORT_ISSUE_TARGET):
+    """Clear the terminal export issue for one target/event pair."""
+    return _export_issue_resolve(conn, event_id, target)
+
 
 
 def _export_put_event(conn, cfg, request, event, exp, location, participants, new_hash, now_dt):
@@ -3215,7 +3251,7 @@ def _export_put_event(conn, cfg, request, event, exp, location, participants, ne
         fresh_etag = _export_reread_etag(cfg, href, request)
         ok, new_etag, status, _conflict2 = _export_put(cfg, href, body, fresh_etag, request)
     if not ok:
-        raise _ExportFailure(f"PUT {href} failed (status={status})")
+        raise _ExportFailure(f"PUT {href} failed (status={status})", status=status)
     _export_record(conn, event["id"], href, new_etag, new_hash, _iso(now_dt))
 
 
@@ -3239,42 +3275,56 @@ def _export_delete_event(conn, cfg, request, event_id, exp):
     if href:
         ok, status = _export_delete(cfg, href, exp.get("etag"), request)
         if not ok:
-            raise _ExportFailure(f"DELETE {href} failed (status={status})")
+            raise _ExportFailure(f"DELETE {href} failed (status={status})", status=status)
     conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
 
 
 def _export_commit_one(conn, event_id, action, count_key, counts, fn):
-    """Per-event commit/rollback isolation -- the export-side analogue of
-    `apply_changes`' own `_apply_one` (same reasoning: one event's
-    transport hiccup, malformed row, or unexpected exception must not sink
-    the rest of THIS tick's export batch, and each event gets its own
-    commit so a failure only rolls back its own uncommitted work).
-    `fn` performs the actual PUT/DELETE + `ext_exports` write and raises
-    (`_ExportFailure` or anything else) on failure; it never commits
-    itself."""
+    """Run one export with isolated transaction and safe issue accounting."""
     try:
         fn()
     except Exception as e:
-        # Final review blocker 3: the `_ExportFailure` branch used to skip
-        # the `[:300]` bound entirely (only the OTHER branch had it) --
-        # `_ExportFailure`'s own messages (`f"PUT {href} failed ..."`,
-        # `f"DELETE {href} failed ..."`) carry an absolute CalDAV resource
-        # href, so an unbounded `str(e)` here was the one channel in this
-        # function inconsistent with its sibling. Same cap either way now.
-        error = (str(e) if isinstance(e, _ExportFailure)
-                 else f"{type(e).__name__}: {e}")[:300]
-        counts["errors"].append({"event_id": event_id, "action": action, "error": error})
+        status = getattr(e, "status", None)
+        reason_code = getattr(e, "reason_code", "export_error")
+        safe_error = reason_code
+        if status is not None:
+            safe_error += f" (status={status})"
+        error = {
+            "event_id": event_id,
+            "action": action,
+            "error": safe_error,
+            "reason_code": reason_code,
+            "http_status": status,
+        }
+        counts["errors"].append(error)
         try:
             conn.rollback()
+            try:
+                _export_issue_upsert(
+                    conn, event_id, action, status=status,
+                    kind="error", reason_code=reason_code)
+            except Exception:
+                # A malformed or already-gone fixture row may not satisfy
+                # the issue journal FK; the safe audit still records the
+                # failed attempt.
+                pass
             audit.log(conn, "cal.ext.export_error", {
-                "event_id": event_id, "action": action, "error": error})
+                "event_id": event_id,
+                "action": _export_issue_action(action),
+                "kind": "error",
+                "reason_code": reason_code,
+                "http_status": status,
+            })
             conn.commit()
         except Exception:
-            pass  # see _apply_one's identical reasoning: already in counts["errors"]
+            pass
         return
+    _export_issue_resolve(conn, event_id)
     counts[count_key] += 1
-    audit.log(conn, "cal.ext.export", {"event_id": event_id, "action": action})
+    audit.log(conn, "cal.ext.export", {
+        "event_id": event_id, "action": _export_issue_action(action)})
     conn.commit()
+
 
 
 def _export_plan(conn, cfg, now_dt):
@@ -3439,9 +3489,13 @@ def export_own(conn, cfg, request=None, now_utc=None):
         event_id = item["event_id"]
         action = item["action"]
         if action == "retain":
+            if _export_issue_resolve(conn, event_id):
+                conn.commit()
             counts["retained"] += 1
             continue
         if action == "unchanged":
+            if _export_issue_resolve(conn, event_id):
+                conn.commit()
             counts["unchanged"] += 1
             continue
         if action == "delete":

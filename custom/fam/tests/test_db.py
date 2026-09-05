@@ -174,7 +174,7 @@ def test_harden_perms_missing_file_never_raises(tmp_path):
 def test_fresh_db_schema_version_current(db):
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
 def test_fresh_db_has_med_intakes_deferred_until_utc_column(db):
     cols = {r["name"] for r in db.execute("PRAGMA table_info(med_intakes)")}
@@ -187,7 +187,7 @@ def test_init_db_is_idempotent_with_deferred_until_utc_column(db):
     assert "deferred_until_utc" in cols
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
 def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     from fam import db as famdb
@@ -204,7 +204,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -225,7 +225,7 @@ def test_migration_from_2a_adds_tables_and_columns(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
     conn.close()
 
 def test_places_travel_min_default_zero(db):
@@ -317,7 +317,7 @@ def test_legacy_2b_db_gets_kind_column(legacy_2b_conn):
     assert "kind" in cols
     assert legacy_2b_conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
 # ---- schema 3a migration: events.travel_min_road, events.road_checked_at ----
 
@@ -368,7 +368,7 @@ CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
     assert "road_checked_at" in cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
     conn.close()
 
 def test_events_travel_min_road_nullable(db):
@@ -452,7 +452,7 @@ def test_schema_v8_columns(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 12
+    assert int(ver) == 13
 
 def test_schema_v8_migrates_from_v7(tmp_path):
     from fam import db as famdb
@@ -547,7 +547,7 @@ CREATE TABLE plans (
     assert "home_place_id" in cols("people")
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
     # pre-existing rows survived the ALTER TABLE ADD COLUMN migration
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -559,7 +559,7 @@ CREATE TABLE plans (
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
     conn.close()
 
 
@@ -606,7 +606,7 @@ def test_schema_v9_goals_table(db):
     ver = db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
     ).fetchone()[0]
-    assert int(ver) == 12
+    assert int(ver) == 13
 
 def test_schema_v9_migrates_from_v8(tmp_path):
     from fam import db as famdb
@@ -641,7 +641,7 @@ def test_schema_v9_migrates_from_v8(tmp_path):
             "closed_at"} <= cols
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
     # pre-existing data survived untouched
     ev = conn.execute("SELECT title FROM events WHERE id=1").fetchone()
@@ -651,7 +651,7 @@ def test_schema_v9_migrates_from_v8(tmp_path):
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
 
 # ---- schema 12 migration: external calendar (owner, external_*, ext_exports) ----
@@ -688,7 +688,7 @@ def test_schema_v12_columns_and_table(db):
 
     assert db.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
 
 def test_schema_v12_migrates_from_v11(tmp_path):
@@ -748,13 +748,13 @@ def test_schema_v12_migrates_from_v11(tmp_path):
 
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
 
     # re-run is harmless (idempotent migration)
     famdb.init_db(conn)
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
     conn.close()
 
 
@@ -927,7 +927,7 @@ def test_extcal_legacy_streak_cleanup_is_exact_and_does_not_bump_schema(db):
     assert after - before == set()
     assert famdb.meta_get(db, legacy_streak) is None
     assert famdb.meta_get(db, legacy_alert) is None
-    assert famdb.meta_get(db, "schema_version") == version_before == "12"
+    assert famdb.meta_get(db, "schema_version") == version_before == "13"
 
     famdb.init_db(db)
     after_second = {
@@ -935,3 +935,30 @@ def test_extcal_legacy_streak_cleanup_is_exact_and_does_not_bump_schema(db):
         for row in db.execute("SELECT key, value FROM meta ORDER BY key")
     }
     assert after_second == after
+
+
+def test_schema_v13_extcal_export_issues_migrates_from_v12(tmp_path):
+    import sqlite3
+    from fam import db as famdb
+    path = tmp_path / "legacy_v12.db"
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(famdb.SCHEMA)
+    conn.execute("DROP TABLE extcal_export_issues")
+    conn.execute("UPDATE meta SET value='12' WHERE key='schema_version'")
+    conn.commit()
+
+    famdb.init_db(conn)
+
+    cols = {row["name"] for row in conn.execute(
+        "PRAGMA table_info(extcal_export_issues)")}
+    assert {"target", "event_id", "action", "kind", "http_status",
+            "reason_code", "first_seen_utc", "last_seen_utc"} <= cols
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "13"
+    famdb.init_db(conn)
+    assert conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"] == "13"
+    conn.close()

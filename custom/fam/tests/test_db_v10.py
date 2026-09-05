@@ -64,15 +64,15 @@ def test_schema_v10_migrates_from_v9(tmp_path):
     # migrating a legacy v9 db lands at the currently-correct version, so
     # the literal target is the essential thing being checked (unlike the
     # incidental schema_version reads in test_schema_v10_sent_messages_table
-    # above), and gets bumped to "12" here for the same reason it was
+    # above), and gets bumped to "13" here for the same reason it was
     # bumped to "11" at the v10->v11 transition.
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"
     assert conn.execute(
         "SELECT title FROM events WHERE id=1").fetchone()["title"] == "старое событие"
 
     famdb.init_db(conn)  # idempotent re-run
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "12"
+    ).fetchone()["value"] == "13"

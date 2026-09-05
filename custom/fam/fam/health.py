@@ -10,8 +10,13 @@ from datetime import datetime, timedelta, timezone
 from . import car
 from . import db as famdb, gate
 
-def _result(name, status, detail="", last_ok_ts=None):
-    return {"name": name, "status": status, "detail": detail, "last_ok_ts": last_ok_ts}
+def _result(name, status, detail="", last_ok_ts=None, **extra):
+    result = {
+        "name": name, "status": status, "detail": detail,
+        "last_ok_ts": last_ok_ts,
+    }
+    result.update(extra)
+    return result
 
 def bridge_readiness(conn, cfg, now=None):
     """ok/down from the last connect/disconnect marker seen in the current
@@ -96,6 +101,53 @@ def extcal_staleness(conn, cfg, now_utc=None):
             last_ok_ts=last)
     return _result("extcal_staleness", "ok", "свежо", last_ok_ts=last)
 
+def extcal_failures(conn, cfg, now_utc=None):
+    """Pure read of active export issues and split terminal streaks.
+
+    The probe exposes only event IDs and bounded enum/status fields.  It
+    deliberately never reads event titles, hrefs, or ICS bodies, and never
+    changes the database or sends a message.  Its streak view is separate
+    from extcal_staleness: it does not use a timestamp or extcal_last_ok.
+    """
+    rows = conn.execute(
+        "SELECT event_id, action, kind, http_status, reason_code, "
+        "first_seen_utc, last_seen_utc "
+        "FROM extcal_export_issues WHERE target=? ORDER BY event_id",
+        ("hermes",),
+    ).fetchall()
+    issues = [dict(row) for row in rows]
+    streaks = {}
+    for label, key in (
+        ("import_apply", "__import_apply__"),
+        ("export", "__export__"),
+    ):
+        raw = famdb.meta_get(conn, f"extcal_fail_streak:{key}", "0")
+        try:
+            streaks[label] = max(0, int(raw))
+        except (TypeError, ValueError):
+            streaks[label] = 0
+
+    if issues:
+        ids = ", ".join(str(row["event_id"]) for row in issues)
+        actions = "; ".join(
+            f"{row['action']} {row['http_status'] or ''}".strip()
+            for row in issues)
+        detail = f"экспорт iCloud залип: {len(issues)} событий ({ids}), {actions}"
+        return _result("extcal_failures", "degraded", detail,
+                       issues=issues, streaks=streaks)
+    active_streaks = ", ".join(
+        f"{label}={value}" for label, value in streaks.items() if value)
+    if active_streaks:
+        return _result(
+            "extcal_failures", "degraded",
+            f"о$8ибки cal-ext: {active_streaks}",
+            issues=issues, streaks=streaks)
+    return _result("extcal_failures", "ok",
+                   "ошибок экспорта нет",
+                   issues=issues, streaks=streaks)
+
+
+
 def degradation_flags(conn, cfg, now=None):
     """Informational: surface known fallback state (road on straight-line
     fallback). Reads the most recent road.* audit marker; absence == ok."""
@@ -136,7 +188,7 @@ def all_probes(conn, cfg, now=None):
     rather than `now`."""
     out = []
     for fn in (bridge_readiness, starline_staleness, degradation_flags,
-               extcal_staleness):
+               extcal_staleness, extcal_failures):
         try:
             out.append(fn(conn, cfg, now))
         except Exception as e:                        # noqa: BLE001 -- isolate

@@ -411,14 +411,10 @@ def test_412_conflict_retry_also_failing_is_recorded_as_one_error_not_retried_ag
 
 
 def test_export_commit_one_caps_error_length_for_export_failure_too(db):
-    """Final review blocker 3 (privacy): `_export_commit_one`'s
-    `_ExportFailure` branch used to skip the `[:300]` cap entirely (only
-    the OTHER branch -- an unexpected non-`_ExportFailure` exception --
-    had it). `_ExportFailure`'s own messages embed an absolute CalDAV
-    resource href (`f"PUT {href} failed (status=...)"`,
-    `f"DELETE {href} failed (status=...)"`), so an unbounded `str(e)`
-    here was the one inconsistent channel -- both branches must cap the
-    same way now."""
+    """Export failures are classified with bounded safe fields.
+    The exception itself may contain a CalDAV href, but neither the
+    counts error nor the audit payload may persist that transport detail."""
+
     long_href = ("https://caldav.icloud.com/1/calendars/hermes/"
                  + ("x" * 400) + ".ics")
 
@@ -436,7 +432,9 @@ def test_export_commit_one_caps_error_length_for_export_failure_too(db):
     ).fetchall()
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload"])
-    assert len(payload["error"]) <= 300
+    assert payload["reason_code"] == "export_error"
+    assert "error" not in payload
+    assert long_href not in json.dumps(payload, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------

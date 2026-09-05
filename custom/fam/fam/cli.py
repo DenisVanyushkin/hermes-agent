@@ -2669,8 +2669,12 @@ def cmd_tick_cal_ext(args):
     # must reach the nightly problem_summary exactly like an import
     # failure does, not silently only via journald).
     export_errors = export_counts.get("errors") or []
+    active_issue_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM extcal_export_issues").fetchone()
+    active_issue_count = active_issue_row["n"] if active_issue_row else 0
     has_error = (bool(calendar_errors) or bool(result["sync_errors"])
-                 or bool(apply_errors) or bool(export_errors))
+                 or bool(apply_errors) or bool(export_errors)
+                 or active_issue_count > 0)
 
     # extcal_last_mode: pure telemetry, but (fix-round 2, minor #6) only
     # WRITTEN when it actually changes -- this key lands in the SAME WAL
