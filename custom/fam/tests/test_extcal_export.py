@@ -68,7 +68,7 @@ def test_write_calendar_unset_is_zero_network_noop(db, monkeypatch):
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=""), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
-                       "deleted": 0, "errors": []}
+                       "deleted": 0, "retained": 0, "errors": []}
     assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
 
 
@@ -298,7 +298,8 @@ def test_participant_set_change_triggers_a_fresh_put_via_body_hash(db, monkeypat
     db.commit()
 
     c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:10:00+00:00")
-    assert c2 == {"exported": 0, "updated": 1, "unchanged": 0, "deleted": 0, "errors": []}
+    assert c2 == {"exported": 0, "updated": 1, "unchanged": 0,
+                  "deleted": 0, "retained": 0, "errors": []}
     assert calls == ["PUT", "PUT"]
 
 
@@ -325,7 +326,8 @@ def test_second_export_of_unchanged_event_touches_no_network(db, monkeypatch):
     # A later tick, different wall-clock time (a fresh DTSTAMP would
     # differ if it were part of the hash) but the SAME event content.
     c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:15:00+00:00")
-    assert c2 == {"exported": 0, "updated": 0, "unchanged": 1, "deleted": 0, "errors": []}
+    assert c2 == {"exported": 0, "updated": 0, "unchanged": 1,
+                  "deleted": 0, "retained": 0, "errors": []}
     assert calls == ["PUT"]  # no new network call at all
 
 
@@ -455,7 +457,8 @@ def test_cancelled_event_triggers_delete_and_drops_ext_exports_row(db, monkeypat
     db.commit()
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
-    assert counts == {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 1, "errors": []}
+    assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
+                       "deleted": 1, "retained": 0, "errors": []}
     assert calls == [("DELETE", href, '"e5"')]
 
     assert db.execute(
@@ -512,11 +515,9 @@ def test_owner_flipped_away_from_hermes_after_export_is_also_deleted(db, monkeyp
     ).fetchone() is None
 
 
-def test_start_moved_beyond_horizon_after_export_is_also_deleted(db, monkeypatch):
-    """N2(b): same scoping again, for the window-aged-out case -- a
-    previously-exported event whose start_utc is later pushed past
-    [today-1d, +extcal_horizon_weeks] is cleaned up the same way, not left
-    behind as a permanent ghost on her phone."""
+def test_start_moved_beyond_horizon_after_export_is_retained_and_updated(db, monkeypatch):
+    """An already-exported active event remains on the phone beyond the
+    first-export horizon and continues through ordinary PUT reconciliation."""
     calls = []
 
     def fake_open(req, timeout):
@@ -533,11 +534,12 @@ def test_start_moved_beyond_horizon_after_export_is_also_deleted(db, monkeypatch
     db.commit()
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
-    assert counts["deleted"] == 1
-    assert calls == ["DELETE"]
+    assert counts["updated"] == 1
+    assert counts["deleted"] == 0
+    assert calls == ["PUT"]
     assert db.execute(
         "SELECT * FROM ext_exports WHERE event_id=?", (event["id"],)
-    ).fetchone() is None
+    ).fetchone() is not None
 
 
 def test_deleted_href_is_treated_as_already_gone_success(db, monkeypatch):
@@ -574,7 +576,8 @@ def test_owner_iphone_event_never_exported(db, monkeypatch):
     db.commit()
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
-    assert counts == {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0, "errors": []}
+    assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
+                       "deleted": 0, "retained": 0, "errors": []}
 
 
 # ---------------------------------------------------------------------
@@ -603,7 +606,8 @@ def test_adopted_event_with_external_uid_is_never_exported(db, monkeypatch):
     db.commit()
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
-    assert counts == {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0, "errors": []}
+    assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
+                       "deleted": 0, "retained": 0, "errors": []}
     assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
 
 

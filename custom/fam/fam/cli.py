@@ -1663,6 +1663,29 @@ def _dry_run_summary(changeset):
     }
 
 
+def _dry_run_export_summary(plan):
+    """Redacted reverse-write preview for ``cal-ext --dry-run``.
+
+    The planner entries carry local event rows and export metadata for the
+    real executor.  Dry-run output exposes only event IDs, actions, reasons,
+    and counts, so titles, hrefs, and ICS never reach the operator surface.
+    """
+    entries = [
+        {"event_id": entry.get("event_id"), "action": entry.get("action"),
+         "reason": entry.get("reason")}
+        for entry in (plan or [])
+    ]
+    counts = {"exported": 0, "updated": 0, "unchanged": 0,
+              "deleted": 0, "retained": 0, "errors": []}
+    for entry in entries:
+        action = entry["action"]
+        if action == "insert":
+            counts["exported"] += 1
+        elif action in ("update", "unchanged", "delete", "retain"):
+            counts[action if action != "retain" else "retained"] += 1
+    return {"counts": counts, "plan": entries}
+
+
 _HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
 # Both of Python's `repr()` quoting conventions: single quotes (the common
 # case), OR double quotes -- `repr()` switches to double quotes whenever
@@ -2443,10 +2466,12 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             entry["external_etag"] = meta["etag"]
 
     if dry_run:
+        export_plan = extcal._export_plan(conn, cfg, now)
         return {
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
             "export_counts": None, "full_mode_urls": set(),
+            "export_plan": export_plan,
             "calendar_had_error": calendar_had_error,
             "calendar_error_msgs": calendar_error_msgs,
             "discovery_error": discovery_error,
@@ -2620,7 +2645,8 @@ def cmd_tick_cal_ext(args):
     if dry_run:
         out = {"ok": True, "dry_run": True, "calendars": result["calendars"],
                "sync_errors": _redact_sync_errors(result["sync_errors"]),
-               "changeset": _dry_run_summary(result["changeset"])}
+               "changeset": _dry_run_summary(result["changeset"]),
+               "export": _dry_run_export_summary(result.get("export_plan"))}
         print(json.dumps(out, ensure_ascii=False))
         # Fix-round 2, minor #4: --dry-run ALWAYS returns 0 here,
         # deliberately, even when sync_errors is non-empty -- it is a

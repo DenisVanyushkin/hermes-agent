@@ -3277,6 +3277,96 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn):
     conn.commit()
 
 
+def _export_plan(conn, cfg, now_dt):
+    """Plan reverse writes from explicit lifecycle reasons.
+
+    The horizon gates a first export only.  Once an event has an
+    ``ext_exports`` row, an active past event is retained without any
+    network operation and an active future event remains eligible for an
+    ordinary PUT/unchanged comparison even when it is beyond the horizon.
+    """
+    cfg = cfg or {}
+    horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
+    window_start = now_dt - timedelta(days=1)
+    window_end = now_dt + timedelta(weeks=horizon_weeks)
+    events = {
+        row["id"]: dict(row)
+        for row in conn.execute("SELECT * FROM events").fetchall()
+    }
+    exported = {
+        row["event_id"]: dict(row)
+        for row in conn.execute("SELECT * FROM ext_exports").fetchall()
+    }
+    plan = []
+
+    def write_entry(event, exp, reason):
+        location = _export_location(conn, event)
+        participants = _export_participants(conn, event["id"])
+        new_hash = _export_body_hash(event, location, participants)
+        action = "update" if exp is not None else "insert"
+        if exp is not None and exp.get("body_hash") == new_hash:
+            action = "unchanged"
+        return {
+            "event_id": event["id"], "action": action, "reason": reason,
+            "event": event, "export": exp, "location": location,
+            "participants": participants, "new_hash": new_hash,
+        }
+
+    for event_id, exp in exported.items():
+        event = events.get(event_id)
+        if event is None:
+            # A physical event deletion is unsupported by the domain, but
+            # preserve the established cleanup behavior for an orphan row.
+            plan.append({"event_id": event_id, "action": "delete",
+                         "reason": "cancelled", "event": None,
+                         "export": exp})
+            continue
+        status = event.get("status")
+        if status == "cancelled":
+            reason = "cancelled"
+        elif status == "done":
+            reason = "done"
+        elif event.get("owner") != "hermes":
+            reason = "owner_changed"
+        elif event.get("external_uid") is not None:
+            reason = "external_uid"
+        else:
+            start_dt = _coerce_utc_dt(event.get("start_utc"))
+            if start_dt is None:
+                plan.append({"event_id": event_id, "action": "retain",
+                             "reason": "not_yet_eligible", "event": event,
+                             "export": exp})
+                continue
+            if start_dt < window_start:
+                plan.append({"event_id": event_id, "action": "retain",
+                             "reason": "past_retained", "event": event,
+                             "export": exp})
+                continue
+            reason = "future_retained" if start_dt > window_end else "in_window"
+            plan.append(write_entry(event, exp, reason))
+            continue
+        plan.append({"event_id": event_id, "action": "delete", "reason": reason,
+                     "event": event, "export": exp})
+
+    for event in events.values():
+        if event["id"] in exported:
+            continue
+        if (event.get("owner") != "hermes"
+                or event.get("external_uid") is not None
+                or event.get("status") != "active"):
+            continue
+        start_dt = _coerce_utc_dt(event.get("start_utc"))
+        if start_dt is None or start_dt < window_start:
+            continue
+        if start_dt > window_end:
+            plan.append({"event_id": event["id"], "action": "retain",
+                         "reason": "not_yet_eligible", "event": event,
+                         "export": None})
+            continue
+        plan.append(write_entry(event, None, "in_window"))
+    return plan
+
+
 def export_own(conn, cfg, request=None, now_utc=None):
     """Reverse write (Task 7): PUT every `owner='hermes'` event inside
     `[today-1d, today+extcal_horizon_weeks]` (recurring series' individual
@@ -3302,15 +3392,16 @@ def export_own(conn, cfg, request=None, now_utc=None):
     all) always has `external_uid IS NULL`, so this changes nothing for
     the common case this function existed for before adoption existed.
 
-    Returns counts: `{exported, updated, unchanged, deleted, errors}`.
+    Returns counts: `{exported, updated, unchanged, deleted, retained, errors}`.
       - `exported`: a brand-new PUT (no prior `ext_exports` row).
       - `updated`: a PUT for an event whose `body_hash` changed since its
         last export (time/title/location edit).
       - `unchanged`: `body_hash` matched -- ZERO network calls for this
         event (requirement #4).
-      - `deleted`: a DELETE for a previously-exported event that is no
-        longer eligible (cancelled, done, deleted outright, re-owned away
-        from 'hermes', or aged out of the window either direction).
+      - `deleted`: a DELETE for an explicit lifecycle change (cancelled,
+        done, re-owned away from 'hermes', or a legacy external UID).
+      - `retained`: an existing active past export, or a new event beyond
+        the first-export horizon, that makes no network call.
       - `errors`: a list of `{event_id, action, error}` dicts, one per
         event whose PUT/DELETE ultimately failed -- mirrors
         `apply_changes`' own `errors` shape closely enough that a caller
@@ -3337,63 +3428,34 @@ def export_own(conn, cfg, request=None, now_utc=None):
     """
     cfg = cfg or {}
     write_url = (cfg.get("extcal_write_calendar") or "").strip()
-    counts = {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0, "errors": []}
+    counts = {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0,
+              "retained": 0, "errors": []}
     if not write_url:
         return counts
     request = request or _request
 
     now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
-    horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
-    window_start = _iso(now_dt - timedelta(days=1))
-    window_end = _iso(now_dt + timedelta(weeks=horizon_weeks))
-
-    eligible_rows = conn.execute(
-        "SELECT * FROM events WHERE owner='hermes' AND status='active' "
-        "AND external_uid IS NULL "
-        "AND start_utc >= ? AND start_utc <= ?",
-        (window_start, window_end)).fetchall()
-    eligible = {r["id"]: dict(r) for r in eligible_rows}
-
-    exported_rows = conn.execute("SELECT * FROM ext_exports").fetchall()
-    exported = {r["event_id"]: dict(r) for r in exported_rows}
-
-    # Removal pass FIRST (same ordering `apply_changes` uses across its own
-    # branches -- insert/update before cancel/drop is irrelevant there since
-    # every entry targets a DIFFERENT row; here it is similarly harmless,
-    # kept simply because "clean up what's gone" reads naturally before
-    # "write what's current"): anything previously exported that is no
-    # longer among THIS round's eligible candidates -- cancelled, done,
-    # deleted outright, re-owned away from 'hermes', or aged out of the
-    # window in either direction -- gets DELETEd from iCloud and dropped
-    # from `ext_exports`. Deliberately broader than "cancelled" alone
-    # (requirement #6's literal wording): every one of those other cases is
-    # exactly as wrong to leave visible on her phone.
-    for event_id, exp in exported.items():
-        if event_id in eligible:
+    for item in _export_plan(conn, cfg, now_dt):
+        event_id = item["event_id"]
+        action = item["action"]
+        if action == "retain":
+            counts["retained"] += 1
             continue
-        _export_commit_one(
-            conn, event_id, "delete", "deleted", counts,
-            lambda exp=exp, event_id=event_id:
-                _export_delete_event(conn, cfg, request, event_id, exp))
-
-    # Export pass: PUT every eligible event whose content actually changed
-    # since its last export. `body_hash` match -> zero network calls at all
-    # for that event (requirement #4).
-    for event_id, event in eligible.items():
-        exp = exported.get(event_id)
-        location = _export_location(conn, event)
-        participants = _export_participants(conn, event_id)
-        new_hash = _export_body_hash(event, location, participants)
-        if exp is not None and exp.get("body_hash") == new_hash:
+        if action == "unchanged":
             counts["unchanged"] += 1
             continue
-        is_update = exp is not None
-        action = "update" if is_update else "insert"
-        count_key = "updated" if is_update else "exported"
+        if action == "delete":
+            _export_commit_one(
+                conn, event_id, action, "deleted", counts,
+                lambda item=item, event_id=event_id: _export_delete_event(
+                    conn, cfg, request, event_id, item["export"]))
+            continue
+        count_key = "updated" if action == "update" else "exported"
         _export_commit_one(
             conn, event_id, action, count_key, counts,
-            lambda event=event, exp=exp, location=location, participants=participants, new_hash=new_hash:
-                _export_put_event(conn, cfg, request, event, exp, location, participants, new_hash, now_dt))
+            lambda item=item: _export_put_event(
+                conn, cfg, request, item["event"], item["export"],
+                item["location"], item["participants"], item["new_hash"], now_dt))
 
     return counts
 
