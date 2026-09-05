@@ -5,6 +5,20 @@ Audited: 2026-06-28
 Canonical host/repo: `ssh hermes-agent && cd /home/hermes/.hermes/hermes-agent`  
 Local output path: `docs/job-intel-source-of-truth.md`
 
+> **Status notice, added 2026-09-05.** This file is the read-only audit output of
+> 2026-06-28 and is retained as a historical record. Several runtime statuses in
+> it are stale — for example it lists the absence of a read-only Recruiter facade,
+> which now exists as `job_intel/recruiter_read_facade.py`. It is not the product
+> authority. Current planning and current state live in:
+>
+> - [`docs/job-intel-search-planning-addendum.md`](job-intel-search-planning-addendum.md) — versioned planning addendum, defines the non-gate `manual_shortlist_route`
+> - [`docs/plans/2026-09-05-job-intel-useful-search-roadmap.md`](plans/2026-09-05-job-intel-useful-search-roadmap.md) — milestone ordering M0–M4
+> - [`docs/plans/2026-09-05-job-intel-useful-search-tasks.md`](plans/2026-09-05-job-intel-useful-search-tasks.md) — detailed task catalogue and acceptance criteria
+> - [`docs/audit/2026-09-05-job-intel-roadmap-current-state.md`](audit/2026-09-05-job-intel-roadmap-current-state.md) — independent current-state audit of 2026-09-05
+>
+> The approved product authority remains the Product SoT
+> `docs/superpowers/specs/2026-08-10-job-intel-search-product-redesign-design.md`.
+
 ## 1. Executive Summary
 
 `job-intel` is the Hermes-hosted executive job/vacancy intelligence system. It discovers vacancies and company hiring signals, deduplicates and scores opportunities against Denis's executive product/search profile, stores durable state in SQLite, and sends Slack-oriented summaries, alerts, health reports, and per-vacancy cards.
