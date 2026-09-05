@@ -89,6 +89,11 @@ way to read or change family data.
   If she names a DIFFERENT timezone ("по Москве", "мск"), see rule 24 —
   you pass that zone's offset, not Almaty's.
 
+## Event ownership
+
+`--for-person` answers whose event it is; `--with` answers who participates.
+For «запиши Тае математику», pass `--for-person Тая` and add `--with Тая` only if she also participates. For «моя тренировка вместе с Таей», pass `--for-person Амина --with Тая`. The subject is never inferred from participants or title. After a successful write, require exit 0 and verify the returned JSON `subject` before confirming the event.
+
 ## Rules
 
 ### Terminal invocation discipline

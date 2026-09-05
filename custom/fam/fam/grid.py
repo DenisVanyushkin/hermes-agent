@@ -103,12 +103,12 @@ def _today_almaty():
     return datetime.now(cal.ALMATY).date()
 
 
-def _collect_events(conn, start_date, end_date):
+def _collect_events(conn, start_date, end_date, subject_person_id=None):
     """Map each date in [start_date, end_date] to its active events."""
     events_by_day = {}
     d = start_date
     while d <= end_date:
-        events_by_day[d] = cal.day(conn, d.isoformat())
+        events_by_day[d] = cal.day(conn, d.isoformat(), subject_person_id=subject_person_id)
         d += timedelta(days=1)
     return events_by_day
 
@@ -186,7 +186,7 @@ def _save(img, out_path):
     img.save(out_path, format="PNG")
 
 
-def render_month(conn, year, month, out_path):
+def render_month(conn, year, month, out_path, subject_person_id=None):
     """Render a 7xN month grid (calendar.monthcalendar weeks, Mon-first)
     to out_path as a PNG. Cells outside the month are left blank. Returns
     out_path.
@@ -197,7 +197,7 @@ def render_month(conn, year, month, out_path):
         for week in raw_weeks
     ]
     all_dates = [d for week in week_dates for d in week if d is not None]
-    events_by_day = _collect_events(conn, all_dates[0], all_dates[-1])
+    events_by_day = _collect_events(conn, all_dates[0], all_dates[-1], subject_person_id)
 
     title = f"{MONTH_NAMES[month]} {year}"
     img = _build_image(title, week_dates, _today_almaty(), events_by_day)
@@ -205,7 +205,7 @@ def render_month(conn, year, month, out_path):
     return out_path
 
 
-def render_week(conn, date_local, out_path):
+def render_week(conn, date_local, out_path, subject_person_id=None):
     """Render the single Mon-Sun week containing date_local (YYYY-MM-DD)
     to out_path as a PNG. Returns out_path.
     """
@@ -213,7 +213,7 @@ def render_week(conn, date_local, out_path):
     anchor = date(y, m, d)
     monday = anchor - timedelta(days=anchor.weekday())
     week = [monday + timedelta(days=i) for i in range(7)]
-    events_by_day = _collect_events(conn, week[0], week[-1])
+    events_by_day = _collect_events(conn, week[0], week[-1], subject_person_id)
 
     start, end = week[0], week[-1]
     if start.month == end.month:
@@ -304,7 +304,7 @@ def _build_day_image(title_text, events_by_hour):
     return img
 
 
-def render_day(conn, date_local, out_path):
+def render_day(conn, date_local, out_path, subject_person_id=None):
     """Render a single-day agenda (hour rows DAY_HOUR_START..DAY_HOUR_END,
     local Asia/Almaty) to out_path as a PNG. Each event is shown at its
     local start hour as "HH:MM–HH:MM title" (or "HH:MM title" when the
@@ -312,7 +312,7 @@ def render_day(conn, date_local, out_path):
     """
     y, m, d = (int(x) for x in date_local.split("-"))
     anchor = date(y, m, d)
-    events = cal.day(conn, date_local)
+    events = cal.day(conn, date_local, subject_person_id=subject_person_id)
     events_by_hour = _events_by_hour(events)
 
     title = _format_day_title(anchor)

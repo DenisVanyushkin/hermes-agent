@@ -76,6 +76,52 @@ def _resolve_participants(conn, participants):
     return resolved_people
 
 
+def _validate_subject_id(conn, subject_person_id):
+    """Validate a stored subject id and reject group rows at the domain edge."""
+    if subject_person_id is None:
+        return None
+    row = conn.execute(
+        "SELECT id, name, kind, slug FROM people WHERE id=?",
+        (subject_person_id,),
+    ).fetchone()
+    if row is None:
+        raise UnknownRefError("person", subject_person_id)
+    if row["kind"] != "person":
+        raise ValueError("subject must resolve to a person, not a group")
+    return row["id"]
+
+
+def resolve_subject(conn, ref):
+    """Resolve a ``--for-person`` ref before a calendar write."""
+    person = people.resolve(conn, ref)
+    if person is None:
+        raise UnknownRefError("person", ref)
+    return _validate_subject_id(conn, person["id"])
+
+
+def subject_for_event(conn, event):
+    """Return the public subject object for an event or series row."""
+    subject_id = event.get("subject_person_id")
+    if subject_id is None:
+        return None
+    row = conn.execute(
+        "SELECT id, name, slug, kind FROM people WHERE id=?", (subject_id,)
+    ).fetchone()
+    if row is None or row["kind"] != "person":
+        return None
+    return {"id": row["id"], "name": row["name"], "slug": row["slug"]}
+
+
+def filter_events_by_subject(conn, events, subject_person_id=None):
+    """Filter materialized event rows through the shared subject classifier."""
+    if subject_person_id is None:
+        return list(events)
+    _validate_subject_id(conn, subject_person_id)
+    return [event for event in events
+            if subject_for_event(conn, event) is not None
+            and event.get("subject_person_id") == subject_person_id]
+
+
 def _resolve_place(conn, place_ref):
     if place_ref is None:
         return None
@@ -188,11 +234,12 @@ def recompute_road(conn, event_id, now_utc=None):
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         transport="unknown", notes="", travel_min=None, series_id=None,
-        prep_min=None):
+        prep_min=None, subject_person_id=None):
     """Create an event. place/participants are text refs (id/name/alias/
     slug); an unresolvable ref raises UnknownRefError and nothing is
     inserted. Group participants expand to their members at add-time (the
-    audit payload keeps the original ref, e.g. "татешки"). travel_min
+    audit payload keeps the original ref, e.g. "татешки"). subject_person_id
+    is a validated person id; groups are rejected before the insert. travel_min
     overrides the place's travel_min for rem.leave_at() -- None (default)
     means "take it from the place" (see rem.leave_at). prep_min (phase 7,
     Task 4), when set, overrides the reminder-rule engine entirely for
@@ -207,6 +254,7 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
     # Validate all refs first, before any insert.
     pl = _resolve_place(conn, place)
     resolved_people = _resolve_participants(conn, participants)
+    subject_person_id = _validate_subject_id(conn, subject_person_id)
 
     start = _to_utc_iso(start_utc)
     end = _to_utc_iso(end_utc) if end_utc is not None else None
@@ -215,9 +263,9 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
     cur = conn.execute(
         "INSERT INTO events(title, start_utc, end_utc, place_id, transport, "
         "status, notes, travel_min, series_id, prep_min, created_at, "
-        "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "updated_at, subject_person_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title, start, end, pl["id"] if pl else None, transport, "active",
-         notes, travel_min, series_id, prep_min, now, now),
+         notes, travel_min, series_id, prep_min, now, now, subject_person_id),
     )
     event_id = cur.lastrowid
 
@@ -233,7 +281,8 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         {"id": event_id, "title": title, "start_utc": start, "end_utc": end,
          "place": place, "participants": list(participants),
          "transport": transport, "notes": notes, "travel_min": travel_min,
-         "prep_min": prep_min},
+         "prep_min": prep_min, "subject": subject_for_event(
+             conn, {"subject_person_id": subject_person_id})},
     )
 
     recompute_road(conn, event_id)
@@ -265,13 +314,14 @@ def get(conn, event_id):
 
     d["start_local"] = _to_local_iso(d["start_utc"])
     d["end_local"] = _to_local_iso(d["end_utc"])
+    d["subject"] = subject_for_event(conn, d)
 
     return d
 
 
 _UPDATE_FIELDS = {
     "title", "start_utc", "end_utc", "place", "transport", "notes",
-    "add_person", "rm_person", "travel_min", "prep_min",
+    "add_person", "rm_person", "travel_min", "prep_min", "subject_person_id",
 }
 
 # Fields whose change should trigger a reminder-chain regeneration
@@ -301,8 +351,9 @@ _MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc", "title")
 
 def update(conn, event_id, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
-    end_utc, place, transport, notes, travel_min, prep_min, add_person
-    (list of refs), rm_person (list of refs). Any other keyword raises
+    end_utc, place, transport, notes, travel_min, prep_min,
+    subject_person_id, add_person (list of refs), rm_person (list of refs).
+    Any other keyword raises
     ValueError
     before any write. place/add_person refs are resolved (UnknownRefError
     on failure) before any write. start_utc/end_utc are normalized to UTC
@@ -374,6 +425,9 @@ def update(conn, event_id, **fields):
 
     to_add = _resolve_participants(conn, add_person) if add_person else []
     to_remove = _resolve_participants(conn, rm_person) if rm_person else []
+    if "subject_person_id" in fields:
+        fields["subject_person_id"] = _validate_subject_id(
+            conn, fields["subject_person_id"])
 
     set_clauses = []
     params = []
@@ -385,6 +439,7 @@ def update(conn, event_id, **fields):
         "notes": "notes",
         "travel_min": "travel_min",
         "prep_min": "prep_min",
+        "subject_person_id": "subject_person_id",
     }
     for key, col in column_map.items():
         if key in fields:
@@ -435,11 +490,13 @@ def update(conn, event_id, **fields):
             conn.execute(
                 "INSERT INTO events(title, start_utc, end_utc, place_id, "
                 "transport, status, notes, travel_min, series_id, "
-                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "created_at, updated_at, subject_person_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (existing["title"], existing["start_utc"], existing["end_utc"],
                  existing["place_id"], existing["transport"], "cancelled",
                  existing["notes"], existing["travel_min"],
-                 existing["series_id"], now, now),
+                 existing["series_id"], now, now,
+                 existing["subject_person_id"]),
             )
             audit.log(conn, "cal.series.tombstone",
                       {"series_id": existing["series_id"], "event_id": event_id,
@@ -457,17 +514,18 @@ def update(conn, event_id, **fields):
             (event_id, person["id"]),
         )
 
+    new_row = conn.execute(
+        "SELECT * FROM events WHERE id=?", (event_id,)
+    ).fetchone()
     audit_payload = {"id": event_id}
     audit_payload.update(fields)
+    audit_payload["subject"] = subject_for_event(conn, dict(new_row))
     if add_person:
         audit_payload["add_person"] = list(add_person)
     if rm_person:
         audit_payload["rm_person"] = list(rm_person)
     audit.log(conn, "cal.update", audit_payload)
 
-    new_row = conn.execute(
-        "SELECT * FROM events WHERE id=?", (event_id,)
-    ).fetchone()
     new_regen_state = tuple(new_row[c] for c in _REGEN_TRIGGER_COLUMNS)
     new_road_state = tuple(new_row[c] for c in _ROAD_TRIGGER_COLUMNS)
     new_participant_ids = {r["person_id"] for r in conn.execute(
@@ -604,7 +662,7 @@ def done(conn, event_id):
     return result
 
 
-def list_range(conn, from_utc, to_utc, status="active"):
+def list_range(conn, from_utc, to_utc, status="active", subject_person_id=None):
     """List events with start_utc in [from_utc, to_utc), optionally
     filtered by status ("active" default; pass None for all statuses).
     """
@@ -620,10 +678,11 @@ def list_range(conn, from_utc, to_utc, status="active"):
             "AND status = ? ORDER BY start_utc",
             (from_utc, to_utc, status),
         ).fetchall()
-    return [get(conn, r["id"]) for r in rows]
+    events = [get(conn, r["id"]) for r in rows]
+    return filter_events_by_subject(conn, events, subject_person_id)
 
 
-def day(conn, date_local):
+def day(conn, date_local, subject_person_id=None):
     """List active events on date_local (YYYY-MM-DD, Asia/Almaty), i.e.
     events whose start falls within that local calendar day's UTC range.
     """
@@ -632,7 +691,8 @@ def day(conn, date_local):
     end_of_day = start_of_day + timedelta(days=1)
     from_utc = start_of_day.astimezone(timezone.utc).isoformat(timespec="seconds")
     to_utc = end_of_day.astimezone(timezone.utc).isoformat(timespec="seconds")
-    return list_range(conn, from_utc, to_utc, status="active")
+    return list_range(conn, from_utc, to_utc, status="active",
+                      subject_person_id=subject_person_id)
 
 
 # --- occupancy (2026-08-01) ---------------------------------------------

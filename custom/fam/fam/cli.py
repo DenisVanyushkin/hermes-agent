@@ -471,9 +471,16 @@ def cmd_cal_add(args):
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
     conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
-    e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
-                participants=args.with_, transport=args.transport, notes=args.notes,
-                travel_min=args.travel_min, prep_min=args.prep_min)
+    try:
+        subject_id = (cal.resolve_subject(conn, args.for_person)
+                      if args.for_person is not None else None)
+        e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
+                    participants=args.with_, transport=args.transport, notes=args.notes,
+                    travel_min=args.travel_min, prep_min=args.prep_min,
+                    subject_person_id=subject_id)
+    except (ValueError, cal.UnknownRefError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     _audit_overlap_ack(conn, "add", conflicts, event_id=e["id"])
     conn.commit()
     _maybe_email_event(conn, e)
@@ -509,6 +516,8 @@ def _cmd_cal_add_series(args):
     try:
         cal._resolve_place(conn, args.place)
         cal._resolve_participants(conn, args.with_)
+        if args.for_person is not None:
+            cal.resolve_subject(conn, args.for_person)
         series._validate_hhmm(args.start_time)
         if args.end_time is not None:
             series._validate_hhmm(args.end_time)
@@ -549,7 +558,9 @@ def _cmd_cal_add_series(args):
                        end_time=args.end_time, place=args.place,
                        participants=args.with_, transport=args.transport,
                        notes=args.notes, until_local=args.until,
-                       prep_min=args.prep_min)
+                       prep_min=args.prep_min,
+                       subject_person_id=(cal.resolve_subject(conn, args.for_person)
+                                          if args.for_person is not None else None))
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -596,8 +607,14 @@ def cmd_cal_series_cancel(args):
 def cmd_cal_series_update(args):
     conn = famdb.connect()
     try:
+        subject = series._UNSET
+        if args.for_person is not None:
+            subject = cal.resolve_subject(conn, args.for_person)
+        elif args.clear_for_person:
+            subject = None
         result = series.update_participants(
-            conn, args.id, add=args.add_person, remove=args.rm_person)
+            conn, args.id, add=args.add_person, remove=args.rm_person,
+            subject_person_id=subject)
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -657,6 +674,10 @@ def cmd_cal_update(args):
     if args.prep_min is not None: fields["prep_min"] = args.prep_min
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
+    if args.for_person is not None:
+        fields["subject_person_id"] = cal.resolve_subject(conn, args.for_person)
+    elif args.clear_for_person:
+        fields["subject_person_id"] = None
     e = cal.update(conn, args.id, **fields)
     _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
@@ -1043,7 +1064,8 @@ def cmd_cal_detours(args):
 
 def cmd_cal_day(args):
     conn = famdb.connect()
-    rows = cal.day(conn, args.date)
+    subject = cal.resolve_subject(conn, args.for_person) if args.for_person is not None else None
+    rows = cal.day(conn, args.date, subject_person_id=subject)
     if args.json:
         print(json.dumps(rows, ensure_ascii=False))
     else:
@@ -1055,7 +1077,8 @@ def cmd_cal_range(args):
     conn = famdb.connect()
     from_utc = cal._to_utc_iso(args.from_iso)
     to_utc = cal._to_utc_iso(args.to_iso)
-    rows = cal.list_range(conn, from_utc, to_utc)
+    subject = cal.resolve_subject(conn, args.for_person) if args.for_person is not None else None
+    rows = cal.list_range(conn, from_utc, to_utc, subject_person_id=subject)
     if args.json:
         print(json.dumps(rows, ensure_ascii=False))
     else:
@@ -1089,13 +1112,14 @@ def _date_arg(value):
 
 def cmd_cal_grid(args):
     conn = famdb.connect()
+    subject = cal.resolve_subject(conn, args.for_person) if args.for_person is not None else None
     if args.month is not None:
         year, month = args.month
-        out = grid.render_month(conn, year, month, args.out)
+        out = grid.render_month(conn, year, month, args.out, subject)
     elif args.week is not None:
-        out = grid.render_week(conn, args.week, args.out)
+        out = grid.render_week(conn, args.week, args.out, subject)
     else:
-        out = grid.render_day(conn, args.day, args.out)
+        out = grid.render_day(conn, args.day, args.out, subject)
     if args.json:
         print(json.dumps({"ok": True, "path": out}, ensure_ascii=False))
     else:
@@ -3696,6 +3720,8 @@ def build_parser():
     spa.add_argument("--notes", default="")
     spa.add_argument("--travel-min", dest="travel_min", type=int,
                       help="override place travel minutes for leave_at (default: take from place)")
+    spa.add_argument("--for-person", dest="for_person",
+                      help="subject person ref (groups are rejected)")
     spa.add_argument("--prep-min", dest="prep_min", type=int,
                       help="minutes needed to get ready before leave_at; "
                            "overrides the default/slug reminder rules with "
@@ -3723,6 +3749,9 @@ def build_parser():
                       help="minutes needed to get ready before leave_at; "
                            "overrides the default/slug reminder rules with "
                            "this event's own escalation chain")
+    subject_group = spu.add_mutually_exclusive_group()
+    subject_group.add_argument("--for-person", dest="for_person")
+    subject_group.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
     spu.add_argument("--add-person", dest="add_person", action="append", default=[],
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -3752,6 +3781,9 @@ def build_parser():
     spsc.add_argument("id", type=int)
     spsu = series_sub.add_parser("update"); spsu.set_defaults(func=cmd_cal_series_update)
     spsu.add_argument("id", type=int)
+    series_subject = spsu.add_mutually_exclusive_group()
+    series_subject.add_argument("--for-person", dest="for_person")
+    series_subject.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
     spsu.add_argument("--add-person", dest="add_person", action="append", default=[],
                        help="participant ref to add to the series and its future untouched occurrences (repeatable)")
     spsu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -3785,12 +3817,14 @@ def build_parser():
 
     spday = cal_sub.add_parser("day"); spday.set_defaults(func=cmd_cal_day)
     spday.add_argument("date", help="YYYY-MM-DD in Asia/Almaty")
+    spday.add_argument("--for-person", dest="for_person")
     spday.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="machine-readable output")
 
     sprange = cal_sub.add_parser("range"); sprange.set_defaults(func=cmd_cal_range)
     sprange.add_argument("from_iso")
     sprange.add_argument("to_iso")
+    sprange.add_argument("--for-person", dest="for_person")
     sprange.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                           help="machine-readable output")
 
@@ -3801,6 +3835,7 @@ def build_parser():
                              help="YYYY-MM-DD, any day within the target Mon-Sun week")
     grid_group.add_argument("--month", type=_month_arg, help="YYYY-MM")
     spg.add_argument("-o", "--out", dest="out", required=True, help="output PNG path")
+    spg.add_argument("--for-person", dest="for_person")
     spg.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 

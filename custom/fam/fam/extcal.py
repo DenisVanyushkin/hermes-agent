@@ -3680,14 +3680,15 @@ def _export_plan_entry(conn, event, exp, reason):
             "hash_state": state}
 
 
-def _export_plan(conn, cfg, now_dt):
-    'Build the lifecycle plan, applying ownership, horizon, retention, and quarantine rules.'
+def _export_plan(conn, cfg, now_dt, subject_person_id=None):
+    """Build a no-network lifecycle plan with the optional subject filter."""
     cfg = cfg or {}
     horizon_weeks = cfg.get("extcal_horizon_weeks", 8)
     window_start = now_dt - timedelta(days=1)
     window_end = now_dt + timedelta(weeks=horizon_weeks)
-    events = {row["id"]: dict(row)
-              for row in conn.execute("SELECT * FROM events").fetchall()}
+    event_rows = [dict(row) for row in conn.execute("SELECT * FROM events").fetchall()]
+    event_rows = cal.filter_events_by_subject(conn, event_rows, subject_person_id)
+    events = {row["id"]: row for row in event_rows}
     exported = {row["event_id"]: dict(row)
                 for row in conn.execute("SELECT * FROM ext_exports").fetchall()}
     quarantined = {
@@ -3697,6 +3698,8 @@ def _export_plan(conn, cfg, now_dt):
     }
     plan = []
     for event_id, exp in exported.items():
+        if subject_person_id is not None and event_id not in events:
+            continue
         event = events.get(event_id)
         if event_id in quarantined:
             plan.append({"event_id": event_id, "action": "quarantine",

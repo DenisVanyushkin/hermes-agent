@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS events (
   travel_min_road INTEGER,                -- computed road minutes with traffic; beats manual (3a)
   road_checked_at TEXT,                   -- UTC ISO of last road computation (3a)
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL);
+  updated_at TEXT NOT NULL,
+  subject_person_id INTEGER REFERENCES people(id));
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
 CREATE TABLE IF NOT EXISTS event_participants (
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -70,7 +71,8 @@ CREATE TABLE IF NOT EXISTS event_series (
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active','cancelled')),
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL);
+  updated_at TEXT NOT NULL,
+  subject_person_id INTEGER REFERENCES people(id));
 CREATE TABLE IF NOT EXISTS event_series_participants (
   series_id INTEGER NOT NULL REFERENCES event_series(id) ON DELETE CASCADE,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -481,6 +483,13 @@ def init_db(conn):
     # audit_log already carries 22k+ tick.reminders rows and a
     # per-recheck audit row per dose would swamp it.
     _ensure_column(conn, "med_intakes", "gate_reason", "gate_reason TEXT")
+    # v14 (S5): subject is nullable and deliberately has no backfill.
+    # Existing rows remain unowned; all four calendar writers reject group
+    # subjects before their first INSERT/UPDATE.
+    _ensure_column(conn, "events", "subject_person_id",
+                   "subject_person_id INTEGER REFERENCES people(id)")
+    _ensure_column(conn, "event_series", "subject_person_id",
+                   "subject_person_id INTEGER REFERENCES people(id)")
     # S2 data cleanup: the old aggregate apply streak is not a
     # meaningful value after the split.  This is deliberately DML only:
     # schema_version remains unchanged by the cleanup itself; v13 owns the new table.
@@ -490,7 +499,7 @@ def init_db(conn):
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','13')")
     conn.execute(
-        "UPDATE meta SET value='13' WHERE key='schema_version'")
+        "UPDATE meta SET value='14' WHERE key='schema_version'")
     conn.commit()
 
 
