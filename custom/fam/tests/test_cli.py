@@ -1979,3 +1979,18 @@ def test_extcal_full_resync_days_falls_back_to_default_on_non_numeric(raw):
 
 def test_extcal_full_resync_days_defaults_when_key_missing():
     assert cli._extcal_full_resync_days({}) == 1
+
+
+def test_refresh_pending_acks_does_not_overwrite_projection_on_config_error(
+    db, monkeypatch
+):
+    writes = []
+
+    def fail_config():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(cli.gate, "load_config", fail_config)
+    monkeypatch.setattr(cli.acks, "write", lambda *args, **kwargs: writes.append(1))
+
+    assert cli._refresh_pending_acks(db) is None
+    assert writes == []

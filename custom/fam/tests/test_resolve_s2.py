@@ -554,3 +554,55 @@ def test_committed_ref_receipt_survives_projection_crash(
     assert db.execute(
         "SELECT status FROM med_intakes WHERE id=?", (intake_id,)
     ).fetchone()[0] == "taken"
+
+
+def test_unresolved_receipt_keeps_failure_provenance(db, tmp_path, monkeypatch):
+    event_id, _ = _fixture(db)
+    monkeypatch.setattr(resolve, "_call_classifier", lambda *_args, **_kwargs: None)
+
+    result = resolve.resolve_turn(
+        db, _request(event_id, 0), cfg=_config(tmp_path, [])
+    )
+
+    assert result["status"] == "unresolved"
+    payload = next(
+        json.loads(row["payload"])
+        for row in db.execute(
+            "SELECT payload FROM audit_log WHERE kind='resolve.turn' ORDER BY id"
+        )
+    )
+    assert payload["model"] == "test-model"
+    assert payload["prompt_version"]
+    assert payload["input_sha256"]
+    assert payload["output_sha256"] is None
+
+
+def test_classifier_timeout_kills_each_process_group(monkeypatch):
+    import signal
+    import subprocess
+
+    processes = []
+    killed = []
+
+    class FakeProcess:
+        pid = 41001
+        returncode = None
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired("classifier", timeout)
+
+    def fake_popen(*_args, **_kwargs):
+        processes.append(_kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(resolve.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(resolve.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    assert resolve._call_classifier("prompt", {
+        "gate_model": "m", "gate_provider": "p",
+        "classifier_command": ["classifier"],
+        "resolve_classifier_timeout_seconds": 0.01,
+    }) is None
+    assert len(processes) == 2
+    assert all(item["start_new_session"] is True for item in processes)
+    assert killed == [(41001, signal.SIGKILL), (41001, signal.SIGKILL)]

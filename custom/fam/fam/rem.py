@@ -343,6 +343,10 @@ def open_resolution_candidates(conn, now_utc=None, max_age_min=120):
     Unlike active_chains, this is the conversation-resolution view: an
     occurrence remains open after every reminder was sent, until its latest
     outbound reminder falls outside the configured response window.
+
+    Known limitation: sent_messages has no sent_at column. Its created_at is
+    stamped by gate.deliver with the outbound operation's timestamp after a
+    successful send, and is therefore the persisted outbound-time proxy.
     """
     now = _parse_utc(now_utc or _now())
     try:

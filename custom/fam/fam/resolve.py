@@ -6,8 +6,10 @@ Nothing is considered applied until the postcondition is true.
 """
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
+import signal
 from typing import Any
 
 from fam import acks, audit, cal, gate, meds, rem
@@ -50,6 +52,20 @@ def _classifier_prompt(request: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _terminate_process_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        try:
+            process.kill()
+        except (AttributeError, OSError):
+            pass
+    try:
+        process.wait(timeout=5)
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _call_classifier(prompt: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
     command = cfg.get("classifier_command", gate.HERMES)
     if not isinstance(command, list) or not command or not all(
@@ -64,22 +80,27 @@ def _call_classifier(prompt: str, cfg: dict[str, Any]) -> dict[str, Any] | None:
     timeout = cfg.get("resolve_classifier_timeout_seconds", 45)
     if not isinstance(timeout, (int, float)) or timeout <= 0:
         return None
+    timeout = min(float(timeout), 45.0)
     for _attempt in range(2):
         try:
-            result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout, shell=False,
+            process = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, shell=False, start_new_session=True,
             )
-        except (subprocess.TimeoutExpired, OSError):
+            stdout, _stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _terminate_process_group(process)
             continue
-        if result.returncode != 0:
+        except OSError:
+            continue
+        if process.returncode != 0:
             continue
         try:
-            output = json.loads((result.stdout or "").strip())
+            output = json.loads((stdout or "").strip())
         except (TypeError, json.JSONDecodeError):
             continue
         if isinstance(output, dict):
             return output
-    return None
 
 
 def _normalize_receipt(receipt):
@@ -137,7 +158,8 @@ def _store_receipt(conn, key, candidate, receipt, created_at=""):
          json.dumps(receipt, ensure_ascii=False, sort_keys=True),
          created_at),
     )
-def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None):
+def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None,
+                model=None):
     receipt = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "status": "unresolved", "residual": True, "reason": reason,
@@ -150,7 +172,7 @@ def _unresolved(conn, key, candidate, reason, input_hash=None, output_hash=None)
     audit.log(conn, "resolve.turn", {
         "idempotency_key": key, "kind": candidate.get("kind"),
         "ref_id": candidate.get("ref_id"), "disposition": None,
-        "model": None, "prompt_version": PROMPT_VERSION,
+        "model": model, "prompt_version": PROMPT_VERSION,
         "input_sha256": input_hash, "output_sha256": output_hash,
         "postcondition": False, "receipt": receipt,
     })
@@ -312,7 +334,10 @@ def resolve_turn(conn, request, cfg=None):
     if (not isinstance(candidates, list) or not candidates or
             not all(isinstance(candidate, dict) for candidate in candidates)):
         candidate = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
-        return _unresolved(conn, _turn_key(request, candidate), candidate, "invalid_candidates")
+        return _unresolved(
+            conn, _turn_key(request, candidate), candidate, "invalid_candidates",
+            input_hash=_json_hash(request), model=cfg.get("gate_model"),
+        )
     existing_receipts = []
     pending_candidates = []
     for candidate in candidates:
@@ -379,7 +404,9 @@ def resolve_turn(conn, request, cfg=None):
                 acks.write(conn, cfg=cfg, now_utc=request.get("now_utc"))
                 results.append(receipt)
                 continue
-        results.append(_unresolved(conn, key, candidate, reason,
-                                   input_hash, output_hash))
+        results.append(_unresolved(
+            conn, key, candidate, reason, input_hash, output_hash,
+            model=cfg.get("gate_model"),
+        ))
 
     return _aggregate_receipts(results)

@@ -124,7 +124,8 @@ def _runner(monkeypatch, tmp_path):
 def test_pending_ack_candidates_fan_out_quote_and_due_medication():
     snapshot = {
         "items": [
-            {"kind": "event", "ref_id": 66, "wa_message_ids": ["wa-rem-66"]},
+            {"kind": "event", "ref_id": 66, "current_state": "active",
+             "wa_message_ids": ["wa-rem-66"]},
             {"kind": "med_intake", "ref_id": 46, "current_state": "pending",
              "wa_message_ids": ["wa-med-46"]},
         ]
@@ -133,7 +134,10 @@ def test_pending_ack_candidates_fan_out_quote_and_due_medication():
     assert [(item["kind"], item["ref_id"]) for item in candidates] == [
         ("event", 66), ("med_intake", 46)
     ]
-    assert gateway_run._pending_ack_candidates(snapshot, None) is None
+    assert [(item["kind"], item["ref_id"])
+            for item in gateway_run._pending_ack_candidates(snapshot, None)] == [
+        ("event", 66), ("med_intake", 46)
+    ]
 
 
 @pytest.mark.asyncio
@@ -696,7 +700,7 @@ def test_pending_ack_candidates_without_quote_returns_all_open_event_candidates(
     candidates = gateway_run._pending_ack_candidates(snapshot, None)
 
     assert [(item["kind"], item["ref_id"]) for item in candidates] == [
-        ("event", 66), ("event", 67)
+        ("event", 66), ("event", 67), ("med_intake", 46)
     ]
 
 
@@ -817,7 +821,7 @@ def test_pending_ack_residual_plan_aggregates_unresolved_candidates_once():
     assert plan["candidate_keys"] == ["event:1", "med_intake:3"]
 
 
-def test_pending_ack_residual_plan_reuses_main_clarification():
+def test_pending_ack_residual_plan_does_not_parse_main_text():
     receipt = {
         "status": "unresolved",
         "residual": True,
@@ -828,7 +832,7 @@ def test_pending_ack_residual_plan_reuses_main_clarification():
 
     assert gateway_run._pending_ack_residual_plan(
         receipt, "Уточни, отменять ли событие «Врач»?"
-    ) is None
+    ) is not None
     assert gateway_run._pending_ack_residual_plan(receipt, "Приняла, спасибо") is not None
 
 
@@ -1005,3 +1009,65 @@ def test_pending_ack_receipt_validator_rejects_invalid_envelopes(receipt):
     }]
 
     assert gateway_run._validate_pending_ack_receipt(receipt, candidates) is None
+
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_residual_suppresses_same_candidate_until_new_window(
+    monkeypatch, tmp_path
+):
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = _PostDeliveryRecordingAdapter()
+    runner.adapters = {Platform.WHATSAPP: adapter}
+    receipt = {
+        "status": "unresolved", "residual": True,
+        "unresolved_refs": [{
+            "kind": "event", "ref_id": 1, "reason": "classifier_failure",
+            "title": "Врач", "last_outbound_at": "2026-09-04T09:00:00+00:00",
+        }],
+    }
+
+    first = gateway_run._pending_ack_residual_plan(receipt, "Готово")
+    assert first is not None
+    assert await runner._defer_pending_ack_residual_after_delivery(
+        _source(), SESSION_KEY, first
+    ) is True
+    await adapter.send(_source().chat_id, "Основной ответ")
+    await adapter.callbacks[SESSION_KEY]()
+    assert adapter.sent == ["Основной ответ", gateway_run._PENDING_ACK_RESIDUAL]
+
+    seen = runner._session_state(SESSION_KEY).conversation.pending_ack_residuals
+    assert gateway_run._pending_ack_residual_plan(receipt, "Готово", seen) is None
+    new_window = {**receipt, "unresolved_refs": [{
+        **receipt["unresolved_refs"][0],
+        "last_outbound_at": "2026-09-04T10:00:00+00:00",
+    }]}
+    assert gateway_run._pending_ack_residual_plan(new_window, "Готово", seen)
+
+
+def test_pending_ack_process_timeout_kills_process_group(monkeypatch, tmp_path):
+    import signal
+    import subprocess
+
+    killed = []
+
+    class FakeProcess:
+        pid = 51001
+        returncode = None
+
+        def communicate(self, input=None, timeout=None):
+            raise subprocess.TimeoutExpired("fam", timeout)
+
+    monkeypatch.setattr(
+        gateway_run.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess()
+    )
+    monkeypatch.setattr(
+        gateway_run.os, "killpg", lambda pid, sig: killed.append((pid, sig))
+    )
+
+    result = gateway_run._run_pending_ack_process(
+        ["fam"], "{}", {}, str(tmp_path), timeout=0.01
+    )
+
+    assert result.returncode != 0
+    assert killed == [(51001, signal.SIGKILL)]

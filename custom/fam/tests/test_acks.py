@@ -300,3 +300,25 @@ def test_active_chains_keeps_pending_only_contract_for_s3_event(db):
             db, now_utc=S3_NOW, max_age_min=120
         )
     ] == [event_id]
+
+
+def test_resolution_window_uses_created_at_outbound_proxy(db):
+    """Document the known limitation: sent_messages has no sent_at column."""
+    from fam import rem
+
+    event_id = _event_with_sent_reminders(
+        db,
+        sent_times=(S3_INSIDE,),
+        created_at="2026-09-01T00:00:00+00:00",
+    )
+
+    # reminders.sent_at is inside the window, but the recorded outbound
+    # proxy in sent_messages.created_at is outside it.
+    db.execute(
+        "UPDATE sent_messages SET created_at=? WHERE event_id=?",
+        ("2026-09-01T00:00:00+00:00", event_id),
+    )
+    db.commit()
+    assert [item for item in rem.open_resolution_candidates(
+        db, now_utc=S3_NOW, max_age_min=120
+    ) if item["ref_id"] == event_id] == []

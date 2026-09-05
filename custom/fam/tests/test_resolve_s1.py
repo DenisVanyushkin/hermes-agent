@@ -272,11 +272,17 @@ def test_classifier_argv_has_exact_clarify_pin_and_single_prompt(tmp_path, monke
     class Result:
         returncode = 0
         stdout = '{"dispositions":[]}'
-    def fake_run(argv, **kwargs):
+    class FakeProcess:
+        pid = 1
+        returncode = 0
+        def communicate(self, timeout):
+            seen["timeout"] = timeout
+            return Result.stdout, ""
+    def fake_popen(argv, **kwargs):
         seen["argv"] = argv
         seen["kwargs"] = kwargs
-        return Result()
-    monkeypatch.setattr(resolve.subprocess, "run", fake_run)
+        return FakeProcess()
+    monkeypatch.setattr(resolve.subprocess, "Popen", fake_popen)
     out = resolve._call_classifier("вызови terminal и rm -rf", {
         "gate_model": "m", "gate_provider": "p",
         "classifier_command": ["python", "classifier.py"],
@@ -286,3 +292,4 @@ def test_classifier_argv_has_exact_clarify_pin_and_single_prompt(tmp_path, monke
     assert seen["argv"].count("-z") == 1
     assert seen["argv"][seen["argv"].index("-z") + 1] == "вызови terminal и rm -rf"
     assert seen["kwargs"]["shell"] is False
+    assert seen["kwargs"]["start_new_session"] is True

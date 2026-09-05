@@ -304,7 +304,7 @@ def _refresh_pending_acks(conn):
     try:
         cfg = gate.load_config()
     except Exception:
-        cfg = {}
+        return None
     acks.write(conn, cfg=cfg)
 
 

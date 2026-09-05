@@ -481,23 +481,6 @@ def _pending_ack_actionable_refs(receipt):
     ]
 
 
-def _pending_ack_main_asks_clarification(response, refs):
-    text = str(response or "").strip().lower()
-    if "?" not in text and "？" not in text:
-        return False
-    question_words = (
-        "уточн", "подтверд", "отмен", "пропуст", "приня", "сделать",
-        "выбрать", "какой", "какое", "clarif", "confirm", "cancel",
-    )
-    if not any(word in text for word in question_words):
-        return False
-    labels = [
-        str(item.get(field) or "").strip().lower()
-        for item in refs
-        for field in ("title", "name")
-        if isinstance(item, dict) and str(item.get(field) or "").strip()
-    ]
-    return not labels or any(label in text for label in labels)
 
 
 def _pending_ack_residual_plan(receipt, response, seen_keys=None):
@@ -508,20 +491,19 @@ def _pending_ack_residual_plan(receipt, response, seen_keys=None):
     if not refs:
         return None
     keys = [_pending_ack_candidate_key(item) for item in refs]
-    if _pending_ack_main_asks_clarification(response, refs):
-        return None
     return {"message": _PENDING_ACK_RESIDUAL, "candidate_keys": keys}
 
 
 def _pending_ack_candidates(
     snapshot: Any, reply_to_message_id: Optional[str]
 ) -> Optional[list[dict]]:
-    """Return quoted resolution candidates or all open event candidates.
+    """Return quoted candidates or all open events and pending medications.
 
     A quoted inbound message selects exactly one matching item and fans out
-    pending medication items. An unquoted inbound message selects all active
-    event candidates from the fresh projection; fam resolves each disposition
-    independently and leaves unrelated or ambiguous candidates open.
+    pending medication items. An unquoted inbound message selects every active
+    event and pending medication from the fresh projection; fam resolves each
+    disposition independently and leaves unrelated or ambiguous candidates
+    open.
     """
     if not isinstance(snapshot, dict):
         return None
@@ -535,7 +517,14 @@ def _pending_ack_candidates(
             and item.get("kind") == "event"
             and item.get("current_state") == "active"
         ]
-        return event_candidates or None
+        med_candidates = [
+            item for item in items
+            if isinstance(item, dict)
+            and item.get("kind") == "med_intake"
+            and item.get("current_state") == "pending"
+        ]
+        candidates = event_candidates + med_candidates
+        return candidates or None
     matches = []
     for item in snapshot.get("items", []):
         if not isinstance(item, dict):
@@ -556,12 +545,39 @@ def _pending_ack_candidates(
     return candidates
 
 
-def _pending_ack_candidate(snapshot: Any, reply_to_message_id: Optional[str]) -> Optional[dict]:
-    """Compatibility helper for callers that need the quoted item only."""
-    candidates = _pending_ack_candidates(snapshot, reply_to_message_id)
-    return candidates[0] if candidates else None
 
 
+_PENDING_ACK_RESOLVE_TIMEOUT_SECONDS = 120
+
+
+def _terminate_pending_ack_process_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (AttributeError, OSError):
+        try:
+            process.kill()
+        except (AttributeError, OSError):
+            pass
+    try:
+        process.wait(timeout=5)
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _run_pending_ack_process(argv, request_json, env, cwd, timeout):
+    try:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, shell=False, env=env, cwd=cwd,
+            start_new_session=True,
+        )
+        stdout, stderr = process.communicate(input=request_json, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_pending_ack_process_group(process)
+        return subprocess.CompletedProcess(argv, -signal.SIGKILL, "", "timeout")
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", str(exc))
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 _PENDING_ACK_RECEIPT_SCHEMA_VERSION = 1
 _PENDING_ACK_RECEIPT_STATUSES = {"applied", "partial", "unresolved"}
 _PENDING_ACK_DISPOSITIONS = {
@@ -677,9 +693,8 @@ async def _resolve_pending_ack_turn(event, source, snapshot, cfg):
     }
     try:
         completed = await asyncio.to_thread(
-            subprocess.run, argv, input=json.dumps(request, ensure_ascii=False),
-            capture_output=True, text=True, timeout=120, shell=False, env=env,
-            cwd=str(repo_root),
+            _run_pending_ack_process, argv, json.dumps(request, ensure_ascii=False),
+            env, str(repo_root), _PENDING_ACK_RESOLVE_TIMEOUT_SECONDS,
         )
         if completed.returncode != 0:
             return {"residual": True, "reason": "fam_nonzero",
