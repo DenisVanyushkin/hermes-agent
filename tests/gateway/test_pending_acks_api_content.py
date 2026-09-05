@@ -657,10 +657,16 @@ async def test_pending_ack_s2_composition_partial_preserves_applied_sidecar_with
     runner._session_db = None
     captured = {}
 
+
     def fake_model_call(self, api_kwargs, **_kwargs):
         captured["api_messages"] = api_kwargs["messages"]
+        marker_match = gateway_run._PENDING_ACK_CLARIFICATION_MARKER_RE.search(
+            "\n".join(message.get("content", "") for message in api_kwargs["messages"])
+        )
+        assert marker_match
+        captured["marker"] = marker_match.group(0)
         return SimpleNamespace(choices=[SimpleNamespace(
-            message=SimpleNamespace(content="Записала тренировку", tool_calls=None),
+            message=SimpleNamespace(content=f"Уточни по Мисол? {marker_match.group(0)}", tool_calls=None),
             finish_reason="stop")], usage=None)
 
     monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
@@ -680,7 +686,9 @@ async def test_pending_ack_s2_composition_partial_preserves_applied_sidecar_with
         message.get("content", "") for message in captured["api_messages"]
     )
     assert "Trusted FAM resolution: event 1" in api_content
-    assert response.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
+    assert "Уточни по Мисол?" in response
+    assert captured["marker"] not in response
+    assert gateway_run._PENDING_ACK_RESIDUAL not in response
     check.close()
 
 
@@ -821,19 +829,31 @@ def test_pending_ack_residual_plan_aggregates_unresolved_candidates_once():
     assert plan["candidate_keys"] == ["event:1", "med_intake:3"]
 
 
-def test_pending_ack_residual_plan_does_not_parse_main_text():
+def test_pending_ack_residual_plan_requires_explicit_clarification_marker():
     receipt = {
         "status": "unresolved",
         "residual": True,
         "unresolved_refs": [
-            {"kind": "event", "ref_id": 1, "reason": "ambiguous", "title": "Врач"},
+            {"kind": "event", "ref_id": 1, "reason": "ambiguous", "title": "Врач",
+             "last_outbound_at": "2026-09-04T09:00:00+00:00"},
         ],
     }
 
     assert gateway_run._pending_ack_residual_plan(
         receipt, "Уточни, отменять ли событие «Врач»?"
     ) is not None
-    assert gateway_run._pending_ack_residual_plan(receipt, "Приняла, спасибо") is not None
+    wrong_marker = "<!-- hermes:pending-ack-clarification candidate=event:99 -->"
+    assert gateway_run._pending_ack_residual_plan(
+        receipt, wrong_marker
+    ) is not None
+    marker = gateway_run._pending_ack_clarification_marker(
+        receipt["unresolved_refs"][0]
+    )
+    response = f"Уточни, отменять ли событие? {marker}"
+    assert gateway_run._pending_ack_residual_plan(receipt, response) is None
+    assert gateway_run._strip_pending_ack_clarification_markers(response) == (
+        "Уточни, отменять ли событие?"
+    )
 
 
 @pytest.mark.parametrize("reason", ["unrelated", "snooze", "defer"])

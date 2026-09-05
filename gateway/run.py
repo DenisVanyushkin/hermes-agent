@@ -480,6 +480,29 @@ def _pending_ack_actionable_refs(receipt):
         not in {"unrelated", "defer", "snooze"}
     ]
 
+_PENDING_ACK_CLARIFICATION_MARKER_RE = re.compile(
+    r"<!--\s*hermes:pending-ack-clarification\s+candidate=([^\s>]+)\s*-->"
+)
+
+
+def _pending_ack_clarification_marker(detail):
+    return (
+        "<!-- hermes:pending-ack-clarification candidate="
+        f"{_pending_ack_candidate_key(detail)} -->"
+    )
+
+
+def _pending_ack_clarification_keys(response):
+    return {
+        match.group(1)
+        for match in _PENDING_ACK_CLARIFICATION_MARKER_RE.finditer(
+            str(response or "")
+        )
+    }
+
+
+def _strip_pending_ack_clarification_markers(response):
+    return _PENDING_ACK_CLARIFICATION_MARKER_RE.sub("", str(response or "")).strip()
 
 
 
@@ -487,7 +510,12 @@ def _pending_ack_residual_plan(receipt, response, seen_keys=None):
     """Build one post-turn residual plan from a typed FAM receipt."""
     refs = _pending_ack_actionable_refs(receipt)
     seen = set(seen_keys or ())
-    refs = [item for item in refs if _pending_ack_candidate_key(item) not in seen]
+    marked = _pending_ack_clarification_keys(response)
+    refs = [
+        item for item in refs
+        if _pending_ack_candidate_key(item) not in seen
+        and _pending_ack_candidate_key(item) not in marked
+    ]
     if not refs:
         return None
     keys = [_pending_ack_candidate_key(item) for item in refs]
@@ -766,7 +794,8 @@ def _pending_acks_note(
         if item.get("kind") == "event":
             title = str(item.get("title") or "").strip()
             if title:
-                lines.append(f"- событие «{title}» (id={item.get('ref_id')})")
+                lines.append(f"- событие «{title}» (id={item.get('ref_id')}); "
+                             f"маркер уточнения: {_pending_ack_clarification_marker(item)}")
             continue
         name = str(item.get("name") or "").strip()
         if not name:
@@ -782,7 +811,8 @@ def _pending_acks_note(
             how = f" — подтвердила: `{ack}`; пропустила/отказалась: `{skip}`"
         elif ack:
             how = f" — подтвердила: `{ack}`"
-        lines.append(f"- приём {head}{when}{how}")
+        lines.append(f"- приём {head}{when}{how}; "
+                     f"маркер уточнения: {_pending_ack_clarification_marker(item)}")
 
     if not lines:
         return None
@@ -794,7 +824,9 @@ def _pending_acks_note(
         + "\nЕсли текущее сообщение подтверждает или отклоняет один из них "
         "(например «готово», «выпила», «приняла», «позже», «не буду»), "
         "закрой его соответствующей командой, прежде чем отвечать. Если "
-        "сообщение не про это — не спрашивай о нём заново.]"
+        "сообщение не про это — не спрашивай о нём заново. Если задаёшь "
+        "уточняющий вопрос, добавь соответствующий маркер из пункта выше в "
+        "конец ответа; gateway удалит маркер перед отправкой пользователю.]"
     )
 
 
@@ -20905,14 +20937,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 residual_plan = _pending_ack_residual_plan(
                     _pending_ack_residual, response, seen.keys()
                 )
+                response = _strip_pending_ack_clarification_markers(response)
                 if residual_plan is not None:
                     if not await self._defer_pending_ack_residual_after_delivery(
                         source, session_key, residual_plan
                     ):
                         response = (response.rstrip() + "\n\n" + _PENDING_ACK_RESIDUAL).strip()
-                else:
-                    for item in _pending_ack_actionable_refs(_pending_ack_residual):
-                        seen[_pending_ack_candidate_key(item)] = "clarification"
 
             # Turn-error alert to the admin channel (config-gated, no-op
             # without gateway.error_alerts). Runs after normalize/sanitize so
