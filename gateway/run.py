@@ -505,6 +505,70 @@ def _strip_pending_ack_clarification_markers(response):
     return _PENDING_ACK_CLARIFICATION_MARKER_RE.sub("", str(response or "")).strip()
 
 
+def _fresh_pending_ack_snapshot_for_source(source):
+    try:
+        cfg = _load_gateway_config()
+        path = str((cfg or {}).get("pending_acks_file", "") or "")
+        snapshot = _read_pending_acks(path)
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("items"), list):
+            return None
+
+        platform = getattr(getattr(source, "platform", None), "value", None)
+        platform = platform or str(getattr(source, "platform", "") or "")
+        target = snapshot.get("target")
+        if not isinstance(target, str) or ":" not in target:
+            return None
+        target_platform, _, target_user = target.partition(":")
+        if target_platform.strip().lower() != platform.strip().lower():
+            return None
+        target_aliases = _expand_whatsapp_auth_aliases(target_user)
+        user_aliases = _expand_whatsapp_auth_aliases(getattr(source, "user_id", "") or "")
+        if not target_aliases or not user_aliases or target_aliases.isdisjoint(user_aliases):
+            return None
+
+        generated = datetime.fromisoformat(str(snapshot.get("generated_at")))
+        if generated.tzinfo is None:
+            generated = generated.replace(tzinfo=timezone.utc)
+        generated = generated.astimezone(timezone.utc)
+        if datetime.now(timezone.utc) - generated > timedelta(
+            minutes=_PENDING_ACKS_MAX_AGE_MINUTES
+        ):
+            return None
+        return snapshot
+    except Exception:
+        return None
+
+
+def _filter_pending_ack_residual_plan(plan, source):
+    snapshot = _fresh_pending_ack_snapshot_for_source(source)
+    if snapshot is None:
+        return plan
+
+    open_by_ref = {}
+    for item in snapshot["items"]:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind == "event":
+            is_open = item.get("current_state") == "active"
+        elif kind == "med_intake":
+            is_open = item.get("current_state") == "pending"
+        else:
+            continue
+        identity = (str(kind), str(item.get("ref_id")))
+        open_by_ref[identity] = open_by_ref.get(identity, False) or is_open
+
+    open_keys = []
+    for key in plan.get("candidate_keys") or []:
+        kind, _, ref = str(key).partition(":")
+        ref_id, _, _ = ref.partition("@")
+        if open_by_ref.get((kind, ref_id), False):
+            open_keys.append(key)
+    if not open_keys:
+        return None
+    return {**plan, "candidate_keys": open_keys}
+
+
 
 def _pending_ack_residual_plan(receipt, response, seen_keys=None):
     """Build one post-turn residual plan from a typed FAM receipt."""
@@ -20940,6 +21004,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _pending_ack_residual, pending_ack_raw_response, seen.keys()
                 )
                 if residual_plan is not None:
+                    residual_plan = _filter_pending_ack_residual_plan(
+                        residual_plan, source
+                    )
+                if residual_plan is not None:
                     if not await self._defer_pending_ack_residual_after_delivery(
                         source, session_key, residual_plan
                     ):
@@ -22116,15 +22184,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         async def _deliver() -> None:
             try:
+                delivery_plan = _filter_pending_ack_residual_plan(plan, source)
+                if delivery_plan is None:
+                    return
+                delivery_keys = list(delivery_plan.get("candidate_keys") or [])
                 delivery_adapter = self._adapter_for_source(source) or adapter
                 result = await delivery_adapter.send(
                     source.chat_id,
-                    plan.get("message") or _PENDING_ACK_RESIDUAL,
+                    delivery_plan.get("message") or _PENDING_ACK_RESIDUAL,
                     metadata=self._thread_metadata_for_source(source),
                 )
                 if result is not None and getattr(result, "success", True):
                     state = self._session_state(session_key).conversation
-                    for key in keys:
+                    for key in delivery_keys:
                         state.pending_ack_residuals[key] = "sent"
             except Exception:
                 logger.warning("pending-ack residual delivery failed", exc_info=True)

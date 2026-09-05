@@ -902,6 +902,163 @@ class _PostDeliveryRecordingAdapter:
         return SimpleNamespace(success=True, message_id=f"m-{len(self.sent)}")
 
 
+def _fresh_pending_ack_snapshot(items):
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target": "whatsapp:+77011102626",
+        "items": items,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_deferred_residual_suppresses_closed_candidates(
+    monkeypatch, tmp_path
+):
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = _PostDeliveryRecordingAdapter()
+    runner.adapters = {Platform.WHATSAPP: adapter}
+    monkeypatch.setattr(
+        gateway_run,
+        "_read_pending_acks",
+        lambda _path: _fresh_pending_ack_snapshot([]),
+    )
+    plan = {
+        "message": gateway_run._PENDING_ACK_RESIDUAL,
+        "candidate_keys": ["event:1", "med_intake:3"],
+    }
+
+    assert await runner._defer_pending_ack_residual_after_delivery(
+        _source(), SESSION_KEY, plan
+    ) is True
+    await adapter.send(_source().chat_id, "Основной ответ")
+    await adapter.callbacks[SESSION_KEY]()
+
+    assert adapter.sent == ["Основной ответ"]
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_deferred_residual_keeps_only_open_candidates(
+    monkeypatch, tmp_path
+):
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = _PostDeliveryRecordingAdapter()
+    runner.adapters = {Platform.WHATSAPP: adapter}
+    monkeypatch.setattr(
+        gateway_run,
+        "_read_pending_acks",
+        lambda _path: _fresh_pending_ack_snapshot([
+            {"kind": "med_intake", "ref_id": 3, "current_state": "pending"},
+        ]),
+    )
+    plan = {
+        "message": gateway_run._PENDING_ACK_RESIDUAL,
+        "candidate_keys": ["event:1", "med_intake:3"],
+    }
+
+    assert await runner._defer_pending_ack_residual_after_delivery(
+        _source(), SESSION_KEY, plan
+    ) is True
+    await adapter.send(_source().chat_id, "Основной ответ")
+    await adapter.callbacks[SESSION_KEY]()
+
+    assert adapter.sent == ["Основной ответ", gateway_run._PENDING_ACK_RESIDUAL]
+    sent_keys = runner._session_state(SESSION_KEY).conversation.pending_ack_residuals
+    assert "event:1" not in sent_keys
+    assert sent_keys["med_intake:3"] == "sent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snapshot", [
+    None,
+    {
+        "generated_at": "2000-01-01T00:00:00+00:00",
+        "target": "whatsapp:+77011102626",
+        "items": [],
+    },
+])
+async def test_pending_ack_deferred_residual_falls_back_on_missing_or_stale_snapshot(
+    monkeypatch, tmp_path, snapshot
+):
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = _PostDeliveryRecordingAdapter()
+    runner.adapters = {Platform.WHATSAPP: adapter}
+    monkeypatch.setattr(gateway_run, "_read_pending_acks", lambda _path: snapshot)
+    plan = {
+        "message": gateway_run._PENDING_ACK_RESIDUAL,
+        "candidate_keys": ["event:1"],
+    }
+
+    assert await runner._defer_pending_ack_residual_after_delivery(
+        _source(), SESSION_KEY, plan
+    ) is True
+    await adapter.send(_source().chat_id, "Основной ответ")
+    await adapter.callbacks[SESSION_KEY]()
+
+    assert adapter.sent == ["Основной ответ", gateway_run._PENDING_ACK_RESIDUAL]
+
+
+@pytest.mark.asyncio
+async def test_pending_ack_inline_residual_filters_closed_candidates(
+    monkeypatch, tmp_path
+):
+    runner = _runner(monkeypatch, tmp_path)
+    snapshot = _fresh_pending_ack_snapshot([
+        {"kind": "med_intake", "ref_id": 3, "current_state": "pending"},
+    ])
+    receipt = {
+        "status": "partial",
+        "residual": True,
+        "unresolved_refs": [
+            {"kind": "event", "ref_id": 1, "reason": "classifier_failure"},
+            {"kind": "med_intake", "ref_id": 3, "reason": "classifier_failure"},
+        ],
+    }
+    monkeypatch.setattr(gateway_run, "_read_pending_acks", lambda _path: snapshot)
+
+    async def fake_resolve(*_args, **_kwargs):
+        return receipt
+
+    monkeypatch.setattr(gateway_run, "_resolve_pending_ack_turn", fake_resolve)
+    captured = {}
+
+    async def inline_fallback(_source, _session_key, plan):
+        captured["plan"] = plan
+        return False
+
+    monkeypatch.setattr(
+        runner,
+        "_defer_pending_ack_residual_after_delivery",
+        inline_fallback,
+    )
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "test-model",
+        {
+            "api_key": "test-key",
+            "base_url": "http://provider.test/v1",
+            "provider": "openai",
+            "api_mode": "chat_completions",
+        },
+    )
+    runner._session_db = None
+
+    def fake_model_call(self, api_kwargs, **_kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content="Основной ответ", tool_calls=None),
+            finish_reason="stop")], usage=None)
+
+    monkeypatch.setattr("run_agent.AIAgent._interruptible_api_call", fake_model_call)
+    monkeypatch.setattr(
+        "run_agent.AIAgent._interruptible_streaming_api_call", fake_model_call
+    )
+
+    response = await runner._handle_message_with_agent(
+        _event(), _source(), SESSION_KEY, 1
+    )
+
+    assert captured["plan"]["candidate_keys"] == ["med_intake:3"]
+    assert response.count(gateway_run._PENDING_ACK_RESIDUAL) == 1
+
+
 @pytest.mark.asyncio
 async def test_pending_ack_residual_is_separate_post_delivery_message(monkeypatch, tmp_path):
     runner = _runner(monkeypatch, tmp_path)
