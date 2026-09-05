@@ -99,4 +99,4 @@ def test_migrates_from_v11_shaped_db(tmp_path):
     famdb.init_db(conn)  # idempotent re-run must not raise
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "14"
+    ).fetchone()["value"] == "15"

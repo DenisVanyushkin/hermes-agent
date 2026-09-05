@@ -1585,13 +1585,17 @@ def _extcal_eligible_calendars(cfg, calendars):
     AND the read-filter check -- fix-round finding m1: the first cut only
     normalized the write-URL side) OR by display name, since Denis will
     actually populate the config with calendar names, not URLs."""
-    write_url = cfg.get("extcal_write_calendar") or ""
+    write_urls = [
+        cfg.get("extcal_write_calendar") or "",
+        cfg.get("extcal_taya_calendar") or "",
+    ]
     read_filter = set(cfg.get("extcal_read_calendars") or [])
     out = []
     for c in (calendars or []):
         url = c.get("url") or ""
         name = c.get("name")
-        if write_url and extcal._same_calendar(url, write_url):
+        if any(write and extcal._same_calendar(url, write)
+               for write in write_urls):
             continue
         if read_filter and not (
                 any(extcal._same_calendar(url, rf) for rf in read_filter)
@@ -1695,8 +1699,8 @@ def _dry_run_export_summary(plan):
     and counts, so titles, hrefs, and ICS never reach the operator surface.
     """
     entries = [
-        {"event_id": entry.get("event_id"), "action": entry.get("action"),
-         "reason": entry.get("reason")}
+        {"event_id": entry.get("event_id"), "target": entry.get("target"),
+         "action": entry.get("action"), "reason": entry.get("reason")}
         for entry in (plan or [])
     ]
     counts = {"exported": 0, "updated": 0, "unchanged": 0,
@@ -1707,7 +1711,12 @@ def _dry_run_export_summary(plan):
             counts["exported"] += 1
         elif action in ("update", "unchanged", "delete", "retain"):
             counts[action if action != "retain" else "retained"] += 1
-    return {"counts": counts, "plan": entries}
+    by_target = {
+        target: sorted(entry["event_id"] for entry in entries
+                       if entry.get("target") == target)
+        for target in ("hermes", "taya")
+    }
+    return {"counts": counts, "plan": entries, "target_event_ids": by_target}
 
 
 _HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
@@ -2491,7 +2500,7 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             entry["external_etag"] = meta["etag"]
 
     if dry_run:
-        export_plan = extcal._export_plan(conn, cfg, now)
+        export_plan = extcal._export_route_plan(conn, cfg, now)
         return {
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},

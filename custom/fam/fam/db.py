@@ -225,6 +225,12 @@ CREATE TABLE IF NOT EXISTS ext_exports (
   etag TEXT,
   body_hash TEXT,
   synced_at TEXT);
+CREATE TABLE IF NOT EXISTS ext_exports_taya (
+  event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+  href TEXT,
+  etag TEXT,
+  body_hash TEXT,
+  synced_at TEXT);
 CREATE TABLE IF NOT EXISTS extcal_export_issues (
   target TEXT NOT NULL CHECK (target IN ('hermes','taya')),
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
@@ -500,6 +506,13 @@ def init_db(conn):
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','13')")
     conn.execute(
         "UPDATE meta SET value='14' WHERE key='schema_version'")
+    # v15 (S6): same-shape journal for the Taya write-only collection.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ext_exports_taya ("
+        "event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, "
+        "href TEXT, etag TEXT, body_hash TEXT, synced_at TEXT)")
+    conn.execute(
+        "UPDATE meta SET value='15' WHERE key='schema_version'")
     conn.commit()
 
 

@@ -16,7 +16,7 @@ def _seed(db):
 
 def test_v14_schema_and_subject_roundtrip(db):
     _, taya, _ = _seed(db)
-    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "14"
+    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
     assert "subject_person_id" in {r["name"] for r in db.execute("PRAGMA table_info(events)")}
     assert "subject_person_id" in {r["name"] for r in db.execute("PRAGMA table_info(event_series)")}
     event = cal.add(db, "Математика", "2030-01-08T10:00:00+00:00", subject_person_id=taya["id"])
@@ -182,5 +182,5 @@ def test_fresh_and_v13_migrated_schema_match_and_history_stays_null(tmp_path):
     migrated_shape = {table: shape(legacy, table) for table in ("events", "event_series")}
     assert migrated_shape == fresh_shape
     assert legacy.execute("SELECT subject_person_id FROM events WHERE title='history'").fetchone()[0] is None
-    assert legacy.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "14"
+    assert legacy.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
     fresh.close(); legacy.close()

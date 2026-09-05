@@ -68,11 +68,11 @@ def test_schema_v10_migrates_from_v9(tmp_path):
     # bumped to "11" at the v10->v11 transition.
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "14"
+    ).fetchone()["value"] == "15"
     assert conn.execute(
         "SELECT title FROM events WHERE id=1").fetchone()["title"] == "старое событие"
 
     famdb.init_db(conn)  # idempotent re-run
     assert conn.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()["value"] == "14"
+    ).fetchone()["value"] == "15"
