@@ -2686,7 +2686,7 @@ def cmd_tick_cal_ext(args):
 
     nonzero_counts = (any(v for k, v in counts.items() if k != "errors")
                        or any(v for k, v in export_counts.items()
-                              if k not in ("errors", "unchanged")))
+                              if k not in ("errors", "unchanged", "retained")))
     if has_error or nonzero_counts or mode_changed:
         audit_payload = dict(counts)
         audit_payload["calendars"] = result["calendars"]

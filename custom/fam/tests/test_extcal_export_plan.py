@@ -42,6 +42,13 @@ def _plan_by_id(plan):
     return {entry["event_id"]: entry for entry in plan}
 
 
+def _audit_rows(conn, kind):
+    rows = conn.execute(
+        "SELECT payload FROM audit_log WHERE kind=? ORDER BY id", (kind,)
+    ).fetchall()
+    return [json.loads(row["payload"]) for row in rows]
+
+
 def test_active_past_journal_is_retained_without_network(db):
     event = _event(db, "Прошедшее", "2037-07-10T13:00:00+00:00")
     _seed_export(db, event["id"])
@@ -149,6 +156,8 @@ def test_cmd_tick_cal_ext_composes_retention_and_resets_export_streak(
         lambda cfg, calendar, sync_token=None, request=None, force_full=False:
         ([], "next", {"mode": "sync_collection", "reason": None}),
     )
+    famdb.meta_set(db, "extcal_last_mode:https://caldav.icloud.com/1/calendars/personal/", "sync_collection")
+    db.commit()
     calls = []
 
     def request(method, url, **kwargs):
@@ -167,3 +176,40 @@ def test_cmd_tick_cal_ext_composes_retention_and_resets_export_streak(
         db, cli._extcal_streak_meta_key(cli._EXTCAL_STREAK_APPLY_KEY)
     ) == "0"
     assert famdb.meta_get(db, "extcal_last_ok") == TEST_NOW
+    assert _audit_rows(db, "cal.ext.sync") == []
+
+
+def test_cmd_tick_cal_ext_audits_real_export_action(db, monkeypatch):
+    event = _event(db, "В окне", "2037-07-20T13:00:00+00:00")
+    cfg = _cfg(extcal_fail_streak_threshold=1)
+    monkeypatch.setattr(cli.gate, "load_config", lambda *a, **k: cfg)
+    calendar_url = "https://caldav.icloud.com/1/calendars/personal/"
+    monkeypatch.setattr(
+        cli.extcal, "discover",
+        lambda cfg, request=None: [{
+            "url": calendar_url, "name": "Calendar", "ctag": "c1",
+            "sync_token": "tok", "supports_sync_token": True,
+            "components": ["VEVENT"],
+        }],
+    )
+    monkeypatch.setattr(
+        cli.extcal, "fetch_changes",
+        lambda cfg, calendar, sync_token=None, request=None, force_full=False:
+        ([], "next", {"mode": "sync_collection", "reason": None}),
+    )
+    famdb.meta_set(db, f"extcal_last_mode:{calendar_url}", "sync_collection")
+    db.commit()
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append(method)
+        return extcal.Response(201, b"", {"ETag": '"e1"'})
+
+    monkeypatch.setattr(cli.extcal, "_request", request)
+    args = types.SimpleNamespace(now=TEST_NOW)
+    assert cli.cmd_tick_cal_ext(args) == 0
+    assert calls == ["PUT"]
+    rows = _audit_rows(db, "cal.ext.sync")
+    assert len(rows) == 1
+    assert rows[0]["export"]["exported"] == 1
+    assert rows[0]["export"]["retained"] == 0
