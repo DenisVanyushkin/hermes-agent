@@ -130,9 +130,21 @@ def extcal_failures(conn, cfg, now_utc=None):
     if issues:
         ids = ", ".join(str(row["event_id"]) for row in issues)
         actions = "; ".join(
-            f"{row['action']} {row['http_status'] or ''}".strip()
+            f"{str(row['action']).upper()} {row['http_status'] or ''}".strip()
             for row in issues)
-        detail = f"экспорт iCloud залип: {len(issues)} событий ({ids}), {actions}"
+        count = len(issues)
+        if 10 < count % 100 < 20:
+            word = "\u0441\u043e\u0431\u044b\u0442\u0438\u0439"
+        elif count % 10 == 1:
+            word = "\u0441\u043e\u0431\u044b\u0442\u0438\u0435"
+        elif count % 10 in (2, 3, 4):
+            word = "\u0441\u043e\u0431\u044b\u0442\u0438\u044f"
+        else:
+            word = "\u0441\u043e\u0431\u044b\u0442\u0438\u0439"
+        detail = (
+            f"\u044d\u043a\u0441\u043f\u043e\u0440\u0442 iCloud "
+            f"\u0437\u0430\u043b\u0438\u043f: {count} {word} "
+            f"({ids}), {actions}")
         return _result("extcal_failures", "degraded", detail,
                        issues=issues, streaks=streaks)
     active_streaks = ", ".join(
@@ -140,10 +152,13 @@ def extcal_failures(conn, cfg, now_utc=None):
     if active_streaks:
         return _result(
             "extcal_failures", "degraded",
-            f"о$8ибки cal-ext: {active_streaks}",
+            "\u043e\u0448\u0438\u0431\u043a\u0438 cal-ext: "
+            f"{active_streaks}",
             issues=issues, streaks=streaks)
     return _result("extcal_failures", "ok",
-                   "ошибок экспорта нет",
+                   "\u043e\u0448\u0438\u0431\u043e\u043a "
+                   "\u044d\u043a\u0441\u043f\u043e\u0440\u0442\u0430 "
+                   "\u043d\u0435\u0442",
                    issues=issues, streaks=streaks)
 
 

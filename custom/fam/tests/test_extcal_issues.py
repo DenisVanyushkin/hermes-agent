@@ -71,7 +71,8 @@ def test_failed_put_creates_one_issue_and_repeat_keeps_first_seen(db):
         db, _cfg(), request=_fail_request, now_utc=TEST_NOW)
     first = _issue(db, event["id"])
     second_counts = extcal.export_own(
-        db, _cfg(), request=_fail_request, now_utc=TEST_NOW)
+        db, _cfg(), request=_fail_request,
+        now_utc="2037-07-15T01:00:00+00:00")
     second = _issue(db, event["id"])
 
     assert len(first_counts["errors"]) == len(second_counts["errors"]) == 1
@@ -81,8 +82,10 @@ def test_failed_put_creates_one_issue_and_repeat_keeps_first_seen(db):
     assert first["kind"] == second["kind"] == "error"
     assert first["reason_code"] == second["reason_code"] == "export_error"
     assert first["http_status"] == second["http_status"] == 500
-    assert first["first_seen_utc"] == second["first_seen_utc"]
-    assert second["last_seen_utc"] >= first["last_seen_utc"]
+    assert first["first_seen_utc"] == "2037-07-15T00:00:00.000000+00:00"
+    assert second["first_seen_utc"] == first["first_seen_utc"]
+    assert second["last_seen_utc"] == "2037-07-15T01:00:00.000000+00:00"
+    assert second["last_seen_utc"] > first["last_seen_utc"]
     assert href not in json.dumps(second, ensure_ascii=False)
     assert "Fixture secret title" not in json.dumps(second, ensure_ascii=False)
     assert "SECRET ICS BODY" not in json.dumps(second, ensure_ascii=False)
@@ -157,11 +160,61 @@ def test_extcal_failures_is_pure_safe_and_registered(db):
     assert href not in full_text
     assert "Title secret" not in full_text
     assert "SECRET ICS BODY" not in full_text
+    assert result["detail"] == "\u044d\u043a\u0441\u043f\u043e\u0440\u0442 iCloud \u0437\u0430\u043b\u0438\u043f: 1 \u0441\u043e\u0431\u044b\u0442\u0438\u0435 (1), PUT 500"
     assert dict(db.execute(
         "SELECT key, value FROM meta").fetchall()) == before
     assert "extcal_failures" in {
         probe["name"] for probe in health.all_probes(db, _cfg(), TEST_NOW)
     }
+
+
+def test_extcal_failures_streak_detail_has_correct_text(db):
+    famdb.meta_set(db, "extcal_fail_streak:__import_apply__", "2")
+    famdb.meta_set(db, "extcal_fail_streak:__export__", "3")
+    db.commit()
+
+    result = health.extcal_failures(db, _cfg(), now_utc=TEST_NOW)
+
+    assert result["status"] == "degraded"
+    assert result["detail"] == "\u043e\u0448\u0438\u0431\u043a\u0438 cal-ext: import_apply=2, export=3"
+
+
+def test_unexpected_export_exception_keeps_type_only_in_audit(db):
+    event = _event(db, "Unexpected event")
+
+    def boom():
+        raise TypeError("internal failure with private href")
+
+    counts = {"errors": []}
+    extcal._export_commit_one(
+        db, event["id"], "update", "updated", counts, boom,
+        now_utc=TEST_NOW)
+
+    assert counts["errors"][0]["error"] == "export_error"
+    payload = json.loads(db.execute(
+        "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
+    ).fetchone()["payload"])
+    assert payload["exception_type"] == "TypeError"
+    assert payload["reason_code"] == "export_error"
+    assert "internal failure" not in json.dumps(payload, ensure_ascii=False)
+
+
+
+def test_non_orphan_issue_integrity_error_is_not_swallowed(db, monkeypatch):
+    event = _event(db, "Existing event")
+    monkeypatch.setattr(
+        extcal, "_export_issue_upsert",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            sqlite3.IntegrityError("CHECK constraint failed")),
+    )
+
+    def boom():
+        raise extcal._ExportFailure("transport failed", status=500)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        extcal._export_commit_one(
+            db, event["id"], "update", "updated", {"errors": []}, boom)
+
 
 
 def test_issue_audit_payload_is_safe_and_no_gate_delivery_or_amina_message(

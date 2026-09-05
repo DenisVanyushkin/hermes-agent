@@ -70,6 +70,7 @@ import base64
 import hashlib
 import os
 import re
+import sqlite3
 import sys
 import urllib.error
 import urllib.request
@@ -3201,8 +3202,9 @@ def _export_issue_action(action):
 
 
 def _export_issue_upsert(conn, event_id, action, status=None, kind="error",
-                         reason_code="export_error"):
-    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+                         reason_code="export_error", now_utc=None):
+    now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
+    now = now_dt.isoformat(timespec="microseconds")
     db_action = _export_issue_action(action)
     conn.execute(
         "INSERT INTO extcal_export_issues("
@@ -3279,45 +3281,54 @@ def _export_delete_event(conn, cfg, request, event_id, exp):
     conn.execute("DELETE FROM ext_exports WHERE event_id=?", (event_id,))
 
 
-def _export_commit_one(conn, event_id, action, count_key, counts, fn):
+def _export_commit_one(conn, event_id, action, count_key, counts, fn,
+                       now_utc=None):
     """Run one export with isolated transaction and safe issue accounting."""
     try:
         fn()
     except Exception as e:
         status = getattr(e, "status", None)
         reason_code = getattr(e, "reason_code", "export_error")
+        exception_type = type(e).__name__[:100]
         safe_error = reason_code
         if status is not None:
             safe_error += f" (status={status})"
-        error = {
+        counts["errors"].append({
             "event_id": event_id,
             "action": action,
             "error": safe_error,
             "reason_code": reason_code,
             "http_status": status,
-        }
-        counts["errors"].append(error)
+        })
+
+        conn.rollback()
+        issue_recorded = True
+        issue_write_error = None
         try:
-            conn.rollback()
-            try:
-                _export_issue_upsert(
-                    conn, event_id, action, status=status,
-                    kind="error", reason_code=reason_code)
-            except Exception:
-                # A malformed or already-gone fixture row may not satisfy
-                # the issue journal FK; the safe audit still records the
-                # failed attempt.
-                pass
-            audit.log(conn, "cal.ext.export_error", {
-                "event_id": event_id,
-                "action": _export_issue_action(action),
-                "kind": "error",
-                "reason_code": reason_code,
-                "http_status": status,
-            })
-            conn.commit()
-        except Exception:
-            pass
+            _export_issue_upsert(
+                conn, event_id, action, status=status,
+                kind="error", reason_code=reason_code, now_utc=now_utc)
+        except sqlite3.IntegrityError:
+            event_exists = conn.execute(
+                "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
+            if event_exists:
+                raise
+            issue_recorded = False
+            issue_write_error = "orphan_event"
+
+        audit_payload = {
+            "event_id": event_id,
+            "action": _export_issue_action(action),
+            "kind": "error",
+            "reason_code": reason_code,
+            "http_status": status,
+            "exception_type": exception_type,
+            "issue_recorded": issue_recorded,
+        }
+        if issue_write_error:
+            audit_payload["issue_write_error"] = issue_write_error
+        audit.log(conn, "cal.ext.export_error", audit_payload)
+        conn.commit()
         return
     _export_issue_resolve(conn, event_id)
     counts[count_key] += 1
@@ -3502,14 +3513,16 @@ def export_own(conn, cfg, request=None, now_utc=None):
             _export_commit_one(
                 conn, event_id, action, "deleted", counts,
                 lambda item=item, event_id=event_id: _export_delete_event(
-                    conn, cfg, request, event_id, item["export"]))
+                    conn, cfg, request, event_id, item["export"]),
+                now_utc=now_dt)
             continue
         count_key = "updated" if action == "update" else "exported"
         _export_commit_one(
             conn, event_id, action, count_key, counts,
             lambda item=item: _export_put_event(
                 conn, cfg, request, item["event"], item["export"],
-                item["location"], item["participants"], item["new_hash"], now_dt))
+                item["location"], item["participants"], item["new_hash"], now_dt),
+            now_utc=now_dt)
 
     return counts
 

@@ -433,6 +433,9 @@ def test_export_commit_one_caps_error_length_for_export_failure_too(db):
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload"])
     assert payload["reason_code"] == "export_error"
+    assert payload["exception_type"] == "_ExportFailure"
+    assert payload["issue_recorded"] is False
+    assert payload["issue_write_error"] == "orphan_event"
     assert "error" not in payload
     assert long_href not in json.dumps(payload, ensure_ascii=False)
 
