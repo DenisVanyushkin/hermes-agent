@@ -3,6 +3,15 @@ from __future__ import annotations
 from job_intel import cli
 
 
+def test_hh_trace_keeps_boolean_truncated_as_boolean() -> None:
+    trace = {}
+
+    cli._merge_hh_trace(trace, {"truncated": True, "pages_fetched": 2})
+    cli._merge_hh_trace(trace, {"truncated": True, "pages_fetched": 3})
+
+    assert trace == {"truncated": True, "pages_fetched": 5}
+
+
 def test_cli_subcommands_include_new_hardening_commands() -> None:
     parser = cli.build_parser()
     subparser_action = next(action for action in parser._actions if getattr(action, "choices", None))
@@ -28,16 +37,12 @@ def test_search_technical_report_includes_browser_profile_and_auth_details() -> 
             },
             "headhunter": {
                 "status": "ok",
-                "acquisition": "browser-native",
+                "acquisition": "api",
                 "session_health": {
-                    "browser_profile": "/var/lib/browser-desktop/profiles/hh",
-                    "auth_attempted": True,
-                    "email_challenge_attempted": True,
-                    "email_challenge_resolved": True,
                     "pages_fetched": 2,
-                    "login_walls": 0,
-                    "auth_redirects": 0,
-                    "status": "healthy",
+                    "found": 2,
+                    "detail_failures": 0,
+                    "status": "ok",
                 },
             },
         },
@@ -49,8 +54,8 @@ def test_search_technical_report_includes_browser_profile_and_auth_details() -> 
     assert "/var/lib/browser-desktop/profiles/linkedin" in report
     assert "login=yes" in report
     assert "email_challenge=no" in report
-    assert "/var/lib/browser-desktop/profiles/hh" in report
-    assert "email_challenge=yes (resolved=yes)" in report
+    assert "headhunter: acquisition=api" in report
+    assert "profile=n/a" in report
 
 
 def test_runtime_provenance_summary_exposes_runtime_topology() -> None:

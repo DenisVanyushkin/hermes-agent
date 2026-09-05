@@ -1,0 +1,33 @@
+schema_version: "3.0.0"
+benchmark_kind: gate_b_at_most_once
+ordered_call_cap: 48
+per_call_maximum_usd: "0.01"
+aggregate_maximum_usd: "0.48"
+automatic_restart: false
+post_dispatch_retry: false
+ambiguous_post_dispatch_cost: conservative_maximum
+minimum_deliverable_results: 43
+maximum_terminal_unknown: 5
+minimum_manual_triage_accuracy: "0.80"
+company_authority_when_missing: unavailable
+company_claims_when_unavailable: forbidden
+company_fact_deny_patterns:
+  - '\bwe\b'
+  - '\bour\b'
+  - '\bour company\b'
+  - '\bthe company\b'
+  - '\bglobal leader\b'
+  - '\bmarket leader\b'
+  - '\bplatform\b'
+  - '\bcustomers?\b'
+  - '\bclients?\b'
+  - '\brevenue\b'
+  - '\bmerchant volume\b'
+  - '\bmarket share\b'
+  - '\bfunding\b'
+  - '\bseries [a-z]\b'
+  - '\bemployees?\b'
+  - '\boffices?\b'
+  - '\bexpansion\b'
+  - '\bfastest[- ]growing\b'
+description_claim_admission: reviewed_hash_allowlist_only

@@ -529,7 +529,8 @@ def _cwd_marker(session_id: str) -> str:
 # as the Python-side contract for the exclusion set; the dump path unsets by
 # name/prefix instead of grepping declare lines (see below / issue #71296).
 _SNAPSHOT_EXCLUDED_ENV_REGEX = (
-    "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_)"
+    "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_|"
+    "HERMES_BROWSER_CONTROL_)"
 )
 _SHELL_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -577,6 +578,7 @@ def _export_dump_excluding_session_vars(
         # must not survive into the shared snapshot. Matches
         # _SNAPSHOT_EXCLUDED_ENV_REGEX, which is the Python-side contract.
         "unset ${!HERMES_SESSION_*} ${!HERMES_CRON_*} "
+        "${!HERMES_BROWSER_CONTROL_*} "
         # AI_AGENT / HERMES_AGENT are per-command attribution markers
         # (re-exported by every _wrap_command with outer-harness-preserving
         # ${VAR:-default} semantics).  Persisting them into the snapshot

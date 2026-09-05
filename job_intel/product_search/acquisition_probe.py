@@ -7,13 +7,21 @@ from html import unescape
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
+from urllib.parse import parse_qs, urlparse
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+import yaml
 
+from ..browser_sourcing import (
+    EXCLUSION_REASON_CATALOG,
+    LinkedInPageClassification,
+    LinkedInSafetyReason,
+)
 from .search_contract import SearchContract
 
 
@@ -26,10 +34,170 @@ FORBIDDEN_PROBE_ROOTS = (
     Path("/home/hermes/.hermes/hermes-agent/.worktrees"),
 )
 GATE_A_EXPERIMENT_ROOT = Path("/home/hermes/.hermes/job_intel/experiments/gate-a")
+
+SourceIsolationMode = Literal["cloned_profile", "exclusive_lock", "api", "blocked"]
+SourceCollectionMethod = Literal["browser", "api"]
+Denominator = Literal["open_market", "seeded_ats_snapshot"]
+SourceState = Literal[
+    "observed",
+    "observed_with_failures",
+    "blocked_no_safe_isolation",
+    "blocked_missing_public_interface",
+    "runtime_capability_blocked",
+    "blocked_anti_bot",
+    "blocked_rate_limit_or_timeout",
+    "blocked_extraction_failure",
+    "blocked_multiple_failures",
+    "blocked_unsupported_geography",
+]
+
+AcquisitionOutcome = Literal[
+    "not_attempted",
+    "blocked",
+    "degraded",
+    "insufficient_breadth",
+    "insufficient_corroboration",
+    "candidate_records_found",
+    "no_candidate_records",
+    "coverage_unestablished_credit_withheld",
+]
+ProductObservabilityState = Literal["blocked", "not_observed"]
+CreditedRecordsProvenance = Literal["attributed", "caller_supplied", "received_rows_fallback"]
+LEGACY_ATTEMPT_EVIDENCE_CRITERION = "legacy_pre_b1_cell_states"
+
+
+@dataclass(frozen=True)
+class AcquisitionOutcomeDecision:
+    acquisition_outcome: AcquisitionOutcome
+    product_observability_state: ProductObservabilityState | None
+    product_observability_reason: str | None
+
+
+def matching_acquisition_rules(
+    *,
+    completed: int,
+    productive: int,
+    blocked: int,
+    degraded: int,
+    minimum_independent_families: int,
+    credited: int = 0,
+) -> tuple[AcquisitionOutcome, ...]:
+    rules: tuple[tuple[AcquisitionOutcome, bool], ...] = (
+        (
+            "not_attempted",
+            completed == 0 and blocked == 0 and degraded == 0,
+        ),
+        (
+            "blocked",
+            completed == 0 and degraded == 0 and blocked > 0,
+        ),
+        (
+            "degraded",
+            completed < minimum_independent_families and degraded > 0,
+        ),
+        (
+            "blocked",
+            0 < completed < minimum_independent_families
+            and degraded == 0
+            and blocked > 0,
+        ),
+        (
+            "insufficient_breadth",
+            0 < completed < minimum_independent_families
+            and degraded == 0
+            and blocked == 0,
+        ),
+        (
+            "candidate_records_found",
+            completed >= minimum_independent_families
+            and productive >= minimum_independent_families
+            and credited > 0,
+        ),
+        (
+            "insufficient_corroboration",
+            completed >= minimum_independent_families
+            and productive < minimum_independent_families
+            and credited > 0,
+        ),
+        (
+            "no_candidate_records",
+            completed >= minimum_independent_families and credited == 0,
+        ),
+    )
+    return tuple(outcome for outcome, applies in rules if applies)
+
+
+def resolve_acquisition_outcome(
+    *,
+    completed: int,
+    productive: int,
+    blocked: int,
+    degraded: int,
+    minimum_independent_families: int,
+    credited: int = 0,
+) -> AcquisitionOutcomeDecision:
+    counts = (completed, productive, blocked, degraded, credited)
+    if any(value < 0 for value in counts):
+        raise ValueError("acquisition counts must be non-negative")
+    if minimum_independent_families < 1:
+        raise ValueError("minimum independent families must be positive")
+    if productive > completed:
+        raise ValueError("productive families cannot exceed completed families")
+    matches = matching_acquisition_rules(
+        completed=completed,
+        productive=productive,
+        blocked=blocked,
+        degraded=degraded,
+        minimum_independent_families=minimum_independent_families,
+        credited=credited,
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            "acquisition transition table is not total and disjoint: "
+            f"{completed=}, {blocked=}, {degraded=}, {minimum_independent_families=}, {credited=}"
+        )
+    outcome = matches[0]
+    if outcome in {
+        "candidate_records_found",
+        "insufficient_corroboration",
+        "no_candidate_records",
+    }:
+        return AcquisitionOutcomeDecision(
+            acquisition_outcome=outcome,
+            product_observability_state=None,
+            product_observability_reason="stage_4_evidence_absent",
+        )
+    state: ProductObservabilityState = (
+        "blocked" if outcome in {"blocked", "degraded"} else "not_observed"
+    )
+    return AcquisitionOutcomeDecision(
+        acquisition_outcome=outcome,
+        product_observability_state=state,
+        product_observability_reason=None,
+    )
+
+OBSERVED_SOURCE_STATES = frozenset({"observed", "observed_with_failures"})
+
+# These are source outcomes that mean the market was not observed. Keep this
+# vocabulary explicit: cell aggregation must not infer observability from a
+# string prefix that could accidentally include a new source failure.
+UNOBSERVED_SOURCE_STATES = frozenset(
+    {
+        "blocked_no_safe_isolation",
+        "blocked_missing_public_interface",
+        "runtime_capability_blocked",
+        "blocked_anti_bot",
+        "blocked_rate_limit_or_timeout",
+        "blocked_extraction_failure",
+        "blocked_multiple_failures",
+        "blocked_unsupported_geography",
+    }
+)
+
 SHARED_BROWSER_PROFILES = {
     "linkedin": Path("/var/lib/browser-desktop/profiles/linkedin"),
-    "headhunter": Path("/var/lib/browser-desktop/profiles/hh"),
 }
+BROWSER_PROFILE_ROOT = Path("/var/lib/browser-desktop/profiles")
 
 
 class ProbeSourceBlocked(RuntimeError):
@@ -39,10 +207,363 @@ class ProbeSourceBlocked(RuntimeError):
         self.detail = detail
 
 
+class RuntimeCapabilityResult(BaseModel):
+    """Answer of the pre-dispatch capability seam.
+
+    Closed on purpose (``extra="forbid"``) and with a fixed set of states: an
+    unrecognised answer must not read as ready. A raw dict here would leave the
+    closed vocabulary as an agreement between test doubles rather than a
+    property of the contract.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state: Literal["ready", "runtime_capability_blocked", "not_applicable"]
+    error_class: str | None = None
+    error_fingerprint: str | None = None
+    error_message_truncated: str | None = Field(default=None, max_length=512)
+    bootstrap_traffic_events: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _blocked_must_carry_a_reason(self) -> "RuntimeCapabilityResult":
+        if self.state != "runtime_capability_blocked":
+            return self
+        missing = [
+            name
+            for name in ("error_class", "error_fingerprint", "error_message_truncated")
+            if not (getattr(self, name) or "").strip()
+        ]
+        if missing:
+            # A blocked result without a reason is the exact loss this gate
+            # exists to prevent: runs 467 and 468 recorded the block and lost
+            # why. Whitespace does not count as a reason.
+            raise ValueError(f"blocked capability result lacks: {', '.join(missing)}")
+        return self
+
+
+class LinkedInExecutionPlan(BaseModel):
+    """Versioned, reproducible observation plan for the Gate A LinkedIn path."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal["1.0"] = "1.0"
+    page_offsets: tuple[int, ...] = (0, 25)
+    max_scroll_checkpoints: int = Field(default=2, ge=1, le=20)
+    settle_timeout_ms: int = Field(default=650, ge=0, le=30_000)
+    saturation_checkpoints: int = Field(default=2, ge=1, le=20)
+    saturation_rule: Literal["two_consecutive_checkpoint_no_new_ids"] = (
+        "two_consecutive_checkpoint_no_new_ids"
+    )
+    results_selector: str = "div.jobs-search-results-list"
+
+    @model_validator(mode="after")
+    def _validate_offsets(self) -> "LinkedInExecutionPlan":
+        if not self.page_offsets:
+            raise ValueError("execution plan must contain at least one page offset")
+        if any(offset < 0 for offset in self.page_offsets):
+            raise ValueError("execution plan page offsets must be non-negative")
+        if tuple(sorted(set(self.page_offsets))) != self.page_offsets:
+            raise ValueError("execution plan page offsets must be sorted and unique")
+        if not self.results_selector.strip():
+            raise ValueError("execution plan results selector is required")
+        return self
+
+
+GeographyStatus = Literal["verified", "unverified", "unsupported", "blocked"]
+
+
+class LinkedInGeographyTarget(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, populate_by_name=True
+    )
+
+    location: str | None = None
+    geo_id: str | None = Field(default=None, alias="geoId")
+    verified_at: str | None = None
+    status: GeographyStatus
+    country_codes: tuple[str, ...] = ()
+
+    @property
+    def canonical_key(self) -> str:
+        return json.dumps(
+            {
+                "geoId": self.geo_id,
+                "location": self.location,
+                "status": self.status,
+                "verified_at": self.verified_at,
+                "country_codes": self.country_codes,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+
+GEOGRAPHY_MAPPING_VERSION = "1.1"
+GEOGRAPHY_NORMALIZATION_RULE_VERSION = "1.0"
+GEOGRAPHY_CONTAMINATION_FORMULA_VERSION = "jaccard_received_v1"
+GEOGRAPHY_CONTAMINATION_THRESHOLD = 0.6
+
+
+class LinkedInGeographyMapping(dict[str, LinkedInGeographyTarget]):
+    """Country ownership mapping plus the versions used to interpret it."""
+
+    def __init__(
+        self,
+        cells: Mapping[str, LinkedInGeographyTarget],
+        *,
+        version: str,
+        normalization_rule_version: str,
+        contamination_formula_version: str,
+        contamination_threshold: float,
+        city_country_codes: Mapping[str, str],
+    ) -> None:
+        super().__init__(cells)
+        self.version = version
+        self.normalization_rule_version = normalization_rule_version
+        self.contamination_formula_version = contamination_formula_version
+        self.contamination_threshold = contamination_threshold
+        self.city_country_codes = dict(city_country_codes)
+
+
+BOUNDED_PROOF_CELL_IDS = ("uk", "singapore", "kazakhstan")
+BOUNDED_PROOF_SELECTION_RULE = (
+    "first_alphabetical_unsupported_excluding_bounded_v1"
+)
+SYNTHETIC_BOUNDED_CONTROL_ID = "synthetic_c1a_unsupported"
+SYNTHETIC_BOUNDED_CONTROL_LOCATION = "C1A nonexistent geography target"
+
+
+def select_bounded_negative_control(
+    mapping: Mapping[str, Any],
+    *,
+    excluded_cell_ids: Iterable[str],
+    declared: Mapping[str, Any],
+) -> dict[str, Any]:
+    mapping_version = str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION))
+    if str(declared.get("selection_rule") or "") != BOUNDED_PROOF_SELECTION_RULE:
+        raise ValueError("bounded proof negative-control selection rule is invalid")
+    if str(declared.get("mapping_version") or "") != mapping_version:
+        raise ValueError("bounded proof negative-control mapping version is stale")
+    excluded = {str(cell_id) for cell_id in excluded_cell_ids}
+    unsupported = sorted(
+        str(cell_id)
+        for cell_id, target in mapping.items()
+        if (
+            (
+                target.status
+                if isinstance(target, LinkedInGeographyTarget)
+                else str(target.get("status", ""))
+            )
+            == "unsupported"
+            and str(cell_id) not in excluded
+        )
+    )
+    expected_cell_id = unsupported[0] if unsupported else SYNTHETIC_BOUNDED_CONTROL_ID
+    declared_cell_id = str(declared.get("cell_id") or "")
+    if declared_cell_id != expected_cell_id:
+        raise ValueError(
+            "bounded proof negative control does not follow the mapping rule: "
+            f"expected {expected_cell_id}, got {declared_cell_id}"
+        )
+    if str(declared.get("status") or "") != "unsupported":
+        raise ValueError("bounded proof negative control must be unsupported")
+    if not unsupported:
+        if str(declared.get("location") or "") != SYNTHETIC_BOUNDED_CONTROL_LOCATION:
+            raise ValueError("synthetic bounded control location is invalid")
+    return dict(declared)
+
+
+def _bounded_proof_configuration(
+    manifest: Mapping[str, Any], mapping: Mapping[str, Any]
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    config = dict(manifest.get("bounded_proof") or {})
+    cell_ids = tuple(str(cell_id) for cell_id in config.get("cell_ids") or ())
+    if cell_ids != BOUNDED_PROOF_CELL_IDS:
+        raise ValueError(
+            "bounded proof must contain the predeclared cells: "
+            + ", ".join(BOUNDED_PROOF_CELL_IDS)
+        )
+    if config.get("include_ats_snapshot") is not False:
+        raise ValueError("ATS snapshot is forbidden in the bounded proof")
+    control = select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=cell_ids,
+        declared=dict(config.get("negative_control") or {}),
+    )
+    return cell_ids, control
+
+
+def _full_run_configuration(
+    manifest: Mapping[str, Any], mapping: Mapping[str, Any]
+) -> dict[str, Any]:
+    config = dict(manifest.get("full_run") or {})
+    if config.get("include_ats_snapshot") is not True:
+        raise ValueError("full run must explicitly include the ATS snapshot")
+    declared = dict(config.get("negative_control") or {})
+    if not declared:
+        raise ValueError("full run negative control must be predeclared")
+    return select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=(),
+        declared=declared,
+    )
+
+
+def build_bounded_proof_configuration(
+    mapping: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the predeclared bounded proof from the current mapping."""
+    mapping_version = str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION))
+    excluded = set(BOUNDED_PROOF_CELL_IDS)
+    unsupported = sorted(
+        str(cell_id)
+        for cell_id, target in mapping.items()
+        if (
+            (
+                target.status
+                if isinstance(target, LinkedInGeographyTarget)
+                else str(target.get("status", ""))
+            )
+            == "unsupported"
+            and str(cell_id) not in excluded
+        )
+    )
+    negative_control: dict[str, Any] = {
+        "selection_rule": BOUNDED_PROOF_SELECTION_RULE,
+        "cell_id": unsupported[0] if unsupported else SYNTHETIC_BOUNDED_CONTROL_ID,
+        "status": "unsupported",
+        "mapping_version": mapping_version,
+    }
+    if not unsupported:
+        negative_control["location"] = SYNTHETIC_BOUNDED_CONTROL_LOCATION
+    validated_control = select_bounded_negative_control(
+        mapping,
+        excluded_cell_ids=BOUNDED_PROOF_CELL_IDS,
+        declared=negative_control,
+    )
+    return {
+        "cell_ids": list(BOUNDED_PROOF_CELL_IDS),
+        "include_ats_snapshot": False,
+        "negative_control": validated_control,
+    }
+
+
+def load_linkedin_geography_mapping(
+    path: Path | str | None = None,
+) -> dict[str, LinkedInGeographyTarget]:
+    mapping_path = Path(path) if path is not None else (
+        Path(__file__).resolve().parents[2]
+        / "config/product_search/linkedin_geography.v1.yaml"
+    )
+    document = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
+    if not isinstance(document, Mapping):
+        raise ValueError("LinkedIn geography mapping must be a mapping")
+    if document.get("version") not in {"1.0", "1.1"}:
+        raise ValueError("unsupported LinkedIn geography mapping version")
+    if document.get("product_authority_id") != "PS-SOT-2026-08-10-v1":
+        raise ValueError("LinkedIn geography mapping has wrong product authority")
+    if document.get("search_contract_version") != "1.0.0":
+        raise ValueError("LinkedIn geography mapping has wrong contract version")
+    normalization_rule_version = str(document.get("normalization_rule_version") or "")
+    if normalization_rule_version != GEOGRAPHY_NORMALIZATION_RULE_VERSION:
+        raise ValueError("unsupported geography normalization rule version")
+    contamination_formula_version = str(
+        document.get("contamination_formula_version") or ""
+    )
+    if contamination_formula_version != GEOGRAPHY_CONTAMINATION_FORMULA_VERSION:
+        raise ValueError("unsupported geography contamination formula version")
+    try:
+        contamination_threshold = float(document.get("contamination_threshold"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid geography contamination threshold") from None
+    if contamination_threshold != GEOGRAPHY_CONTAMINATION_THRESHOLD:
+        raise ValueError("unsupported geography contamination threshold")
+    city_country_codes = document.get("city_country_codes")
+    if not isinstance(city_country_codes, Mapping):
+        raise ValueError("geography city country mapping is required")
+    normalized_city_country_codes: dict[str, str] = {}
+    for city, code in city_country_codes.items():
+        normalized_code = str(code).upper()
+        if not str(city).strip() or not re.fullmatch(r"[A-Z]{2}", normalized_code):
+            raise ValueError(f"invalid city country mapping entry: {city}")
+        normalized_city_country_codes[str(city)] = normalized_code
+    cells = document.get("cells")
+    if not isinstance(cells, Mapping):
+        raise ValueError("LinkedIn geography mapping cells are required")
+    parsed = {
+        str(cell_id): LinkedInGeographyTarget.model_validate(value)
+        for cell_id, value in cells.items()
+    }
+    for cell_id, target in parsed.items():
+        if target.status != "verified":
+            continue
+        if not (str(target.location or "").strip() or str(target.geo_id or "").strip()):
+            raise ValueError(
+                "verified geography target requires location or geoId: "
+                f"{cell_id}"
+            )
+        if not str(target.verified_at or "").strip():
+            raise ValueError(
+                f"verified geography target requires verified_at: {cell_id}"
+            )
+    owners: dict[str, str] = {}
+    for cell_id, target in parsed.items():
+        for code in target.country_codes:
+            normalized_code = str(code).upper()
+            if not re.fullmatch(r"[A-Z]{2}", normalized_code):
+                raise ValueError(f"invalid country code in geography mapping: {code}")
+            previous = owners.get(normalized_code)
+            if previous is not None:
+                raise ValueError(
+                    f"country code overlap in geography mapping: {normalized_code} "
+                    f"belongs to {previous} and {cell_id}"
+                )
+            owners[normalized_code] = cell_id
+    for city, code in normalized_city_country_codes.items():
+        if code not in owners:
+            raise ValueError(
+                f"city country mapping points to unmapped country: {city} -> {code}"
+            )
+    return LinkedInGeographyMapping(
+        parsed,
+        version=str(document["version"]),
+        normalization_rule_version=normalization_rule_version,
+        contamination_formula_version=contamination_formula_version,
+        contamination_threshold=contamination_threshold,
+        city_country_codes=normalized_city_country_codes,
+    )
+
+
 @dataclass(frozen=True)
 class SourceIsolation:
-    mode: str
+    mode: SourceIsolationMode
     path: Path | None
+    # ``api`` isolation is unambiguously an API collection method. Other
+    # isolation modes require this explicit classification; None is rejected
+    # by the pre-dispatch gate instead of silently becoming ready.
+    collection_method: SourceCollectionMethod | None = None
+    cdp_url: str | None = None
+
+
+def _valid_cdp_url(value: object) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and port is not None
+        and not parsed.username
+        and not parsed.password
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 class ProbeQuery(BaseModel):
@@ -52,6 +573,13 @@ class ProbeQuery(BaseModel):
     cell_id: str
     source_family: str
     query: str
+    keywords: str | None = None
+    primary_geography: str | None = None
+    geography_target: LinkedInGeographyTarget | None = None
+    execution_plan: LinkedInExecutionPlan | None = None
+    denominator: Denominator = "open_market"
+    is_synthetic_control: bool = False
+    minimum_independent_families: int = Field(default=1, ge=1)
 
 
 def build_isolated_probe_environment(
@@ -63,18 +591,10 @@ def build_isolated_probe_environment(
     paths = dict(manifest.get("paths") or {})
     isolation = dict(manifest.get("source_isolation") or {})
     linkedin_settings = dict(isolation.get("linkedin") or {})
-    headhunter_settings = dict(isolation.get("headhunter") or {})
     linkedin = Path(
         str(
             linkedin_settings.get("shared_profile_path")
             or linkedin_settings.get("path")
-            or ""
-        )
-    )
-    headhunter = Path(
-        str(
-            headhunter_settings.get("shared_profile_path")
-            or headhunter_settings.get("path")
             or ""
         )
     )
@@ -89,13 +609,14 @@ def build_isolated_probe_environment(
     for name, path in required.items():
         if not _inside(str(path), root):
             raise ValueError(f"isolated environment path outside experiment root: {name}")
-    for family, settings, profile in (
-        ("linkedin", linkedin_settings, linkedin),
-        ("headhunter", headhunter_settings, headhunter),
-    ):
+    for family, settings, profile in (("linkedin", linkedin_settings, linkedin),):
         shared = settings.get("shared_profile_path")
         if not shared:
-            if not _inside(str(profile), root):
+            mode = str(settings.get("mode") or "")
+            allowed_clone = mode == "cloned_profile" and _inside(
+                str(profile), BROWSER_PROFILE_ROOT
+            )
+            if not _inside(str(profile), root) and not allowed_clone:
                 raise ValueError(f"isolated environment path outside experiment root: {family}")
             continue
         if profile != SHARED_BROWSER_PROFILES[family]:
@@ -105,6 +626,12 @@ def build_isolated_probe_environment(
             raise ValueError(f"shared profile backup is missing: {family}")
 
     environment = dict(ambient or {})
+    if str(linkedin_settings.get("mode") or "") == "cloned_profile":
+        environment["JOB_INTEL_BROWSER_CDP_URL"] = str(
+            linkedin_settings.get("cdp_url") or ""
+        ).strip()
+    else:
+        environment.pop("JOB_INTEL_BROWSER_CDP_URL", None)
     browser_profile = required["browser-profile"]
     environment.update(
         {
@@ -113,7 +640,6 @@ def build_isolated_probe_environment(
             "JOB_INTEL_STATE_DIR": str(root),
             "JOB_INTEL_BROWSER_PROFILE_DIR": str(browser_profile),
             "JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN": str(linkedin),
-            "JOB_INTEL_BROWSER_PROFILE_DIR_HH": str(headhunter),
             "JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER": str(
                 browser_profile / "company-career"
             ),
@@ -146,29 +672,404 @@ class EvidencePackage(BaseModel):
     identity_hints: dict[str, str]
 
 
+PaginationOutcome = Literal[
+    "pagination_progression_observed_through",
+    "pagination_not_observed",
+    "pagination_ambiguous",
+]
+CoverageHoldReason = Literal[
+    "coverage_not_evaluated",
+    "pagination_evidence_unverifiable",
+    "coverage_audit_references_unknown_query",
+    "coverage_audit_incomplete_for_declared_queries",
+    "pagination_evidence_mixed_across_queries",
+    "progression_observed_sufficiency_policy_absent",
+    "pagination_progression_not_observed",
+    "pagination_evidence_ambiguous",
+]
+_PAGINATION_OUTCOME_REASON: dict[str, str] = {
+    "pagination_progression_observed_through": "progression_observed_sufficiency_policy_absent",
+    "pagination_not_observed": "pagination_progression_not_observed",
+    "pagination_ambiguous": "pagination_evidence_ambiguous",
+}
+
+
+def _url_start(url: str) -> int | None:
+    """The effective offset the page came back on, or None when absent."""
+
+    query = urlparse(url).query
+    values = parse_qs(query).get("start")
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except ValueError:
+        return None
+
+
+class PageProgressionObservation(BaseModel):
+    """One requested offset and what came back for it.
+
+    Every derived field is recomputed on read. A document whose stored value
+    disagrees with the recomputation is a parse error, not a value: the reader
+    never returns a model in which the self-description and the recount are
+    both treated as true.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    requested_offset: int
+    final_url: str
+    job_ids: tuple[str, ...]
+    page_classification: LinkedInPageClassification
+    safety_reason: LinkedInSafetyReason | None
+    http_status: int | None
+    final_url_start: int | None
+    final_url_start_matches_requested: bool
+    new_ids_vs_prior_offsets_count: int
+
+    @model_validator(mode="after")
+    def _recompute_page_derivations(self) -> "PageProgressionObservation":
+        start = _url_start(self.final_url)
+        if self.final_url_start != start:
+            raise ValueError(
+                "derived_field_mismatch:final_url_start "
+                f"expected={start} got={self.final_url_start}"
+            )
+        matches = start == self.requested_offset
+        if self.final_url_start_matches_requested != matches:
+            raise ValueError(
+                "derived_field_mismatch:final_url_start_matches_requested "
+                f"expected={matches} got={self.final_url_start_matches_requested}"
+            )
+        return self
+
+
+class QueryCoverageAudit(BaseModel):
+    """The progression audit for one query, and only for that query.
+
+    new_ids_vs_prior_offsets_count is a property of the sequence, not of a
+    page, so it is recomputed here, where the ordered pages live.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query_id: str
+    pages: tuple[PageProgressionObservation, ...]
+    pagination_outcome: PaginationOutcome
+
+    @model_validator(mode="after")
+    def _recompute_sequence_derivations(self) -> "QueryCoverageAudit":
+        seen: set[str] = set()
+        novel: list[int] = []
+        for index, page in enumerate(self.pages):
+            fresh = len([job_id for job_id in page.job_ids if job_id not in seen])
+            if page.new_ids_vs_prior_offsets_count != fresh:
+                raise ValueError(
+                    "derived_field_mismatch:new_ids_vs_prior_offsets_count "
+                    f"page={index} expected={fresh} "
+                    f"got={page.new_ids_vs_prior_offsets_count}"
+                )
+            seen.update(page.job_ids)
+            if index:
+                novel.append(fresh)
+        outcome = _fold_pagination_outcome(novel)
+        if self.pagination_outcome != outcome:
+            raise ValueError(
+                "derived_field_mismatch:pagination_outcome "
+                f"expected={outcome} got={self.pagination_outcome}"
+            )
+        return self
+
+
+def _fold_pagination_outcome(novel_counts: list[int]) -> str:
+    """The B.10 contract, over the novelty of every offset after the first.
+
+    A single zero is not a stopping rule: the sequence A, B, B, C would lose C.
+    Mixed novelty is ambiguous, and ambiguity never licenses a claim.
+    """
+
+    if not novel_counts:
+        return "pagination_not_observed"
+    if all(count > 0 for count in novel_counts):
+        return "pagination_progression_observed_through"
+    if all(count == 0 for count in novel_counts):
+        return "pagination_not_observed"
+    return "pagination_ambiguous"
+
+
+class CoverageAudit(BaseModel):
+    """The pair-level envelope. Built once, after every query has run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_state: Literal["parsed", "unverifiable"]
+    queries: tuple[QueryCoverageAudit, ...]
+    pagination_outcome: PaginationOutcome | None
+
+    @model_validator(mode="after")
+    def _recompute_pair_outcome(self) -> "CoverageAudit":
+        outcomes = {query.pagination_outcome for query in self.queries}
+        expected = outcomes.pop() if len(outcomes) == 1 else None
+        if self.pagination_outcome != expected:
+            raise ValueError(
+                "derived_field_mismatch:pagination_outcome "
+                f"expected={expected} got={self.pagination_outcome}"
+            )
+        return self
+
+
+class CoverageScope(BaseModel):
+    """Which queries of the pair were subject to the audit, and why.
+
+    query_plan_presence is the only input; everything else is recomputed on
+    read, so forging the subject flag or the audited set is a parse error.
+    Fidelity of query_plan_presence itself to the original execution plans is
+    NOT provable from the document -- the plans are not in it. That is a named
+    limitation, held instead by the fact that the sole builder takes no set of
+    audited ids at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query_plan_presence: tuple[tuple[str, bool], ...]
+    all_query_ids: tuple[str, ...]
+    audited_query_ids: tuple[str, ...]
+    audit_subject: bool
+
+    @model_validator(mode="after")
+    def _recompute_scope_derivations(self) -> "CoverageScope":
+        all_ids = tuple(query_id for query_id, _ in self.query_plan_presence)
+        audited = tuple(
+            query_id for query_id, has_plan in self.query_plan_presence if has_plan
+        )
+        if self.all_query_ids != all_ids:
+            raise ValueError(
+                f"derived_field_mismatch:all_query_ids expected={all_ids} "
+                f"got={self.all_query_ids}"
+            )
+        if self.audited_query_ids != audited:
+            raise ValueError(
+                f"derived_field_mismatch:audited_query_ids expected={audited} "
+                f"got={self.audited_query_ids}"
+            )
+        if self.audit_subject != bool(audited):
+            raise ValueError(
+                f"derived_field_mismatch:audit_subject expected={bool(audited)} "
+                f"got={self.audit_subject}"
+            )
+        return self
+
+
+class CoverageDecision(BaseModel):
+    """Fail-closed by construction: only a pair outside the audit goes unheld."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    held: bool
+    coverage_status: Literal["unestablished"]
+    reason: CoverageHoldReason | None
+
+
+def build_coverage_scope(pair_queries: Iterable[ProbeQuery]) -> CoverageScope:
+    """The one builder. It takes no audited-id set, so none can be supplied."""
+
+    presence = tuple(
+        (query.query_id, query.execution_plan is not None) for query in pair_queries
+    )
+    audited = tuple(query_id for query_id, has_plan in presence if has_plan)
+    return CoverageScope(
+        query_plan_presence=presence,
+        all_query_ids=tuple(query_id for query_id, _ in presence),
+        audited_query_ids=audited,
+        audit_subject=bool(audited),
+    )
+
+
+def resolve_coverage_hold(
+    audit: CoverageAudit | None, *, scope: CoverageScope
+) -> CoverageDecision:
+    """Total over every state the pair can be in. There is no default branch.
+
+    Coverage stays unestablished whatever the pagination check found, because
+    the owner set no sufficiency policy. What the outcome changes is the
+    reason, never the status and never the hold.
+    """
+
+    if not scope.audit_subject:
+        return CoverageDecision(held=False, coverage_status="unestablished", reason=None)
+    if audit is None:
+        reason = "coverage_not_evaluated"
+    elif audit.evidence_state == "unverifiable":
+        reason = "pagination_evidence_unverifiable"
+    else:
+        audited = set(scope.audited_query_ids)
+        present = {query.query_id for query in audit.queries}
+        if present - audited:
+            reason = "coverage_audit_references_unknown_query"
+        elif audited - present:
+            reason = "coverage_audit_incomplete_for_declared_queries"
+        elif audit.pagination_outcome is None:
+            reason = "pagination_evidence_mixed_across_queries"
+        else:
+            reason = _PAGINATION_OUTCOME_REASON[audit.pagination_outcome]
+    return CoverageDecision(held=True, coverage_status="unestablished", reason=reason)
+
+
+def build_query_coverage_audit(
+    query_id: str, trace: Mapping[str, Any]
+) -> QueryCoverageAudit:
+    """Stage one: one query's pages, derived from the trace the source carries.
+
+    Nothing pair-level is decided here. This runs once per query, inside the
+    query loop, where the other queries of the pair have not run yet.
+    """
+
+    observations: list[PageProgressionObservation] = []
+    seen: set[str] = set()
+    pages = trace.get("pages")
+    if not isinstance(pages, list):
+        raise ValueError("coverage_trace_pages_missing")
+    planned = list(trace.get("planned_page_offsets") or [])
+    for index, page in enumerate(pages):
+        if not isinstance(page, Mapping):
+            raise ValueError("coverage_trace_page_not_mapping")
+        job_ids = tuple(str(value) for value in page.get("dom_unique_job_ids") or ())
+        fresh = len([job_id for job_id in job_ids if job_id not in seen])
+        seen.update(job_ids)
+        final_url = str(page.get("final_url") or "")
+        start = _url_start(final_url)
+        requested = int(planned[index]) if index < len(planned) else 0
+        if "page_classification" not in page:
+            # Absent rather than defaulted: a page recorded without its label
+            # is evidence we cannot read, and reading it as "unknown" would
+            # invent a classification nobody measured.
+            raise ValueError("coverage_trace_page_classification_missing")
+        observations.append(
+            PageProgressionObservation(
+                requested_offset=requested,
+                final_url=final_url,
+                job_ids=job_ids,
+                page_classification=str(page["page_classification"]),
+                http_status=(
+                    None
+                    if page.get("http_status") is None
+                    else int(page["http_status"])
+                ),
+                safety_reason=(
+                    None
+                    if page.get("safety_reason") is None
+                    else str(page["safety_reason"])
+                ),
+                final_url_start=start,
+                final_url_start_matches_requested=start == requested,
+                new_ids_vs_prior_offsets_count=fresh,
+            )
+        )
+    novel = [page.new_ids_vs_prior_offsets_count for page in observations[1:]]
+    return QueryCoverageAudit(
+        query_id=query_id,
+        pages=tuple(observations),
+        pagination_outcome=_fold_pagination_outcome(novel),
+    )
+
+
+def finalize_pair_coverage(
+    pair: dict[str, Any],
+    *,
+    pair_queries: tuple[ProbeQuery, ...],
+    query_audits: Mapping[str, Any],
+) -> None:
+    """Stage two: run once, after every query of the pair has been attempted.
+
+    Capture cannot do this. It runs per query -- four times, counting the
+    failure branches -- so at capture time a mixed outcome or a query missing
+    from the audit is not yet observable.
+    """
+
+    scope = build_coverage_scope(pair_queries)
+    audit: CoverageAudit | None = None
+    if scope.audit_subject:
+        collected = [
+            query_audits[query_id]
+            for query_id in query_audits
+            if isinstance(query_audits[query_id], QueryCoverageAudit)
+        ]
+        unverifiable = any(
+            not isinstance(value, QueryCoverageAudit) for value in query_audits.values()
+        )
+        if unverifiable:
+            audit = CoverageAudit(
+                evidence_state="unverifiable", queries=(), pagination_outcome=None
+            )
+        elif collected:
+            outcomes = {item.pagination_outcome for item in collected}
+            audit = CoverageAudit(
+                evidence_state="parsed",
+                queries=tuple(collected),
+                pagination_outcome=outcomes.pop() if len(outcomes) == 1 else None,
+            )
+    decision = resolve_coverage_hold(audit, scope=scope)
+    pair["coverage_scope"] = scope.model_dump()
+    pair["coverage_audit"] = audit.model_dump() if audit is not None else None
+    pair["coverage_decision"] = decision.model_dump()
+
+
 class ProbeResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     run_id: str
     stage_counts: dict[str, int]
     provisional_labels: dict[str, int]
-    source_states: dict[str, str]
-    cell_states: dict[str, str]
+    source_states: dict[str, SourceState]
+    acquisition_outcomes: dict[str, AcquisitionOutcome]
+    acquisition_outcome_annotations: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    product_observability_state: dict[str, ProductObservabilityState | None]
+    product_observability_reason: dict[str, str | None]
+    credited_records_provenance: dict[str, CreditedRecordsProvenance]
+    degraded_families: dict[str, tuple[str, ...]]
+    blocked_families: dict[str, tuple[str, ...]]
     duplicates: int
     evidence: tuple[EvidencePackage, ...]
     cost: dict[str, float]
     latency_seconds: float
+    family_attempts: tuple[dict[str, Any], ...] = ()
+    cell_family_attempts: tuple[dict[str, Any], ...] = ()
+    geography_summary: dict[str, Any] = Field(default_factory=dict)
+    denominators: dict[str, Any] = Field(default_factory=dict)
 
 
-def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> tuple[ProbeQuery, ...]:
+def expand_queries(
+    contract: SearchContract,
+    *,
+    role_terms: tuple[str, ...],
+    geography_mapping: Mapping[str, LinkedInGeographyTarget] | None = None,
+    execution_plan: LinkedInExecutionPlan | None = None,
+) -> tuple[ProbeQuery, ...]:
     expanded: list[ProbeQuery] = []
+    mapping = geography_mapping or load_linkedin_geography_mapping()
     for lane_id, lane in sorted(contract.lanes.items()):
         for cell_id, cell in sorted(lane.cells.items()):
             for family in sorted(cell.source_families):
                 for role in sorted(role_terms):
                     query = f"{role} {cell.primary_geography}".strip()
+                    target = mapping.get(cell_id) if family == "linkedin" else None
+                    geography_key = (
+                        target.canonical_key
+                        if target is not None
+                        else json.dumps(
+                            {"location": cell.primary_geography, "status": "missing"},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                    identity_input = (
+                        f"{lane_id}\0{cell_id}\0{family}\0{role}\0{geography_key}"
+                        if family == "linkedin"
+                        else f"{lane_id}\0{cell_id}\0{family}\0{query}"
+                    )
                     digest = hashlib.sha256(
-                        f"{lane_id}\0{cell_id}\0{family}\0{query}".encode()
+                        identity_input.encode()
                     ).hexdigest()[:20]
                     expanded.append(
                         ProbeQuery(
@@ -176,6 +1077,13 @@ def expand_queries(contract: SearchContract, *, role_terms: tuple[str, ...]) -> 
                             cell_id=cell_id,
                             source_family=family,
                             query=query,
+                            keywords=role if family == "linkedin" else None,
+                            primary_geography=(
+                                cell.primary_geography if family == "linkedin" else None
+                            ),
+                            geography_target=target,
+                            execution_plan=execution_plan if family == "linkedin" else None,
+                            minimum_independent_families=cell.minimum_independent_families,
                         )
                     )
     return tuple(sorted(expanded, key=lambda item: item.query_id))
@@ -194,6 +1102,7 @@ def build_snapshot_queries() -> tuple[ProbeQuery, ...]:
             cell_id="ats_global_snapshot",
             source_family=family,
             query=query,
+            denominator="seeded_ats_snapshot",
         )
         for family in ATS_FAMILIES
     )
@@ -224,7 +1133,9 @@ def _ensure_slack_blind(environment: Mapping[str, str]) -> None:
         raise ValueError(f"Slack credentials are forbidden in acquisition probe: {', '.join(present)}")
 
 
-def _record_source_state(states: dict[str, str], family: str, state: str) -> None:
+def _record_source_state(
+    states: dict[str, SourceState], family: str, state: SourceState
+) -> None:
     previous = states.get(family)
     if previous is None or previous == state:
         states[family] = state
@@ -234,7 +1145,7 @@ def _record_source_state(states: dict[str, str], family: str, state: str) -> Non
         states[family] = "blocked_multiple_failures"
 
 
-def _canonical_url(raw: str) -> str:
+def _canonical_url(raw: str, *, collapse_linkedin_slug: bool = False) -> str:
     split = urlsplit(unescape(raw.strip()))
     hostname = (split.hostname or "").casefold()
     path = split.path.rstrip("/")
@@ -244,6 +1155,13 @@ def _canonical_url(raw: str) -> str:
     is_headhunter_vacancy = (
         hostname == "hh.ru" or hostname.endswith(".hh.ru")
     ) and path.startswith("/vacancy/")
+    if collapse_linkedin_slug and is_linkedin_job:
+        match = re.fullmatch(
+            r"/jobs/view/(?:[^/]+-)?(?P<job_id>\d{7,})", path, flags=re.I
+        )
+        if match:
+            hostname = "www.linkedin.com"
+            path = f'/jobs/view/{match.group("job_id")}'
     filtered = (
         []
         if is_linkedin_job or is_headhunter_vacancy
@@ -256,12 +1174,437 @@ def _canonical_url(raw: str) -> str:
     return urlunsplit(
         (
             split.scheme.casefold(),
-            split.netloc.casefold(),
+            hostname if collapse_linkedin_slug and is_linkedin_job else split.netloc.casefold(),
             path,
             urlencode(filtered),
             "",
         )
     )
+
+
+GeographyNormalizationSource = Literal["structured_field", "parsed_content", "unresolved"]
+RemoteScope = Literal["none", "country_remote", "location_independent"]
+
+
+class GeographyEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    raw_location_text: str | None
+    mentioned_countries: tuple[str, ...]
+    primary_country: str | None
+    normalization_source: GeographyNormalizationSource
+    normalization_rule_version: str
+    mapping_version: str
+    remote_scope: RemoteScope
+    geography_resolution_reason: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_primary_country(self) -> "GeographyEvidence":
+        if self.normalization_source == "unresolved" and self.primary_country is not None:
+            raise ValueError("unresolved geography cannot have a primary country")
+        if len(set(self.mentioned_countries)) != len(self.mentioned_countries):
+            raise ValueError("mentioned countries must be unique")
+        if self.primary_country is not None and self.primary_country not in self.mentioned_countries:
+            raise ValueError("primary country must be among mentioned countries")
+        if self.remote_scope == "location_independent" and (
+            self.primary_country is not None or self.mentioned_countries
+        ):
+            raise ValueError("location-independent geography must have no country")
+        return self
+
+
+_COUNTRY_ALIASES: tuple[tuple[str, str], ...] = (
+    ("united arab emirates", "AE"),
+    ("united kingdom", "GB"),
+    ("united states", "US"),
+    ("south korea", "KR"),
+    ("new zealand", "NZ"),
+    ("argentina", "AR"),
+    ("australia", "AU"),
+    ("austria", "AT"),
+    ("bahrain", "BH"),
+    ("belgium", "BE"),
+    ("bolivia", "BO"),
+    ("brazil", "BR"),
+    ("brunei", "BN"),
+    ("cambodia", "KH"),
+    ("canada", "CA"),
+    ("chile", "CL"),
+    ("china", "CN"),
+    ("colombia", "CO"),
+    ("costa rica", "CR"),
+    ("denmark", "DK"),
+    ("dominican republic", "DO"),
+    ("ecuador", "EC"),
+    ("el salvador", "SV"),
+    ("finland", "FI"),
+    ("france", "FR"),
+    ("germany", "DE"),
+    ("guatemala", "GT"),
+    ("honduras", "HN"),
+    ("iceland", "IS"),
+    ("india", "IN"),
+    ("indonesia", "ID"),
+    ("italy", "IT"),
+    ("japan", "JP"),
+    ("kazakhstan", "KZ"),
+    ("kyrgyzstan", "KG"),
+    ("kuwait", "KW"),
+    ("luxembourg", "LU"),
+    ("laos", "LA"),
+    ("liechtenstein", "LI"),
+    ("malaysia", "MY"),
+    ("mexico", "MX"),
+    ("myanmar", "MM"),
+    ("nicaragua", "NI"),
+    ("netherlands", "NL"),
+    ("new zealand", "NZ"),
+    ("norway", "NO"),
+    ("oman", "OM"),
+    ("panama", "PA"),
+    ("paraguay", "PY"),
+    ("peru", "PE"),
+    ("philippines", "PH"),
+    ("poland", "PL"),
+    ("qatar", "QA"),
+    ("saudi arabia", "SA"),
+    ("singapore", "SG"),
+    ("south africa", "ZA"),
+    ("south korea", "KR"),
+    ("spain", "ES"),
+    ("sweden", "SE"),
+    ("switzerland", "CH"),
+    ("tajikistan", "TJ"),
+    ("thailand", "TH"),
+    ("timor-leste", "TL"),
+    ("turkmenistan", "TM"),
+    ("ukraine", "UA"),
+    ("united states", "US"),
+    ("uzbekistan", "UZ"),
+    ("vietnam", "VN"),
+    ("suriname", "SR"),
+    ("uruguay", "UY"),
+    ("venezuela", "VE"),
+    ("uk", "GB"),
+    ("uae", "AE"),
+    ("usa", "US"),
+)
+_CITY_COUNTRY_ALIASES: dict[str, str] = {}
+
+
+def normalize_geography_evidence(
+    raw_location_text: str | None,
+    *,
+    mapping_version: str = GEOGRAPHY_MAPPING_VERSION,
+    city_country_codes: Mapping[str, str] | None = None,
+) -> GeographyEvidence:
+    raw = None if raw_location_text is None else str(raw_location_text).strip()
+    text = raw or ""
+    if not text or text.casefold() == "unknown":
+        return GeographyEvidence(
+            raw_location_text=raw,
+            mentioned_countries=(),
+            primary_country=None,
+            normalization_source="unresolved",
+            normalization_rule_version=GEOGRAPHY_NORMALIZATION_RULE_VERSION,
+            mapping_version=mapping_version,
+            remote_scope="none",
+        )
+
+    found: dict[str, int] = {}
+    folded = text.casefold()
+    for alias, code in sorted(_COUNTRY_ALIASES, key=lambda item: len(item[0]), reverse=True):
+        match = re.search(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", folded)
+        if match is not None:
+            found.setdefault(code, match.start())
+    if not found:
+        aliases = dict(_CITY_COUNTRY_ALIASES)
+        aliases.update(
+            {str(city).casefold(): str(code).upper() for city, code in (city_country_codes or {}).items()}
+        )
+        city_token = folded.split(",", 1)[0].strip()
+        for city, code in aliases.items():
+            if city_token == city:
+                found[code] = 0
+
+    mentioned = tuple(code for code, _ in sorted(found.items(), key=lambda item: item[1]))
+    primary = mentioned[0] if len(mentioned) == 1 else None
+    if len(mentioned) > 1:
+        primary = None
+    remote = bool(re.search(r"\bremote\b", folded))
+    remote_only = folded == "remote"
+    remote_scope: RemoteScope = (
+        "country_remote" if remote and primary is not None
+        else "location_independent" if remote_only
+        else "none"
+    )
+    return GeographyEvidence(
+        raw_location_text=raw,
+        mentioned_countries=mentioned,
+        primary_country=primary,
+        normalization_source="structured_field",
+        normalization_rule_version=GEOGRAPHY_NORMALIZATION_RULE_VERSION,
+        mapping_version=mapping_version,
+        remote_scope=remote_scope,
+    )
+
+
+def _merge_geography_evidence(
+    current: GeographyEvidence, incoming: GeographyEvidence
+) -> GeographyEvidence:
+    current_semantics = (
+        current.primary_country,
+        current.remote_scope,
+        current.mentioned_countries,
+    )
+    incoming_semantics = (
+        incoming.primary_country,
+        incoming.remote_scope,
+        incoming.mentioned_countries,
+    )
+    if current_semantics == incoming_semantics:
+        return current
+    if current.geography_resolution_reason or incoming.geography_resolution_reason:
+        return _conflicting_geography_evidence(current, incoming)
+    if current.normalization_source == "unresolved":
+        return incoming
+    if incoming.normalization_source == "unresolved":
+        return current
+    return _conflicting_geography_evidence(current, incoming)
+
+
+def _conflicting_geography_evidence(
+    current: GeographyEvidence, incoming: GeographyEvidence
+) -> GeographyEvidence:
+    return GeographyEvidence(
+        raw_location_text=None,
+        mentioned_countries=tuple(
+            sorted(
+                set(current.mentioned_countries)
+                | set(incoming.mentioned_countries)
+            )
+        ),
+        primary_country=None,
+        normalization_source="unresolved",
+        normalization_rule_version=current.normalization_rule_version,
+        mapping_version=current.mapping_version,
+        remote_scope="none",
+        geography_resolution_reason="conflicting_resolved_geography",
+    )
+
+
+def _mapping_metadata(mapping: Mapping[str, Any]) -> tuple[str, str, str, float]:
+    return (
+        str(getattr(mapping, "version", GEOGRAPHY_MAPPING_VERSION)),
+        str(
+            getattr(
+                mapping,
+                "normalization_rule_version",
+                GEOGRAPHY_NORMALIZATION_RULE_VERSION,
+            )
+        ),
+        str(
+            getattr(
+                mapping,
+                "contamination_formula_version",
+                GEOGRAPHY_CONTAMINATION_FORMULA_VERSION,
+            )
+        ),
+        float(
+            getattr(
+                mapping,
+                "contamination_threshold",
+                GEOGRAPHY_CONTAMINATION_THRESHOLD,
+            )
+        ),
+    )
+
+
+def _mapping_city_country_codes(mapping: Mapping[str, Any]) -> Mapping[str, str]:
+    return getattr(mapping, "city_country_codes", {})
+
+
+def _mapping_country_codes(target: Any) -> tuple[str, ...]:
+    if isinstance(target, LinkedInGeographyTarget):
+        return tuple(target.country_codes)
+    if isinstance(target, Mapping):
+        return tuple(str(code).upper() for code in target.get("country_codes", ()))
+    raise TypeError(f"unsupported geography mapping target: {type(target).__name__}")
+
+
+def _validate_mapping_country_ownership(mapping: Mapping[str, Any]) -> dict[str, str]:
+    owners: dict[str, str] = {}
+    for cell_id, target in mapping.items():
+        for code in _mapping_country_codes(target):
+            if not re.fullmatch(r"[A-Z]{2}", code):
+                raise ValueError(f"invalid country code in geography mapping: {code}")
+            previous = owners.get(code)
+            if previous is not None:
+                raise ValueError(
+                    f"country code overlap in geography mapping: {code} "
+                    f"belongs to {previous} and {cell_id}"
+                )
+            owners[code] = str(cell_id)
+    return owners
+
+
+def build_geography_summary(
+    records: Iterable[Mapping[str, Any]],
+    mapping: Mapping[str, Any],
+    *,
+    manifest_versions: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    mapping_version, normalization_version, formula_version, threshold = _mapping_metadata(mapping)
+    expected = {
+        "mapping_version": mapping_version,
+        "normalization_rule_version": normalization_version,
+        "contamination_formula_version": formula_version,
+        "contamination_threshold": threshold,
+    }
+    for name, value in dict(manifest_versions or {}).items():
+        if name in expected and value != expected[name]:
+            label = name.replace("_", " ")
+            raise ValueError(f"{label} does not match geography mapping contract")
+    owners = _validate_mapping_country_ownership(mapping)
+    cells: dict[str, dict[str, Any]] = {
+        str(cell_id): {
+            "received": set(),
+            "credited": set(),
+            "rejected_country_mismatch": 0,
+            "geography_unknown": 0,
+        }
+        for cell_id in mapping
+    }
+    evidence_by_identity: dict[str, GeographyEvidence] = {}
+    evidence_by_source_id: dict[str, dict[str, Any]] = {}
+    source_ids_by_identity: dict[str, set[str]] = {}
+    received_seen: set[tuple[str, str]] = set()
+    credited_identity_owners: dict[str, str] = {}
+    received_query_cells_by_identity: dict[str, set[str]] = {}
+
+    for raw_record in records:
+        record = dict(raw_record)
+        query_cell = str(record.get("cell_id") or "")
+        if query_cell == "ats_global_snapshot":
+            # This seeded snapshot is intentionally outside the geographic
+            # denominator; it is a source-breadth control, not a lane.
+            continue
+        cells.setdefault(
+            query_cell,
+            {
+                "received": set(),
+                "credited": set(),
+                "rejected_country_mismatch": 0,
+                "geography_unknown": 0,
+            },
+        )
+        identity = _canonical_url(
+            str(record.get("url") or ""), collapse_linkedin_slug=True
+        )
+        if not identity:
+            identity = hashlib.sha256(
+                f"{record.get('company')}\0{record.get('title')}".encode()
+            ).hexdigest()
+        incoming_geography = normalize_geography_evidence(
+            record.get("location"),
+            mapping_version=mapping_version,
+            city_country_codes=_mapping_city_country_codes(mapping),
+        )
+        previous = evidence_by_identity.get(identity)
+        geography = (
+            incoming_geography
+            if previous is None
+            else _merge_geography_evidence(previous, incoming_geography)
+        )
+        evidence_by_identity[identity] = geography
+        source_id = str(record.get("source_id") or identity)
+        source_ids_by_identity.setdefault(identity, set()).add(source_id)
+        received_query_cells_by_identity.setdefault(identity, set()).add(query_cell)
+        evidence_by_source_id[source_id] = geography.model_dump(mode="json")
+        if (query_cell, identity) in received_seen:
+            continue
+        received_seen.add((query_cell, identity))
+        cells[query_cell]["received"].add(identity)
+
+    for identity, source_ids in source_ids_by_identity.items():
+        final_evidence = evidence_by_identity[identity].model_dump(mode="json")
+        for source_id in source_ids:
+            evidence_by_source_id[source_id] = final_evidence
+
+    for query_cell, cell in cells.items():
+        for identity in cell["received"]:
+            geography = evidence_by_identity[identity]
+            owner: str | None = None
+            if geography.remote_scope == "location_independent":
+                if "genuinely_location_independent" in cells:
+                    owner = "genuinely_location_independent"
+            elif geography.primary_country is None:
+                cell["geography_unknown"] += 1
+            else:
+                owner = owners.get(geography.primary_country)
+            if owner is None:
+                if geography.primary_country is not None:
+                    cell["rejected_country_mismatch"] += 1
+            elif owner != query_cell:
+                cell["rejected_country_mismatch"] += 1
+            if owner is not None:
+                existing_owner = credited_identity_owners.get(identity)
+                if existing_owner is not None and existing_owner != owner:
+                    raise ValueError(
+                        f"geography identity credited to multiple cells: {identity}"
+                    )
+                credited_identity_owners[identity] = owner
+                cells[owner]["credited"].add(identity)
+
+    credited_from_other_queries: dict[str, list[str]] = {}
+    for cell_id, cell in cells.items():
+        credited_from_other_queries[cell_id] = sorted(
+            identity
+            for identity in cell["credited"]
+            if cell_id not in received_query_cells_by_identity.get(identity, set())
+        )
+
+    cell_ids = sorted(cells)
+    pairwise: dict[str, dict[str, Any]] = {}
+    for index, left in enumerate(cell_ids):
+        for right in cell_ids[index + 1 :]:
+            left_ids = {
+                identity
+                for identity in cells[left]["received"]
+                if len(evidence_by_identity[identity].mentioned_countries) <= 1
+            }
+            right_ids = {
+                identity
+                for identity in cells[right]["received"]
+                if len(evidence_by_identity[identity].mentioned_countries) <= 1
+            }
+            union = left_ids | right_ids
+            jaccard = len(left_ids & right_ids) / len(union) if union else 0.0
+            pairwise[f"{left}|{right}"] = {
+                "jaccard": jaccard,
+                "contamination_suspected": jaccard >= threshold,
+            }
+
+    return {
+        "mapping_version": mapping_version,
+        "normalization_rule_version": normalization_version,
+        "contamination_formula_version": formula_version,
+        "contamination_threshold": threshold,
+        "records": dict(sorted(evidence_by_source_id.items())),
+        "cells": {
+            cell_id: {
+                "received": sorted(cells[cell_id]["received"]),
+                "credited": sorted(cells[cell_id]["credited"]),
+                "credited_from_other_queries": credited_from_other_queries[cell_id],
+                "credited_from_other_queries_count": len(credited_from_other_queries[cell_id]),
+                "rejected_country_mismatch": cells[cell_id]["rejected_country_mismatch"],
+                "geography_unknown": cells[cell_id]["geography_unknown"],
+            }
+            for cell_id in cell_ids
+        },
+        "credited_identity_owners": dict(sorted(credited_identity_owners.items())),
+        "pairwise": pairwise,
+    }
 
 
 def _as_mapping(record: Any) -> dict[str, Any]:
@@ -276,18 +1619,152 @@ def _minimum_evidence_sufficient(record: Mapping[str, Any]) -> bool:
     return all(str(record.get(field) or "").strip() for field in ("url", "title", "company", "description"))
 
 
+def _build_denominators(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    buckets: dict[str, dict[str, Any]] = {
+        "open_market": {"received_rows": 0, "vacancies": set(), "companies": set()},
+        "seeded_ats_snapshot": {
+            "received_rows": 0,
+            "vacancies": set(),
+            "companies": set(),
+        },
+    }
+    for raw_record in records:
+        record = dict(raw_record)
+        denominator = str(record.get("denominator") or "")
+        if denominator not in buckets:
+            raise ValueError(f"unknown acquisition denominator: {denominator}")
+        identity = str(record.get("canonical_url") or "")
+        if not identity:
+            identity = hashlib.sha256(
+                f"{record.get('company')}\0{record.get('title')}".encode()
+            ).hexdigest()
+        company = str(record.get("company") or "").strip()
+        bucket = buckets[denominator]
+        bucket["received_rows"] += 1
+        bucket["vacancies"].add(identity)
+        if company:
+            bucket["companies"].add(company)
+
+    def public(bucket: Mapping[str, Any]) -> dict[str, int]:
+        return {
+            "received_rows": int(bucket["received_rows"]),
+            "unique_canonical_vacancies": len(bucket["vacancies"]),
+            "unique_companies": len(bucket["companies"]),
+        }
+
+    return {
+        "open_market": public(buckets["open_market"]),
+        "seeded_ats_snapshot": public(buckets["seeded_ats_snapshot"]),
+        "combined_diagnostic": {
+            "received_rows": sum(int(buckets[name]["received_rows"]) for name in buckets),
+            "unique_canonical_vacancies": sum(
+                len(buckets[name]["vacancies"]) for name in buckets
+            ),
+            "unique_companies": sum(len(buckets[name]["companies"]) for name in buckets),
+        },
+    }
+
+
 def run_probe(
     *,
     run_id: str,
     queries: Iterable[ProbeQuery | Mapping[str, Any]],
-    sources: Mapping[str, Callable[[str], Iterable[Any]]],
+    sources: Mapping[str, Callable[[Any], Iterable[Any]]],
     output_dir: Path | str,
+    runtime_capability_checks: Mapping[str, Callable[[], Any]] | None = None,
     isolation: Mapping[str, SourceIsolation],
+    minimum_independent_families_by_cell: Mapping[str, int] | None = None,
+    credited_records_by_cell: Mapping[str, int] | None = None,
+    geography_mapping: Mapping[str, Any] | None = None,
     max_attempts: int = 2,
     environment: Mapping[str, str] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> ProbeResult:
     started = time.monotonic()
+    checks = dict(runtime_capability_checks or {})
+    capability_by_family: dict[str, RuntimeCapabilityResult] = {}
+    market_dispatch_counts: dict[str, int] = {}
+
+    def _blocked(reason: str, detail: str, traffic: int = 0) -> RuntimeCapabilityResult:
+        return RuntimeCapabilityResult(
+            state="runtime_capability_blocked",
+            error_class="runtime_capability",
+            error_fingerprint=reason,
+            error_message_truncated=detail[:512] or reason,
+            bootstrap_traffic_events=traffic,
+        )
+
+    def _capability(
+        family: str, source_isolation: SourceIsolation
+    ) -> RuntimeCapabilityResult:
+        """Answer once per family per run.
+
+        Once per family, not once per query: the live contract issues 112
+        LinkedIn queries, and a cold browser start for each of them is not a
+        contract anyone would run.
+        """
+        cached = capability_by_family.get(family)
+        if cached is not None:
+            return cached
+
+        collection_method = source_isolation.collection_method
+        if collection_method is None and source_isolation.mode == "api":
+            collection_method = "api"
+        if source_isolation.mode == "cloned_profile" and source_isolation.cdp_url == "":
+            result = _blocked(
+                "missing_clone_cdp_url",
+                f"cloned profile has no cdp_url for {family}",
+            )
+        elif (
+            source_isolation.mode == "cloned_profile"
+            and source_isolation.cdp_url is not None
+            and not _valid_cdp_url(source_isolation.cdp_url)
+        ):
+            result = _blocked(
+                "invalid_clone_cdp_url",
+                f"cloned profile has invalid cdp_url for {family}",
+            )
+        elif collection_method not in {"browser", "api"}:
+            result = _blocked(
+                "unclassified_collection_method",
+                f"no collection method for {family}",
+            )
+        elif collection_method == "api":
+            result = RuntimeCapabilityResult(state="not_applicable")
+        else:
+            checker = checks.get(family)
+            if checker is None:
+                result = _blocked(
+                    "no_capability_check", f"no capability check for {family}"
+                )
+            else:
+                try:
+                    raw = checker()
+                    result = (
+                        raw
+                        if isinstance(raw, RuntimeCapabilityResult)
+                        else RuntimeCapabilityResult.model_validate(raw)
+                    )
+                except Exception as exc:  # noqa: BLE001 - any failure is a refusal
+                    # The preflight itself can fail. That must not abort the run and
+                    # must not fall through to the extraction path, which would
+                    # blame the source for a runtime problem.
+                    result = _blocked(
+                        "capability_check_failed", f"{type(exc).__name__}: {exc}"
+                    )
+
+        if collection_method == "browser" and result.state == "not_applicable":
+            # For a browser family this answer is a contradiction, and the safe
+            # reading of a contradiction is refusal.
+            result = _blocked(
+                "not_applicable_for_browser_family",
+                f"{family} needs a browser runtime, capability reported not_applicable",
+                result.bootstrap_traffic_events,
+            )
+
+        capability_by_family[family] = result
+        return result
+
     output = Path(output_dir)
     _ensure_safe_output(output)
     _ensure_slack_blind(environment or {})
@@ -299,54 +1776,240 @@ def run_probe(
 
     evidence: list[EvidencePackage] = []
     observations: list[dict[str, Any]] = []
-    source_states: dict[str, str] = {}
+    source_states: dict[str, SourceState] = {}
     cell_attempts: dict[str, list[str]] = {}
+    cell_minimums: dict[str, int] = dict(minimum_independent_families_by_cell or {})
+    pair_attempts: dict[tuple[str, str], dict[str, Any]] = {}
+    pair_trace_evidence: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    pair_probe_queries: dict[tuple[str, str], list[ProbeQuery]] = {}
+    pair_query_coverage: dict[tuple[str, str], dict[str, Any]] = {}
+    query_outcomes: dict[tuple[str, str], dict[str, AcquisitionOutcome]] = {}
+    query_critical_degradation: dict[tuple[str, str], dict[str, bool]] = {}
+
+    def _ensure_pair(query: ProbeQuery) -> dict[str, Any]:
+        key = (query.cell_id, query.source_family)
+        record = pair_attempts.setdefault(
+            key,
+            {
+                "cell_id": query.cell_id,
+                "source_family": query.source_family,
+                "query_ids": [],
+                "query_count": 0,
+                "timestamp": clock().isoformat(),
+                "outcome": "not_attempted",
+                "session_observation": (
+                    "not_observed" if query.source_family == "linkedin" else "not_applicable"
+                ),
+                "extraction_counts": None,
+                "extraction_artifact_references": [],
+                "scroll_checkpoints": [],
+                "received_records": 0,
+                "credited_records": None,
+                "credited_records_status": "undetermined",
+                "credited_records_reason": "b2_attribution_unavailable",
+                "artifact_references": [],
+                "critical_degradation": False,
+                "critical_degradation_reason": None,
+                "coverage_scope": None,
+                "coverage_audit": None,
+                "coverage_decision": None,
+            },
+        )
+        configured = cell_minimums.get(query.cell_id)
+        expected = (
+            query.minimum_independent_families
+            if configured is None
+            else configured
+        )
+        if (
+            configured is not None
+            and query.minimum_independent_families != 1
+            and configured != query.minimum_independent_families
+        ):
+            raise ValueError(
+                f"inconsistent minimum independent families for {query.cell_id}"
+            )
+        cell_minimums[query.cell_id] = expected
+        return record
+
+    def _set_pair_outcome(query: ProbeQuery, outcome: AcquisitionOutcome) -> None:
+        record = _ensure_pair(query)
+        pair_key = (query.cell_id, query.source_family)
+        per_query = query_outcomes.setdefault(pair_key, {})
+        per_query[query.query_id] = outcome
+        outcomes = set(per_query.values())
+        if "degraded" in outcomes:
+            record["outcome"] = "degraded"
+        elif "blocked" in outcomes:
+            record["outcome"] = "blocked"
+        elif "completed" in outcomes:
+            record["outcome"] = "completed"
+        else:
+            record["outcome"] = "not_attempted"
+
+    def _capture_source_evidence(query: ProbeQuery, source: Any) -> None:
+        pair = _ensure_pair(query)
+        pair_key = (query.cell_id, query.source_family)
+        per_query_critical = query_critical_degradation.setdefault(pair_key, {})
+        per_query_critical.setdefault(query.query_id, False)
+        trace = getattr(source, "last_trace", None)
+        health = getattr(source, "last_health", None)
+        if isinstance(trace, Mapping):
+            if trace.get("stop_reason") == "critical_degradation":
+                per_query_critical[query.query_id] = True
+                pair["critical_degradation"] = True
+                pair["critical_degradation_reason"] = str(
+                    trace.get("failure_reason") or "critical degradation"
+                )
+            observation = trace.get("session_observation")
+            if observation in {"with_session", "without_session", "not_observed"}:
+                pair["session_observation"] = observation
+            counts = trace.get("extraction_counts")
+            pages = trace.get("pages")
+            checkpoints = trace.get("scroll_checkpoints")
+            query_traces = pair_trace_evidence.setdefault(pair_key, {})
+            query_traces[query.query_id] = {
+                "extraction_counts": (
+                    {str(key): int(value) for key, value in counts.items()}
+                    if isinstance(counts, Mapping)
+                    else {}
+                ),
+                "artifact_references": (
+                    [
+                        str(page["artifact_ref"])
+                        for page in pages
+                        if isinstance(page, Mapping) and page.get("artifact_ref")
+                    ]
+                    if isinstance(pages, list)
+                    else []
+                ),
+                "scroll_checkpoints": (
+                    [
+                        dict(checkpoint)
+                        for checkpoint in checkpoints
+                        if isinstance(checkpoint, Mapping)
+                    ]
+                    if isinstance(checkpoints, list)
+                    else []
+                ),
+            }
+            aggregated_counts: dict[str, int] = {}
+            artifact_references: list[str] = []
+            scroll_checkpoints: list[dict[str, Any]] = []
+            for query_id in pair["query_ids"]:
+                query_trace = query_traces.get(query_id)
+                if query_trace is None:
+                    continue
+                for key, value in query_trace["extraction_counts"].items():
+                    aggregated_counts[key] = aggregated_counts.get(key, 0) + value
+                artifact_references.extend(query_trace["artifact_references"])
+                scroll_checkpoints.extend(query_trace["scroll_checkpoints"])
+            if query.execution_plan is not None:
+                coverage = pair_query_coverage.setdefault(pair_key, {})
+                try:
+                    coverage[query.query_id] = build_query_coverage_audit(
+                        query.query_id, trace
+                    )
+                except (ValueError, TypeError) as exc:
+                    coverage[query.query_id] = f"unverifiable:{exc}"
+            pair["extraction_counts"] = aggregated_counts or None
+            pair["extraction_artifact_references"] = artifact_references
+            pair["scroll_checkpoints"] = scroll_checkpoints
+        if (
+            query.source_family == "linkedin"
+            and pair["session_observation"] == "not_observed"
+            and isinstance(health, Mapping)
+            and health.get("session_state") == "session_ok"
+        ):
+            pair["session_observation"] = "with_session"
+
+    def _record_attempt_state(query: ProbeQuery, state: SourceState) -> None:
+        if not query.is_synthetic_control:
+            _record_source_state(source_states, query.source_family, state)
 
     for raw_query in queries:
         query = raw_query if isinstance(raw_query, ProbeQuery) else ProbeQuery.model_validate(raw_query)
         cell_attempts.setdefault(query.cell_id, []).append(query.source_family)
+        pair = _ensure_pair(query)
+        if query.query_id not in pair["query_ids"]:
+            pair["query_ids"].append(query.query_id)
+            pair["query_count"] = len(pair["query_ids"])
+        pair_probe_queries.setdefault((query.cell_id, query.source_family), []).append(
+            query
+        )
+        query_critical_degradation.setdefault(
+            (query.cell_id, query.source_family), {}
+        ).setdefault(query.query_id, False)
         source = sources.get(query.source_family)
         source_isolation = isolation.get(query.source_family)
-        if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock"}:
-            _record_source_state(
-                source_states, query.source_family, "blocked_no_safe_isolation"
-            )
+        if source_isolation is None or source_isolation.mode not in {"cloned_profile", "exclusive_lock", "api"}:
+            _record_attempt_state(query, "blocked_no_safe_isolation")
+            _set_pair_outcome(query, "blocked")
             continue
         if source is None:
-            _record_source_state(
-                source_states, query.source_family, "blocked_missing_public_interface"
-            )
+            _record_attempt_state(query, "blocked_missing_public_interface")
+            _set_pair_outcome(query, "blocked")
+            continue
+
+        if query.source_family == "linkedin" and query.primary_geography is not None:
+            target = query.geography_target
+            if target is None or target.status != "verified" or not (
+                target.location or target.geo_id
+            ):
+                _record_attempt_state(query, "blocked_unsupported_geography")
+                _set_pair_outcome(query, "blocked")
+                continue
+
+        capability = _capability(query.source_family, source_isolation)
+        if capability.state == "runtime_capability_blocked":
+            _record_attempt_state(query, "runtime_capability_blocked")
+            _set_pair_outcome(query, "blocked")
             continue
 
         records: list[Any] | None = None
+        market_dispatch_counts[query.source_family] = (
+            market_dispatch_counts.get(query.source_family, 0) + 1
+        )
         for attempt in range(1, max_attempts + 1):
             try:
-                records = list(source(query.query))
+                request: Any = query
+                if query.source_family != "linkedin" or query.primary_geography is None:
+                    request = query.query
+                records = list(source(request))
+                _capture_source_evidence(query, source)
+                critical_degradation = query_critical_degradation[
+                    (query.cell_id, query.source_family)
+                ][query.query_id]
                 state = (
                     "observed_with_failures"
-                    if tuple(getattr(source, "last_errors", ()) or ())
+                    if critical_degradation
+                    or tuple(getattr(source, "last_errors", ()) or ())
                     else "observed"
                 )
-                _record_source_state(source_states, query.source_family, state)
+                _record_attempt_state(query, state)
+                _set_pair_outcome(
+                    query,
+                    "degraded"
+                    if critical_degradation or state == "observed_with_failures"
+                    else "completed",
+                )
                 break
             except ProbeSourceBlocked as exc:
-                _record_source_state(
-                    source_states, query.source_family, f"blocked_{exc.reason}"
-                )
+                _capture_source_evidence(query, source)
+                _record_attempt_state(query, f"blocked_{exc.reason}")
+                _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except TimeoutError:
-                _record_source_state(
-                    source_states,
-                    query.source_family,
-                    "blocked_rate_limit_or_timeout",
-                )
+                _capture_source_evidence(query, source)
+                _record_attempt_state(query, "blocked_rate_limit_or_timeout")
+                _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
             except Exception:
-                _record_source_state(
-                    source_states, query.source_family, "blocked_extraction_failure"
-                )
+                _capture_source_evidence(query, source)
+                _record_attempt_state(query, "blocked_extraction_failure")
+                _set_pair_outcome(query, "blocked")
                 if attempt == max_attempts:
                     records = None
         if records is None:
@@ -354,19 +2017,31 @@ def run_probe(
 
         for raw_record in records:
             record = _as_mapping(raw_record)
-            canonical = _canonical_url(str(record.get("url") or ""))
+            canonical = _canonical_url(
+                str(record.get("url") or ""), collapse_linkedin_slug=True
+            )
             captured_at = str(record.get("captured_at") or clock().isoformat())
             normalized = dict(record)
             normalized["canonical_url"] = canonical
             normalized["query_id"] = query.query_id
             normalized["cell_id"] = query.cell_id
             normalized["source_family"] = query.source_family
+            normalized["denominator"] = query.denominator
+            if geography_mapping is not None:
+                normalized["geography_evidence"] = normalize_geography_evidence(
+                    record.get("location"),
+                    mapping_version=_mapping_metadata(geography_mapping)[0],
+                    city_country_codes=_mapping_city_country_codes(geography_mapping),
+                ).model_dump(mode="json")
             raw_bytes = json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str).encode()
             content_hash = hashlib.sha256(raw_bytes).hexdigest()
             relative = Path("raw-evidence") / f"{content_hash}.json"
             target = output / relative
             if not target.exists():
                 target.write_bytes(raw_bytes)
+            pair_record = _ensure_pair(query)
+            pair_record["received_records"] += 1
+            pair_record["artifact_references"].append(relative.as_posix())
             source_id = str(record.get("source_id") or content_hash[:20])
             evidence.append(
                 EvidencePackage(
@@ -409,17 +2084,184 @@ def run_probe(
             label = "unresolved_for_decision_v2"
         labels[label] = labels.get(label, 0) + 1
 
-    cell_states: dict[str, str] = {}
-    for cell_id in cell_attempts:
-        cell_records = [record for record in observations if record.get("cell_id") == cell_id]
-        cell_blocked = all(source_states.get(family, "").startswith("blocked") for family in cell_attempts[cell_id])
-        if cell_records:
-            cell_states[cell_id] = "qualified_results_found"
-        elif cell_blocked:
-            cell_states[cell_id] = "blocked"
-        else:
-            cell_states[cell_id] = "searched_no_qualified_results"
+    geography_summary = (
+        build_geography_summary(observations, geography_mapping)
+        if geography_mapping is not None
+        else {}
+    )
+    attributed_credited_by_cell = {
+        cell_id: len(details["credited"])
+        for cell_id, details in geography_summary.get("cells", {}).items()
+    }
+    credited_identities_by_pair: dict[tuple[str, str], set[str]] = {
+        key: set() for key in pair_attempts
+    }
+    credited_counts_by_pair: dict[tuple[str, str], int] = {}
+    credited_unknown_reasons_by_pair: dict[tuple[str, str], str] = {
+        key: "b2_attribution_unavailable" for key in pair_attempts
+    }
+    if geography_mapping is not None:
+        credited_identity_owners = geography_summary.get("credited_identity_owners", {})
+        credited_identity_pairs: dict[str, set[tuple[str, str]]] = {}
+        for observed in observations:
+            identity = str(observed.get("canonical_url") or "")
+            pair_key = (
+                str(observed.get("cell_id") or ""),
+                str(observed.get("source_family") or ""),
+            )
+            if identity and credited_identity_owners.get(identity) == pair_key[0]:
+                credited_identity_pairs.setdefault(identity, set()).add(pair_key)
+        for identity, pair_keys in credited_identity_pairs.items():
+            credited_identities_by_pair[sorted(pair_keys)[0]].add(identity)
+        credited_counts_by_pair = {
+            key: len(credited_identities_by_pair[key]) for key in pair_attempts
+        }
+    else:
+        pair_keys_by_cell: dict[str, list[tuple[str, str]]] = {}
+        for key in pair_attempts:
+            pair_keys_by_cell.setdefault(key[0], []).append(key)
+        for cell_id, keys in pair_keys_by_cell.items():
+            if len(keys) == 1 and cell_id in (credited_records_by_cell or {}):
+                credited_counts_by_pair[keys[0]] = int(
+                    (credited_records_by_cell or {})[cell_id]
+                )
+            elif len(keys) > 1 and cell_id in (credited_records_by_cell or {}):
+                for key in keys:
+                    credited_unknown_reasons_by_pair[key] = (
+                        "cell_level_credit_not_attributable_to_multiple_pairs"
+                    )
 
+    acquisition_outcomes: dict[str, AcquisitionOutcome] = {}
+    product_observability_state: dict[str, ProductObservabilityState | None] = {}
+    product_observability_reason: dict[str, str | None] = {}
+    acquisition_outcome_annotations: dict[str, dict[str, Any]] = {}
+    credited_records_provenance: dict[str, CreditedRecordsProvenance] = {}
+    degraded_families: dict[str, tuple[str, ...]] = {}
+    blocked_families: dict[str, tuple[str, ...]] = {}
+    for pair_key, pair_record in pair_attempts.items():
+        finalize_pair_coverage(
+            pair_record,
+            pair_queries=tuple(pair_probe_queries.get(pair_key, ())),
+            query_audits=pair_query_coverage.get(pair_key, {}),
+        )
+
+    for cell_id in cell_attempts:
+        pair_records = [
+            record
+            for (record_cell_id, _), record in pair_attempts.items()
+            if record_cell_id == cell_id
+        ]
+        coverage_held = [
+            record
+            for record in pair_records
+            if (record.get("coverage_decision") or {}).get("held")
+        ]
+        counts = {
+            outcome: sum(record["outcome"] == outcome for record in pair_records)
+            for outcome in ("completed", "blocked", "degraded")
+        }
+        productive = sum(
+            record["outcome"] == "completed" and record["received_records"] > 0
+            for record in pair_records
+        )
+        pair_record_by_key = {
+            (record["cell_id"], record["source_family"]): record
+            for record in pair_records
+        }
+        for pair_key, pair_record in pair_record_by_key.items():
+            if pair_key in credited_counts_by_pair:
+                pair_record["credited_records"] = credited_counts_by_pair[pair_key]
+                pair_record["credited_records_status"] = "determined"
+                pair_record["credited_records_reason"] = None
+            else:
+                pair_record["credited_records"] = None
+                pair_record["credited_records_status"] = "undetermined"
+                pair_record["credited_records_reason"] = (
+                    credited_unknown_reasons_by_pair[pair_key]
+                )
+        cell_records = [
+            record for record in canonical_records.values()
+            if record.get("cell_id") == cell_id
+        ]
+        credited_by_cell = (
+            attributed_credited_by_cell
+            if geography_mapping is not None
+            else dict(credited_records_by_cell or {})
+        )
+        if geography_mapping is not None:
+            credited = credited_by_cell.get(cell_id, 0)
+            credited_records_provenance[cell_id] = "attributed"
+        elif cell_id in credited_by_cell:
+            credited = credited_by_cell[cell_id]
+            credited_records_provenance[cell_id] = "caller_supplied"
+        else:
+            credited = len(cell_records)
+            credited_records_provenance[cell_id] = "received_rows_fallback"
+        decision = resolve_acquisition_outcome(
+            completed=counts["completed"],
+            productive=productive,
+            blocked=counts["blocked"],
+            degraded=counts["degraded"],
+            minimum_independent_families=cell_minimums[cell_id],
+            credited=credited,
+        )
+        cell_outcome = decision.acquisition_outcome
+        if coverage_held and cell_outcome == "candidate_records_found":
+            cell_outcome = "coverage_unestablished_credit_withheld"
+        acquisition_outcomes[cell_id] = cell_outcome
+        geography_cell = geography_summary.get("cells", {}).get(cell_id, {})
+        credited_from_other_queries_count = int(
+            geography_cell.get("credited_from_other_queries_count", 0)
+        )
+        coverage_hold_reasons = tuple(
+            sorted(
+                {
+                    str((record.get("coverage_decision") or {}).get("reason"))
+                    for record in coverage_held
+                }
+            )
+        )
+        acquisition_outcome_annotations[cell_id] = {
+            "acquisition_outcome": cell_outcome,
+            "credited_records": credited,
+            "credited_from_other_queries_count": credited_from_other_queries_count,
+            "own_completed_families": counts["completed"],
+            "productive_families": productive,
+            "credit_note": (
+                "credited_from_other_queries_while_own_families_blocked"
+                if (
+                    decision.acquisition_outcome == "blocked"
+                    and counts["completed"] == 0
+                    and credited_from_other_queries_count > 0
+                )
+                else None
+            ),
+        }
+        if coverage_held:
+            # Only a cell that was actually held carries the reasons. A cell
+            # nothing measured keeps the annotation it always had, byte for
+            # byte, because nothing about it has been learned.
+            acquisition_outcome_annotations[cell_id][
+                "coverage_hold_reasons"
+            ] = coverage_hold_reasons
+        product_observability_state[cell_id] = decision.product_observability_state
+        product_observability_reason[cell_id] = decision.product_observability_reason
+        degraded_families[cell_id] = tuple(
+            sorted(
+                record["source_family"]
+                for record in pair_records
+                if record["outcome"] == "degraded"
+            )
+        )
+        blocked_families[cell_id] = tuple(
+            sorted(
+                record["source_family"]
+                for record in pair_records
+                if record["outcome"] == "blocked"
+            )
+        )
+
+    denominators = _build_denominators(observations)
     result = ProbeResult(
         run_id=run_id,
         stage_counts={
@@ -429,11 +2271,43 @@ def run_probe(
         },
         provisional_labels=dict(sorted(labels.items())),
         source_states=dict(sorted(source_states.items())),
-        cell_states=dict(sorted(cell_states.items())),
+        acquisition_outcomes=dict(sorted(acquisition_outcomes.items())),
+        acquisition_outcome_annotations=dict(sorted(acquisition_outcome_annotations.items())),
+        product_observability_state=dict(sorted(product_observability_state.items())),
+        product_observability_reason=dict(sorted(product_observability_reason.items())),
+        credited_records_provenance=dict(sorted(credited_records_provenance.items())),
+        degraded_families=dict(sorted(degraded_families.items())),
+        blocked_families=dict(sorted(blocked_families.items())),
         duplicates=len(observations) - len(canonical_records),
         evidence=tuple(evidence),
-        cost={"provider_cost_usd": 0.0},
+        cost={
+            "provider_cost_usd": 0.0,
+            "market_query_dispatch_count": float(sum(market_dispatch_counts.values())),
+        },
         latency_seconds=round(time.monotonic() - started, 6),
+        family_attempts=tuple(
+            {
+                "source_family": family,
+                "capability_state": capability.state,
+                "outcome": (
+                    "runtime_capability_blocked"
+                    if capability.state == "runtime_capability_blocked"
+                    else source_states.get(family, "not_attempted")
+                ),
+                "error_class": capability.error_class,
+                "error_fingerprint": capability.error_fingerprint,
+                "error_message_truncated": capability.error_message_truncated,
+                "market_query_dispatch_count": market_dispatch_counts.get(family, 0),
+                "bootstrap_traffic_events": capability.bootstrap_traffic_events,
+            }
+            for family, capability in sorted(capability_by_family.items())
+        ),
+        cell_family_attempts=tuple(
+            pair_attempts[key]
+            for key in sorted(pair_attempts)
+        ),
+        geography_summary=geography_summary,
+        denominators=denominators,
     )
     (output / "summary.json").write_text(
         result.model_dump_json(indent=2), encoding="utf-8"
@@ -488,7 +2362,36 @@ def run_probe(
     return result
 
 
-def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
+def resolve_runtime_capability_checks(
+    isolation: Mapping[str, SourceIsolation],
+) -> dict[str, Callable[[], RuntimeCapabilityResult]]:
+    from job_intel import browser_worker
+
+    checks: dict[str, Callable[[], RuntimeCapabilityResult]] = {}
+    for family, settings in isolation.items():
+        if settings.collection_method != "browser":
+            continue
+        profile = settings.path if settings.mode == "cloned_profile" else None
+
+        def check(
+            source_family: str = family,
+            source_settings: SourceIsolation = settings,
+            source_profile: Path | None = profile,
+        ) -> RuntimeCapabilityResult:
+            browser_worker._ensure_browser_desktop(
+                source_family,
+                cdp_url=source_settings.cdp_url,
+                profile=source_profile,
+            )
+            return RuntimeCapabilityResult(state="ready")
+
+        checks[family] = check
+    return checks
+
+
+def resolve_public_sources(
+    *, run_id: str | None = None
+) -> dict[str, Callable[[Any], Iterable[Any]]]:
     from job_intel.sources import (
         fetch_headhunter_vacancies,
         fetch_linkedin_vacancies,
@@ -498,8 +2401,36 @@ def resolve_public_sources() -> dict[str, Callable[[str], Iterable[Any]]]:
         search_remotive_jobs,
     )
 
-    sources: dict[str, Callable[[str], Iterable[Any]]] = {
-        "linkedin": lambda query: fetch_linkedin_vacancies(query, max_pages=2),
+    def _publish_linkedin_metadata() -> None:
+        _linkedin_source.last_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
+        _linkedin_source.last_health = getattr(fetch_linkedin_vacancies, "last_health", None)
+        _linkedin_source.last_errors = getattr(fetch_linkedin_vacancies, "last_errors", ())
+
+    def _linkedin_source(request: Any) -> Iterable[Any]:
+        try:
+            if isinstance(request, ProbeQuery):
+                target = request.geography_target
+                return fetch_linkedin_vacancies(
+                    request.keywords or request.query,
+                    location=target.location if target is not None else None,
+                    geo_id=target.geo_id if target is not None else None,
+                    execution_plan=(
+                        request.execution_plan.model_dump(mode="json")
+                        if request.execution_plan is not None
+                        else None
+                    ),
+                    max_pages=2,
+                    run_id=run_id,
+                    query_id=getattr(request, "query_id", None),
+                    cell_id=getattr(request, "cell_id", None),
+                    allow_unauthenticated=True,
+                )
+            return fetch_linkedin_vacancies(str(request), max_pages=2)
+        finally:
+            _publish_linkedin_metadata()
+
+    sources: dict[str, Callable[[Any], Iterable[Any]]] = {
+        "linkedin": _linkedin_source,
         "headhunter": lambda query: fetch_headhunter_vacancies(query, per_page=10),
         "duckduckgo": lambda query: [
             normalize_search_hit(hit) for hit in search_duckduckgo(query, max_results=10)
@@ -523,6 +2454,20 @@ def _inside(path: str, root: Path) -> bool:
 def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     if manifest.get("gate") != "gate-a" or manifest.get("environment_id") != "product-search-gate-a":
         raise ValueError("wrong gate or environment identity")
+    run_mode = str(manifest.get("run_mode") or "bounded")
+    if run_mode not in {"bounded", "full"}:
+        raise ValueError(f"invalid Gate A run mode: {run_mode}")
+    if run_mode == "full":
+        full_run = dict(manifest.get("full_run") or {})
+        if full_run.get("include_ats_snapshot") is not True:
+            raise ValueError("full run must explicitly include the ATS snapshot")
+        if not dict(full_run.get("negative_control") or {}):
+            raise ValueError("full run negative control must be predeclared")
+    exclusion_catalog = dict(manifest.get("exclusion_reason_codes") or {})
+    if exclusion_catalog.get("version") != EXCLUSION_REASON_CATALOG.version:
+        raise ValueError("manifest exclusion reason catalog version is not current")
+    if exclusion_catalog.get("sha256") != EXCLUSION_REASON_CATALOG.sha256:
+        raise ValueError("manifest exclusion reason catalog hash is not current")
     root = Path(str(manifest.get("root") or ""))
     if not root.is_absolute():
         raise ValueError("experiment root must be absolute")
@@ -538,13 +2483,37 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
     if editable:
         raise ValueError("editable installs are forbidden")
     for family, settings in dict(manifest.get("source_isolation") or {}).items():
-        mode = str(dict(settings).get("mode") or "")
-        path = str(dict(settings).get("path") or "")
+        settings_dict = dict(settings)
+        mode = str(settings_dict.get("mode") or "")
+        path = str(settings_dict.get("path") or "")
+        collection_method = str(settings_dict.get("collection_method") or "")
+        if collection_method not in {"browser", "api"}:
+            raise ValueError(f"invalid source collection method: {family}")
+        if mode == "api" and collection_method != "api":
+            raise ValueError(f"API isolation must use API collection method: {family}")
+        if mode == "api":
+            if family != "headhunter":
+                raise ValueError(f"API source isolation is not supported for: {family}")
+            continue
         if mode not in {"cloned_profile", "exclusive_lock"}:
             raise ValueError(f"invalid source isolation mode: {family}")
-        if not _inside(path, root):
-            raise ValueError(f"source isolation path outside experiment root: {family}")
         shared_profile = dict(settings).get("shared_profile_path")
+        if mode == "cloned_profile":
+            if shared_profile:
+                raise ValueError(f"cloned profile cannot use shared profile: {family}")
+            if Path(path) == SHARED_BROWSER_PROFILES.get(family):
+                raise ValueError(
+                    "cloned profile path must differ from the shared LinkedIn profile"
+                )
+            if not _inside(path, root) and not _inside(path, BROWSER_PROFILE_ROOT):
+                raise ValueError(f"source isolation path outside allowed clone roots: {family}")
+            cdp_url = str(settings_dict.get("cdp_url") or "").strip()
+            if not cdp_url:
+                raise ValueError(f"cloned profile requires cdp_url: {family}")
+            if not _valid_cdp_url(cdp_url):
+                raise ValueError(f"invalid cloned profile cdp_url: {family}")
+        elif not _inside(path, root):
+            raise ValueError(f"source isolation path outside experiment root: {family}")
         if shared_profile:
             if family not in SHARED_BROWSER_PROFILES:
                 raise ValueError(f"shared browser profile forbidden for source: {family}")
@@ -564,6 +2533,30 @@ def validate_experiment_manifest(manifest: Mapping[str, Any]) -> None:
         for key in keys:
             if len(str(values.get(key) or "")) != 64:
                 raise ValueError(f"invalid identity hash: {section}.{key}")
+
+
+def classify_legacy_attempt_evidence(summary_path: Path | str) -> dict[str, Any]:
+    """Refuse to infer pair outcomes from the pre-B1 summary format."""
+    path = Path(summary_path)
+    summary = json.loads(path.read_text(encoding="utf-8"))
+    cell_states = dict(summary.get("cell_states") or {})
+    if not cell_states:
+        raise ValueError("legacy summary has no cell states")
+    cell_outcomes = {
+        cell_id: "legacy_attempt_evidence_insufficient"
+        for cell_id in sorted(cell_states)
+    }
+    return {
+        "run_id": summary.get("run_id"),
+        "cell_outcomes": cell_outcomes,
+        "acquisition_outcomes": {},
+        "product_observability_state": {},
+        "product_observability_reason": {
+            cell_id: "legacy_attempt_evidence_insufficient"
+            for cell_id in sorted(cell_states)
+        },
+        "attempt_evidence_criterion": LEGACY_ATTEMPT_EVIDENCE_CRITERION,
+    }
 
 
 def validate_gate_a_run_evidence(evidence: Mapping[str, Any]) -> None:
@@ -592,8 +2585,22 @@ def validate_gate_a_run_evidence(evidence: Mapping[str, Any]) -> None:
         raise ValueError("attempt accounting does not close")
     if not dict(evidence.get("family_attempts") or {}):
         raise ValueError("family attempts are required")
-    if not dict(evidence.get("cell_states") or {}):
-        raise ValueError("cell states are required")
+    if "cell_states" in evidence:
+        raise ValueError("legacy cell_states are forbidden")
+    acquisition_outcomes = dict(evidence.get("acquisition_outcomes") or {})
+    if not acquisition_outcomes:
+        raise ValueError("acquisition outcomes are required")
+    allowed_outcomes = {
+        "not_attempted",
+        "blocked",
+        "degraded",
+        "insufficient_breadth",
+        "insufficient_corroboration",
+        "candidate_records_found",
+        "no_candidate_records",
+    }
+    if not set(acquisition_outcomes.values()) <= allowed_outcomes:
+        raise ValueError("unknown Gate A acquisition outcome")
     if evidence.get("evidence_hashes_verified") is not True:
         raise ValueError("evidence hashes must be verified")
     for name, path in dict(evidence.get("isolated_paths") or {}).items():
@@ -631,6 +2638,9 @@ def build_experiment_manifest(
     python_runtime = root / "python-runtime"
     installed = python_runtime / "installed-distributions.txt"
     lock = runtime / "uv.lock"
+    bounded_proof = build_bounded_proof_configuration(
+        load_linkedin_geography_mapping()
+    )
     paths = {
         "runtime": str(runtime),
         "experiment.sqlite3": str(root / "experiment.sqlite3"),
@@ -647,6 +2657,11 @@ def build_experiment_manifest(
         "environment_id": "product-search-gate-a",
         "commit": commit,
         "root": str(root),
+        "exclusion_reason_codes": {
+            "version": EXCLUSION_REASON_CATALOG.version,
+            "sha256": EXCLUSION_REASON_CATALOG.sha256,
+        },
+        "bounded_proof": bounded_proof,
         "paths": paths,
         "python": {
             "executable_path": str(python_executable),
@@ -706,12 +2721,7 @@ def relocate_experiment_manifest(
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
-        "headhunter": {
-            "backup_path": str(new_root / "browser-profile-backup/headhunter"),
-            "mode": "exclusive_lock",
-            "path": str(new_root / "locks/headhunter-profile.lock"),
-            "shared_profile_path": str(SHARED_BROWSER_PROFILES["headhunter"]),
-        },
+        "headhunter": {"mode": "api"},
         "greenhouse": {
             "mode": "exclusive_lock",
             "path": str(new_root / "locks/greenhouse.lock"),
@@ -751,7 +2761,20 @@ def relocate_experiment_manifest(
             "path": str(new_root / "locks/teamtailor.lock"),
         },
     }
-    validate_experiment_manifest(relocated)
+    original_isolation = dict(manifest.get("source_isolation") or {})
+    for family, original_settings in original_isolation.items():
+        if not isinstance(original_settings, Mapping) or "collection_method" not in original_settings:
+            continue
+        if family in relocated["source_isolation"]:
+            relocated["source_isolation"][family]["collection_method"] = original_settings[
+                "collection_method"
+            ]
+    # A legacy manifest without source_isolation is accepted on input for
+    # relocation compatibility. Its generated legacy isolation map must not be
+    # enriched with collection_method, and is intentionally not revalidated as
+    # a newly classified manifest. Classified manifests remain fail-closed.
+    if original_isolation:
+        validate_experiment_manifest(relocated)
     return relocated
 
 
@@ -846,23 +2869,100 @@ def main() -> int:
         contract = __import__(
             "job_intel.product_search.search_contract", fromlist=["load_search_contract"]
         ).load_search_contract(runtime / "config/product_search/search_contract.v1.yaml")
+        mapping = load_linkedin_geography_mapping(
+            runtime / "config/product_search/linkedin_geography.v1.yaml"
+        )
+        run_mode = str(manifest.get("run_mode") or "bounded")
+        if run_mode == "bounded":
+            bounded_cell_ids, negative_control = _bounded_proof_configuration(
+                manifest, mapping
+            )
+        elif run_mode == "full":
+            negative_control = _full_run_configuration(manifest, mapping)
+            bounded_cell_ids = tuple(mapping)
+        else:
+            raise ValueError(f"invalid Gate A run mode: {run_mode}")
+        execution_plan = LinkedInExecutionPlan()
         queries = expand_queries(
             contract,
             role_terms=("Chief Product Officer", "VP Product", "Head of Product", "GM Digital"),
-        ) + build_snapshot_queries()
+            geography_mapping=mapping,
+            execution_plan=execution_plan,
+        )
+        if run_mode == "bounded":
+            control_cell_id = str(negative_control["cell_id"])
+            queries = tuple(
+                query.model_copy(update={"is_synthetic_control": True})
+                if query.cell_id == control_cell_id
+                and query.source_family == "linkedin"
+                else query
+                for query in queries
+                if query.cell_id in bounded_cell_ids
+                or (
+                    query.cell_id == control_cell_id
+                    and query.source_family == "linkedin"
+                )
+            )
+        else:
+            queries = queries + build_snapshot_queries()
+        if negative_control["cell_id"] not in mapping:
+            control_cell_id = str(negative_control["cell_id"])
+            control_location = str(negative_control["location"])
+            synthetic_query = ProbeQuery(
+                query_id=hashlib.sha256(
+                    f"c1a-negative-control\0{control_cell_id}\0{control_location}".encode()
+                ).hexdigest()[:20],
+                cell_id=str(negative_control["cell_id"]),
+                source_family="linkedin",
+                query=str(negative_control["location"]),
+                keywords="C1A negative control",
+                primary_geography=str(negative_control["location"]),
+                geography_target=LinkedInGeographyTarget(
+                    location=str(negative_control["location"]),
+                    status="unsupported",
+                    country_codes=(),
+                ),
+                is_synthetic_control=True,
+                minimum_independent_families=1,
+            )
+            queries = queries + (synthetic_query,)
         isolation = {
             family: SourceIsolation(
                 mode=str(settings.get("mode") or "blocked"),
                 path=Path(settings["path"]) if settings.get("path") else None,
+                collection_method=(
+                    str(settings["collection_method"])
+                    if settings.get("collection_method")
+                    else None
+                ),
+                cdp_url=(
+                    str(settings["cdp_url"])
+                    if settings.get("cdp_url")
+                    else None
+                ),
             )
             for family, settings in dict(manifest.get("source_isolation") or {}).items()
         }
+        if run_mode == "full":
+            from .acquisition_plugins.ats_snapshot import ATS_FAMILIES
+
+            isolation.update(
+                {
+                    family: SourceIsolation(
+                        mode="api", path=None, collection_method="api"
+                    )
+                    for family in ATS_FAMILIES
+                }
+            )
+        run_id = f"gate-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
         run_probe(
-            run_id=f"gate-a-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+            run_id=run_id,
             queries=queries,
-            sources=resolve_public_sources(),
+            sources=resolve_public_sources(run_id=run_id),
             output_dir=Path(manifest["root"]),
             isolation=isolation,
+            runtime_capability_checks=resolve_runtime_capability_checks(isolation),
+            geography_mapping=mapping,
             environment=probe_environment,
         )
     return 0

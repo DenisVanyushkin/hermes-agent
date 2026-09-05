@@ -97,6 +97,14 @@ def post_advisory(message: str, *, dry_run: bool = True,
                   channel: str | None = None) -> dict[str, Any]:
     """Deliver the advisory through the hermes gateway. dry_run (default)
     renders and posts nothing. Never raises: returns posted=False + error."""
+    from job_intel.runtime import delivery_disabled
+
+    if delivery_disabled():
+        return {
+            "posted": False,
+            "dry_run": dry_run,
+            "error": "outbound delivery is disabled by JOB_INTEL_DELIVERY_DISABLED",
+        }
     if dry_run:
         return {"posted": False, "dry_run": True, "message": message}
     ch = (channel or os.getenv("SEMANTIC_SHADOW_ADVISORY_CHANNEL", "").strip()

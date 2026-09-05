@@ -17,12 +17,60 @@ compatibility.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
+from agent.malformed_tool_intent import (
+    MAX_INSPECTED_TEXT_CHARS,
+    MalformedToolIntent,
+    detect_malformed_tool_intent,
+)
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
+
+
+def _message_protocol_prefix_state(
+    text: str,
+    *,
+    phase: str,
+    valid_tool_names: set[str],
+) -> str:
+    """Classify only the prefix state of a possible text-bound tool envelope.
+
+    ``candidate`` is deliberately conservative: it is used only while the
+    observed text can still become the registered ChatML/XML envelope. Once
+    the prefix is disproven, callers can release buffered analysis deltas and
+    resume the legacy per-delta reasoning stream.
+    """
+    candidate = text.lstrip()
+    if not candidate:
+        return "candidate"
+    candidate_folded = candidate.casefold()
+    xml_prefix = "<tool_call>"
+    xml_prefix_folded = xml_prefix.casefold()
+    if (
+        xml_prefix_folded.startswith(candidate_folded)
+        or candidate_folded.startswith(xml_prefix_folded)
+    ):
+        return "candidate"
+
+    header_prefix = (
+        "<|start|>assistant<|channel|>"
+        f"{phase} to=functions."
+    )
+    envelope_prefixes = {
+        f"{header_prefix}{name}<|constrain|>json".casefold()
+        for name in valid_tool_names
+    }
+    if any(
+        prefix.startswith(candidate_folded) or candidate_folded.startswith(prefix)
+        for prefix in envelope_prefixes
+    ):
+        return "candidate"
+    return "ordinary"
 
 logger = logging.getLogger(__name__)
 
@@ -1045,6 +1093,7 @@ def _consume_codex_event_stream(
     on_first_delta=None,
     on_event=None,
     interrupt_check=None,
+    valid_tool_names=None,
 ) -> SimpleNamespace:
     """Consume a Codex Responses SSE event stream and return a final response.
 
@@ -1088,7 +1137,13 @@ def _consume_codex_event_stream(
     has_tool_calls = False
     first_delta_fired = False
     active_message_phase: str | None = None
-    commentary_text_deltas: List[str] = []
+    message_text_deltas: List[str] = []
+    message_candidate_deltas: List[str] = []
+    message_candidate_chars = 0
+    message_protocol_state = "ordinary"
+    message_text_hash = hashlib.sha256()
+    detected_malformed_intent = None
+    malformed_tool_intent = None
     # Last reasoning summary_index seen. The Responses stream delimits summary
     # parts by this index and gives each part no separator of its own, so a
     # change of index is where the blank line belongs.
@@ -1137,8 +1192,13 @@ def _consume_codex_event_stream(
             if item_type == "message":
                 phase = _item_field(item, "phase", None)
                 active_message_phase = phase.strip().lower() if isinstance(phase, str) else None
-                if active_message_phase == "commentary":
-                    commentary_text_deltas = []
+                if active_message_phase in {"commentary", "analysis"}:
+                    message_text_deltas = []
+                    message_candidate_deltas = []
+                    message_candidate_chars = 0
+                    message_protocol_state = "candidate"
+                    message_text_hash = hashlib.sha256()
+                    detected_malformed_intent = None
             else:
                 active_message_phase = None
             if "function_call" in str(item_type):
@@ -1147,17 +1207,74 @@ def _consume_codex_event_stream(
 
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
             delta_text = _event_field(event, "delta", "")
-            if delta_text and active_message_phase == "commentary":
-                commentary_text_deltas.append(delta_text)
-                # Preserve CLI/backward compatibility when no first-class
-                # commentary consumer is installed.
-                if on_commentary_message is None and on_reasoning_delta is not None:
-                    try:
-                        on_reasoning_delta(delta_text)
-                    except Exception:
-                        logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
-            elif delta_text and active_message_phase == "analysis":
-                if on_reasoning_delta is not None:
+            if delta_text and active_message_phase in {"commentary", "analysis"}:
+                message_text_hash.update(delta_text.encode("utf-8"))
+                if message_protocol_state in {"malformed", "oversized"}:
+                    # Keep hashing the opaque text for the bounded RCA
+                    # fingerprint, but never retain or emit protocol text.
+                    continue
+
+                transitioned_to_ordinary = False
+                if message_protocol_state == "candidate":
+                    remaining = MAX_INSPECTED_TEXT_CHARS - message_candidate_chars
+                    candidate_remainder = delta_text[remaining:] if remaining > 0 else delta_text
+                    if remaining > 0:
+                        candidate_delta = delta_text[:remaining]
+                        message_candidate_deltas.append(candidate_delta)
+                        message_candidate_chars += len(candidate_delta)
+                    candidate_text = "".join(message_candidate_deltas)
+                    detected_malformed_intent = detect_malformed_tool_intent(
+                        candidate_text,
+                        phase=active_message_phase,
+                        valid_tool_names=valid_tool_names,
+                    )
+                    if detected_malformed_intent is not None:
+                        message_protocol_state = "malformed"
+                        continue
+
+                    message_protocol_state = _message_protocol_prefix_state(
+                        candidate_text,
+                        phase=active_message_phase,
+                        valid_tool_names={str(name) for name in (valid_tool_names or ())},
+                    )
+                    if message_protocol_state == "candidate" and message_candidate_chars >= MAX_INSPECTED_TEXT_CHARS:
+                        message_protocol_state = "oversized"
+                        detected_malformed_intent = MalformedToolIntent(
+                            tool_name="unknown",
+                            source_phase=active_message_phase,
+                            format="oversized_protocol_candidate",
+                            fingerprint="sha256:" + message_text_hash.hexdigest(),
+                        )
+                        continue
+                    if message_protocol_state == "candidate":
+                        # Both phases keep candidate text in exactly one buffer
+                        # until the protocol possibility is disproven.
+                        continue
+
+                    if active_message_phase == "analysis":
+                        if on_reasoning_delta is not None:
+                            for buffered_delta in message_candidate_deltas:
+                                try:
+                                    on_reasoning_delta(buffered_delta)
+                                except Exception:
+                                    logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
+                            if candidate_remainder and on_reasoning_delta is not None:
+                                try:
+                                    on_reasoning_delta(candidate_remainder)
+                                except Exception:
+                                    logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
+                        message_candidate_deltas = []
+                        transitioned_to_ordinary = True
+                    else:
+                        message_text_deltas.extend(message_candidate_deltas)
+                        if candidate_remainder:
+                            message_text_deltas.append(candidate_remainder)
+                        transitioned_to_ordinary = True
+                    message_candidate_deltas = []
+
+                if active_message_phase == "commentary" and not transitioned_to_ordinary:
+                    message_text_deltas.append(delta_text)
+                elif on_reasoning_delta is not None and not transitioned_to_ordinary:
                     try:
                         on_reasoning_delta(delta_text)
                     except Exception:
@@ -1209,25 +1326,73 @@ def _consume_codex_event_stream(
                 collected_output_items.append(done_item)
                 done_phase = _item_field(done_item, "phase", None)
                 done_phase = done_phase.strip().lower() if isinstance(done_phase, str) else None
-                if done_phase == "commentary" and on_commentary_message is not None:
-                    commentary_text = "".join(commentary_text_deltas).strip()
-                    if not commentary_text:
+                if done_phase in {"commentary", "analysis"}:
+                    message_text = "".join(message_text_deltas).strip()
+                    candidate_text = "".join(message_candidate_deltas).strip()
+                    if not message_text and candidate_text:
+                        message_text = candidate_text
+                    if not message_text:
                         content_parts = _item_field(done_item, "content", [])
                         if isinstance(content_parts, list):
-                            commentary_text = "".join(
+                            message_text = "".join(
                                 str(_item_field(part, "text", "") or "")
                                 for part in content_parts
                                 if _item_field(part, "type", "") == "output_text"
                             ).strip()
-                    if commentary_text:
+                            if message_text:
+                                message_text_hash.update(message_text.encode("utf-8"))
+                    intent = detected_malformed_intent
+                    if intent is None and message_text:
+                        intent = detect_malformed_tool_intent(
+                            message_text,
+                            phase=done_phase,
+                            valid_tool_names=valid_tool_names,
+                        )
+                    if intent is not None:
+                        malformed_tool_intent = replace(
+                            intent,
+                            fingerprint="sha256:" + message_text_hash.hexdigest(),
+                        )
+                    elif message_text and done_phase == "analysis" and message_protocol_state == "candidate":
+                        # The prefix remained incomplete but harmless; release
+                        # it now instead of swallowing a terminal analysis tail.
+                        if on_reasoning_delta is not None:
+                            for buffered_delta in message_candidate_deltas:
+                                try:
+                                    on_reasoning_delta(buffered_delta)
+                                except Exception:
+                                    logger.debug(
+                                        "Codex stream on_reasoning_delta raised",
+                                        exc_info=True,
+                                    )
+                        if not message_candidate_deltas and on_reasoning_delta is not None:
+                            try:
+                                on_reasoning_delta(message_text)
+                            except Exception:
+                                logger.debug(
+                                    "Codex stream on_reasoning_delta raised",
+                                    exc_info=True,
+                                )
+                    elif message_text and done_phase == "analysis" and message_protocol_state == "ordinary":
+                        # Ordinary analysis was already delivered per delta.
+                        pass
+                    elif message_text and done_phase == "commentary" and on_commentary_message is not None:
                         try:
-                            on_commentary_message(commentary_text)
+                            on_commentary_message(message_text)
                         except Exception:
                             logger.debug(
                                 "Codex stream on_commentary_message raised",
                                 exc_info=True,
                             )
-                    commentary_text_deltas = []
+                    elif message_text and on_reasoning_delta is not None:
+                        try:
+                            on_reasoning_delta(message_text)
+                        except Exception:
+                            logger.debug(
+                                "Codex stream on_reasoning_delta raised",
+                                exc_info=True,
+                            )
+                    message_text_deltas = []
             continue
 
         if event_type in _TERMINAL_EVENT_TYPES:
@@ -1301,8 +1466,65 @@ def _consume_codex_event_stream(
         model=model,
         incomplete_details=terminal_incomplete_details,
         error=terminal_error,
+        _hermes_malformed_tool_intent=malformed_tool_intent,
     )
     return final
+
+
+def _sanitize_consumer_codex_request(
+    agent: Any,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Drop fields the ChatGPT OAuth Codex endpoint does not accept.
+
+    This guard intentionally lives at the final wire boundary, after Relay or
+    other request middleware has had a chance to transform the request. The
+    normal transport builder already omits ``prompt_cache_retention`` for this
+    endpoint, but a late mutation must not be allowed to turn a valid tool
+    follow-up into a non-retryable HTTP 400.
+
+    Explicit ``request_overrides`` are subject to the same endpoint contract:
+    unsupported retention is dropped with a warning instead of being sent and
+    rejected by the provider. The check covers both the top-level kwarg and a
+    nested ``extra_body`` entry — the OpenAI SDK merges ``extra_body`` into
+    the outgoing JSON body, so either shape reaches the endpoint.
+    """
+    sanitized = dict(request)
+    # Resolved defensively on purpose: run_codex_stream is also driven with
+    # lightweight stand-in agents that carry only the attributes a given path
+    # needs (see tests/agent/test_codex_request_transport_diagnostics.py), so a
+    # bare agent._is_codex_backend() here would raise AttributeError on them.
+    backend_predicate = getattr(agent, "_is_codex_backend", None)
+    is_consumer_codex = (
+        bool(backend_predicate()) if callable(backend_predicate) else False
+    )
+    if not is_consumer_codex:
+        return sanitized
+    dropped_from: list[str] = []
+    if "prompt_cache_retention" in sanitized:
+        sanitized.pop("prompt_cache_retention")
+        dropped_from.append("top-level")
+    # The OpenAI SDK merges ``extra_body`` into the outgoing JSON body, so a
+    # nested ``extra_body.prompt_cache_retention`` reaches the endpoint just
+    # like the top-level field would. Copy before editing — the caller's
+    # mapping must not be mutated — and drop the mapping when it empties.
+    extra_body = sanitized.get("extra_body")
+    if isinstance(extra_body, dict) and "prompt_cache_retention" in extra_body:
+        extra_body = dict(extra_body)
+        extra_body.pop("prompt_cache_retention")
+        if extra_body:
+            sanitized["extra_body"] = extra_body
+        else:
+            sanitized.pop("extra_body")
+        dropped_from.append("extra_body")
+    if dropped_from:
+        logger.warning(
+            "Dropped unsupported prompt_cache_retention at consumer Codex "
+            "wire boundary (model=%s, via %s).",
+            sanitized.get("model", getattr(agent, "model", "unknown")),
+            ", ".join(dropped_from),
+        )
+    return sanitized
 
 
 def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta=None):
@@ -1347,7 +1569,10 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         writer_token = {"value": None}
 
         def _open_codex_stream(next_api_kwargs: dict[str, Any]):
-            stream_kwargs = dict(next_api_kwargs)
+            stream_kwargs = _sanitize_consumer_codex_request(
+                agent,
+                next_api_kwargs,
+            )
             stream_kwargs["stream"] = True
             return active_client.responses.create(**stream_kwargs)
 
@@ -1372,6 +1597,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             return _consume_codex_event_stream(
                 list(intercepted_events),
                 model=api_kwargs.get("model"),
+                valid_tool_names=getattr(agent, "valid_tool_names", ()),
             )
 
         try:
@@ -1454,6 +1680,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     on_first_delta=on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_or_superseded,
+                    valid_tool_names=getattr(agent, "valid_tool_names", ()),
                 )
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:

@@ -12,10 +12,11 @@ Local output path: `docs/job-intel-source-of-truth.md`
 Systems touched:
 
 - Source acquisition: LinkedIn, HeadHunter, target company career pages, Greenhouse, Lever, Ashby, Teamtailor, SmartRecruiters, Personio, Recruitee, DuckDuckGo, RemoteOK, Remotive.
-- Browser runtime: `/var/lib/browser-desktop` with per-source Chromium profiles.
+- Browser runtime: `/var/lib/browser-desktop` for LinkedIn and optional company-career crawling.
+- HeadHunter transport: official `api.hh.ru` with a cached application token.
 - Storage: canonical SQLite DB at `/var/lib/job-intel/state/job_intel.sqlite3`.
 - Messaging: Slack via Hermes `send_message_tool` gateway or Slack webhook.
-- Optional auth support: Gmail IMAP only for HeadHunter OTP/challenge handling.
+- Optional auth support: no HeadHunter browser/OTP path; the API uses an application token.
 - Monitoring/reporting: Prometheus exporter, Grafana dashboards, systemd timers, health reports.
 
 Relationship to future Recruiter role:
@@ -31,6 +32,8 @@ Biggest risks/gaps:
 - Several docs still mention older DB locations; current host evidence confirms `/var/lib/job-intel/state/job_intel.sqlite3`.
 - `python3 -m job_intel --help` fails outside the project venv because system Python lacks `pydantic`; use `venv/bin/python` or host wrapper.
 - The local workspace was already dirty/untracked before this audit; clean-scope proof must account for pre-existing untracked files.
+- HeadHunter acquisition is explicitly budgeted per query: `per_page` controls page size, while `JOB_INTEL_HEADHUNTER_MAX_ITEMS` controls the result budget (default `100`, capped at `2000`).
+- `JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS` paces non-HH ATS detail requests only; HH detail pacing is owned by `JOB_INTEL_HH_DELAY_SECONDS` in `job_intel.hh_api`.
 
 ## 2. Audit Baseline
 
@@ -164,7 +167,10 @@ Runtime env keys observed, values redacted:
 - `HERMES_HOME`, `HERMES_HOME_MODE`, `HERMES_SKIP_CHMOD`
 - `JOB_INTEL_DB_PATH`, `JOB_INTEL_STATE_DIR`, `JOB_INTEL_WORKDIR`, `JOB_INTEL_ENVIRONMENT`, `JOB_INTEL_RUN_TYPE`
 - `JOB_INTEL_ENABLED_SOURCES`
-- `JOB_INTEL_BROWSER_PROFILE_DIR`, `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN`, `JOB_INTEL_BROWSER_PROFILE_DIR_HH`, `JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER`, `JOB_INTEL_BROWSER_RUNTIME_DIR`
+- `JOB_INTEL_BROWSER_PROFILE_DIR`, `JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN`, `JOB_INTEL_BROWSER_PROFILE_DIR_COMPANY_CAREER`, `JOB_INTEL_BROWSER_RUNTIME_DIR`
+- `JOB_INTEL_HH_CLIENT_ID`, `JOB_INTEL_HH_CLIENT_SECRET`, `JOB_INTEL_HH_TOKEN_CACHE`, `JOB_INTEL_HH_DELAY_SECONDS`
+- `JOB_INTEL_HEADHUNTER_QUERY_LIMIT`, `JOB_INTEL_HEADHUNTER_PER_PAGE`, `JOB_INTEL_HEADHUNTER_MAX_ITEMS`
+- `JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS`
 - `JOB_INTEL_ATS_SEEDS_ASHBY`, `JOB_INTEL_ATS_SEEDS_GREENHOUSE`
 - `JOB_INTEL_SLACK_WEBHOOK_URL`
 - `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_HOME_CHANNEL`
@@ -501,7 +507,7 @@ Risks/gaps: v3 explicitly shadow; do not use as production decision unless enabl
 Supported current sources:
 
 - LinkedIn: browser-native via `fetch_linkedin_vacancies`, `browser_worker.py`, and `BrowserSourceClient.search_linkedin`.
-- HeadHunter/HH: browser-native via `fetch_headhunter_vacancies`, `browser_worker.py`, and `BrowserSourceClient.search_headhunter`.
+- HeadHunter/HH: official API via `fetch_headhunter_vacancies` and `job_intel.hh_api`; no browser profile or CDP target.
 - Target company career pages: `fetch_company_career_vacancies`, company monitoring, JSON-LD extraction.
 - ATS: Greenhouse, Lever, Ashby, SmartRecruiters, Teamtailor, Personio, Recruitee in `job_intel/ats_sources.py`.
 - Discovery/weak sources: DuckDuckGo, RemoteOK, Remotive in `job_intel/sources.py`; default enabled set excludes RemoteOK/Remotive/DuckDuckGo unless env enables them.
@@ -516,7 +522,15 @@ Fetch/read mechanisms:
 Login-wall/anti-bot handling:
 
 - `BrowserSessionHealth` records `login_walls`, `auth_redirects`, `anti_bot_events`, extraction failures, profile/session status.
-- HeadHunter has Gmail OTP support through `JOB_INTEL_GMAIL_*` env vars; audit did not inspect or use secrets.
+- HeadHunter has no Gmail OTP/browser support after the API migration; its application token is cached by `job_intel.hh_api`.
+
+HeadHunter request controls:
+
+- `JOB_INTEL_HEADHUNTER_QUERY_LIMIT` limits the number of configured queries.
+- `JOB_INTEL_HEADHUNTER_PER_PAGE` controls the API page size only.
+- `JOB_INTEL_HEADHUNTER_MAX_ITEMS` bounds the number of acquired vacancies per query; the default is `100` and the hard cap is `2000`.
+- HH detail requests are paced by `JOB_INTEL_HH_DELAY_SECONDS` in `job_intel.hh_api`; `JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS` applies only to non-HH ATS detail requests.
+- A failed or rate-limited detail request is retained as a stored vacancy fact but is fail-closed for notification because advertising placement and other detail-only fields are unavailable.
 
 Dedup logic:
 
@@ -632,7 +646,7 @@ Telegram:
 
 Gmail:
 
-- Gmail appears only for HeadHunter OTP/challenge support in `browser_sourcing.py` via `JOB_INTEL_GMAIL_*` env vars.
+- Gmail is not part of the HeadHunter API transport.
 - Recruiter MVP must not use Gmail outbound or IMAP.
 
 Google Docs:

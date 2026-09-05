@@ -138,9 +138,10 @@ def backfill(rows, *, budget: int, fetchers=None) -> BackfillReport:
     A source that answers 429 is closed for the rest of the call. Its remaining
     rows are counted in `rate_limited` and produce NO result, so a caller that
     persists results writes nothing for them and they stay eligible. Each
-    detail request is also preceded by a politeness delay
+    Non-HH detail requests are preceded by a politeness delay
     (ats_sources.DETAIL_REQUEST_DELAY_SECONDS, 0.5s, overridable with
-    JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS).
+    JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS). HH detail pacing is owned by
+    job_intel.hh_api and uses JOB_INTEL_HH_DELAY_SECONDS.
 
     Never raises.
     """

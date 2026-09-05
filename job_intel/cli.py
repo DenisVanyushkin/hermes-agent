@@ -63,6 +63,7 @@ from .models import Evaluation, Vacancy
 from .runtime import (
     assert_runtime_contract,
     build_runtime_contract,
+    delivery_disabled,
     file_access_flags,
     parse_iso_datetime,
     resolve_db_path,
@@ -170,6 +171,16 @@ def _aggregate_browser_trace(target: dict[str, Any], trace: dict[str, Any] | Non
         if key == "zero_result_reason" and value:
             reasons = target.setdefault("zero_result_reasons", {})
             reasons[str(value)] = int(reasons.get(str(value)) or 0) + 1
+
+
+def _merge_hh_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
+    if not trace:
+        return
+    for key, value in trace.items():
+        if isinstance(value, bool):
+            target[key] = bool(target.get(key)) or value
+        elif isinstance(value, (int, float)):
+            target[key] = int(target.get(key) or 0) + int(value)
 
 
 def _emit_browser_trace_spans(
@@ -567,7 +578,7 @@ def _collect_vacancies(
             _emit_browser_trace_spans(performance, source="linkedin", parent_span_name="source_acquisition.linkedin", trace=linkedin_trace)
 
     if not _source_enabled(enabled_sources, "headhunter"):
-        statuses["headhunter"] = _skipped_source_status("headhunter", acquisition="browser-native-first")
+        statuses["headhunter"] = _skipped_source_status("headhunter", acquisition="api")
     else:
         with (performance.span("source_acquisition.headhunter", parent_span_name="source_acquisition_total", source_name="headhunter") if performance else _null_span()) as perf_span:
             hh_query_limit = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_QUERY_LIMIT", "6")))
@@ -582,7 +593,8 @@ def _collect_vacancies(
                     results = fetch_headhunter_vacancies(query, per_page=hh_per_page)
                     hh_hits += len(results)
                     vacancies.extend(results)
-                    _aggregate_browser_trace(hh_trace, getattr(fetch_headhunter_vacancies, "last_trace", None))
+                    trace = getattr(fetch_headhunter_vacancies, "last_trace", None) or {}
+                    _merge_hh_trace(hh_trace, trace)
                 except Exception as exc:
                     hh_errors.append(str(exc))
             if hh_hits:
@@ -598,12 +610,15 @@ def _collect_vacancies(
                 status=hh_status,
                 hits=hh_hits,
                 errors=hh_errors,
-                acquisition="browser-native-first",
+                acquisition="api",
                 runtime_seconds=perf_counter() - hh_started,
             )
             hh_health = getattr(fetch_headhunter_vacancies, "last_health", None)
-            if hh_health:
+            if hh_health or hh_trace:
+                hh_health = dict(hh_health or {})
+                hh_health.update(hh_trace)
                 hh_source_status["session_health"] = hh_health
+            hh_source_status["api_trace"] = hh_trace
             statuses["headhunter"] = hh_source_status
             perf_span.set_counts(
                 found_count=hh_hits,
@@ -611,7 +626,6 @@ def _collect_vacancies(
                 error_count=len(hh_errors),
                 timeout_count=sum(1 for err in hh_errors if "timeout" in err.lower()),
             )
-            _emit_browser_trace_spans(performance, source="headhunter", parent_span_name="source_acquisition.headhunter", trace=hh_trace)
 
     # ATS Wave 1 (production sources). These must not fail the whole run.
     def _collect_ats(source: str, *, fetcher, acquisition: str) -> None:
@@ -873,6 +887,13 @@ def _deliver_to_slack(
     prefer_gateway: bool = False,
     thread_ts: str | None = None,
 ) -> SlackDeliveryResult:
+    if delivery_disabled():
+        return SlackDeliveryResult(
+            success=False,
+            attempts=0,
+            error="outbound delivery is disabled by JOB_INTEL_DELIVERY_DISABLED",
+            status="suppressed",
+        )
     webhook = os.getenv("JOB_INTEL_SLACK_WEBHOOK_URL", "").strip()
     if message == "[SILENT]":
         return SlackDeliveryResult(success=True, attempts=0, error=None, status="sent")
@@ -1473,12 +1494,73 @@ def _material_card_change(
     if previous_summary_hash and previous_summary_hash != current_summary_hash:
         return True
     return False
+def _is_hh_archived_vacancy(vacancy: Vacancy) -> bool:
+    if (getattr(vacancy, "source", "") or "").strip().lower() != "headhunter":
+        return False
+    metadata = getattr(vacancy, "metadata", {}) or {}
+    return str(metadata.get("archived") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _is_hh_advertising_vacancy(vacancy: Vacancy) -> bool:
+    if (getattr(vacancy, "source", "") or "").strip().lower() != "headhunter":
+        return False
+    metadata = getattr(vacancy, "metadata", {}) or {}
+    properties = metadata.get("vacancy_properties") or []
+    if not isinstance(properties, list):
+        return False
+    for prop in properties:
+        value = (prop.get("id") or prop.get("type")) if isinstance(prop, dict) else prop
+        if str(value or "").strip().upper() == "HH_ADVERTISING":
+            return True
+    return False
+
+
+def _is_hh_detail_unavailable(vacancy: Vacancy) -> bool:
+    if (getattr(vacancy, "source", "") or "").strip().lower() != "headhunter":
+        return False
+    metadata = getattr(vacancy, "metadata", {}) or {}
+    return bool(metadata.get("detail_fetch_failed"))
+
+
 def _card_decision_plan(
     store: JobIntelStore,
     vacancy: Vacancy,
     evaluation: Any,
     repost_window_days: int,
 ) -> CardDecisionPlan:
+    if _is_hh_detail_unavailable(vacancy):
+        return CardDecisionPlan(
+            should_notify=False,
+            decision="suppressed",
+            suppression_reason="hh_detail_unavailable",
+            previous_sent_run_id=None,
+            previous_sent_at=None,
+            previous_feedback_label=None,
+            feedback_state_active=False,
+            next_allowed_send_at=None,
+            score_delta_since_last_sent=None,
+            recommendation_changed_since_last_sent=False,
+            content_hash_changed=False,
+            description_hash_changed=False,
+        )
+    if _is_hh_archived_vacancy(vacancy) or _is_hh_advertising_vacancy(vacancy):
+        # HH keeps closed vacancies retrievable by ID. Backfill may enrich and
+        # re-score them, but archived/advertising records are never openings
+        # and must never reach a human-facing notification.
+        return CardDecisionPlan(
+            should_notify=False,
+            decision="suppressed",
+            suppression_reason="hh_non_opening",
+            previous_sent_run_id=None,
+            previous_sent_at=None,
+            previous_feedback_label=None,
+            feedback_state_active=False,
+            next_allowed_send_at=None,
+            score_delta_since_last_sent=None,
+            recommendation_changed_since_last_sent=False,
+            content_hash_changed=False,
+            description_hash_changed=False,
+        )
     score_delta = int(os.getenv("JOB_INTEL_CARD_RESEND_SCORE_DELTA", "10") or "10")
     card_key = _card_key_for_vacancy(vacancy)
     latest = store.latest_notification_for_card(
@@ -1487,7 +1569,20 @@ def _card_decision_plan(
         message_types=("vacancy_card", "vacancy_opportunity", "daily_digest"),
     )
     if not latest:
-        return CardDecisionPlan(True, "sent", None, None, None, None, False, None, None, False, False, False)
+        return CardDecisionPlan(
+            should_notify=True,
+            decision="sent",
+            suppression_reason=None,
+            previous_sent_run_id=None,
+            previous_sent_at=None,
+            previous_feedback_label=None,
+            feedback_state_active=False,
+            next_allowed_send_at=None,
+            score_delta_since_last_sent=None,
+            recommendation_changed_since_last_sent=False,
+            content_hash_changed=False,
+            description_hash_changed=False,
+        )
 
     feedback_types = set(store.active_feedback_for_card(card_key))
     try:
@@ -1521,15 +1616,50 @@ def _card_decision_plan(
     previous_sent_at = latest.get("sent_at")
 
     if "applied" in feedback_types:
-        return CardDecisionPlan(False, "suppressed", "feedback_applied", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+        return CardDecisionPlan(
+            should_notify=False, decision="suppressed", suppression_reason="feedback_applied",
+            previous_sent_run_id=previous_sent_run_id, previous_sent_at=previous_sent_at,
+            previous_feedback_label=previous_feedback_label, feedback_state_active=feedback_state_active,
+            next_allowed_send_at=next_allowed_at, score_delta_since_last_sent=score_delta_since_last_sent,
+            recommendation_changed_since_last_sent=recommendation_changed,
+            content_hash_changed=content_hash_changed, description_hash_changed=description_hash_changed,
+        )
     if "exceptional" in feedback_types:
-        return CardDecisionPlan(False, "suppressed", "feedback_exceptional_follow_up", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+        return CardDecisionPlan(
+            should_notify=False, decision="suppressed", suppression_reason="feedback_exceptional_follow_up",
+            previous_sent_run_id=previous_sent_run_id, previous_sent_at=previous_sent_at,
+            previous_feedback_label=previous_feedback_label, feedback_state_active=feedback_state_active,
+            next_allowed_send_at=next_allowed_at, score_delta_since_last_sent=score_delta_since_last_sent,
+            recommendation_changed_since_last_sent=recommendation_changed,
+            content_hash_changed=content_hash_changed, description_hash_changed=description_hash_changed,
+        )
     if "not_interesting" in feedback_types and not material_change:
-        return CardDecisionPlan(False, "suppressed", "feedback_not_interesting", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+        return CardDecisionPlan(
+            should_notify=False, decision="suppressed", suppression_reason="feedback_not_interesting",
+            previous_sent_run_id=previous_sent_run_id, previous_sent_at=previous_sent_at,
+            previous_feedback_label=previous_feedback_label, feedback_state_active=feedback_state_active,
+            next_allowed_send_at=next_allowed_at, score_delta_since_last_sent=score_delta_since_last_sent,
+            recommendation_changed_since_last_sent=recommendation_changed,
+            content_hash_changed=content_hash_changed, description_hash_changed=description_hash_changed,
+        )
     if ("interesting" in feedback_types or "save_for_later" in feedback_types) and not (material_change or cooldown_elapsed):
-        return CardDecisionPlan(False, "suppressed", "feedback_cooldown_active", previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+        return CardDecisionPlan(
+            should_notify=False, decision="suppressed", suppression_reason="feedback_cooldown_active",
+            previous_sent_run_id=previous_sent_run_id, previous_sent_at=previous_sent_at,
+            previous_feedback_label=previous_feedback_label, feedback_state_active=feedback_state_active,
+            next_allowed_send_at=next_allowed_at, score_delta_since_last_sent=score_delta_since_last_sent,
+            recommendation_changed_since_last_sent=recommendation_changed,
+            content_hash_changed=content_hash_changed, description_hash_changed=description_hash_changed,
+        )
     if not feedback_types and not (material_change or cooldown_elapsed):
-        return CardDecisionPlan(False, "suppressed", "already_sent_cooldown_active", previous_sent_run_id, previous_sent_at, None, False, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+        return CardDecisionPlan(
+            should_notify=False, decision="suppressed", suppression_reason="already_sent_cooldown_active",
+            previous_sent_run_id=previous_sent_run_id, previous_sent_at=previous_sent_at,
+            previous_feedback_label=None, feedback_state_active=False,
+            next_allowed_send_at=next_allowed_at, score_delta_since_last_sent=score_delta_since_last_sent,
+            recommendation_changed_since_last_sent=recommendation_changed,
+            content_hash_changed=content_hash_changed, description_hash_changed=description_hash_changed,
+        )
 
     if recommendation_improved:
         reason = "recommendation_improved"
@@ -1543,7 +1673,14 @@ def _card_decision_plan(
         reason = "cooldown_elapsed"
     else:
         reason = "material_change"
-    return CardDecisionPlan(True, "sent", reason, previous_sent_run_id, previous_sent_at, previous_feedback_label, feedback_state_active, next_allowed_at, score_delta_since_last_sent, recommendation_changed, content_hash_changed, description_hash_changed)
+    return CardDecisionPlan(
+        should_notify=True, decision="sent", suppression_reason=reason,
+        previous_sent_run_id=previous_sent_run_id, previous_sent_at=previous_sent_at,
+        previous_feedback_label=previous_feedback_label, feedback_state_active=feedback_state_active,
+        next_allowed_send_at=next_allowed_at, score_delta_since_last_sent=score_delta_since_last_sent,
+        recommendation_changed_since_last_sent=recommendation_changed,
+        content_hash_changed=content_hash_changed, description_hash_changed=description_hash_changed,
+    )
 
 
 def _should_notify_vacancy(store: JobIntelStore, vacancy_id: int, vacancy: Vacancy, evaluation: Any, repost_window_days: int) -> bool:
@@ -2075,7 +2212,20 @@ def run_daily() -> str:
             normalization_ms += (perf_counter() - started) * 1000.0
 
             started = perf_counter()
-            if dual_score_enabled:
+            advertising_placement = _is_hh_advertising_vacancy(vacancy)
+            detail_unavailable = _is_hh_detail_unavailable(vacancy)
+            if advertising_placement or detail_unavailable:
+                evaluation = Evaluation(
+                    score=0,
+                    tier="reject",
+                    recommendation="reject",
+                    concerns=[
+                        "headhunter advertising placement"
+                        if advertising_placement
+                        else "headhunter detail unavailable"
+                    ],
+                )
+            elif dual_score_enabled:
                 ev1 = score_vacancy_with_version(vacancy, "v1")
                 ev2 = score_vacancy_with_version(vacancy, "v2")
                 evaluation = score_vacancy_with_version(vacancy, effective_scoring_version)
@@ -2089,7 +2239,7 @@ def run_daily() -> str:
                 evaluation = score_vacancy(vacancy)
             scoring_ms += (perf_counter() - started) * 1000.0
 
-            if v3_shadow_enabled:
+            if v3_shadow_enabled and not advertising_placement and not detail_unavailable:
                 ev2_shadow = score_vacancy_with_version(vacancy, "v2")
                 ev3_shadow = score_vacancy_v3_shadow(vacancy)
                 rec_v3 = str(ev3_shadow.get("recommendation") or "reject")
@@ -2317,7 +2467,11 @@ def run_daily() -> str:
                     continue
                 if decision_plan.should_notify:
                     surfaced_rows.append((vacancy, evaluation, vacancy_id))
-                    decision = "sent"
+                    # The ledger records what happened, not what was chosen. With
+                    # delivery disabled the card is selected but never sent, and
+                    # calling that "sent" would make a shadow run indistinguishable
+                    # from a delivering one in every policy metric derived from it.
+                    decision = "would_send" if delivery_disabled() else "sent"
                 else:
                     store.set_vacancy_status(vacancy_id, "notified")
                     decision = "suppressed"
@@ -2635,6 +2789,14 @@ def run_daily() -> str:
                 auth_redirects = session.get("auth_redirects")
                 anti_bot_events = session.get("anti_bot_events")
                 extraction_failures = session.get("extraction_failures")
+                if source == "headhunter":
+                    # HH is API-only: retain requested page count for source
+                    # coverage, while browser-only health counters stay NULL.
+                    pages_fetched = session.get("pages_fetched")
+                    login_walls = None
+                    auth_redirects = None
+                    anti_bot_events = None
+                    extraction_failures = None
                 denom = found if found else 0
                 pct_company_known = (float(stats.get("company_known") or 0) / denom) if denom else None
                 pct_location_known = (float(stats.get("location_known") or 0) / denom) if denom else None
@@ -3650,7 +3812,7 @@ def _check_health_conditions(store: "JobIntelStore") -> list[str]:
             # 4. Login wall on Tier-1
             login_walls = conn.execute(
                 "SELECT source, login_walls FROM source_kpi_run "
-                "WHERE run_id=? AND source IN ('linkedin','headhunter','target_companies') "
+                "WHERE run_id=? AND source IN ('linkedin','target_companies') "
                 "AND login_walls > 0",
                 (last_run_id,)
             ).fetchall()
@@ -3864,8 +4026,8 @@ def _browser_desktop_health() -> dict[str, Any]:
         detail = payload.get("error") if isinstance(payload, dict) else None
         return False, str(detail or probe.stderr or stdout or f"{source} CDP probe failed")
 
-    cdp_ports = {"linkedin": 9222, "headhunter": 9223}
-    for source in ("linkedin", "headhunter"):
+    cdp_ports = {"linkedin": 9222}
+    for source in ("linkedin",):
         ok, detail = worker_probe(source)
         mark(f"cdp_probe_{source}", ok, detail)
         port = cdp_ports[source]
@@ -3878,7 +4040,7 @@ def _browser_desktop_health() -> dict[str, Any]:
         except Exception as exc:
             mark(f"cdp_endpoint_{source}", False, f"CDP endpoint {port} unavailable: {exc}")
 
-    for profile_name in ("linkedin", "hh"):
+    for profile_name in ("linkedin",):
         profile_dir = base_dir / "profiles" / profile_name
         profile_ok = profile_dir.exists() and profile_dir.is_dir()
         mark(

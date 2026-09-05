@@ -53,6 +53,7 @@ def test_export_snippet_shape():
     # cannot leak into the shared snapshot. The broad glob covers the
     # narrow one; asserting the narrow literal here went stale.
     assert "${!HERMES_CRON_*}" in snippet
+    assert "${!HERMES_BROWSER_CONTROL_*}" in snippet
     assert "HERMES_UI_SESSION_ID" in snippet
     assert "grep -vE" not in snippet
     assert '"$__hermes_snap_tmp"' in snippet

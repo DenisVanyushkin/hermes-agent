@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -127,10 +128,81 @@ def _extract_message_text(message: Mapping[str, Any]) -> str:
     return " ".join(" ".join(parts).split())
 
 
+CRON_BANNER_RE = re.compile(
+    r"^Cronjob Response:\s*\S+\s*\(job_id:\s*[0-9a-zA-Z]+\)\s*-{3,}\s*"
+)
+
+# Both halves of the bilingual "how to stop this job" footer the scheduler
+# appends to every cron post. Cutting at whichever appears first drops both.
+STOP_TRAILER_MARKERS = (
+    "Чтобы остановить или изменить эту задачу",
+    "To stop or manage this job",
+)
+
+
+def _strip_cron_envelope(text: str) -> str:
+    """Drop the scheduler's envelope so the doc holds the idea, not the plumbing."""
+
+    cleaned = CRON_BANNER_RE.sub("", text).strip()
+    cut = min(
+        (pos for pos in (cleaned.find(marker) for marker in STOP_TRAILER_MARKERS) if pos > 0),
+        default=-1,
+    )
+    if cut > 0:
+        cleaned = cleaned[:cut].strip()
+    return cleaned or text.strip()
+
+
+def _timestamp_for_message(message_ts: str) -> str:
+    """Date the bullet by the idea itself, not by when we happened to capture it.
+
+    A backfill run months later must not stamp every idea with today's date.
+    """
+
+    try:
+        moment = datetime.fromtimestamp(float(message_ts), tz=timezone.utc)
+    except (TypeError, ValueError):
+        return _current_almaty_timestamp()
+    if ZoneInfo is None:
+        return moment.strftime("%Y-%m-%d %H:%M UTC")
+    return moment.astimezone(ZoneInfo("Asia/Almaty")).strftime("%Y-%m-%d %H:%M %Z")
+
+
 def _current_almaty_timestamp() -> str:
     if ZoneInfo is None:
         return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     return datetime.now(ZoneInfo("Asia/Almaty")).strftime("%Y-%m-%d %H:%M %Z")
+
+
+SANDBOX_GOOGLE_HOME_PARTS = ("sandboxes", "docker", "default", "home", ".hermes")
+
+
+def _google_credentials_home() -> Path:
+    """Locate the HERMES_HOME that actually holds the Google OAuth token.
+
+    The agent authorises Google from inside a Docker sandbox, where ``HOME`` is
+    ``/root`` and the token lands in the sandbox home on the host. The gateway
+    runs on the host with ``HERMES_HOME=~/.hermes`` and therefore never saw that
+    token, so every capture died with "Not authenticated" (2026-08-20).
+
+    Order: explicit override, host home, sandbox home. Only a home that really
+    carries ``google_token.json`` wins, so this degrades to the host home rather
+    than inventing a path.
+    """
+
+    override = os.getenv("GOOGLE_WORKSPACE_HERMES_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    host_home = _hermes_home()
+    if (host_home / "google_token.json").exists():
+        return host_home
+
+    sandbox_home = host_home.joinpath(*SANDBOX_GOOGLE_HOME_PARTS)
+    if (sandbox_home / "google_token.json").exists():
+        return sandbox_home
+
+    return host_home
 
 
 def _append_to_doc(text: str) -> dict[str, Any]:
@@ -139,8 +211,10 @@ def _append_to_doc(text: str) -> dict[str, Any]:
     hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     home_script = hermes_home / "skills" / "productivity" / "google-workspace" / "scripts" / "google_api.py"
     script = repo_script if repo_script.exists() else home_script
+    # The install is found relative to the host home, but the credentials may
+    # live in a different home entirely — keep the two lookups separate.
     env = os.environ.copy()
-    env["HERMES_HOME"] = str(hermes_home)
+    env["HERMES_HOME"] = str(_google_credentials_home())
     cmd = [sys.executable, str(script), "docs", "append", doc_id, "--text", text]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
@@ -193,7 +267,7 @@ def process_event(
     if dedupe_key in seen:
         return {"status": "ignored", "reason": "duplicate", "dedupe_key": dedupe_key}
 
-    text = _extract_message_text(message)
+    text = _strip_cron_envelope(_extract_message_text(message))
     if not text:
         return {"status": "ignored", "reason": "empty_message_text", "channel": channel, "message_ts": message_ts}
 
@@ -203,7 +277,7 @@ def process_event(
     if message.get("username"):
         source_bits.append(f"username {message.get('username')}")
 
-    bullet = f"- [{_current_almaty_timestamp()}] {text} — source: {', '.join(source_bits)}"
+    bullet = f"- [{_timestamp_for_message(message_ts)}] {text} — source: {', '.join(source_bits)}"
 
     if dry_run:
         return {"status": "dry_run", "doc_id": _doc_id(), "append_text": bullet, "dedupe_key": dedupe_key}

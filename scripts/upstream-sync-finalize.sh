@@ -93,6 +93,14 @@ BACKUP_REF="$(json_field backup_ref)"
 # reported to the operator as a failed smoketest (2026-07-27) — the log tail
 # they were shown started well after the real cause.
 FAILED_STAGE=""
+BREAK_GLASS_NOTICE=""
+GATE_OUTCOME="unknown"
+GATE_MODE="apply"
+GATE_ATTEMPT_DIR=""
+GATE_ATTEMPT_ID=""
+GATE_BEFORE=""
+GATE_AFTER=""
+GATE_BOUNDARY=""
 
 write_result() {
   # Statuses: ok | failed | awaiting_decision (apply-decisions stopped to ask
@@ -154,6 +162,7 @@ PY
     if [ -f "$STATE_DIR/pending.json" ]; then
       archived="$STATE_DIR/pending.json.applied-$(date +%Y%m%d-%H%M%S)"
       if mv -f "$STATE_DIR/pending.json" "$archived" 2>/dev/null; then
+        ARCHIVED_PENDING="$archived"
         record_decisions_from "$archived"
         cp -f "$DETAIL_LOG" "$STATE_DIR/finalize-detail.log" 2>/dev/null || true
       else
@@ -163,6 +172,11 @@ PY
   fi
   # After the archive: the thread report reads pending.json or its archive.
   report_to_thread "$1"
+  # A successful gate keeps its normalized payload alive until the report has
+  # consumed it; then remove it so the next attempt cannot inherit stale PASS.
+  if [ "$1" = ok ]; then
+    rm -f "$STATE_DIR/gate-failures.json"
+  fi
 }
 
 # The operator-facing summary, threaded under the conflict report when
@@ -177,9 +191,9 @@ report_to_thread() {
   [ -f "$helper" ] || return 0
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  "$py" - "$helper" "$STATE_DIR" "$RESULT" "$status" "$ACTION" "$SCRATCH_FOR_REPORT" >>"$DETAIL_LOG" 2>&1 <<'PY' || echo "warning: thread report not posted (see above)" >>"$DETAIL_LOG"
+  "$py" - "$helper" "$STATE_DIR" "$RESULT" "$status" "$ACTION" "$SCRATCH_FOR_REPORT" "$ARCHIVED_PENDING" >>"$DETAIL_LOG" 2>&1 <<'PY' || echo "warning: thread report not posted (see above)" >>"$DETAIL_LOG"
 import glob, importlib.util, json, os, sys
-helper, state, result_path, status, action, scratch = sys.argv[1:7]
+helper, state, result_path, status, action, scratch, archived_pending = sys.argv[1:8]
 spec = importlib.util.spec_from_file_location("upstream_sync_slack", helper)
 slack = importlib.util.module_from_spec(spec); spec.loader.exec_module(slack)
 def load(p):
@@ -188,9 +202,18 @@ def load(p):
     except Exception:
         return {}
 pending = load(os.path.join(state, "pending.json"))
+if not pending and archived_pending:
+    # The archive this very run created. On success pending.json is renamed
+    # before the report runs, so the caller hands us the path rather than
+    # letting us re-derive it.
+    pending = load(archived_pending)
 if not pending:
-    archived = sorted(glob.glob(os.path.join(state, "pending.json.applied-*")))
-    pending = load(archived[-1]) if archived else {}
+    # Last resort: newest by mtime. NEVER by name — a hand-made archive
+    # (pending.json.applied-manual-20260724) sorts above every dated one
+    # because "m" outranks any digit, and it carries no channel, so the
+    # report would exit 0 having posted nowhere (silent since 2026-07-24).
+    archived = glob.glob(os.path.join(state, "pending.json.applied-*"))
+    pending = load(max(archived, key=os.path.getmtime)) if archived else {}
 channel = pending.get("slack_channel") or os.environ.get("HERMES_SYNC_SLACK_CHANNEL") or ""
 thread = pending.get("slack_thread_ts") or None
 if not channel:
@@ -198,18 +221,22 @@ if not channel:
 prep = load(os.path.join(state, "apply-prepare.json"))
 result = load(result_path)
 triage = load(os.path.join(state, "gate-triage.json"))
+gate_failures = load(os.path.join(state, "gate-failures.json"))
 if status == "ok" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
-    text = slack.applied_text(prep, result)
+    text = slack.applied_text(prep, result, gate_failures=gate_failures)
 elif status == "awaiting_decision":
     text = slack.report_text(pending)
 elif status == "failed" and action in ("apply-decisions", "apply-merge", "apply-triage-fixes"):
-    text = slack.failed_text(prep, result, scratch=scratch, triage=triage)
+    text = slack.failed_text(
+        prep, result, scratch=scratch, triage=triage, gate_failures=gate_failures
+    )
 else:
     sys.exit(0)
 slack.post(channel, text, thread_ts=thread)
 PY
 }
 SCRATCH_FOR_REPORT=""
+ARCHIVED_PENDING=""
 # Recording the operator's decisions used to be the LAST step of Mode B, run by
 # the agent — but its session dies with the gateway restart the smoketest
 # triggers, so on 2026-08-12 the record never ran and the memory had to be
@@ -303,79 +330,475 @@ adopt_scratch_clone() {
 # branch — the same before/after comparison the sync script applies to an
 # automatic merge. Baseline is our HEAD, post is the merge; only NEW failures
 # block, and an unreadable run (killed, no summary line) blocks too.
+run_gate() {
+  local before="$1" after="$2" boundary="$3" attempt_id="$4" mode="$5"
+  GATE_MODE="$mode"
+  GATE_ATTEMPT_DIR=""
+  GATE_ATTEMPT_ID="$attempt_id"
+  GATE_BEFORE="$before"
+  GATE_AFTER="$after"
+  GATE_BOUNDARY="$boundary"
+  GATE_OUTCOME="unknown"
+  printf 'run_gate seam: mode=%s before=%s after=%s boundary=%s attempt_id=%s\n' \
+    "$mode" "$before" "$after" "$boundary" "$attempt_id" >>"$DETAIL_LOG"
+  if merge_passes_fork_tests "$before" "$after" "$boundary"; then
+    GATE_OUTCOME="pass"
+    printf 'run_gate outcome: mode=%s outcome=pass attempt_id=%s\n' \
+      "$mode" "$attempt_id" >>"$DETAIL_LOG"
+    return 0
+  fi
+  # Preserve the distinction between a measured block and an unreadable or
+  # invalid execution for every caller of the shared seam.
+  printf 'run_gate outcome: mode=%s outcome=%s attempt_id=%s\n' \
+    "$mode" "$GATE_OUTCOME" "$attempt_id" >>"$DETAIL_LOG"
+  return 1
+}
+
 merge_passes_fork_tests() {
-  local before="$1" after="$2"
+  # Граница приходит третьим аргументом от вызывающего, который её уже сверил
+  # (UPSTREAM_FULL из pending.json, до проверки родителей). Выводить её здесь
+  # заново из after^2 значило бы завести второй источник истины, способный
+  # разойтись с уже пройденной проверкой.
+  local before="$1" after="$2" boundary="$3"
   local test_cmd="${HERMES_SYNC_TEST_CMD:-$SCRIPTS_DIR/run-fork-tests.sh}"
   [ -x "$test_cmd" ] || test_cmd="$REPO/scripts/run-fork-tests.sh"
   local gate="$SCRIPTS_DIR/upstream_sync_gate.py"
   [ -f "$gate" ] || gate="$REPO/scripts/upstream_sync_gate.py"
   local py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  local wt baseline post rc new_failures
+  local wt baseline post rc new_failures listing_dir
+  local baseline_nodes merged_nodes upstream_nodes probe_request probe_nodeids
+  local probe_log probe_wt probe_boundary_paths probe_filtered_request probe_available_nodeids classification_json blocking_count unknown_count
+  local before_paths after_paths boundary_paths changed_paths
+  local selection_report attempt_dir selection_manifest selection_digest
+  local baseline_receipt_line post_receipt_line
+  local baseline_final_receipt_line post_final_receipt_line
+  listing_dir="$(mktemp -d -t hermes-gate-selection-XXXXXX)"
+  before_paths="$listing_dir/before.paths"
+  after_paths="$listing_dir/after.paths"
+  boundary_paths="$listing_dir/boundary.paths"
+  changed_paths="$listing_dir/changed.paths"
+  if ! git -C "$REPO" ls-tree -rz --name-only "$before" -- tests/ >"$before_paths" 2>>"$DETAIL_LOG" ||
+     ! git -C "$REPO" ls-tree -rz --name-only "$after" -- tests/ >"$after_paths" 2>>"$DETAIL_LOG" ||
+     ! git -C "$REPO" ls-tree -rz --name-only "$boundary" -- tests/ >"$boundary_paths" 2>>"$DETAIL_LOG" ||
+     ! git -C "$REPO" diff -z --name-only "$before" "$after" -- tests/ >"$changed_paths" 2>>"$DETAIL_LOG"; then
+    rm -f "$before_paths" "$after_paths" "$boundary_paths" "$changed_paths"
+    rmdir "$listing_dir" 2>/dev/null || true
+    echo "could not list the trees for the test selection manifest" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! selection_report="$(
+    "$py" "$gate" prepare-selection \
+      --state-dir "$STATE_DIR" \
+      --before "$before" \
+      --after "$after" \
+      --boundary "$boundary" \
+      --before-paths "$before_paths" \
+      --after-paths "$after_paths" \
+      --boundary-paths "$boundary_paths" \
+      --changed-paths "$changed_paths" 2>>"$DETAIL_LOG"
+  )"; then
+    rm -f "$before_paths" "$after_paths" "$boundary_paths" "$changed_paths"
+    rmdir "$listing_dir" 2>/dev/null || true
+    echo "could not build the test selection manifest" >>"$DETAIL_LOG"
+    return 1
+  fi
+  rm -f "$before_paths" "$after_paths" "$boundary_paths" "$changed_paths"
+  rmdir "$listing_dir" 2>/dev/null || true
+  if ! attempt_dir="$(
+    printf '%s' "$selection_report" | "$py" -c \
+      'import json,sys; print(json.load(sys.stdin)["attempt_dir"])'
+  )"; then
+    echo "could not read the attempt namespace from the selection report" >>"$DETAIL_LOG"
+    return 1
+  fi
+  GATE_ATTEMPT_DIR="$attempt_dir"
+  selection_manifest="$attempt_dir/gate-selection.json"
+  if ! selection_digest="$(sha256sum "$selection_manifest" | awk '{print $1}')" || [ -z "$selection_digest" ]; then
+    echo "could not hash the selection manifest for the runner receipt" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! baseline_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side pre --digest "$selection_digest" 2>>"$DETAIL_LOG")" ||
+     ! post_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side post --digest "$selection_digest" 2>>"$DETAIL_LOG")"; then
+    echo "could not format the expected runner receipt" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! baseline_final_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side pre --stage final --digest "$selection_digest" 2>>"$DETAIL_LOG")" ||
+     ! post_final_receipt_line="$("$py" "$gate" receipt \
+    --source manifest --side post --stage final --digest "$selection_digest" 2>>"$DETAIL_LOG")"; then
+    echo "could not format the expected final runner receipt" >>"$DETAIL_LOG"
+    return 1
+  fi
+
+  probe_final_receipt_line() {
+    local nodeids_file="$1"
+    local digest
+    if ! digest="$("$py" - "$nodeids_file" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+nodeids = payload.get("nodeids") if isinstance(payload, dict) else payload
+if not isinstance(nodeids, list) or not all(isinstance(item, str) for item in nodeids):
+    raise SystemExit("probe request nodeids must be a string list")
+print(hashlib.sha256("".join(f"{item}\n" for item in nodeids).encode()).hexdigest())
+PY
+    )" || [ -z "$digest" ]; then
+      return 1
+    fi
+    "$py" "$gate" receipt --source legacy --stage final --digest "$digest"
+  }
+
+  record_unreadable_probe() {
+    local output="$1"
+    local label="$2"
+    "$py" - "$output" "$label" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+    "collect_ok": False,
+    "probe_ok": False,
+    "collected_nodeids": [],
+    "failed_nodeids": [],
+    "error_count": 0,
+    "collection_error_paths": [],
+    "unreadable_runs": [{"source": sys.argv[2], "stage": "receipt"}],
+}), encoding="utf-8")
+PY
+    echo "$label probe final receipt missing; refusing to use its node report" >>"$DETAIL_LOG"
+  }
+
+  record_unreadable_receipt() {
+    local source="$1"
+    local unreadable_classification="$attempt_dir/gate-classification.json"
+    local unreadable_legacy="$attempt_dir/gate-legacy-failures.txt"
+    "$py" - "$unreadable_classification" "$source" <<'PY'
+import json, sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(json.dumps({
+    "common_path": [],
+    "post_only_path": [],
+    "pre_existing": [],
+    "unknown": [],
+    "unreadable_runs": [{"source": sys.argv[2], "stage": "receipt"}],
+}), encoding="utf-8")
+PY
+    : >"$unreadable_legacy"
+    if ! "$py" "$gate" persist-gate-failures \
+      --classification "$unreadable_classification" \
+      --merge-sha "$after" --before "$before" \
+      --legacy-failures "$unreadable_legacy" \
+      --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
+      echo "could not persist unreadable gate receipt outcome" >>"$DETAIL_LOG"
+      return 1
+    fi
+    if [ "$GATE_MODE" = apply ]; then
+      cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
+    fi
+    GATE_OUTCOME=unknown
+    return 0
+  }
+  printf 'gate selection report: %s\n' "$selection_report" >>"$DETAIL_LOG"
   wt="$(mktemp -d -t hermes-apply-merge-XXXXXX)"
-  baseline="$(mktemp)"
-  post="$(mktemp)"
+  baseline="$attempt_dir/gate-baseline.log"
+  post="$attempt_dir/gate-post.log"
   if ! git -C "$REPO" worktree add --detach "$wt" "$before" >>"$DETAIL_LOG" 2>&1; then
-    rm -rf "$wt" "$baseline" "$post"
+    rm -rf "$wt"
     echo "could not create a worktree for the test gate" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" "$wt" >"$baseline" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
+    --attempt-root "$STATE_DIR/attempts" "$wt" >"$baseline" 2>&1 || true
+  if ! grep -Fqx "$baseline_receipt_line" "$baseline"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    if ! record_unreadable_receipt baseline; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner preliminary receipt missing or measured the wrong manifest side in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! grep -Fqx "$baseline_final_receipt_line" "$baseline"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    if ! record_unreadable_receipt baseline; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner final receipt missing in baseline; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
   if ! git -C "$wt" checkout -q --detach "$after" >>"$DETAIL_LOG" 2>&1; then
     git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
-    rm -rf "$wt" "$baseline" "$post"
+    rm -rf "$wt"
     echo "could not check out the merge in the test-gate worktree" >>"$DETAIL_LOG"
     return 1
   fi
-  "$test_cmd" "$wt" >"$post" 2>&1 || true
+  "$test_cmd" --boundary "$boundary" --selection-from "$selection_manifest" \
+    --attempt-root "$STATE_DIR/attempts" "$wt" >"$post" 2>&1 || true
+  if ! grep -Fqx "$post_receipt_line" "$post"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    if ! record_unreadable_receipt merged; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner preliminary receipt missing or measured the wrong manifest side in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! grep -Fqx "$post_final_receipt_line" "$post"; then
+    git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+    if ! record_unreadable_receipt merged; then
+      echo "runner receipt outcome could not be persisted" >>"$DETAIL_LOG"
+    fi
+    echo "runner final receipt missing in post run; refusing to compare an unverified test command" >>"$DETAIL_LOG"
+    return 1
+  fi
   git -C "$REPO" worktree remove --force "$wt" >/dev/null 2>&1 || true
   rm -rf "$wt"
   # Keep both runs. They used to be mktemp'd and deleted, which left a blocked
   # merge with no evidence beyond a truncated log tail in the result JSON —
   # and no way to diagnose WHICH change broke WHICH test without redoing the
   # whole thing by hand. The triage reads these.
-  cp -f "$baseline" "$STATE_DIR/gate-baseline.log" 2>/dev/null || true
-  cp -f "$post" "$STATE_DIR/gate-post.log" 2>/dev/null || true
-  # set +e, not `|| true`: rc 2 (could not compare) must stay distinct from
-  # "no new failures" — the same idiom the sync script uses for this gate.
-  set +e
-  new_failures="$("$py" "$gate" new-failures --baseline "$baseline" --post "$post")"
-  rc=$?
-  set -e
-  if [ "$rc" -eq 2 ]; then
-    {
-      echo "could not compare the two test runs; refusing to land the merge."
-      echo "baseline tail:"; tail -n 5 "$baseline"
-      echo "post-merge tail:"; tail -n 5 "$post"
-    } >>"$DETAIL_LOG"
-    rm -f "$baseline" "$post"
+  if [ "$GATE_MODE" = apply ]; then
+    cp -f "$baseline" "$STATE_DIR/gate-baseline.log" 2>/dev/null || true
+    cp -f "$post" "$STATE_DIR/gate-post.log" 2>/dev/null || true
+  fi
+  # Node-aware cutover. The old log-difference block below is unreachable
+  # compatibility code until T13 removes its evidence projection; it is not
+  # consulted for this gate verdict.
+  baseline_nodes="$attempt_dir/gate-baseline.nodes.json"
+  merged_nodes="$attempt_dir/gate-merged.nodes.json"
+  upstream_nodes="$attempt_dir/gate-upstream-parent.nodes.json"
+  baseline_runner_nodes="$attempt_dir/gate-baseline.runner.nodes.json"
+  merged_runner_nodes="$attempt_dir/gate-merged.runner.nodes.json"
+  baseline_source=(--log "$baseline" --aggregate)
+  merged_source=(--log "$post" --aggregate)
+  if [ -s "$baseline_runner_nodes" ]; then
+    baseline_source=(--node-report "$baseline_runner_nodes")
+  fi
+  if [ -s "$merged_runner_nodes" ]; then
+    merged_source=(--node-report "$merged_runner_nodes")
+  fi
+  if ! "$py" "$gate" node-outcome "${baseline_source[@]}" >"$baseline_nodes" 2>>"$DETAIL_LOG" ||
+     ! "$py" "$gate" node-outcome "${merged_source[@]}" >"$merged_nodes" 2>>"$DETAIL_LOG"; then
+    echo "could not parse structured node outcomes; refusing to land the merge" >>"$DETAIL_LOG"
     return 1
   fi
-  rm -f "$baseline" "$post"
-  if [ -n "$new_failures" ]; then
-    {
-      echo "the merge introduces test failures:"
-      printf '%s\n' "$new_failures" | sed 's/^/  /'
-    } >>"$DETAIL_LOG"
-    # The list travels in a FILE, not a pipe: `python3 - <<PY` already claims
-    # stdin for the script itself, so a piped payload arrives empty and the
-    # evidence file records zero failures for a gate that just blocked.
-    local failures_file
-    failures_file="$(mktemp)"
-    printf '%s\n' "$new_failures" >"$failures_file"
-    python3 - "$STATE_DIR/gate-failures.json" "$after" "$before" "$failures_file" <<'PY' || true
-import datetime, json, sys
-path, merge_sha, before, failures_path = sys.argv[1:5]
-with open(failures_path, encoding="utf-8") as fh:
-    failures = [l.strip() for l in fh.read().splitlines() if l.strip()]
-json.dump({"merge_sha": merge_sha, "before": before, "new_failures": failures,
-           "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()},
-          open(path, "w"), ensure_ascii=False, indent=1)
+
+  probe_request="$attempt_dir/gate-upstream-probe.request.json"
+  probe_boundary_paths="$attempt_dir/gate-upstream-probe.boundary.paths"
+  if ! git -C "$REPO" ls-tree -r --name-only "$boundary" -- tests/ >"$probe_boundary_paths" 2>>"$DETAIL_LOG"; then
+    echo "could not list upstream-parent test paths for the narrow probe" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! "$py" "$gate" probe-request \
+    --baseline "$baseline_nodes" --merged "$merged_nodes" \
+    --manifest "$selection_manifest" --boundary-paths "$probe_boundary_paths" \
+    >"$probe_request" 2>>"$DETAIL_LOG"; then
+    echo "could not build the narrow upstream-parent probe request; refusing to land the merge" >>"$DETAIL_LOG"
+    return 1
+  fi
+  merged_isolated_nodes="$attempt_dir/gate-merged-isolated.nodes.json"
+  merged_isolated_log="$attempt_dir/gate-merged-isolated.log"
+  merged_probe_wt=""
+  merged_isolated_probe_nodeids="$attempt_dir/gate-merged-isolated.nodeids.json"
+  if ! "$py" - "$probe_request" "$merged_isolated_probe_nodeids" <<'PY'
+import json, sys
+from pathlib import Path
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+nodeids = request.get("nodeids")
+if not isinstance(nodeids, list) or not all(isinstance(item, str) for item in nodeids):
+    raise SystemExit("probe request nodeids must be a string list")
+Path(sys.argv[2]).write_text(json.dumps(nodeids), encoding="utf-8")
+raise SystemExit(0 if nodeids else 1)
 PY
-    rm -f "$failures_file"
+  then
+    printf '%s\n' '{"collect_ok":true,"probe_ok":true,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+    : >"$merged_isolated_log"
+  else
+    if ! merged_probe_wt="$(mktemp -d -t hermes-merged-probe-XXXXXX)" ||
+       ! git -C "$REPO" worktree add --detach "$merged_probe_wt" "$after" >>"$DETAIL_LOG" 2>&1; then
+      rm -rf "$merged_probe_wt"
+      printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+      : >"$merged_isolated_log"
+      echo "could not create the merged-tree probe worktree" >>"$DETAIL_LOG"
+    else
+      "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_request" "$merged_probe_wt" >"$merged_isolated_log" 2>&1 || true
+      if ! merged_probe_final_receipt_line="$(probe_final_receipt_line "$probe_request" 2>>"$DETAIL_LOG")" ||
+         ! grep -Fqx "$merged_probe_final_receipt_line" "$merged_isolated_log"; then
+        record_unreadable_probe "$merged_isolated_nodes" "merged-isolated"
+      else
+        merged_isolated_runner_nodes="$attempt_dir/gate-merged-isolated.runner.nodes.json"
+        merged_isolated_source=(--log "$merged_isolated_log" --aggregate)
+        if [ -s "$merged_isolated_runner_nodes" ]; then
+          merged_isolated_source=(--node-report "$merged_isolated_runner_nodes")
+        fi
+        if ! "$py" "$gate" node-outcome "${merged_isolated_source[@]}" \
+          --expected-nodeids "$merged_isolated_probe_nodeids" >"$merged_isolated_nodes" 2>>"$DETAIL_LOG"; then
+          printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$merged_isolated_nodes"
+        fi
+      fi
+      git -C "$REPO" worktree remove --force "$merged_probe_wt" >/dev/null 2>&1 || true
+      rm -rf "$merged_probe_wt"
+    fi
+  fi
+  probe_filtered_request="$attempt_dir/gate-upstream-probe.filtered.request.json"
+  probe_available_nodeids="$attempt_dir/gate-upstream-probe.available.nodeids.json"
+  probe_nodeids="$attempt_dir/gate-upstream-probe.nodeids.json"
+  probe_log="$attempt_dir/gate-upstream-probe.log"
+  if ! probe_wt="$(mktemp -d -t hermes-upstream-probe-XXXXXX)" ||
+     ! git -C "$REPO" worktree add --detach "$probe_wt" "$boundary" >>"$DETAIL_LOG" 2>&1; then
+    rm -rf "$probe_wt"
+    echo "could not create the upstream-parent probe worktree" >>"$DETAIL_LOG"
     return 1
   fi
-  rm -f "$STATE_DIR/gate-failures.json"
+  if ! "$py" - "$probe_request" "$probe_wt" "$probe_available_nodeids" <<'PY'
+import json, subprocess, sys
+from pathlib import Path
+
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+worktree = Path(sys.argv[2])
+available = []
+for nodeid in request.get("nodeids", []):
+    path = nodeid.split("::", 1)[0]
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", path, "--collect-only", "-q",
+            "-p", "no:cacheprovider", "--timeout=90",
+        ],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    output = (proc.stdout + proc.stderr).splitlines()
+    if proc.returncode == 0 and any(line.strip() == nodeid for line in output):
+        available.append(nodeid)
+Path(sys.argv[3]).write_text(json.dumps(sorted(set(available))), encoding="utf-8")
+PY
+  then
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+    echo "could not collect upstream-parent probe node presence" >>"$DETAIL_LOG"
+    return 1
+  fi
+  if ! "$py" "$gate" filter-probe-request \
+    --request "$probe_request" --available-nodeids "$probe_available_nodeids" \
+    >"$probe_filtered_request" 2>>"$DETAIL_LOG"; then
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+    echo "could not filter the upstream-parent probe request" >>"$DETAIL_LOG"
+    return 1
+  fi
+  "$py" - "$probe_filtered_request" "$probe_nodeids" <<'PY'
+import json, sys
+from pathlib import Path
+request = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+Path(sys.argv[2]).write_text(json.dumps(request.get("nodeids", [])), encoding="utf-8")
+PY
+  if ! "$py" - "$probe_nodeids" <<'PY' >/dev/null
+import json, sys
+from pathlib import Path
+raise SystemExit(0 if json.loads(Path(sys.argv[1]).read_text()) else 1)
+PY
+  then
+    printf '%s\n' '{"collect_ok":true,"probe_ok":true,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
+    : >"$probe_log"
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+  else
+    "$test_cmd" --boundary "$boundary" --probe-nodeids-from "$probe_filtered_request" "$probe_wt" >"$probe_log" 2>&1 || true
+    if ! upstream_probe_final_receipt_line="$(probe_final_receipt_line "$probe_filtered_request" 2>>"$DETAIL_LOG")" ||
+       ! grep -Fqx "$upstream_probe_final_receipt_line" "$probe_log"; then
+      record_unreadable_probe "$upstream_nodes" "upstream-parent"
+    else
+      upstream_runner_nodes="$attempt_dir/gate-upstream-probe.runner.nodes.json"
+      upstream_source=(--log "$probe_log" --aggregate)
+      if [ -s "$upstream_runner_nodes" ]; then
+        upstream_source=(--node-report "$upstream_runner_nodes")
+      fi
+      if ! "$py" "$gate" node-outcome "${upstream_source[@]}" \
+        --expected-nodeids "$probe_nodeids" >"$upstream_nodes" 2>>"$DETAIL_LOG"; then
+        printf '%s\n' '{"collect_ok":false,"probe_ok":false,"collected_nodeids":[],"failed_nodeids":[]}' >"$upstream_nodes"
+      fi
+    fi
+    git -C "$REPO" worktree remove --force "$probe_wt" >/dev/null 2>&1 || true
+    rm -rf "$probe_wt"
+  fi
+
+  classification_json="$attempt_dir/gate-classification.json"
+  if ! "$py" "$gate" classify-node-failures \
+    --baseline "$baseline_nodes" --upstream-parent "$upstream_nodes" \
+    --merged "$merged_nodes" --merged-isolated "$merged_isolated_nodes" \
+    --manifest "$selection_manifest" \
+    >"$classification_json" 2>>"$DETAIL_LOG"; then
+    echo "could not classify structured node outcomes; refusing to land the merge" >>"$DETAIL_LOG"
+    return 1
+  fi
+  printf 'node-aware gate classification: %s\n' "$(cat "$classification_json")" >>"$DETAIL_LOG"
+
+  local t11_failures_file
+  t11_failures_file="$(mktemp)"
+  "$py" - "$baseline_nodes" "$merged_nodes" "$t11_failures_file" <<'PY'
+import json, sys
+from pathlib import Path
+baseline = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+merged = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+legacy = sorted(set(merged.get("failed_nodeids", [])) - set(baseline.get("failed_nodeids", [])))
+Path(sys.argv[3]).write_text("\n".join(legacy) + ("\n" if legacy else ""), encoding="utf-8")
+PY
+  if ! "$py" "$gate" persist-gate-failures \
+    --classification "$classification_json" \
+    --merge-sha "$after" \
+    --before "$before" \
+    --legacy-failures "$t11_failures_file" \
+    --baseline-nodes "$baseline_nodes" \
+    --merged-nodes "$merged_nodes" \
+    --baseline-log "$baseline" \
+    --merged-log "$post" \
+    --output "$attempt_dir/gate-failures.json" >>"$DETAIL_LOG" 2>&1; then
+    echo "could not persist normalized gate-failures.json" >>"$DETAIL_LOG"
+    rm -f "$t11_failures_file"
+    return 1
+  fi
+  blocking_count="$("$py" - "$attempt_dir/gate-failures.json" <<'PY'
+import json, sys
+from pathlib import Path
+print(len(json.loads(Path(sys.argv[1]).read_text()).get("blocking_failures", [])))
+PY
+  )"
+  unknown_count="$("$py" - "$attempt_dir/gate-failures.json" <<'PY'
+import json, sys
+from pathlib import Path
+failures = json.loads(Path(sys.argv[1]).read_text())
+print(len(failures.get("unknown", [])) + len(failures.get("unreadable_runs", [])))
+PY
+  )"
+  if [ "$blocking_count" -ne 0 ] || [ "$unknown_count" -ne 0 ]; then
+    {
+      echo "node-aware gate refused to land the merge."
+      echo "blocking_failures=$blocking_count unknown=$unknown_count"
+      echo "classification:"
+      cat "$classification_json"
+    } >>"$DETAIL_LOG"
+    if [ "$unknown_count" -ne 0 ]; then
+      GATE_OUTCOME="unknown"
+    else
+      GATE_OUTCOME="block"
+    fi
+    rm -f "$t11_failures_file"
+    if [ "$GATE_MODE" = apply ]; then
+      cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json" 2>/dev/null || true
+    fi
+    return 1
+  fi
+  rm -f "$t11_failures_file"
+  if [ "$GATE_MODE" = apply ]; then
+    cp -f "$attempt_dir/gate-failures.json" "$STATE_DIR/gate-failures.json"
+    rm -f "$attempt_dir/gate-failures.json"
+  fi
   return 0
 }
 
@@ -388,13 +811,23 @@ PY
 run_gate_triage() {
   [ "$ACTION" = apply-triage-fixes ] && return 0
   [ -f "$STATE_DIR/gate-failures.json" ] || return 0
-  local triage py
+  local triage py expected_merge expected_before
+  expected_merge="${1:-}"
+  expected_before="${2:-}"
   triage="$SCRIPTS_DIR/upstream_sync_triage.py"
   [ -f "$triage" ] || triage="$REPO/scripts/upstream_sync_triage.py"
   [ -f "$triage" ] || { echo "warning: upstream_sync_triage.py not found; no triage" >>"$DETAIL_LOG"; return 0; }
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
   [ -x "$py" ] || py="$(command -v python3)"
-  "$py" "$triage" --state "$STATE_DIR" --repo "$REPO" >>"$DETAIL_LOG" 2>&1 || \
+  if [ -z "$expected_merge" ] || [ -z "$expected_before" ]; then
+    echo "triage identity unavailable: expected merge_sha and before are required; no proposal will be made" >>"$DETAIL_LOG"
+    return 0
+  fi
+  local -a triage_args=(
+    "$py" "$triage" --state "$STATE_DIR" --repo "$REPO"
+    --expected-merge-sha "$expected_merge" --expected-before "$expected_before"
+  )
+  "${triage_args[@]}" >>"$DETAIL_LOG" 2>&1 || \
     echo "warning: gate triage failed (see above); the gate outcome stands" >>"$DETAIL_LOG"
   return 0
 }
@@ -428,6 +861,9 @@ run_post_update_pipeline() {
 # UPSTREAM_SHA, SCRATCH, SCRATCH_NAME, BACKUP_REF from the caller. Every early
 # return follows a write_result, so exiting there is terminal by design.
 land_merge() {
+    if [ -z "$BREAK_GLASS_NOTICE" ] &&        grep -q '"invariants_break_glass"' "$STATE_DIR/apply-prepare.json" 2>/dev/null; then
+      BREAK_GLASS_NOTICE="BREAK_GLASS: structural gate was not executed; merge continued only via explicit manual emergency bypass."
+    fi
     # A merge that is already the branch tip is a duplicate hand-off, not a
     # mismatch: reporting it as a parent mismatch overwrote the real outcome of
     # the run that had just landed it, telling the operator the apply had failed
@@ -475,10 +911,10 @@ land_merge() {
       write_result failed "merge_sha parent mismatch: parents ($MERGE_PARENTS) are not (HEAD $HEAD_SHA, approved upstream $UPSTREAM_FULL) — refusing; repo untouched, no rollback."
       exit 0
     fi
-    if ! merge_passes_fork_tests "$HEAD_SHA" "$MERGE_SHA"; then
+    if ! run_gate "$HEAD_SHA" "$MERGE_SHA" "$UPSTREAM_FULL" "apply-merge:$MERGE_SHA" apply; then
       FAILED_STAGE=test-gate
       # Before the report, not after: the operator's message IS the triage.
-      run_gate_triage
+      run_gate_triage "$MERGE_SHA" "$HEAD_SHA"
       write_result failed "the agent merge does not pass the fork's tests — not landed; repo untouched, no rollback, decision kept for a rework. $(cat "$DETAIL_LOG")"
       exit 0
     fi
@@ -496,6 +932,9 @@ land_merge() {
       write_result failed "fast-forward to the agent merge failed — repo untouched, no rollback. $(cat "$DETAIL_LOG")"
       exit 0
     fi
+    if [ -n "$BREAK_GLASS_NOTICE" ]; then
+      echo "$BREAK_GLASS_NOTICE" >>"$DETAIL_LOG"
+    fi
     run_post_update_pipeline "$HEAD_SHA"
     # The clone is a full working copy; keep it only when it may still be
     # needed for diagnosis.
@@ -504,11 +943,99 @@ land_merge() {
     fi
 }
 
+# gate-only — run the same gate composition without changing live HEAD. Its
+# result is evidence inside the generation, not the apply control plane.
+write_gate_only_result() {
+  local status="$1" verdict="$2"
+  [ -n "$GATE_ATTEMPT_DIR" ] || return 1
+  python3 - "$GATE_ATTEMPT_DIR/attempt-result.json" "$status" "$verdict" "$DETAIL_LOG" <<'PY'
+import datetime, json, os, sys, tempfile
+from pathlib import Path
+
+target, status, verdict, detail_path = sys.argv[1:]
+try:
+    detail = Path(detail_path).read_text(encoding="utf-8", errors="replace")
+except OSError:
+    detail = ""
+payload = {
+    "schema_version": "upstream-sync-gate-attempt-result/v1",
+    "action": "gate-only",
+    "status": status,
+    "gate_verdict": verdict,
+    "attempt_id": os.environ.get("GATE_ATTEMPT_ID", ""),
+    "before": os.environ.get("GATE_BEFORE", ""),
+    "after": os.environ.get("GATE_AFTER", ""),
+    "boundary": os.environ.get("GATE_BOUNDARY", ""),
+    "detail": detail[-4000:],
+    "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+destination = Path(target)
+fd, temporary = tempfile.mkstemp(prefix=".attempt-result.", dir=destination.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=1)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, destination)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+gate_only() {
+  local before after boundary attempt_id current
+  before="$(json_field before)"
+  after="$(json_field after)"
+  boundary="$(json_field boundary)"
+  attempt_id="$(json_field attempt_id)"
+  if [ -z "$before" ] || [ -z "$after" ] || [ -z "$boundary" ] || [ -z "$attempt_id" ]; then
+    echo "gate-only needs before, after, boundary, and attempt_id; live repo untouched." >&2
+    rm -f "$PROCESSING"
+    return 1
+  fi
+  if ! current="$(git -C "$REPO" rev-parse HEAD 2>>"$DETAIL_LOG")" || [ "$current" != "$before" ]; then
+    echo "gate-only before $before is not the live HEAD ${current:-unknown}; refusing to run." >&2
+    rm -f "$PROCESSING"
+    return 1
+  fi
+  if run_gate "$before" "$after" "$boundary" "$attempt_id" gate-only; then
+    export GATE_ATTEMPT_ID GATE_BEFORE GATE_AFTER GATE_BOUNDARY
+    printf 'gate-only completed with gate_verdict=pass; live repo untouched.\n' >>"$DETAIL_LOG"
+    write_gate_only_result ok pass
+  else
+    export GATE_ATTEMPT_ID GATE_BEFORE GATE_AFTER GATE_BOUNDARY
+    printf 'gate-only completed with gate_verdict=%s; live repo untouched.\n' "$GATE_OUTCOME" >>"$DETAIL_LOG"
+    write_gate_only_result failed "$GATE_OUTCOME"
+  fi
+  rm -f "$PROCESSING"
+}
+
 # apply-decisions — the host-owned path. pending.json carries every decision
 # (policy / memory / operator); nothing runs in a sandbox and no agent holds
 # state. Each step writes its outcome to the state dir, so a failed run leaves
 # a precise report and a preserved clone rather than a half-applied branch,
 # and a re-request after a manual fix resumes instead of starting over.
+PREPARE_INVARIANT_MODE_ARGS=()
+
+load_prepare_invariant_mode() {
+  PREPARE_INVARIANT_MODE_ARGS=()
+  local config="$STATE_DIR/invariant-mode.json" mode
+  [ -f "$config" ] || return 0
+  mode="$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")).get("invariant_mode"); print(value or "")' "$config" 2>/dev/null || true)"
+  case "$mode" in
+    block|report)
+      PREPARE_INVARIANT_MODE_ARGS=(--invariant-mode "$mode")
+      ;;
+    *)
+      echo "invalid invariant mode config at $config; expected invariant_mode=block|report" >>"$DETAIL_LOG"
+      return 1
+      ;;
+  esac
+}
+
 apply_decisions() {
   local py apply prep_status
   py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
@@ -522,49 +1049,49 @@ apply_decisions() {
     write_result failed "apply-decisions: no pending.json — nothing decided to apply; repo untouched."
     exit 0
   fi
+  if ! load_prepare_invariant_mode; then
+    FAILED_STAGE=prepare
+    write_result failed "apply-decisions: invariant mode config is invalid; repo untouched. $(cat "$DETAIL_LOG")"
+    exit 0
+  fi
   UPSTREAM_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"upstream_head\") or \"\")" "$STATE_DIR/pending.json" 2>/dev/null || true)"
   if [ -z "$UPSTREAM_SHA" ]; then
     write_result failed "apply-decisions: pending.json has no upstream_head; repo untouched."
     exit 0
   fi
 
-  # Resume: a preserved clone with no conflict markers left is someone's hand
-  # work — take it as is. Otherwise (re)build it.
-  prep_status="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"status\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
-  if [ -d "$SCRATCH/.git" ] && [ "$prep_status" = ready ] && \
-     [ -z "$(git -C "$SCRATCH" ls-files -u 2>/dev/null)" ] && \
-     [ "$(git -C "$SCRATCH" rev-parse HEAD 2>/dev/null)" = "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" -o -n "$(git -C "$SCRATCH" rev-parse -q --verify MERGE_HEAD 2>/dev/null)" ]; then
-    echo "apply-decisions: resuming from the preserved clone (no unmerged paths)" >>"$DETAIL_LOG"
-  else
-    rm -rf "$SCRATCH"
-    set +e
-    "$py" "$apply" prepare --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok >>"$DETAIL_LOG" 2>&1
-    rc=$?
-    set -e
-    case "$rc" in
-      0) ;;
-      4)
-        # A new security-path conflict: the policy does not decide those. Ask
-        # (report_to_thread posts the question) and keep everything armed.
-        write_result awaiting_decision "apply-decisions: a new conflict on a security-sensitive path needs the operator's decision; nothing applied. $(cat "$DETAIL_LOG")"
-        exit 0
-        ;;
-      *)
-        FAILED_STAGE=prepare
-        write_result failed "apply-decisions: prepare failed (rc=$rc); repo untouched. $(cat "$DETAIL_LOG")"
-        exit 0
-        ;;
-    esac
-    set +e
-    "$py" "$apply" resolve-llm --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
-    rc=$?
-    set -e
-    if [ "$rc" -ne 0 ]; then
+  # One helper owns the pair-bound resume decision, stale-attempt archive, and
+  # fresh prepare. No caller may reimplement one of those steps.
+  set +e
+  "$py" "$apply" prepare-or-resume --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" --auto-policy --in-flight-ok "${PREPARE_INVARIANT_MODE_ARGS[@]}" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0) ;;
+    10)
+      echo "apply-decisions: resuming from the pair-bound preserved clone" >>"$DETAIL_LOG"
+      ;;
+    4)
+      # A new security-path conflict: the policy does not decide those. Ask
+      # (report_to_thread posts the question) and keep everything armed.
+      write_result awaiting_decision "apply-decisions: a new conflict on a security-sensitive path needs the operator's decision; nothing applied. $(cat "$DETAIL_LOG")"
+      exit 0
+      ;;
+    *)
+      FAILED_STAGE=prepare
+      write_result failed "apply-decisions: prepare failed (rc=$rc); repo untouched. $(cat "$DETAIL_LOG")"
+      exit 0
+      ;;
+  esac
+  set +e
+  "$py" "$apply" resolve-llm --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
       FAILED_STAGE=resolve
       write_result failed "apply-decisions: the model could not resolve every hunk; the clone is preserved at $SCRATCH with markers in place, decision kept armed. $(cat "$DETAIL_LOG")"
       exit 0
     fi
-  fi
   set +e
   "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
   rc=$?
@@ -576,21 +1103,61 @@ apply_decisions() {
     # tests went stale, which is what the triage flow offers to patch. Here the
     # merge itself lost something: patching tests would bury the finding along
     # with the code it points at (2026-08-19).
-    if grep -q "invariants_failed" "$DETAIL_LOG"; then
+    if grep -Eq "invariants_failed|invariant_origin_incomplete" "$DETAIL_LOG"; then
       FAILED_STAGE=invariants
       findings="$(python3 "$SCRIPTS_DIR/upstream_sync_findings.py" "$DETAIL_LOG" 2>/dev/null || true)"
       write_result failed "apply-decisions: the resolved merge failed its structural checks — nothing was committed, the clone is preserved at $SCRATCH.
 ${findings:-(see finalize-detail.log)}
 
-Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case re-run with HERMES_SYNC_SKIP_INVARIANTS=1."
+Not a stale-test failure — do not answer with the triage vocabulary. Either the resolution dropped code that has to come back, or every finding is intended, in which case repair the resolution, or answer each listed soft finding with its exact `ack INV-...` receipt; hard findings cannot be acknowledged. When the invariant state is blocked, receipt interception stays disabled until every hard finding is repaired."
       exit 0
     fi
     write_result failed "apply-decisions: could not commit the merge (rc=$rc — unresolved paths, or the live branch moved); clone preserved. $(cat "$DETAIL_LOG")"
     exit 0
   fi
   MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(\"merge_sha\") or \"\")" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if grep -q '"invariants_break_glass"' "$STATE_DIR/apply-prepare.json" 2>/dev/null; then
+    BREAK_GLASS_NOTICE="BREAK_GLASS: structural gate was not executed; merge continued only via explicit manual emergency bypass."
+  fi
   if [ -z "$MERGE_SHA" ]; then
     write_result failed "apply-decisions: commit reported no merge_sha; clone preserved."
+    exit 0
+  fi
+  land_merge
+}
+
+# ack-invariant — the operator acknowledged one exact soft finding. The
+# Python gate re-reads the merge record and all receipts; it commits only when
+# every soft finding still has a matching fingerprint and hard findings are gone.
+resume_invariant_ack() {
+  local py apply rc
+  py="${HERMES_PYTHON:-$REPO/venv/bin/python}"
+  [ -x "$py" ] || py="$(command -v python3)"
+  apply="$SCRIPTS_DIR/upstream_sync_apply.py"
+  [ -f "$apply" ] || apply="$REPO/scripts/upstream_sync_apply.py"
+  SCRATCH_NAME="scratch"
+  SCRATCH="$STATE_DIR/$SCRATCH_NAME"
+  SCRATCH_FOR_REPORT="$SCRATCH"
+  if [ ! -f "$STATE_DIR/invariants-pending.json" ] || [ ! -d "$SCRATCH/.git" ]; then
+    write_result failed "ack-invariant: no armed invariant state or preserved clone; repo untouched."
+    exit 0
+  fi
+  set +e
+  "$py" "$apply" commit --state "$STATE_DIR" --live "$REPO" --scratch "$SCRATCH_NAME" >>"$DETAIL_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    if grep -q 'invariants_failed' "$DETAIL_LOG"; then
+      write_result awaiting_decision "ack-invariant: receipt recorded, but other findings remain or a fingerprint changed; repo untouched. $(cat "$DETAIL_LOG")"
+    else
+      write_result failed "ack-invariant: commit refused (rc=$rc); clone preserved, repo untouched. $(cat "$DETAIL_LOG")"
+    fi
+    exit 0
+  fi
+  UPSTREAM_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('upstream_head') or '')" "$STATE_DIR/pending.json" 2>/dev/null || true)"
+  MERGE_SHA="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('merge_sha') or '')" "$STATE_DIR/apply-prepare.json" 2>/dev/null || true)"
+  if [ -z "$MERGE_SHA" ] || [ -z "$UPSTREAM_SHA" ]; then
+    write_result failed "ack-invariant: committed merge or gated upstream point is unknown; clone preserved."
     exit 0
   fi
   land_merge
@@ -725,6 +1292,12 @@ case "$ACTION" in
     ;;
   apply-triage-fixes)
     apply_triage_fixes
+    ;;
+  gate-only)
+    gate_only
+    ;;
+  ack-invariant)
+    resume_invariant_ack
     ;;
   rollback)
     if [ -z "$BACKUP_REF" ]; then

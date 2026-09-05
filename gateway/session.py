@@ -3847,6 +3847,9 @@ class SessionStore:
 
     def _append_transcript_message(self, session_id: str, message: Dict[str, Any]) -> None:
         """Write one transcript row. Caller handles retry queuing."""
+        from agent.replay_cleanup import project_protocol_invalid_persistence
+
+        message = project_protocol_invalid_persistence(message)
         self._db.append_message(
             session_id=session_id,
             role=message.get("role", "unknown"),

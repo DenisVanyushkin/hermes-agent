@@ -41,6 +41,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from upstream_sync_gate import parse_merge_tree  # noqa: E402
+from upstream_sync_index import (  # noqa: E402
+    read_blob, read_stage_zero_blob, snapshot, stage_zero_entries, tree_entries, zlist,
+)
+from upstream_sync_receipts import finding_key, fingerprint, receipt_matches  # noqa: E402
 from upstream_sync_policy import decide_paths, number_features  # noqa: E402
 
 SCHEMA = "upstream-sync-apply/v1"
@@ -59,6 +63,7 @@ EXIT_UNRESOLVED = 6
 EXIT_LIVE_MOVED = 7
 EXIT_APPLY_FAILED = 8
 EXIT_TIMEOUT = 9
+EXIT_RESUMED = 10
 
 CONFLICT_START = "<<<<<<< "
 CONFLICT_BASE = "||||||| "
@@ -171,6 +176,85 @@ def unmerged_stages(repo: Path) -> dict:
         stage = int(meta.split(" ")[2])
         stages.setdefault(path, set()).add(stage)
     return stages
+
+
+def _cached_paths(repo: Path, base: str) -> set[str]:
+    return set(zlist(repo, "diff", "--cached", "--name-only", "-z", base, "--"))
+
+
+def _changed_paths(repo: Path, left: str, right: str) -> set[str]:
+    return set(zlist(repo, "diff", "--name-only", "-z", left, right, "--"))
+
+
+def _commit_tree_contract_error(scratch: Path) -> str | None:
+    unstaged = git(scratch, "diff", "--quiet", "--", check=False)
+    if unstaged.returncode not in (0, 1):
+        return f"could not inspect unstaged changes: {unstaged.stderr.strip()}"
+    untracked = zlist(scratch, "ls-files", "--others", "--exclude-standard", "-z")
+    if unstaged.returncode == 1 or untracked:
+        details = []
+        if unstaged.returncode == 1:
+            details.append("unstaged tracked changes")
+        if untracked:
+            details.append("untracked files: " + ", ".join(untracked[:8]))
+        return ("the clone has " + " and ".join(details) + "; the gate only examines "
+                "the tree that will be committed — the edit was preserved; execute "
+                "`git add -- <paths>` and retry")
+    return None
+
+
+def _decision_conflicts(pending: dict) -> list[str]:
+    seen: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for feature in pending.get("features", []):
+        decision = feature.get("decision")
+        if decision not in VALID_DECISIONS:
+            continue
+        for path in feature.get("files", []):
+            previous = seen.get(path)
+            if previous is not None and previous != decision:
+                conflicts.add(path)
+            seen[path] = decision
+    return sorted(conflicts)
+
+
+def _resolution_policy_snapshot(scratch: Path, pending: dict, local_base: str,
+                                upstream_head: str, conflicts: list[str]) -> tuple[dict, str]:
+    base = git(scratch, "merge-base", local_base, upstream_head).stdout.strip()
+    by_file, missing = decisions_by_file(pending)
+    ambiguous = _decision_conflicts(pending)
+    if missing:
+        raise ValueError("resolution policy has undecided features: " + ", ".join(map(str, missing)))
+    if ambiguous:
+        raise ValueError("resolution policy is ambiguous for path(s): " + ", ".join(ambiguous))
+    missing_policy = sorted(set(conflicts) - set(by_file))
+    if missing_policy:
+        raise ValueError("conflicted path has no immutable resolution policy: " + ", ".join(missing_policy))
+    changed = _changed_paths(scratch, base, local_base) | _changed_paths(scratch, base, upstream_head)
+    return {path: by_file.get(path, "merge-both") for path in sorted(changed)}, base
+
+
+def _decorate_findings(scratch: Path, prep: dict, report) -> None:
+    base_entries = tree_entries(scratch, prep["merge_scope"]["merge_base"])
+    ours_entries = tree_entries(scratch, prep["local_base"])
+    theirs_entries = tree_entries(scratch, prep["upstream_head"])
+    result_entries = stage_zero_entries(scratch)
+    policies = prep.get("resolution_policy_by_path") or {}
+    for item in report.findings:
+        policy = policies.get(item.path, "merge-both")
+        fp = fingerprint(
+            path=item.path,
+            kind=item.kind,
+            symbol=item.symbol,
+            policy=policy,
+            base=snapshot(base_entries, item.path),
+            ours=snapshot(ours_entries, item.path),
+            theirs=snapshot(theirs_entries, item.path),
+            result=snapshot(result_entries, item.path),
+        )
+        object.__setattr__(item, "finding_id", fp["id"])
+        object.__setattr__(item, "fingerprint", fp)
+        object.__setattr__(item, "policy", policy)
 
 
 def take_side(repo: Path, path: str, stages: set, *, ours: bool) -> None:
@@ -298,6 +382,12 @@ def cmd_prepare(args) -> int:
                       "reason": f"{name} exists — a finalize is in flight; wait for it first"})
                 return EXIT_USAGE
     pending = load_pending(state)
+    # A new prepare deliberately rebases the decision set onto the current live
+    # HEAD. Any prior invariant receipt state is invalidated below; the pending
+    # conflict decision itself is still evaluated against this live snapshot.
+    stale_receipts = state / "invariants-pending.json"
+    if stale_receipts.exists():
+        stale_receipts.unlink()
     upstream_head = pending["upstream_head"]
     by_file, missing = decisions_by_file(pending)
     if missing:
@@ -335,6 +425,10 @@ def cmd_prepare(args) -> int:
         "new_conflicts": sorted(set(conflicts) - set(by_file)),
         "no_longer_conflicting": sorted(set(by_file) - set(conflicts)),
         "auto_resolved": [], "needs_manual": [], "policy_decided": [],
+        "merge_scope": {"local_parent": local_base, "upstream_parent": upstream_head,
+                        "merge_base": None},
+        "resolution_policy_by_path": {},
+        "invariant_mode": _invariant_mode(args, pending),
         "handed_off_at": None, "merge_sha": None,
     }
     if summary["new_conflicts"] and args.auto_policy:
@@ -349,6 +443,19 @@ def cmd_prepare(args) -> int:
         _write_json(state / "apply-prepare.json", summary)
         emit(summary)
         return EXIT_NEW_CONFLICTS
+
+    try:
+        policy_by_path, merge_base = _resolution_policy_snapshot(
+            scratch, pending, local_base, upstream_head, conflicts
+        )
+    except ValueError as exc:
+        summary["status"] = "policy_error"
+        summary["reason"] = str(exc)
+        _write_json(state / "apply-prepare.json", summary)
+        emit(summary)
+        return EXIT_UNRESOLVED
+    summary["merge_scope"]["merge_base"] = merge_base
+    summary["resolution_policy_by_path"] = policy_by_path
 
     # Identity is passed explicitly: the sandbox has none configured, and a
     # conflict-free merge commits on the spot.
@@ -407,48 +514,287 @@ def cmd_prepare(args) -> int:
     return EXIT_OK
 
 
+def _resume_matches_attempt(live: Path, scratch: Path, pending: dict,
+                            prep: dict) -> bool:
+    """Return true only when the preserved clone is bound to this exact pair."""
+    try:
+        live_head = git(live, "rev-parse", "HEAD").stdout.strip()
+        scratch_head = git(scratch, "rev-parse", "HEAD").stdout.strip()
+        merge_head = git(scratch, "rev-parse", "-q", "--verify", "MERGE_HEAD",
+                         check=False).stdout.strip()
+        if prep.get("status") != "ready":
+            return False
+        if pending.get("local_head") != live_head:
+            return False
+        if prep.get("local_base") != live_head:
+            return False
+        if not pending.get("upstream_head") or prep.get("upstream_head") != pending.get("upstream_head"):
+            return False
+        if scratch_head != live_head:
+            return False
+        return not merge_head or merge_head == pending["upstream_head"]
+    except (GitError, OSError, KeyError):
+        return False
+
+
+def _recover_incomplete_archive(state: Path) -> None:
+    """Restore a commit marker left in staging after an interrupted move."""
+    archive_root = state / "apply-attempts"
+    if not archive_root.exists():
+        return
+    staging = sorted(
+        path for path in archive_root.iterdir()
+        if path.is_dir() and path.name.startswith(".") and path.name.endswith(".tmp")
+    )
+    if len(staging) > 1:
+        raise OSError("multiple incomplete apply-attempt archives")
+    if staging and not (state / "pending.json").exists():
+        marker = staging[0] / "pending.json"
+        if marker.exists():
+            os.replace(marker, state / "pending.json")
+
+
+def _archive_stale_attempt(state: Path, scratch: Path) -> None:
+    """Move old apply inputs into one append-only archive, pending last."""
+    archive_root = state / "apply-attempts"
+    archive_root.mkdir(exist_ok=True)
+    staging = sorted(
+        path for path in archive_root.iterdir()
+        if path.is_dir() and path.name.startswith(".") and path.name.endswith(".tmp")
+    )
+    if len(staging) > 1:
+        raise OSError("multiple incomplete apply-attempt archives")
+    if staging:
+        tmp = staging[0]
+        final = archive_root / tmp.name[1:-4]
+    else:
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+        tmp = archive_root / f".{stamp}-{os.getpid()}.tmp"
+        final = archive_root / f"{stamp}-{os.getpid()}"
+        suffix = 0
+        while tmp.exists() or final.exists():
+            suffix += 1
+            tmp = archive_root / f".{stamp}-{os.getpid()}-{suffix}.tmp"
+            final = archive_root / f"{stamp}-{os.getpid()}-{suffix}"
+        tmp.mkdir()
+    for name in ("apply-prepare.json", "invariants-pending.json"):
+        path = state / name
+        if path.exists():
+            os.replace(path, tmp / name)
+    if scratch.exists():
+        os.replace(scratch, tmp / scratch.name)
+    pending = state / "pending.json"
+    if pending.exists():
+        os.replace(pending, tmp / "pending.json")
+    if not (tmp / "pending.json").exists():
+        raise OSError("incomplete apply-attempt archive has no pending marker")
+    os.replace(tmp, final)
+
+
+def cmd_prepare_or_resume(args) -> int:
+    """Resume only a pair-bound clone; otherwise archive it and prepare fresh."""
+    state, live = Path(args.state), Path(args.live)
+    scratch = state / args.scratch
+    pending_path = state / "pending.json"
+    _recover_incomplete_archive(state)
+    if not pending_path.exists():
+        emit({"status": "error", "reason": "pending.json missing"})
+        return EXIT_USAGE
+    pending = load_pending(state)
+    prep_path = state / "apply-prepare.json"
+    try:
+        prep = json.loads(prep_path.read_text(encoding="utf-8")) if prep_path.exists() else {}
+    except (OSError, ValueError):
+        prep = {}
+    if scratch.is_dir() and _resume_matches_attempt(live, scratch, pending, prep):
+        emit({"status": "resumed", "local_head": pending["local_head"],
+              "upstream_head": pending["upstream_head"], "scratch": str(scratch)})
+        return EXIT_RESUMED
+
+    live_head = git(live, "rev-parse", "HEAD").stdout.strip()
+    _archive_stale_attempt(state, scratch)
+    pending["local_head"] = live_head
+    _write_json(pending_path, pending)
+    return cmd_prepare(args)
+
+
 # --------------------------------------------------------------------------- handoff
 
 def _invariant_report(scratch: Path, prep: dict):
-    """Structural checks over the resolved tree, before it becomes a commit.
+    """Check the stage-0 index tree that the next commit will contain.
 
-    Parsing is cheap enough to run over everything the merge touches. The
-    definition diff is not - it needs both parents of every file - so it runs
-    only where both sides actually edited the same file. Nowhere else can a
-    resolver drop code: a file taken wholesale from one side cannot lose any.
+    All path sets and blobs come from the index/tree object database. The work
+    tree is deliberately not consulted here: an unstaged edit is rejected by
+    ``_commit_tree_contract_error`` before this function runs.
     """
     from upstream_sync_invariants import check_merge
 
-    local_base, upstream_head = prep["local_base"], prep["upstream_head"]
-    base = git(scratch, "merge-base", local_base, upstream_head).stdout.strip()
+    local_base = prep["local_base"]
+    upstream_head = prep["upstream_head"]
+    base = prep.get("merge_scope", {}).get("merge_base") or git(
+        scratch, "merge-base", local_base, upstream_head
+    ).stdout.strip()
+    touched = _cached_paths(scratch, local_base)
+    both_sides = _changed_paths(scratch, base, local_base) & _changed_paths(
+        scratch, base, upstream_head
+    )
+    paths = sorted(touched | both_sides)
+    index = stage_zero_entries(scratch)
+    paths_in_result = set(index)
+    base_entries = tree_entries(scratch, base)
+    ours_entries = tree_entries(scratch, local_base)
+    theirs_entries = tree_entries(scratch, upstream_head)
 
-    def _names(*args) -> set:
-        out = git(scratch, "diff", "--name-only", *args).stdout.split("\n")
-        return {n for n in out if n}
-
-    touched = _names(local_base)
-    both_sides = _names(base, local_base) & _names(base, upstream_head)
-
-    def _blob(rev, path):
-        proc = git(scratch, "show", f"{rev}:{path}", check=False)
-        return proc.stdout if proc.returncode == 0 else ""
+    def read_from(entries, path):
+        entry = entries.get(path)
+        if entry is None or entry.mode == "160000":
+            return None
+        return read_blob(scratch, entry.oid)
 
     def read_result(path):
-        f = scratch / path
-        return f.read_text(encoding="utf-8", errors="surrogateescape") if f.is_file() else ""
+        return read_stage_zero_blob(scratch, index, path)
 
-    # A path missing from the result is a delete/modify conflict, which prepare
-    # reports on its own; flagging every symbol in it here would only add noise.
-    paths = sorted(p for p in touched if (scratch / p).is_file())
-    parse_only = [p for p in paths if p not in both_sides]
-    full = [p for p in paths if p in both_sides]
-
-    report = check_merge(full, lambda p: _blob(local_base, p), lambda p: _blob(upstream_head, p), read_result)
-    report.findings.extend(
-        f for f in check_merge(parse_only, lambda p: "", lambda p: "", read_result).findings
-        if f.kind == "unparseable"
+    full = sorted(path for path in both_sides if path in paths_in_result)
+    parse_only = [
+        path for path in paths
+        if path not in both_sides and path in paths_in_result
+    ]
+    policy = prep.get("resolution_policy_by_path") or {}
+    deleted = sorted(
+        path for path in both_sides
+        if path.endswith(".py") and path not in paths_in_result
     )
+    report = check_merge(
+        full,
+        lambda path: read_from(ours_entries, path),
+        lambda path: read_from(theirs_entries, path),
+        read_result,
+        lambda path: read_from(base_entries, path),
+        policy_by_path=policy,
+    )
+    parse_report = check_merge(
+        parse_only,
+        lambda _path: None,
+        lambda _path: None,
+        read_result,
+        policy_by_path=policy,
+    )
+    report.findings.extend(f for f in parse_report.findings if f.kind == "unparseable")
+    from upstream_sync_invariants import Finding
+    for path in deleted:
+        report.findings.append(Finding(
+            path=path,
+            kind="deleted_in_result",
+            policy=policy.get(path),
+            message=(
+                "the resolved merge deletes this path from the stage-0 result; "
+                "confirm the delete/modify resolution was intended"
+            ),
+        ))
+    _decorate_findings(scratch, prep, report)
     return report
+
+
+_HARD_INVARIANT_KINDS = {"unparseable", "unreadable_parent"}
+
+
+def _arm_invariant_state(state: Path, prep: dict, findings: list[dict], *, expected=None, mode="block") -> None:
+    """Persist the merge-scoped receipt state without rereading pending later."""
+    path = state / "invariants-pending.json"
+    old: dict = {}
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = {}
+    scope = prep.get("merge_scope") or {}
+    if old.get("merge_scope") != scope:
+        old = {}
+    pending = {}
+    try:
+        pending = load_pending(state)
+    except (OSError, ValueError):
+        pass
+    origin = {
+        "platform": pending.get("slack_platform"),
+        "chat_id": pending.get("slack_channel"),
+        "thread_id": pending.get("slack_thread_ts"),
+        "user_id": pending.get("slack_user_id"),
+    }
+    blocking = [
+        finding for finding in findings
+        if not (mode == "report" and finding.get("kind") == "discarded_contribution")
+    ]
+    if not blocking:
+        status = "reported"
+    else:
+        status = "blocked" if any(
+            f.get("kind") in _HARD_INVARIANT_KINDS for f in blocking
+        ) else "awaiting_ack"
+    journal = list(old.get("journal") or [])
+    for event in expected or []:
+        if not any(
+            existing.get("event") == "expected_policy_loss"
+            and existing.get("path") == event.get("path")
+            and existing.get("symbol") == event.get("symbol")
+            and existing.get("discarded_side") == event.get("discarded_side")
+            for existing in journal
+        ):
+            journal.append(event)
+    payload = {
+        "schema": "upstream-sync-invariants-pending/v1",
+        "version": 1,
+        "status": status,
+        "mode": mode,
+        "created_at": old.get("created_at") or _now(),
+        "updated_at": _now(),
+        "merge_scope": scope,
+        "merge_record": "apply-prepare.json",
+        "origin": old.get("origin") or origin,
+        "findings": findings,
+        "receipts": old.get("receipts") or [],
+        "journal": journal,
+        "expected_policy_losses": list(expected or []),
+    }
+    _write_json(path, payload)
+
+
+def _unacknowledged_findings(state: Path, findings: list[dict]) -> list[dict]:
+    try:
+        data = json.loads((state / "invariants-pending.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return findings
+    receipts = data.get("receipts") or []
+    return [
+        finding for finding in findings
+        if finding.get("kind") in _HARD_INVARIANT_KINDS
+        or not any(receipt_matches(receipt, finding) for receipt in receipts)
+    ]
+
+def _invariant_mode(args, pending=None) -> str:
+    value = (
+        getattr(args, "invariant_mode", None)
+        or (pending or {}).get("invariant_mode")
+        or os.getenv("HERMES_SYNC_INVARIANT_MODE", "block")
+    )
+    value = str(value).strip().lower()
+    if value not in {"block", "report"}:
+        raise ValueError("invariant mode must be 'block' or 'report'")
+    return value
+
+
+def _missing_invariant_origin(state: Path) -> list[str]:
+    try:
+        pending = load_pending(state)
+    except (OSError, ValueError, KeyError):
+        return ["pending.json"]
+    fields = {
+        "platform": pending.get("slack_platform"),
+        "chat_id": pending.get("slack_channel"),
+        "thread_id": pending.get("slack_thread_ts"),
+        "user_id": pending.get("slack_user_id"),
+    }
+    return [name for name, value in fields.items() if not value]
 
 
 def _commit_merge(args) -> tuple:
@@ -467,13 +813,17 @@ def _commit_merge(args) -> tuple:
         return EXIT_USAGE, {"status": "error", "reason": f"prepare ended with {prep.get('status')!r}, not ready"}
 
     stages = unmerged_stages(scratch)
-    marked = [
-        p for p in prep["conflicts"]
-        if (scratch / p).exists()
-        and has_conflict_markers((scratch / p).read_text(encoding="utf-8", errors="surrogateescape"))
-    ]
+    marked = []
+    index = stage_zero_entries(scratch)
+    for path in prep["conflicts"]:
+        text = read_stage_zero_blob(scratch, index, path)
+        if text is not None and has_conflict_markers(text):
+            marked.append(path)
     if stages or marked:
         return EXIT_UNRESOLVED, {"status": "unresolved", "unmerged": sorted(stages), "with_markers": marked}
+    contract_error = _commit_tree_contract_error(scratch)
+    if contract_error:
+        return EXIT_UNRESOLVED, {"status": "unstaged_tree", "reason": contract_error}
 
     # Check the race before committing anything: the host refuses a merge whose
     # first parent is not its current HEAD, so there is nothing to gain from
@@ -484,17 +834,90 @@ def _commit_merge(args) -> tuple:
                                  "hint": "the live branch moved since prepare; run prepare again and redo the resolution"}
 
     # Structural gate. Deliberately before the commit: a merge that fails here
-    # is not a merge anyone should be able to hand off, and leaving the clone
-    # untouched is what makes the repair a plain edit rather than a rewrite.
-    skipped = os.environ.get("HERMES_SYNC_SKIP_INVARIANTS") == "1"
-    if not skipped:
+    # is not a merge anyone should be able to hand off. The preserved clone is
+    # the repair surface; the commit object is not rewritten on refusal.
+    break_glass = bool(getattr(args, "break_glass", False))
+    invariant_mode = prep.get("invariant_mode") or "block"
+    if invariant_mode not in {"block", "report"}:
+        return EXIT_USAGE, {
+            "status": "error",
+            "reason": "apply-prepare.json has invalid invariant_mode; run prepare again",
+        }
+    if break_glass:
+        prep["invariants_break_glass"] = {"used_at": _now(), "mode": "manual-only"}
+        prep["invariant_report"] = {
+            "mode": "break-glass",
+            "status": "not-run",
+            "findings": [],
+            "expected_policy_losses": [],
+        }
+    else:
         report = _invariant_report(scratch, prep)
-        if not report.ok:
-            payload = {"status": "invariants_failed", **report.as_dict()}
-            payload["hint"] = ("nothing was committed and the clone is preserved; fix the "
-                               "resolution there, or set HERMES_SYNC_SKIP_INVARIANTS=1 if every "
-                               "finding is intended")
-            return EXIT_UNRESOLVED, payload
+        report_payload = report.as_dict()
+        records = report_payload["findings"]
+        expected = report_payload.get("expected_policy_losses", [])
+        prep["invariant_report"] = {
+            "mode": invariant_mode,
+            "status": "reported" if invariant_mode == "report" else "blocking",
+            "findings": records,
+            "expected_policy_losses": expected,
+        }
+        blocking = [
+            finding for finding in records
+            if not (
+                invariant_mode == "report"
+                and finding.get("kind") == "discarded_contribution"
+            )
+        ]
+        if blocking:
+            missing_origin = _missing_invariant_origin(state)
+            if missing_origin:
+                prep["invariant_report"]["origin_error"] = (
+                    "receipt origin is incomplete; missing " + ", ".join(missing_origin)
+                )
+                _write_json(prep_path, prep)
+                return EXIT_UNRESOLVED, {
+                    "status": "invariant_origin_incomplete",
+                    "ok": False,
+                    "findings": blocking,
+                    "invariant_report": prep["invariant_report"],
+                    "reason": prep["invariant_report"]["origin_error"],
+                }
+        if records or expected:
+            _arm_invariant_state(
+                state, prep, records, expected=expected, mode=invariant_mode,
+            )
+        if blocking:
+            active = _unacknowledged_findings(state, blocking)
+            if active:
+                payload = {
+                    "status": "invariants_failed",
+                    "ok": False,
+                    "findings": active,
+                    "invariant_report": prep["invariant_report"],
+                }
+                payload["acknowledgements_required"] = [
+                    f.get("finding_id") for f in active
+                    if f.get("kind") not in _HARD_INVARIANT_KINDS
+                ]
+                blocked_note = ""
+                try:
+                    current_status = json.loads(
+                        (state / "invariants-pending.json").read_text(encoding="utf-8")
+                    ).get("status")
+                    if current_status == "blocked":
+                        blocked_note = (
+                            " The invariant state is blocked; receipt interception is "
+                            "disabled until every hard finding is repaired."
+                        )
+                except (OSError, ValueError):
+                    blocked_note = ""
+                payload["hint"] = (
+                    "nothing was committed and the clone is preserved; hard findings "
+                    "must be repaired, while soft findings require one matching "
+                    "fingerprint receipt each." + blocked_note
+                )
+                return EXIT_UNRESOLVED, payload
 
     merge_head_file = scratch / ".git" / "MERGE_HEAD"
     amend = bool(getattr(args, "amend", False))
@@ -529,14 +952,12 @@ def _commit_merge(args) -> tuple:
                                  "reason": f"merge parents {parents} are not (local_base, upstream_head) — "
                                            "run prepare again"}
     prep["merge_sha"] = merge_sha
-    if skipped:
-        # Recorded on the merge record, not only in this reply: whoever reads
-        # the result later must see that the structural gate did not run.
-        prep["invariants_skipped"] = True
     _write_json(prep_path, prep)
     payload = {"status": "committed", "merge_sha": merge_sha, "prep": prep}
-    if skipped:
-        payload["invariants_skipped"] = True
+    if prep.get("invariant_report"):
+        payload["invariant_report"] = prep["invariant_report"]
+    if break_glass:
+        payload["invariants_break_glass"] = prep["invariants_break_glass"]
     return EXIT_OK, payload
 
 
@@ -689,14 +1110,26 @@ def main(argv=None) -> int:
                         help="decide undecided plain paths by policy (merge-both); security paths still ask")
     p_prep.add_argument("--in-flight-ok", action="store_true",
                         help="do not refuse when a finalize request is in flight (the finalizer's own call)")
+    p_prep.add_argument("--invariant-mode", choices=("block", "report"),
+                        help="snapshot invariant handling in apply-prepare.json")
     p_prep.set_defaults(func=cmd_prepare)
+    p_resume = sub.add_parser("prepare-or-resume", parents=[common])
+    p_resume.add_argument("--auto-policy", action="store_true")
+    p_resume.add_argument("--in-flight-ok", action="store_true")
+    p_resume.add_argument("--invariant-mode", choices=("block", "report"))
+    p_resume.set_defaults(func=cmd_prepare_or_resume)
     sub.add_parser("resolve-llm", parents=[common]).set_defaults(func=cmd_resolve_llm)
     p_commit = sub.add_parser("commit", parents=[common])
+    p_commit.add_argument("--break-glass", action="store_true",
+                          help="manual audited emergency bypass; never supplied by systemd")
     p_commit.add_argument("--amend", action="store_true",
                           help="fold staged changes into the existing merge commit (gate-triage fixes), "
                                "preserving its parents")
     p_commit.set_defaults(func=cmd_commit)
-    sub.add_parser("handoff", parents=[common]).set_defaults(func=cmd_handoff)
+    p_handoff = sub.add_parser("handoff", parents=[common])
+    p_handoff.add_argument("--break-glass", action="store_true",
+                           help="manual audited emergency bypass; never supplied by systemd")
+    p_handoff.set_defaults(func=cmd_handoff)
     p_wait = sub.add_parser("wait", parents=[common])
     p_wait.add_argument("--after", default="",
                         help="ISO time; results not newer than this are ignored")

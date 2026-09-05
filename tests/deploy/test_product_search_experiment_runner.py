@@ -8,6 +8,7 @@ import tomllib
 import yaml
 
 from job_intel.product_search.acquisition_probe import (
+    EXCLUSION_REASON_CATALOG,
     build_experiment_manifest,
     relocate_experiment_manifest,
     validate_experiment_manifest,
@@ -52,6 +53,10 @@ def valid_manifest(tmp_path: Path) -> dict:
         "config_sha256": "2" * 64,
         "source_sha256": "3" * 64,
         "unit_sha256": "4" * 64,
+        "exclusion_reason_codes": {
+            "version": EXCLUSION_REASON_CATALOG.version,
+            "sha256": EXCLUSION_REASON_CATALOG.sha256,
+        },
     }
 
 
@@ -187,10 +192,7 @@ def test_manifest_relocation_repins_all_runtime_paths(tmp_path: Path) -> None:
             "path": str(new_root / "locks/duckduckgo.lock"),
         },
         "headhunter": {
-            "backup_path": str(new_root / "browser-profile-backup/headhunter"),
-            "mode": "exclusive_lock",
-            "path": str(new_root / "locks/headhunter-profile.lock"),
-            "shared_profile_path": "/var/lib/browser-desktop/profiles/hh",
+            "mode": "api",
         },
         "greenhouse": {
             "mode": "exclusive_lock",

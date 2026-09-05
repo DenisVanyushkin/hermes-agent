@@ -58,85 +58,6 @@ def test_smartrecruiters_returns_none_when_the_posting_is_permanently_absent(mon
     monkeypatch.setattr("job_intel.ats_sources._detail_json", lambda url, **kw: None)
     assert fetch_smartrecruiters_detail(SR_API_URL) is None
 
-
-from job_intel.ats_sources import fetch_headhunter_detail
-
-_HH_JOBPOSTING_HTML = '''<html><head><script type="application/ld+json">
-{"@type": "JobPosting", "title": "Директор по продукту",
- "description": "<p>Вы будете отвечать за P&amp;L продукта и стратегию развития.</p><ul><li>Управление командой</li></ul>"}
-</script></head><body></body></html>'''
-
-
-def test_headhunter_prefers_the_browser_native_page_when_available(monkeypatch):
-    """api.hh.ru returns a wholesale 403 from this VPS's IP (DDoS-Guard
-    IP-reputation block, confirmed live 2026-08-09 across 4 different
-    User-Agent values) -- the browser-native page, fetched through the
-    already-cleared `hh` CDP session, is the primary path now. _detail_json
-    must not even be called when it succeeds."""
-    monkeypatch.setattr("job_intel.ats_sources.fetch_headhunter_detail_html",
-                        lambda url: _HH_JOBPOSTING_HTML)
-
-    def _boom(url, **kw):
-        raise AssertionError("_detail_json must not be called when the browser page has a JobPosting")
-
-    monkeypatch.setattr("job_intel.ats_sources._detail_json", _boom)
-
-    text = fetch_headhunter_detail("https://hh.ru/vacancy/133446873")
-    assert "отвечать за P&L продукта" in text
-    assert "Управление командой" in text
-    assert "<p>" not in text
-
-
-def test_headhunter_falls_back_to_the_api_when_the_browser_is_unavailable(monkeypatch):
-    """Browser-native acquisition can fail independently (Playwright venv
-    down, CDP session not warmed yet, etc.) -- the old requests-based API
-    path stays as a fallback rather than turning every browser hiccup into
-    a lost row. Pins the existing api.hh.ru/vacancies/<id> URL shape too."""
-    def _browser_unavailable(url):
-        from job_intel.sources import SourceFetchError
-        raise SourceFetchError("Playwright is not installed")
-
-    monkeypatch.setattr("job_intel.ats_sources.fetch_headhunter_detail_html", _browser_unavailable)
-
-    seen = {}
-
-    def _fake(url, **kw):
-        seen["url"] = url
-        return _payload("headhunter_detail.json")
-
-    monkeypatch.setattr("job_intel.ats_sources._detail_json", _fake)
-
-    text = fetch_headhunter_detail("https://hh.ru/vacancy/133446873")
-    assert seen["url"] == "https://api.hh.ru/vacancies/133446873"
-    assert "отвечать за P&L продукта" in text
-    assert "<p>" not in text
-
-
-def test_headhunter_falls_back_to_the_api_when_the_browser_page_has_no_jobposting(monkeypatch):
-    """A browser fetch can succeed (200, real HTML) without the JSON-LD
-    JobPosting block -- a redesign, an interstitial, a captcha page. That is
-    evidence about the browser page, not about api.hh.ru, so it must still
-    fall through rather than being treated the same as a hard failure."""
-    monkeypatch.setattr("job_intel.ats_sources.fetch_headhunter_detail_html",
-                        lambda url: "<html><body>no jobposting here</body></html>")
-    monkeypatch.setattr("job_intel.ats_sources._detail_json",
-                        lambda url, **kw: _payload("headhunter_detail.json"))
-
-    text = fetch_headhunter_detail("https://hh.ru/vacancy/133446873")
-    assert "отвечать за P&L продукта" in text
-
-
-def test_headhunter_returns_none_for_an_unparseable_url(monkeypatch):
-    """A URL we can't address at all must not even attempt a browser fetch."""
-    def _boom(url):
-        raise AssertionError("fetch_headhunter_detail_html must not be called for an unaddressable URL")
-
-    monkeypatch.setattr("job_intel.ats_sources.fetch_headhunter_detail_html", _boom)
-    monkeypatch.setattr("job_intel.ats_sources._detail_json",
-                        lambda url, **kw: _payload("headhunter_detail.json"))
-    assert fetch_headhunter_detail("https://hh.ru/employer/1234") is None
-
-
 from job_intel.ats_sources import fetch_teamtailor_detail
 
 
@@ -220,4 +141,3 @@ def test_json_ld_objects_does_not_match_a_backslash_typo_in_the_type_attr():
     assert typo_html.count(BACKSLASH) == 1  # sanity: exactly one backslash byte
     assert "+json" not in typo_html  # sanity: no plus sign present
     assert _json_ld_objects(typo_html) == []
-

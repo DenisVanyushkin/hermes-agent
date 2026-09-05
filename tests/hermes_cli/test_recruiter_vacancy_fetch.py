@@ -17,18 +17,18 @@ def _fake_get(payload=None, text=""):
 
 class TestUrlRouting:
     def test_hh(self, monkeypatch) -> None:
+        from job_intel import hh_api
+
         monkeypatch.setattr(
-            fetch_mod,
-            "_get",
-            _fake_get(
-                {
-                    "name": "CPO",
-                    "employer": {"name": "Айтигенио"},
-                    "area": {"name": "Москва"},
-                    "description": "<p>Ведущий <b>Edtech</b></p>",
-                    "schedule": {"id": "remote"},
-                }
-            ),
+            hh_api,
+            "fetch_vacancy_detail",
+            lambda vacancy_id: {
+                "name": "CPO",
+                "employer": {"name": "Айтигенио"},
+                "area": {"name": "Москва"},
+                "description": "<p>Ведущий <b>Edtech</b></p>",
+                "schedule": {"id": "remote"},
+            },
         )
         details = fetch_vacancy_details("https://hh.ru/vacancy/134606080")
         assert details["fetch_status"] == "ok"
@@ -36,6 +36,36 @@ class TestUrlRouting:
         assert details["company"] == "Айтигенио"
         assert "Edtech" in details["description_text"]
         assert details["remote"] is True
+
+    def test_hh_uses_shared_authenticated_transport(self, monkeypatch) -> None:
+        from job_intel import hh_api
+
+        seen = {}
+
+        class _Response:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "name": "CPO",
+                    "employer": {"name": "Acme"},
+                    "area": {"name": "Алматы"},
+                    "description": "<p>Own product strategy</p>",
+                }
+
+        def fake_get(url, *, params, headers, timeout):
+            seen.update(url=url, params=params, headers=headers, timeout=timeout)
+            return _Response()
+
+        monkeypatch.setattr(hh_api, "get_app_token", lambda: "token")
+        monkeypatch.setattr(hh_api.requests, "get", fake_get)
+
+        details = fetch_mod._fetch_hh("134606080")
+
+        assert details["fetch_status"] == "ok"
+        assert seen["url"] == "https://api.hh.ru/vacancies/134606080"
+        assert seen["headers"]["Authorization"] == "Bearer token"
+        assert seen["headers"]["User-Agent"] == hh_api.HH_USER_AGENT
 
     def test_greenhouse(self, monkeypatch) -> None:
         monkeypatch.setattr(

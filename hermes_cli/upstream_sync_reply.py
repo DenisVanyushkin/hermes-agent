@@ -9,12 +9,115 @@ of the generic pipeline orchestrator.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import re
 from pathlib import Path
 from typing import Optional
 
 _VALID_OPTIONS = ("merge both", "keep local", "take upstream")
+
+
+@contextlib.contextmanager
+def _state_lock(state: Path):
+    """Serialize every state transition and the shared finalize request slot."""
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / "state.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+# Ack ids are content-addressed short ids, never path:symbol tokens. The
+# delimiter is intentionally forbidden: it was the source of false positives
+# for times, URLs, and arbitrary ``3:1`` prose.
+_ACK_RE = re.compile(r"^ack\s+([A-Za-z0-9][A-Za-z0-9._/-]{1,63})$", re.IGNORECASE)
+
+
+def parse_upstream_sync_ack_reply(text: Optional[str]) -> Optional[str]:
+    if not isinstance(text, str):
+        return None
+    match = _ACK_RE.fullmatch(text.strip())
+    if not match:
+        return None
+    finding_id = match.group(1)
+    if ":" in finding_id or "://" in finding_id:
+        return None
+    return finding_id
+
+
+def _load_invariant_pending(state: Path) -> dict:
+    try:
+        data = json.loads((state / "invariants-pending.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def has_pending_upstream_invariant_ack(state_dir: Path | str) -> bool:
+    """Fail closed: unreadable or malformed state is not an armed intercept."""
+    data = _load_invariant_pending(Path(state_dir))
+    return data.get("schema") == "upstream-sync-invariants-pending/v1" and data.get("status") == "awaiting_ack"
+
+
+def record_invariant_ack(state_dir: Path | str, finding_id: str, source: dict) -> dict:
+    """Record one fingerprint-bound receipt and enqueue exactly one host request."""
+    state = Path(state_dir)
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    with _state_lock(state):
+        data = _load_invariant_pending(state)
+        if data.get("schema") != "upstream-sync-invariants-pending/v1" or data.get("status") != "awaiting_ack":
+            return {"requested": False, "reason": "the invariant gate is not armed"}
+        expected_origin = data.get("origin") or {}
+        actual_origin = dict(source or {})
+        actual_origin["platform"] = _normalize_platform(actual_origin.get("platform"))
+        for key in ("platform", "chat_id", "thread_id", "user_id"):
+            expected = expected_origin.get(key)
+            actual = actual_origin.get(key)
+            if not expected:
+                return {"requested": False, "reason": f"armed invariant state has no {key}"}
+            if not actual:
+                return {"requested": False, "reason": f"receipt source has no {key}"}
+            if str(expected) != str(actual):
+                return {"requested": False, "reason": f"receipt source does not match the armed {key}"}
+        finding = next((f for f in data.get("findings", []) if f.get("finding_id") == finding_id), None)
+        if finding is None:
+            return {"requested": False, "reason": "unknown or stale invariant finding id"}
+        if finding.get("kind") in {"unparseable", "unreadable_parent"}:
+            return {"requested": False, "reason": "hard invariant findings cannot be acknowledged"}
+        receipts = data.setdefault("receipts", [])
+        if any(r.get("finding_id") == finding_id and r.get("fingerprint_sha256") == (finding.get("fingerprint") or {}).get("sha256") for r in receipts):
+            return {"requested": False, "reason": "that finding was already acknowledged", "duplicate": True}
+        receipt = {
+            "finding_id": finding_id,
+            "fingerprint_sha256": (finding.get("fingerprint") or {}).get("sha256"),
+            "acknowledged_at": now,
+            "source": actual_origin,
+        }
+        receipts.append(receipt)
+        data.setdefault("journal", []).append({"event": "ack", **receipt})
+        data["updated_at"] = now
+        _write_json_atomic(state / "invariants-pending.json", data)
+        request = state / "finalize-request.json"
+        processing = state / "finalize-request.processing.json"
+        if request.exists() or processing.exists():
+            return {"requested": False, "reason": "a finalize is already in flight; the receipt is recorded"}
+        _write_json_atomic(request, {
+            "action": "ack-invariant",
+            "finding_id": finding_id,
+            "receipt": receipt,
+            "requested_at": now,
+            "origin": actual_origin,
+        })
+        return {"requested": True, "receipt": receipt}
+
+
+# Stable aliases for callers that name the gate rather than the storage file.
+has_pending_upstream_sync_ack = has_pending_upstream_invariant_ack
+record_upstream_sync_ack = record_invariant_ack
 
 # Matches ``<n>: <option>`` where option is one of the allowed phrases. The two
 # option words may be joined by whitespace, a hyphen, or an underscore, so the
@@ -123,10 +226,10 @@ def record_operator_decisions(state_dir: Path | str, decisions: dict, source: di
         feat["source"] = "operator"
         applied.append(feat["id"])
     still = [f["id"] for f in features if not f.get("decision")]
-    if source.get("chat_id"):
-        pending["slack_channel"] = source.get("chat_id")
-    if source.get("thread_id"):
-        pending["slack_thread_ts"] = source.get("thread_id")
+    pending["slack_platform"] = _normalize_platform(source.get("platform"))
+    pending["slack_channel"] = source.get("chat_id")
+    pending["slack_thread_ts"] = source.get("thread_id")
+    pending["slack_user_id"] = source.get("user_id")
     pending["status"] = "awaiting_decision" if still else "auto_apply"
     pending["decided_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     _write_json_atomic(pending_path, pending)
@@ -146,6 +249,14 @@ def record_operator_decisions(state_dir: Path | str, decisions: dict, source: di
             requested = True
     return {"applied": applied, "still_awaiting": still, "unknown": unknown,
             "requested": requested, "reason": reason}
+
+
+_record_operator_decisions_unlocked = record_operator_decisions
+
+
+def record_operator_decisions(state_dir: Path | str, decisions: dict, source: dict) -> dict:
+    with _state_lock(Path(state_dir)):
+        return _record_operator_decisions_unlocked(state_dir, decisions, source)
 
 
 _STATE_SUFFIX = "state/upstream-sync"
@@ -297,7 +408,7 @@ def has_pending_upstream_triage(state_dir: Path | str) -> bool:
     return load_triage(state_dir).get("status") == "awaiting_triage"
 
 
-def record_triage_decision(state_dir: Path | str, answer: str, source: dict) -> dict:
+def _record_triage_decision_unlocked(state_dir: Path | str, answer: str, source: dict) -> dict:
     """Record the operator answer; request apply-triage-fixes for ``apply_fix``.
 
     Returns {"status": <new status>, "requested": bool, "reason": str|None}.
@@ -336,3 +447,9 @@ def record_triage_decision(state_dir: Path | str, answer: str, source: dict) -> 
                    "user_id": source.get("user_id")},
     })
     return {"status": "applying", "requested": True, "reason": None}
+
+
+
+def record_triage_decision(state_dir: Path | str, answer: str, source: dict) -> dict:
+    with _state_lock(Path(state_dir)):
+        return _record_triage_decision_unlocked(state_dir, answer, source)

@@ -22,6 +22,7 @@ import re
 import shlex
 import subprocess
 import sys
+from collections import Counter
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -177,7 +178,12 @@ def _resolution_summary(prep: dict) -> list[str]:
     return out
 
 
-def applied_text(prep: dict, result: dict) -> str:
+def applied_text(
+    prep: dict,
+    result: dict,
+    *,
+    gate_failures: dict | None = None,
+) -> str:
     lines = [
         f"*Upstream sync applied* — upstream `{_short(prep.get('upstream_head'))}` "
         f"merged into `local/customizations` (was `{_short(prep.get('local_base'))}`).",
@@ -189,7 +195,10 @@ def applied_text(prep: dict, result: dict) -> str:
         "- fork tests: no new failures · smoketest: passed · gateway restarted · pushed",
         f"- decisions recorded into memory · finished {result.get('finished_at', '')}",
     ]
-    return "\n".join(lines) + "\n"
+    text = "\n".join(lines) + "\n"
+    if gate_failures:
+        text += "\n" + gate_report_text(gate_failures)
+    return text
 
 
 MAX_PATCH_CHARS = 2500
@@ -280,7 +289,98 @@ def triage_reminder_text(triage: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def failed_text(prep: dict, result: dict, *, scratch: str = "", triage: dict | None = None) -> str:
+_GATE_SOURCE_LABEL = {
+    "baseline": "baseline (before merge)",
+    "merged": "post (after merge)",
+    "upstream_parent": "upstream-parent probe",
+}
+
+
+def _gate_source_label(source: str) -> str:
+    return _GATE_SOURCE_LABEL.get(source, source or "unknown run")
+
+
+def gate_report_text(failures: dict) -> str:
+    """Render the persisted node-aware gate outcome for the operator.
+
+    Baseline is explicitly informational; only post-merge buckets can block.
+    An unreadable run is an infrastructure ``UNKNOWN`` and must never look
+    like a clean run or a merge regression.
+    """
+    common = failures.get("common_path") or []
+    post_only = failures.get("post_only_path") or []
+    pre_existing = failures.get("pre_existing") or []
+    unknown = failures.get("unknown") or []
+    unreadable = failures.get("unreadable_runs") or []
+    blocking = failures.get("blocking_failures") or []
+    blocking_by_class = failures.get("blocking_failures_by_class") or {}
+    if not blocking_by_class and blocking:
+        blocking_by_class = dict(
+            Counter(item.get("classification") or "<missing>" for item in blocking)
+        )
+    unknown_blocking = failures.get("unknown_blocking_classifications") or []
+
+    lines = [
+        "*Fork test gate*",
+        "- baseline (before merge): informational only; never blocks.",
+        "- post (after merge): admission result; blocking buckets come from this run.",
+        f"- common_path: {len(common)}",
+        f"- post_only_path: {len(post_only)}",
+        f"- pre_existing: {len(pre_existing)} (informational)",
+        f"- blocking_failures: {len(blocking)}",
+    ]
+    if blocking_by_class:
+        lines.append("- blocking failures by class:")
+        for classification, count in sorted(blocking_by_class.items()):
+            lines.append(f"  - `{classification}`: {count}")
+    if unknown_blocking:
+        lines.append(
+            "- unknown blocking classification(s): "
+            + ", ".join(f"`{classification}`" for classification in unknown_blocking)
+        )
+    for label, items in (("common_path", common), ("post_only_path", post_only)):
+        if items:
+            lines.append(f"- {label} failures:")
+            for item in items:
+                nodeid = item.get("nodeid") or item.get("path") or "unknown outcome"
+                classification = item.get("classification") or "unclassified"
+                lines.append(f"  - `{nodeid}` — `{classification}`")
+    if unreadable:
+        lines += [
+            "- verdict: `UNKNOWN` — gate infrastructure failure; this is not a merge regression.",
+            "- unreadable runs:",
+        ]
+        for run in unreadable:
+            lines.append(
+                f"  - {_gate_source_label(str(run.get('source') or ''))} "
+                f"stage `{run.get('stage') or 'unknown'}`"
+            )
+    elif unknown:
+        lines += [
+            "- verdict: `UNKNOWN` — gate outcome could not be classified; this is not a merge regression.",
+            f"- unknown outcomes: {len(unknown)}",
+        ]
+    elif blocking:
+        lines.append("- verdict: `BLOCK` — new failures were found in the merged tree.")
+    else:
+        lines.append("- verdict: `PASS` — clean; no new blocking failures.")
+
+    for item in unknown:
+        nodeid = item.get("nodeid") or item.get("path") or "unknown outcome"
+        lines.append(
+            f"  - `{nodeid}` ({item.get('source', 'unknown')} / {item.get('stage', 'unknown')})"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def failed_text(
+    prep: dict,
+    result: dict,
+    *,
+    scratch: str = "",
+    triage: dict | None = None,
+    gate_failures: dict | None = None,
+) -> str:
     stage = result.get("failed_stage") or "unknown"
     lines = [
         f"*Upstream sync NOT applied* — stage `{stage}` failed for upstream "
@@ -297,8 +397,11 @@ def failed_text(prep: dict, result: dict, *, scratch: str = "", triage: dict | N
     # A red test gate has a diagnosis attached; showing the raw log tail instead
     # buries it. The triage carries the failing tests, the verdict and (maybe) a
     # patch the operator can approve with one word.
+    gate_report = gate_report_text(gate_failures) if gate_failures else ""
     if stage == "test-gate" and (triage or {}).get("proposals"):
-        return "\n".join(lines) + "\n\n" + triage_text(triage or {})
+        return "\n".join(lines) + "\n\n" + gate_report + "\n" + triage_text(triage or {})
+    if stage == "test-gate" and gate_report:
+        return "\n".join(lines) + "\n\n" + gate_report
     detail = (result.get("detail") or "").strip()
     if detail and stage != "resolve":
         tail = "\n".join(detail.splitlines()[-8:])

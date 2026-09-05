@@ -48,7 +48,11 @@ def discover_d7(conn: sqlite3.Connection, *, days: int = 90,
 
     out = []
     for slug, c in grouped.items():
-        # HH low-quality negative anchor: HH-only companies need >=2 distinct titles
+        # TODO(hh-api-slice-2): recalibrate this negative anchor now that the
+        # official API supplies real employer names. It was tuned against
+        # browser-era HH rows containing company="HeadHunter" and must not be
+        # treated as validated product-search quality evidence.
+        # HH-only companies still need >=2 distinct titles for now.
         titles = all_titles.get(slug, set())
         hh_only = bool(titles) and all(src == "headhunter" for _, src in titles)
         if hh_only and len(hh_titles.get(slug, set())) < 2:

@@ -7,13 +7,16 @@ bare-репозитории в tmp_path, токена нет, гейтвея н�
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNC = REPO_ROOT / "scripts" / "sync-local-customizations.sh"
+SMOKETEST = REPO_ROOT / "scripts" / "upstream-sync-smoketest.sh"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -79,13 +82,37 @@ def _inert_test_cmd(world) -> Path:
     script = world["fork"].parent / "inert-tests.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+        + _manifest_receipt_preamble()
+        + "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
         "echo '1 failed, 5 passed in 2.00s'\n"
     )
     script.chmod(0o755)
     return script
 
 
+def _pre_only_test_cmd(world) -> Path:
+    """Runner double that leaves only the receipt emitted before pytest."""
+    script = world["fork"].parent / "pre-only-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        + _manifest_receipt_pre_only()
+        + "echo '1 failed, 5 passed in 2.00s'\n"
+        + "exit 137\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _wrong_pre_receipt_test_cmd(world) -> Path:
+    script = world["fork"].parent / "wrong-pre-receipt-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'fork test receipt: contract=v1 source=manifest side=pre manifest_sha256=wrong'\n"
+        "echo '1 failed, 5 passed in 2.00s'\n"
+        "exit 137\n"
+    )
+    script.chmod(0o755)
+    return script
 def _stub_hermes_bin(world) -> Path:
     """Заглушка вместо настоящего hermes.
 
@@ -97,6 +124,41 @@ def _stub_hermes_bin(world) -> Path:
     script.write_text('#!/usr/bin/env bash\necho "hermes stub $*"\nexit 0\n')
     script.chmod(0o755)
     return script
+
+
+def _manifest_receipt_pre_only() -> str:
+    return f'''PYTHON={sys.executable!r}
+GATE={str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")!r}
+SEL=""
+WT=""
+while [ $# -gt 0 ]; do case "$1" in
+  --selection-from) SEL="$2"; shift 2 ;;
+  --attempt-root|--boundary) shift 2 ;;
+  *) WT="$1"; shift ;;
+esac; done
+HEAD="$(${{PYTHON}} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$(${{PYTHON}} - "$SEL" "$HEAD" <<'PY'
+import json,sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text())
+print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")
+PY
+)"
+DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
+'''
+
+
+def _manifest_receipt_preamble() -> str:
+    """Make test doubles emit both receipts from the real runner contract."""
+    python = str(sys.executable)
+    gate = str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")
+    return (
+        _manifest_receipt_pre_only()
+        + f'''{python} {gate} receipt --source manifest --side "$SIDE" --stage final --digest "$DIGEST"
+echo 'fork test duration: seconds=2'
+'''
+    )
 
 
 def _run_sync(world, extra_env=None, argv=()) -> subprocess.CompletedProcess:
@@ -134,6 +196,32 @@ def _run_sync(world, extra_env=None, argv=()) -> subprocess.CompletedProcess:
     )
 
 
+def _repo_precedence_runtime(tmp_path: Path, source: Path, *, with_git_retry: bool) -> tuple[Path, Path]:
+    runtime = tmp_path / "runtime-root"
+    runtime_scripts = runtime / "scripts"
+    runtime_scripts.mkdir(parents=True)
+    (runtime / "agent").mkdir()
+    (runtime / "gateway").mkdir()
+    runtime_script = runtime_scripts / source.name
+    runtime_script.write_bytes(source.read_bytes())
+    runtime_script.chmod(0o755)
+    if with_git_retry:
+        lib = runtime_scripts / "lib"
+        lib.mkdir()
+        source_lib = REPO_ROOT / "scripts" / "lib" / "git-retry.sh"
+        (lib / "git-retry.sh").write_bytes(source_lib.read_bytes())
+
+    selected = tmp_path / "selected-repo"
+    selected.mkdir()
+    _git(selected, "init", "-q", "-b", "repo-precedence-marker")
+    _git(selected, "config", "user.email", "t@t")
+    _git(selected, "config", "user.name", "t")
+    (selected / "marker.txt").write_text("selected\n")
+    _git(selected, "add", "marker.txt")
+    _git(selected, "commit", "-qm", "selected repo")
+    return runtime_script, selected
+
+
 def _add_upstream_commit(world, path: str, content: str, message: str) -> None:
     seed = world["seed"]
     target = seed / path
@@ -157,6 +245,102 @@ def test_upstream_commits_arrive_as_a_merge_not_a_replay(world):
     assert merges == "1", "обновление должно приезжать merge-коммитом"
 
 
+def test_unreadable_runner_does_not_land_the_merge(world):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    fork = world["fork"]
+    before = _git(fork, "rev-parse", "HEAD")
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(_pre_only_test_cmd(world))})
+
+    assert result.returncode != 0
+    assert "unreadable" in result.stderr.lower()
+    assert "new failures" not in result.stdout.lower()
+    assert _git(fork, "rev-parse", "HEAD") == before
+
+
+def test_wrong_preliminary_receipt_names_the_preliminary_receipt(world):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+
+    result = _run_sync(
+        world, {"HERMES_SYNC_TEST_CMD": str(_wrong_pre_receipt_test_cmd(world))}
+    )
+
+    assert result.returncode != 0
+    assert "preliminary receipt" in result.stderr.lower()
+    assert "final receipt" not in result.stderr.lower()
+
+
+def _boundary_recording_test_cmd(world) -> tuple[Path, Path]:
+    """Как ``_inert_test_cmd``, но записывает свой argv.
+
+    Обманка обязана остаться идентичной до и после слияния, иначе гейт увидит
+    разные множества падений и упрётся в них вместо проверяемого здесь.
+    """
+    log = world["fork"].parent / "boundary-calls.log"
+    script = world["fork"].parent / "boundary-recording-tests.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'CALL_ARGS="$*"\n'
+        + _manifest_receipt_preamble()
+        + 'printf "%s\\n" "$CALL_ARGS" >> ' + str(log) + "\n"
+        "echo 'FAILED tests/known.py::test_flaky - AssertionError'\n"
+        "echo '1 failed, 5 passed in 2.00s'\n"
+    )
+    script.chmod(0o755)
+    return script, log
+
+
+def test_both_gate_runs_receive_the_fetched_upstream_sha(world):
+    """Оба прогона меряют от одного полного SHA — того, который и слили.
+
+    Граница решает, что считается тестом форка. Если один прогон получит ref, а
+    другой полный SHA, или два разных SHA, сравнение «до и после» перестанет
+    быть сравнением: разойдётся сенсор, а не поведение мержа. Ref к тому же
+    может уехать между двумя прогонами, и тогда проверен будет один кандидат, а
+    слит другой — поэтому здесь требуется именно 40-значный SHA и совпадение со
+    вторым родителем получившегося merge-коммита.
+    """
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    cmd, log = _boundary_recording_test_cmd(world)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+    assert result.returncode == 0, result.stderr
+
+    calls = [line.split() for line in log.read_text().splitlines() if line.strip()]
+    assert len(calls) == 2, f"expected one gate run before and one after: {calls}"
+
+    boundaries, worktrees = set(), set()
+    for call in calls:
+        assert len(call) == 7, (
+            f"expected `--selection-from <manifest> --attempt-root <root> --boundary <sha> <worktree>`: {call}"
+        )
+        assert call[0] == "--selection-from" and call[2] == "--attempt-root", (
+            f"the manifest selection mode was not explicit: {call}"
+        )
+        assert call[4] == "--boundary", f"the boundary option moved unexpectedly: {call}"
+        assert re.fullmatch(r"[0-9a-f]{40}", call[5]), (
+            f"the boundary is not a full immutable SHA: {call}"
+        )
+        assert call[6] != call[5], f"the worktree is the boundary again: {call}"
+        assert Path(call[1]).name == "gate-selection.json", call
+        assert Path(call[3]).name == "attempts", call
+        boundaries.add(call[5])
+        worktrees.add(call[6])
+
+    assert calls[0] == calls[1], f"the two runs did not receive identical argv: {calls}"
+    assert len({call[1] for call in calls}) == 1, f"the two runs received different manifests: {calls}"
+    assert len({call[3] for call in calls}) == 1, f"the two runs received different attempt roots: {calls}"
+
+    assert len(boundaries) == 1, f"the two runs measured from different commits: {calls}"
+    assert len(worktrees) == 1, f"the two runs used different worktrees: {calls}"
+
+    fork = world["fork"]
+    merge = _git(fork, "rev-list", "--merges", "-n1", "HEAD")
+    assert _git(fork, "rev-parse", merge + "^2") == boundaries.pop(), (
+        "the commit that was gated is not the commit that was merged"
+    )
+
+
 def test_no_upstream_changes_is_a_noop(world):
     result = _run_sync(world)
     assert result.returncode == 0, result.stderr
@@ -169,7 +353,8 @@ def _staged_test_cmd(tmp_path: Path, baseline: str, post: str) -> Path:
     script = tmp_path / "staged-tests.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"
-        f'marker="{marker}"\n'
+        + _manifest_receipt_preamble()
+        + f'marker="{marker}"\n'
         'count=$(cat "$marker" 2>/dev/null || echo 0)\n'
         'echo $((count + 1)) > "$marker"\n'
         'if [ "$count" -eq 0 ]; then\n'
@@ -193,6 +378,23 @@ REGRESSED_LOG = (
 )
 
 
+AGGREGATE_GREEN_LOG = (
+    "Running 2 test files (~2 tests) with -j 1\n"
+    "=== Summary: 2 files, 2 tests passed, 0 failed "
+    "(100% complete) in 1.0s (1 workers) ===\n"
+)
+
+
+def test_a_merge_with_a_green_aggregate_run_lands(world, tmp_path):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    cmd = _staged_test_cmd(tmp_path, AGGREGATE_GREEN_LOG, AGGREGATE_GREEN_LOG)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+
+    assert result.returncode == 0, result.stderr
+    assert (world["fork"] / "agent" / "new_module.py").exists()
+
+
 def test_a_merge_without_new_failures_lands(world, tmp_path):
     _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
     cmd = _staged_test_cmd(tmp_path, BASELINE_LOG, SAME_LOG)
@@ -203,6 +405,15 @@ def test_a_merge_without_new_failures_lands(world, tmp_path):
     fork = world["fork"]
     assert (fork / "agent" / "new_module.py").exists()
     assert _git(fork, "rev-list", "--merges", "--count", "origin/main..HEAD") == "1"
+
+
+def test_sync_receipt_check_ignores_duration_sidecar(world, tmp_path):
+    _add_upstream_commit(world, "agent/new_module.py", "NEW = 1\n", "upstream feature")
+    cmd = _staged_test_cmd(tmp_path, BASELINE_LOG, SAME_LOG)
+
+    result = _run_sync(world, {"HERMES_SYNC_TEST_CMD": str(cmd)})
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_a_merge_that_breaks_tests_never_reaches_the_branch(world, tmp_path):
@@ -328,3 +539,61 @@ def test_post_update_only_without_a_before_head_refuses(world):
     proc = _run_sync(world, argv=["--post-update-only"])
     assert proc.returncode != 0
     assert "post-update-only" in proc.stderr
+
+
+def test_repo_precedence_sync_local_prefers_explicit_repo_from_root_cwd(tmp_path):
+    script, selected = _repo_precedence_runtime(
+        tmp_path, SYNC, with_git_retry=True
+    )
+    env = dict(os.environ)
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "HERMES_REPO": str(selected),
+            "HERMES_LOCAL_BRANCH": "repo-precedence-marker",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script), "--post-update-only", "missing-commit"],
+        cwd="/",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 2, output
+    assert "--post-update-only was given an unknown commit" in output
+    assert "Local branch not found" not in output
+
+
+def test_repo_precedence_smoketest_prefers_explicit_repo_from_root_cwd(tmp_path):
+    script, selected = _repo_precedence_runtime(
+        tmp_path, SMOKETEST, with_git_retry=False
+    )
+    for repo, exit_code in ((script.parent.parent, "11"), (selected, "12")):
+        python = repo / "venv" / "bin" / "python"
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text(f"#!/usr/bin/env bash\nexit {exit_code}\n")
+        python.chmod(0o755)
+    env = dict(os.environ)
+    env.update(
+        {
+            "HOME": str(tmp_path / "home"),
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
+            "HERMES_SYNC_STATE_DIR": str(tmp_path / "state"),
+            "HERMES_REPO": str(selected),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd="/",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert f"Repo: {selected}" in output
+    assert "core package import failed" in output

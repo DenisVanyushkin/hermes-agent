@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0.0",
+  "record_type": "gate_a_owner_closure",
+  "gate": "gate-a",
+  "decision_date": "2026-08-16",
+  "exact_owner_approval": "Одобряю Gate A: proceed",
+  "decision": "proceed",
+  "gate_state": "closed",
+  "supersedes": {
+    "pending_decision_package": {
+      "owner_decision_path": "docs/evidence/product-search-gate-a/owner-decision.md",
+      "coverage_summary_path": "docs/evidence/product-search-gate-a/coverage-summary.json",
+      "coverage_summary_sha256": "cc20676bc4c9a0e7209adbd6a91a096e5c0ed431bf56f56b97162ea193bb3361",
+      "pending_owner_decision": "pending"
+    }
+  },
+  "authorized_continuation": {
+    "task_number": 8,
+    "task_name": "Task 8: Define Product Search contracts and Career Profile v2",
+    "authorized": true
+  },
+  "hold_state": {
+    "canonical_candidate": "dormant",
+    "product_search_runtime": "dormant",
+    "legacy_job_intel": "masked"
+  },
+  "immutable_run_evidence_modified": false
+}

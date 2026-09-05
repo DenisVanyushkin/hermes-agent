@@ -33,7 +33,7 @@ def valid_evidence() -> dict:
             "unresolved_for_decision_v2": 10,
         },
         "family_attempts": {"linkedin": 20, "headhunter": 20},
-        "cell_states": {"uk": "qualified_results_found", "kazakhstan": "searched_no_qualified_results"},
+        "acquisition_outcomes": {"uk": "blocked", "kazakhstan": "not_attempted"},
         "new_company_candidates": 12,
         "duplicates": 20,
         "cost_usd": 0.0,
@@ -51,6 +51,11 @@ def valid_evidence() -> dict:
 
 def test_gate_a_accepts_only_stages_one_to_three_and_provisional_labels() -> None:
     validate_gate_a_run_evidence(valid_evidence())
+
+    evidence = valid_evidence()
+    evidence["cell_states"] = {"uk": "qualified_results_found"}
+    with pytest.raises(ValueError, match="legacy cell_states"):
+        validate_gate_a_run_evidence(evidence)
 
     evidence = valid_evidence()
     evidence["stage_counts"]["hard_gate_eligible"] = 1
@@ -80,7 +85,7 @@ def test_gate_a_requires_attempt_accounting_family_cells_hashes_and_isolated_pat
     mutations = (
         ("scheduled_attempts", 0, "scheduled attempts"),
         ("family_attempts", {}, "family attempts"),
-        ("cell_states", {}, "cell states"),
+        ("acquisition_outcomes", {}, "acquisition outcomes"),
         ("evidence_hashes_verified", False, "evidence hashes"),
     )
     for field, value, error in mutations:

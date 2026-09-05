@@ -1,0 +1,1204 @@
+"""Отбор тестов форка — регрессия простоя 2026-08-22.
+
+``run-fork-tests.sh`` считает набор как «свои тесты форка» плюс «тесты,
+изменённые мержем». Второе слагаемое берётся из ``git diff --name-only`` без
+``--diff-filter``, поэтому в набор попадают файлы, которые мерж **удалил**.
+pytest, получив несуществующий путь, не пропускает его, а обрушивает весь
+прогон: ``no tests ran in 0.01s``. Компаратор гейта не находит итоговой строки,
+возвращает rc 2 «несравнимо», и мерж не приземляется — при том, что проверен он
+не был ни разу.
+
+Поэтому здесь проверяется не «набор непустой», а инвариант: **каждый путь в
+наборе существует в том дереве, против которого набор будет запущен**. Его
+нарушение гасит прогон целиком, а не один файл.
+
+Набор читается не из нового флага, а из argv, который скрипт передаёт
+интерпретатору: ``HERMES_PYTHON`` подменяется на фальшивый интерпретатор,
+записывающий свои аргументы. Так тест работает против скрипта как он есть
+сегодня, и падение указывает на удалённый путь, а не на незнакомую опцию.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from scripts import upstream_sync_gate
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUNNER = REPO_ROOT / "scripts" / "run-fork-tests.sh"
+
+UPSTREAM_REF = "refs/remotes/upstream/main"
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def _commit(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    )
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _write(repo: Path, rel: str, body: str) -> None:
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+
+
+@pytest.fixture()
+def world(tmp_path: Path) -> Path:
+    """Форк, который вливает апстрим, удаливший один свой тест.
+
+    Три файла и ровно один вид изменения — больше для этого инварианта не нужно,
+    а меньше не позволяет отличить «удалённый» от «чужого».
+    """
+    repo = tmp_path / "fork"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _write(repo, ".gitignore", "__pycache__/\n.pytest_cache/\n")
+
+    _write(repo, "tests/test_upstream_kept.py", "def test_kept():\n    pass\n")
+    _write(repo, "tests/test_upstream_dropped.py", "def test_dropped():\n    pass\n")
+    base = _commit(repo, "upstream base")
+
+    # Ветка апстрима уходит вперёд и удаляет один из своих тестов.
+    _git(repo, "checkout", "-q", "-b", "upstream-main")
+    (repo / "tests/test_upstream_dropped.py").unlink()
+    upstream_tip = _commit(repo, "upstream drops a test of its own")
+    _git(repo, "update-ref", UPSTREAM_REF, upstream_tip)
+
+    # Форк живёт своей жизнью от общей базы и заводит собственный тест.
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "reset", "-q", "--hard", base)
+    _write(repo, "tests/test_fork_only.py", "def test_fork_only():\n    pass\n")
+    _commit(repo, "fork adds a test of its own")
+
+    # Мерж принимает удаление — путь остаётся в diff, но не в дереве.
+    _git(
+        repo,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "merge",
+        "-q",
+        "--no-edit",
+        "upstream-main",
+    )
+    return repo
+
+
+@pytest.fixture()
+def fake_python(tmp_path: Path) -> tuple[Path, Path]:
+    """Интерпретатор, который ничего не исполняет, а записывает свой argv.
+
+    Пишет строкой на вызов, а не перезаписывает файл: так тест видит, что
+    раннер позвал интерпретатор **ровно один раз**, и красный результат не
+    может оказаться следствием двух прогонов, наложившихся друг на друга.
+    """
+    argv_file = tmp_path / "argv.jsonl"
+    interpreter = tmp_path / "fake-python"
+    interpreter.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['FAKE_ARGV_FILE'], 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    return interpreter, argv_file
+
+
+def _selection(world: Path, fake_python: tuple[Path, Path]) -> list[str]:
+    """Набор, который раннер реально передал pytest.
+
+    Извлекается из ``--files`` в контракте вызова, а не фильтром «похоже на
+    путь к тесту». Это доказывает саму форму вызова: если раннер перестанет
+    получать явный список, тест это заметит.
+    """
+    interpreter, argv_file = fake_python
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "the runner failed before or during the interpreter call, so the "
+        f"selection under test is not the one it would really use; rc="
+        f"{result.returncode} stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert argv_file.exists(), (
+        "the runner never reached the interpreter — the fake was not used, so "
+        f"there is no selection to inspect; stderr={result.stderr!r}"
+    )
+    invocations = [
+        json.loads(line)
+        for line in argv_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(invocations) == 1, (
+        "expected exactly one interpreter call; more than one means the "
+        f"selection below is a mix of runs: {invocations}"
+    )
+
+    argv = invocations[0]
+    assert argv and argv[0].endswith("/scripts/run_tests_parallel.py"), (
+        f"the pinned per-file runner was not invoked; argv={argv}"
+    )
+    assert "--files" in argv, f"parallel runner needs an explicit file list; argv={argv}"
+    return argv[argv.index("--files") + 1].split(":")
+
+
+def test_runner_uses_a_summary_capable_pytest_report_flag(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    _selection(world, fake_python)
+    argv = json.loads(fake_python[1].read_text(encoding="utf-8").splitlines()[0])
+
+    assert "-rA" in argv, (
+        "pytest must emit PASSED/FAILED node lines so the gate can distinguish "
+        f"collected nodes from failures; argv={argv}"
+    )
+
+
+def test_runner_is_pinned_to_main_checkout_and_receives_target_root(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """The gate must pin the runner code without moving pytest to that checkout."""
+    runner_copy = world / "scripts" / "run_tests_parallel.py"
+    runner_copy.parent.mkdir(parents=True, exist_ok=True)
+    runner_copy.write_text("raise SystemExit('runner copy')\n", encoding="utf-8")
+    _commit(world, "provide the pinned runner in the main checkout")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": str(fake_python[0]),
+            "FAKE_ARGV_FILE": str(fake_python[1]),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(fake_python[1].read_text(encoding="utf-8").splitlines()[0])
+
+    assert str(REPO_ROOT / "scripts" / "run_tests_parallel.py") in argv
+    assert argv[argv.index("--repo-root") + 1] == str(world)
+    files_arg = argv[argv.index("--files") + 1]
+    assert files_arg.split(":") == ["tests/test_fork_only.py"]
+    assert argv[argv.index("--file-retries") + 1] == "0"
+    assert "--file-timeout" in argv
+    assert "--jobs" in argv
+
+
+def _run_runner(world: Path, python: Path, **extra_env: str) -> subprocess.CompletedProcess:
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(python),
+        "HERMES_CONTROL_PYTHON": sys.executable,
+        "HERMES_UPSTREAM_SYNC_GATE": str(REPO_ROOT / "scripts" / "upstream_sync_gate.py"),
+        **extra_env,
+    }
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _checkout_fake_python(tmp_path: Path) -> Path:
+    interpreter = tmp_path / "checkouting-python"
+    interpreter.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, subprocess, sys\n"
+        "if any(arg.endswith('run_tests_parallel.py') for arg in sys.argv[1:]):\n"
+        "    subprocess.run(['git', 'checkout', '-q', os.environ['FAKE_CHECKOUT_REF']], check=True)\n"
+    )
+    interpreter.chmod(0o755)
+    return interpreter
+
+
+def test_head_move_does_not_emit_a_final_receipt(world: Path, tmp_path: Path) -> None:
+    before = _git(world, "rev-parse", "HEAD")
+    result = _run_runner(
+        world,
+        _checkout_fake_python(tmp_path),
+        FAKE_CHECKOUT_REF="upstream-main",
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert f"head_before={before}" in output
+    assert "head_after=" in output
+    assert output.count("fork test receipt:") == 1
+    assert "stage=final" not in output
+
+
+def test_unchanged_clean_tree_emits_preliminary_and_final_receipts(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    result = _run_runner(world, fake_python[0], FAKE_ARGV_FILE=str(fake_python[1]))
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    assert output.count("fork test receipt:") == 2
+    assert "stage=final" in output
+    digests = re.findall(r"selection_sha256=([0-9a-f]{64})", output)
+    assert len(digests) == 2
+    assert len(set(digests)) == 1
+    before = _git(world, "rev-parse", "HEAD")
+    assert f"head_before={before} head_after={before}" in output
+
+
+def test_final_receipt_has_machine_readable_duration(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    result = _run_runner(world, fake_python[0], FAKE_ARGV_FILE=str(fake_python[1]))
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    duration = re.search(r"^fork test duration: seconds=(\d+)$", output, re.MULTILINE)
+    assert duration is not None, output
+    assert int(duration.group(1)) >= 0
+
+
+@pytest.mark.parametrize("dirty_kind", ["tracked", "index", "untracked"])
+def test_dirty_tree_does_not_emit_a_final_receipt(
+    world: Path, fake_python: tuple[Path, Path], dirty_kind: str
+) -> None:
+    path = world / "tests" / "test_fork_only.py"
+    if dirty_kind == "tracked":
+        path.write_text("def test_fork_only():\n    assert True\n", encoding="utf-8")
+    elif dirty_kind == "index":
+        path.write_text("def test_fork_only():\n    assert True\n", encoding="utf-8")
+        _git(world, "add", "tests/test_fork_only.py")
+    else:
+        (world / "untracked-from-pytest.txt").write_text("dirty\n", encoding="utf-8")
+
+    result = _run_runner(world, fake_python[0], FAKE_ARGV_FILE=str(fake_python[1]))
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert output.count("fork test receipt:") == 1
+    assert "stage=final" not in output
+
+
+def test_real_runner_reports_passed_nodes_from_rA(world: Path) -> None:
+    path = "tests/test_runner_reports.py"
+    _write(
+        world,
+        path,
+        "def test_passed():\n"
+        "    assert True\n"
+        "\n"
+        "def test_failed():\n"
+        "    assert False\n",
+    )
+    _commit(world, "add a mixed-outcome runner fixture")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env={**os.environ, "HERMES_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0
+    assert "PASSED tests/test_runner_reports.py::test_passed" in output
+    assert "FAILED tests/test_runner_reports.py::test_failed" in output
+
+
+def test_probe_nodeid_runs_only_the_requested_node(world: Path, tmp_path: Path) -> None:
+    _write(
+        world,
+        "tests/test_probe_targets.py",
+        "def test_requested_node():\n"
+        "    assert True\n\n"
+        "def test_unrequested_node():\n"
+        "    assert False\n",
+    )
+    _write(world, ".gitignore", "__pycache__/\n.pytest_cache/\n")
+    _commit(world, "add an exact probe target")
+    nodeid = "tests/test_probe_targets.py::test_requested_node"
+    request = tmp_path / "probe.request.json"
+    request.write_text(json.dumps({"nodeids": [nodeid]}), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--boundary",
+            UPSTREAM_REF,
+            "--probe-nodeids-from",
+            str(request),
+            str(world),
+        ],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": sys.executable,
+            "HERMES_CONTROL_PYTHON": sys.executable,
+            "HERMES_UPSTREAM_SYNC_GATE": str(
+                REPO_ROOT / "scripts" / "upstream_sync_gate.py"
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "1 tests passed" in output, output
+    assert "test_unrequested_node" not in output, output
+
+
+def test_deleted_path_not_selected(world: Path, fake_python: tuple[Path, Path]) -> None:
+    """Путь, удалённый мержем, не имеет права попасть в набор.
+
+    Ассерт сформулирован через существование, а не через имя: набор, содержащий
+    любой несуществующий путь, обрушит прогон целиком независимо от того, как
+    этот путь туда попал.
+    """
+    selection = _selection(world, fake_python)
+
+    # Прежде чем требовать отсутствия лишнего, убеждаемся, что нужное есть:
+    # красный список ниже не должен оказаться следствием пустой фикстуры.
+    assert "tests/test_fork_only.py" in selection, (
+        f"the fixture produced no fork-owned selection at all: {selection}"
+    )
+
+    missing = sorted(path for path in selection if not (world / path).exists())
+    assert missing == [], (
+        "the selection names paths that do not exist in the tree under test; "
+        "pytest aborts the whole run on the first of them instead of skipping "
+        f"it: {missing}"
+    )
+
+
+def test_fork_own_test_is_selected(world: Path, fake_python: tuple[Path, Path]) -> None:
+    """Обратная сторона: фильтр не должен вычистить собственные тесты форка."""
+    selection = _selection(world, fake_python)
+
+    assert "tests/test_fork_only.py" in selection, (
+        "the fork's own test disappeared from the selection; a filter that "
+        f"drops it makes the gate blind rather than safe: {selection}"
+    )
+
+
+def test_filename_ending_in_dunder_init_is_not_a_package_initializer(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """Only the exact basename __init__.py is infrastructure, not a test."""
+    path = "tests/my__init__.py"
+    _write(world, path, "def test_suffix_is_still_a_test():\n    pass\n")
+    _commit(world, "fork adds a test whose basename ends in dunder init")
+
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert path in result.stdout.splitlines(), (
+        "the shell filter disagrees with the manifest builder and drops a real "
+        f"test merely because its basename ends with __init__.py: {result.stdout!r}"
+    )
+
+
+def _print_selection(
+    world: Path, fake_python: tuple[Path, Path]
+) -> subprocess.CompletedProcess[str]:
+    interpreter, argv_file = fake_python
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+    }
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _manifest_attempt(world: Path, root: Path) -> Path:
+    """Write one hand-checked, self-contained manifest for the fixture merge."""
+    before = _git(world, "rev-parse", "HEAD^1")
+    after = _git(world, "rev-parse", "HEAD")
+    boundary = _git(world, "rev-parse", UPSTREAM_REF)
+    identity = json.dumps(
+        {"after": after, "before": before, "boundary": boundary},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    candidate_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    generation = 1
+    attempt = root / "attempts" / candidate_id / str(generation)
+    attempt.mkdir(parents=True)
+    manifest = attempt / "gate-selection.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "upstream-sync-test-selection/v1",
+                "before": before,
+                "after": after,
+                "boundary": boundary,
+                "candidate_id": candidate_id,
+                "generation": generation,
+                "run_id": f"{candidate_id}:{generation}",
+                "tests": [
+                    {
+                        "path": "tests/test_fork_only.py",
+                        "exists_pre": True,
+                        "exists_post": True,
+                    },
+                    {
+                        "path": "tests/test_upstream_dropped.py",
+                        "exists_pre": True,
+                        "exists_post": False,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (attempt / "attempt.json").write_text("{}\n", encoding="utf-8")
+    return manifest
+
+
+def _consume_manifest(world: Path, manifest: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--selection-from",
+            str(manifest),
+            "--attempt-root",
+            str(manifest.parents[2]),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _rewrite_manifest(manifest: Path, **updates) -> None:
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload.update(updates)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_manifest_consumer_selects_only_paths_declared_present(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert result.stdout.splitlines() == ["tests/test_fork_only.py"]
+
+
+def test_manifest_consumer_selects_pre_only_path_on_before(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _git(world, "checkout", "-q", "--detach", "HEAD^1")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert result.stdout.splitlines() == [
+        "tests/test_fork_only.py",
+        "tests/test_upstream_dropped.py",
+    ]
+
+
+def test_manifest_consumer_rejects_unknown_schema(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _rewrite_manifest(manifest, schema_version="upstream-sync-test-selection/v999")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "schema" in result.stderr.lower()
+
+
+def test_manifest_consumer_rejects_foreign_head(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _write(world, "foreign.txt", "different candidate\n")
+    foreign_head = _commit(world, "move checkout past the candidate")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert foreign_head in result.stderr
+
+
+def test_manifest_consumer_rejects_declared_exists_mismatch(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _git(world, "checkout", "-q", "--detach", "HEAD^1")
+    missing = "tests/test_upstream_dropped.py"
+    (world / missing).unlink()
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert missing in result.stderr
+
+
+def test_manifest_consumer_requires_attempt_commit_marker(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    (manifest.parent / "attempt.json").unlink()
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "attempt.json" in result.stderr
+
+
+def test_manifest_consumer_rejects_manifest_moved_to_foreign_generation(
+    world: Path, tmp_path
+):
+    manifest = _manifest_attempt(world, tmp_path)
+    foreign_attempt = manifest.parent.parent / "2"
+    foreign_attempt.mkdir()
+    foreign_manifest = foreign_attempt / manifest.name
+    foreign_manifest.write_bytes(manifest.read_bytes())
+    (foreign_attempt / "attempt.json").write_text("{}\n", encoding="utf-8")
+
+    result = _consume_manifest(world, foreign_manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "generation" in result.stderr.lower()
+
+
+def test_manifest_consumer_rejects_manifest_moved_to_foreign_candidate(
+    world: Path, tmp_path
+):
+    manifest = _manifest_attempt(world, tmp_path)
+    foreign_attempt = manifest.parent.parent.parent / ("0" * 64) / "1"
+    foreign_attempt.mkdir(parents=True)
+    foreign_manifest = foreign_attempt / manifest.name
+    foreign_manifest.write_bytes(manifest.read_bytes())
+    (foreign_attempt / "attempt.json").write_text("{}\n", encoding="utf-8")
+
+    result = _consume_manifest(world, foreign_manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "candidate_id" in result.stderr
+
+
+def test_manifest_consumer_rejects_run_id_mismatch(world: Path, tmp_path):
+    manifest = _manifest_attempt(world, tmp_path)
+    _rewrite_manifest(manifest, run_id="different-run")
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "run_id" in result.stderr
+
+
+def test_manifest_consumer_rejects_identical_before_and_after(
+    world: Path, tmp_path
+):
+    manifest = _manifest_attempt(world, tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    _rewrite_manifest(manifest, after=payload["before"])
+
+    result = _consume_manifest(world, manifest)
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "before and after must be distinct" in result.stderr
+
+
+def test_manifest_consumer_rejects_foreign_attempt_root(world: Path, tmp_path):
+    """A valid generation outside the caller's namespace is still foreign."""
+    manifest = _manifest_attempt(world, tmp_path)
+    foreign_attempt = (
+        tmp_path
+        / "foreign"
+        / "attempts"
+        / manifest.parent.parent.name
+        / manifest.parent.name
+    )
+    foreign_attempt.parent.mkdir(parents=True)
+    shutil.copytree(manifest.parent, foreign_attempt)
+    foreign_manifest = foreign_attempt / manifest.name
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--attempt-root",
+            str(tmp_path / "attempts"),
+            "--selection-from",
+            str(foreign_manifest),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "expected attempt root" in result.stderr.lower()
+
+
+def test_selection_mode_must_be_explicit(world: Path) -> None:
+    """Dropping --selection-from must not silently re-enable computation."""
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "selection mode" in result.stderr.lower()
+
+
+def test_selection_modes_are_mutually_exclusive(world: Path, tmp_path) -> None:
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--selection-from",
+            str(manifest),
+            "--attempt-root",
+            str(tmp_path / "attempts"),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "selection mode is ambiguous" in result.stderr.lower()
+
+
+def test_manifest_selection_requires_attempt_root(world: Path, tmp_path) -> None:
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--selection-from",
+            str(manifest),
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "manifest selection needs --attempt-root" in result.stderr.lower()
+
+
+def test_manifest_selection_emits_receipt_for_consumed_file(
+    world: Path, tmp_path
+) -> None:
+    manifest = _manifest_attempt(world, tmp_path)
+
+    result = _consume_manifest(world, manifest)
+
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    expected = upstream_sync_gate.fork_test_receipt(
+        source="manifest",
+        side="post",
+        digest=digest,
+    )
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert expected in result.stderr
+
+
+def test_manifest_receipt_binds_file_set_not_only_file_count(
+    world: Path, tmp_path: Path
+) -> None:
+    manifest_a = _manifest_attempt(world, tmp_path)
+    payload = json.loads(manifest_a.read_text(encoding="utf-8"))
+    candidate = manifest_a.parents[1]
+    manifest_b_dir = candidate / "2"
+    manifest_b_dir.mkdir()
+    payload["generation"] = 2
+    payload["run_id"] = f"{payload['candidate_id']}:2"
+    payload["tests"][0]["path"] = "tests/test_upstream_kept.py"
+    manifest_b = manifest_b_dir / "gate-selection.json"
+    manifest_b.write_text(json.dumps(payload), encoding="utf-8")
+    (manifest_b_dir / "attempt.json").write_text("{}\n", encoding="utf-8")
+
+    result_a = _consume_manifest(world, manifest_a)
+    result_same = _consume_manifest(world, manifest_a)
+    result_b = _consume_manifest(world, manifest_b)
+    assert result_a.returncode == 0, result_a.stderr
+    assert result_same.returncode == 0, result_same.stderr
+    assert result_b.returncode == 0, result_b.stderr
+    assert len(result_a.stdout.splitlines()) == len(result_b.stdout.splitlines())
+
+    digest_a = re.search(r"manifest_sha256=([0-9a-f]{64})", result_a.stderr).group(1)
+    digest_same = re.search(
+        r"manifest_sha256=([0-9a-f]{64})", result_same.stderr
+    ).group(1)
+    digest_b = re.search(r"manifest_sha256=([0-9a-f]{64})", result_b.stderr).group(1)
+    assert digest_same == digest_a
+    assert digest_a != digest_b
+
+
+def test_duplicate_boundary_option_is_refused(world: Path) -> None:
+    other_boundary = _git(world, "rev-parse", "HEAD^1")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--boundary",
+            other_boundary,
+            "--print-selection",
+            str(world),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "duplicate --boundary" in result.stderr.lower()
+
+
+def test_collection_error_does_not_abort_run(world: Path) -> None:
+    """One broken import stays visible without preventing runnable tests."""
+    _write(
+        world,
+        "tests/test_collection_bomb.py",
+        "raise RuntimeError('collection boom')\n",
+    )
+    _write(
+        world,
+        "tests/test_after_collection_error.py",
+        "def test_still_runs():\n    assert True\n",
+    )
+    _commit(world, "fork adds one broken and one runnable test module")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            str(world),
+        ],
+        env={**os.environ, "HERMES_PYTHON": sys.executable},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, "the collection error must remain a failing outcome"
+    assert "collection boom" in output, "the collection error disappeared from evidence"
+    assert "Interrupted" not in output, (
+        "pytest aborted after collection instead of running the modules it could collect"
+    )
+    assert "2 tests passed" in output and "1 error in" in output, (
+        "the runnable fork tests did not execute to a terminal runner summary; "
+        f"output={output!r}"
+    )
+    assert re.search(
+        r"^ERROR tests/test_collection_bomb\.py(?:\s+-|\s*$)",
+        output,
+        re.MULTILINE,
+    ), "pytest did not emit the parseable collection-error path"
+
+
+def test_print_selection_emits_only_paths_on_stdout(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """stdout — протокол, и в нём не может быть ничего, кроме путей.
+
+    Смысл проверки практический: набор забирают редиректом в файл манифеста.
+    Одна диагностическая строка, попавшая в stdout, станет там «ещё одним
+    путём», и потребитель манифеста упрётся в файл, которого нет.
+    """
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    lines = result.stdout.splitlines()
+    assert lines, "the selection came back empty"
+
+    not_paths = [line for line in lines if not (world / line).is_file()]
+    assert not_paths == [], (
+        "stdout carries lines that are not existing paths, so redirecting it "
+        f"into a manifest would poison the manifest: {not_paths}"
+    )
+    assert "fork test selection:" in result.stderr, (
+        "the diagnostic line vanished instead of moving to stderr; a selection "
+        "that shrinks silently is a gate that reports a clean run"
+    )
+    assert "fork test selection:" not in result.stdout
+
+
+def test_print_selection_does_not_run_the_tests(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """Спросить набор должно быть дёшево — иначе его снова никто не проверит."""
+    _, argv_file = fake_python
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert not argv_file.exists(), (
+        "--print-selection reached the interpreter, so asking for the selection "
+        "costs a full test run"
+    )
+
+
+def test_a_path_missing_from_the_working_tree_is_refused(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """Расхождение дерева с HEAD — отказ, а не запись в лог.
+
+    ``--diff-filter=d`` снимает удалённое мержем ещё на входе, поэтому сюда
+    доходит только другой случай: путь числится в ``HEAD``, а на диске его нет.
+    Кандидаты берутся из ``ls-tree HEAD``, значит такой путь войдёт в набор, и
+    это означает, что чекаут не соответствует проверяемому коммиту.
+
+    Логировать и продолжать здесь нельзя. Оставшиеся тесты пройдут, компаратор
+    получит нормальную итоговую строку, а ``dropped_missing`` не читает ни один
+    потребитель — сенсор уменьшится, и гейт отчитается о чистом прогоне.
+    Видимость для человека отказа не заменяет.
+    """
+    (world / "tests/test_fork_only.py").unlink()
+
+    result = _print_selection(world, fake_python)
+
+    assert result.returncode == 2, (
+        "a checkout that does not match its HEAD must stop the gate, not just "
+        f"annotate the log; rc={result.returncode} stdout={result.stdout!r}"
+    )
+    assert result.stdout.strip() == "", (
+        f"a refused run still emitted a selection: {result.stdout!r}"
+    )
+    assert "dropped_missing=1" in result.stderr, (
+        f"the missing path was not accounted for; stderr={result.stderr!r}"
+    )
+    assert "tests/test_fork_only.py" in result.stderr, (
+        f"the missing path was not named; stderr={result.stderr!r}"
+    )
+
+
+def test_double_dash_separator_still_yields_the_worktree(
+    world: Path, fake_python: tuple[Path, Path]
+) -> None:
+    """`--` снимает маркер, а не проглатывает путь за ним."""
+    interpreter, argv_file = fake_python
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+        "HERMES_UPSTREAM_REMOTE": "upstream",
+        "HERMES_UPSTREAM_BRANCH": "main",
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            "--",
+            str(world),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert "tests/test_fork_only.py" in result.stdout.splitlines(), (
+        f"the worktree after `--` was not used; stdout={result.stdout!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["FIRST", "SECOND"], id="two_worktrees"),
+        pytest.param(["FIRST", "--print-selection"], id="option_after_worktree"),
+        pytest.param([], id="no_worktree"),
+    ],
+)
+def test_ambiguous_argv_is_refused(world: Path, argv: list[str]) -> None:
+    """Лишний argv отвергается, а не разрешается в пользу последнего.
+
+    Прежде из ``/first /second`` брался второй, и первый исчезал молча. Набор
+    тестов решает, поедет ли обновление в прод; тихий выбор одного из двух
+    путей — не та неоднозначность, которую стоит терпеть в этой позиции.
+    """
+    concrete = [str(world) if arg == "FIRST" else arg for arg in argv]
+    concrete = [str(world / "elsewhere") if arg == "SECOND" else arg for arg in concrete]
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--legacy-selection",
+            "--boundary",
+            UPSTREAM_REF,
+            *concrete,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2, (
+        f"ambiguous argv {concrete} was accepted; rc={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert result.stdout.strip() == "", (
+        f"a refused run still emitted output: {result.stdout!r}"
+    )
+
+
+def _tests_in(repo: Path, rev: str) -> set[str]:
+    listing = _git(repo, "ls-tree", "-r", "--name-only", rev, "tests/")
+    return {line for line in listing.splitlines() if line.endswith(".py")}
+
+
+def _fork_only(repo: Path, head: str, boundary: str) -> set[str]:
+    """Набор «наших» тестов так, как его считает раннер: HEAD минус граница."""
+    return _tests_in(repo, head) - _tests_in(repo, boundary)
+
+
+@pytest.fixture()
+def drifted_world(tmp_path: Path) -> tuple[Path, str]:
+    """Ref апстрима отстал от коммита, который форк реально влил.
+
+    Это D3 в миниатюре. В бою ``upstream/main`` отставал на 752 коммита, и
+    из-за этого около 105 апстримовых тестовых файлов попадали в набор как
+    «свои»: всё, что апстрим добавил после последнего fetch, выглядит для
+    ``comm`` как файл, которого у апстрима нет.
+    """
+    repo = tmp_path / "drifted"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    _write(repo, "tests/test_upstream_kept.py", "def test_kept():\n    pass\n")
+    base = _commit(repo, "upstream base")
+    # Ref остаётся здесь и дальше не двигается — именно он и отстанет.
+    _git(repo, "update-ref", UPSTREAM_REF, base)
+
+    _git(repo, "checkout", "-q", "-b", "upstream-main")
+    _write(repo, "tests/test_upstream_new.py", "def test_new():\n    pass\n")
+    merged_upstream = _commit(repo, "upstream adds a test after our last fetch")
+
+    _git(repo, "checkout", "-q", "main")
+    _write(repo, "tests/test_fork_only.py", "def test_fork_only():\n    pass\n")
+    _commit(repo, "fork adds a test of its own")
+    _git(
+        repo,
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "merge",
+        "-q",
+        "--no-edit",
+        "upstream-main",
+    )
+    return repo, merged_upstream
+
+
+def test_boundary_is_explicit(
+    drifted_world: tuple[Path, str], fake_python: tuple[Path, Path]
+) -> None:
+    """Без явной границы раннер обязан отказать, а не взять отставший ref.
+
+    Молчаливое использование ref — не неточность, а подмена смысла: гейт
+    объявляет чужие тесты своими и гоняет их как сенсор форка. Отказ здесь
+    дешевле, чем отчёт, посчитанный не от той границы.
+    """
+    repo, merged_upstream = drifted_world
+    interpreter, argv_file = fake_python
+
+    stale = _fork_only(repo, "HEAD", UPSTREAM_REF)
+    exact = _fork_only(repo, "HEAD", merged_upstream)
+    assert stale != exact, (
+        "the fixture does not distinguish the stale ref from the merged commit, "
+        f"so it cannot prove anything: {sorted(stale)}"
+    )
+
+    # Окружение чистим явно: раннер принимает HERMES_UPSTREAM_BOUNDARY, и если
+    # она окажется в окружении pytest, «запуск без границы» границу получит,
+    # а тест позеленеет, ничего не проверив.
+    env = {
+        **os.environ,
+        "HERMES_PYTHON": str(interpreter),
+        "FAKE_ARGV_FILE": str(argv_file),
+    }
+    env.pop("HERMES_UPSTREAM_BOUNDARY", None)
+    result = subprocess.run(
+        ["bash", str(RUNNER), "--print-selection", "--legacy-selection", str(repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2, (
+        "the runner accepted an implicit boundary and computed a selection from "
+        f"the stale ref: {len(stale)} files ({sorted(stale)}) instead of the "
+        f"{len(exact)} it would get from the commit actually merged "
+        f"({sorted(exact)}); rc={result.returncode} stdout={result.stdout!r}"
+    )
+    assert result.stdout.strip() == "", (
+        f"a refused run still emitted a selection: {result.stdout!r}"
+    )
+
+
+def test_explicit_boundary_selects_from_that_commit(
+    drifted_world: tuple[Path, str], fake_python: tuple[Path, Path]
+) -> None:
+    """Положительная половина: значение границы действительно ею управляет.
+
+    Отказ без опции доказывает, что она обязательна, но не доказывает, что её
+    значение на что-то влияет. Здесь отставший ``upstream/main`` по-прежнему
+    существует и по-прежнему дал бы лишний файл — и всё же набор считается от
+    переданного коммита.
+    """
+    repo, merged_upstream = drifted_world
+    interpreter, argv_file = fake_python
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--print-selection",
+            "--legacy-selection",
+            "--boundary",
+            merged_upstream,
+            str(repo),
+        ],
+        env={
+            **os.environ,
+            "HERMES_PYTHON": str(interpreter),
+            "FAKE_ARGV_FILE": str(argv_file),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+
+    # Граница управляет тем, что считается НАШИМ, — то есть fork_only.
+    # Апстримовый test_upstream_new.py остаётся в наборе и здесь, но приходит
+    # через merge_changed: мерж его изменил, значит собственное изменение мержа
+    # обязано быть внутри сенсора. Спутать эти два слагаемых — то же самое, что
+    # спутать «чей тест» с «что тронул мерж».
+    assert "fork_only=1" in result.stderr, (
+        "the boundary did not decide what counts as ours; the stale ref would "
+        f"have said fork_only=2: {result.stderr!r}"
+    )
+    assert "tests/test_fork_only.py" in result.stdout.splitlines()
+    assert _tests_in(repo, UPSTREAM_REF) != _tests_in(repo, merged_upstream), (
+        "the stale ref stopped differing from the merged commit, so this test "
+        "no longer proves that the boundary value is what decided the set"
+    )

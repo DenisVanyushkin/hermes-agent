@@ -1,0 +1,31 @@
+schema_version: 1.0.0
+product_authority_id: PS-SOT-2026-08-10-v1
+required_dimensions:
+  - scale_stage
+  - trajectory
+  - business_model
+  - employer_risk
+  - geographic_context
+  - credible_need
+identity_states:
+  - resolved
+  - ambiguous
+  - unresolved
+evidence_kinds:
+  - fact
+  - inference
+freshness_states:
+  - current
+  - stale
+contradiction_states:
+  - unopposed
+  - contradicted
+sufficiency_states:
+  - sufficient
+  - insufficient
+private_inputs: prohibited
+persistence: prohibited
+weekly_intelligence_requires:
+  - company_evidence
+  - fit_thesis
+  - proposed_action

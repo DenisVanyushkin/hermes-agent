@@ -212,6 +212,7 @@ export const ja = defineLocale({
     swapSidebarSides: 'サイドバーの向きを切り替え',
     hideRightSidebar: '右サイドバーを非表示',
     showRightSidebar: '右サイドバーを表示',
+    unreadSessions: count => (count === 1 ? '未読セッション 1 件' : `未読セッション ${count} 件`),
     muteHaptics: '触覚フィードバックをオフ',
     unmuteHaptics: '触覚フィードバックをオン',
     openSettings: '設定を開く',
@@ -339,6 +340,11 @@ export const ja = defineLocale({
       sessionDensityCompact: 'コンパクト',
       sessionDensityComfortable: '標準',
       sessionDensityDetailed: '詳細',
+      tabStripTitle: 'タブバー',
+      tabStripDesc: 'ゾーンの上にタブを表示します。自動ではペインが1つのときに隠します。',
+      tabStripAuto: '自動',
+      tabStripAlways: '常に表示',
+      tabStripNever: '表示しない',
       terminalFontTitle: 'ターミナルフォント',
       terminalFontDesc:
         'Desktop のターミナルで使用するインストール済みフォントを選びます。Nerd Font は Powerlevel10k とシェルアイコンを表示できます。空欄では内蔵の JetBrains Mono を使用します。',
@@ -366,6 +372,8 @@ export const ja = defineLocale({
       },
       backdropTitle: 'チャット背景',
       backdropDesc: '会話の背後に表示される淡い彫像の画像。',
+      introSplashTitle: 'イントロ表示',
+      introSplashDesc: '空のチャットに表示されるワードマークとプロンプト。',
       reactionsTitle: 'メッセージリアクション',
       reactionsDesc:
         'iMessage風の絵文字タップバック — メッセージにリアクションでき、Hermesもあなたのメッセージにリアクションします。',
@@ -1952,6 +1960,7 @@ export const ja = defineLocale({
     endShort: '終了',
     stopDictation: '口述を停止',
     transcribingDictation: '口述を文字起こし中',
+    voiceControls: '音声',
     voiceDictation: '音声口述',
     speakReplies: '返信を読み上げる',
     stopSpeakingReplies: '返信の読み上げを停止',
@@ -2174,6 +2183,14 @@ export const ja = defineLocale({
     pidLabel: pid => `PID ${pid}`,
     technicalDetails: '技術的な詳細',
     notNow: '今は後で',
+    clientAlsoBehindTitle: 'デスクトップアプリが古くなっています',
+    clientAlsoBehindMessage:
+      'バックエンドは最新ですが、このデスクトップアプリはまだ古いバージョンです。最新の修正を反映するには更新してください。',
+    clientAlsoBehindAction: 'デスクトップアプリを更新',
+    everythingDispatched: '更新を開始しました',
+    everythingSkipped: 'スキップ',
+    everythingRowFailed: '更新に失敗しました',
+    everythingFanoutFailedTitle: '他のインスタンスを更新できませんでした',
     applyStatus: {
       preparing: 'バックエンドを更新しています…',
       pulling: 'バックエンドを更新中…',
@@ -2624,8 +2641,8 @@ export const ja = defineLocale({
   },
 
   zones: {
-    showHeader: 'ヘッダーを表示',
-    hideHeader: 'ヘッダーを隠す',
+    showTabStrip: 'タブを表示',
+    hideTabStrip: 'タブを隠す',
     showStripTab: title => `${title} を表示`,
     hideStripTab: title => `${title} を隠す`,
     lastTabKeptTitle: '最後のタブは残ります',

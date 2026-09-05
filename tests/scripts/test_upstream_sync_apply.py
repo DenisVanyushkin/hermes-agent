@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.scripts.runtime_bundle_test_utils import copy_runtime_python_files
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 APPLY = REPO_ROOT / "scripts" / "upstream_sync_apply.py"
 FINALIZE = REPO_ROOT / "scripts" / "upstream-sync-finalize.sh"
@@ -42,6 +44,38 @@ def _run(cmd: str, state: Path, live: Path, *extra: str) -> subprocess.Completed
 def _out(proc: subprocess.CompletedProcess) -> dict:
     assert proc.stdout.strip(), proc.stderr
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _manifest_receipt_preamble() -> str:
+    """Make the e2e runner double honor the manifest receipt contract."""
+    return f'''PYTHON={sys.executable!r}
+GATE={str(REPO_ROOT / "scripts" / "upstream_sync_gate.py")!r}
+SEL=""
+WT=""
+while [ $# -gt 0 ]; do case "$1" in
+  --selection-from) SEL="$2"; shift 2 ;;
+  --attempt-root|--boundary) shift 2 ;;
+  *) WT="$1"; shift ;;
+esac; done
+HEAD="$(${{PYTHON}} -c 'import subprocess,sys; print(subprocess.check_output(["git","-C",sys.argv[1],"rev-parse","HEAD"], text=True).strip())' "$WT")"
+SIDE="$(${{PYTHON}} - "$SEL" "$HEAD" <<'PY'
+import json,sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print("pre" if sys.argv[2] == m["before"] else "post" if sys.argv[2] == m["after"] else "wrong")
+PY
+)"
+DIGEST="$(sha256sum "$SEL" | awk '{{print $1}}')"
+"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" --digest "$DIGEST"
+'''
+
+
+def _manifest_final_receipt_tail() -> str:
+    """Append the final receipt after the stub runner has printed its output."""
+    return (
+        '"$PYTHON" "$GATE" receipt --source manifest --side "$SIDE" '
+        '--stage final --digest "$DIGEST"\n'
+    )
 
 
 @pytest.fixture()
@@ -457,10 +491,14 @@ class TestEndToEndWithTheHostFinalizer:
             p.write_text("#!/usr/bin/env bash\nexit 0\n")
             p.chmod(0o755)
         tests_stub = scripts / "run-fork-tests.sh"
-        tests_stub.write_text("#!/usr/bin/env bash\necho '0 failed, 1 passed in 0.10s'\n")
+        tests_stub.write_text(
+            "#!/usr/bin/env bash\n"
+            + _manifest_receipt_preamble()
+            + "echo '0 failed, 1 passed in 0.10s'\n"
+            + _manifest_final_receipt_tail()
+        )
         tests_stub.chmod(0o755)
-        for helper in ("upstream_sync_gate.py", "upstream_sync_decisions.py"):
-            (scripts / helper).write_text((REPO_ROOT / "scripts" / helper).read_text())
+        copy_runtime_python_files(REPO_ROOT, scripts)
         return scripts
 
     def test_the_merge_lands_on_the_live_branch(self, world, tmp_path):

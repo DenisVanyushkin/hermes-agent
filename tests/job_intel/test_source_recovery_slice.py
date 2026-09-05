@@ -77,7 +77,7 @@ def test_reason_login_wall() -> None:
 
 def test_reason_anti_bot_without_login_wall() -> None:
     payload = {
-        "source": "headhunter",
+        "source": "linkedin",
         "status": "degraded",
         "hits": 0,
         "session_health": {"login_walls": 0, "auth_redirects": 0, "anti_bot_events": 2},

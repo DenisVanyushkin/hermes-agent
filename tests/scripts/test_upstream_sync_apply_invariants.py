@@ -58,6 +58,7 @@ def pyworld(tmp_path: Path):
     _git(live, "config", "user.email", "t@t")
     _git(live, "config", "user.name", "t")
     (live / "mod.py").write_text(MODULE_BASE)
+    (live / "untouched.py").write_text("def untouched():\n    return 7\n")
     _git(live, "add", "-A")
     _git(live, "commit", "-qm", "base")
     base = _git(live, "rev-parse", "HEAD")
@@ -81,6 +82,10 @@ def pyworld(tmp_path: Path):
         "status": "awaiting_decision",
         "local_head": local_head,
         "upstream_head": upstream_head,
+        "slack_platform": "slack",
+        "slack_channel": "C0B3X1E5SJZ",
+        "slack_thread_ts": "1783420000.000",
+        "slack_user_id": "U123",
         "features": [{"id": "F1", "decision": "keep-local", "files": ["mod.py"],
                       "local_subjects": ["local change"]}],
     }))
@@ -146,6 +151,86 @@ class TestCommitRefusesBrokenResolutions:
         assert (scratch / "mod.py").exists()
 
 
+@pytest.fixture()
+def pyworld_upstream_deletes(tmp_path: Path):
+    """Same shape as ``pyworld``, except upstream removes ``local_only``.
+
+    The fork only edits ``kept`` here — it never removes the deleted function,
+    which is the ordinary shape of an upstream refactor landing next to local
+    work (2026-08-22: c1693d7dcc removed 27 duplicate helpers).
+    """
+    live = tmp_path / "live"
+    live.mkdir()
+    _git(live, "init", "-q", "-b", "local/customizations")
+    _git(live, "config", "user.email", "t@t")
+    _git(live, "config", "user.name", "t")
+    (live / "mod.py").write_text(MODULE_BASE)
+    (live / "untouched.py").write_text("def untouched():\n    return 7\n")
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "base")
+    base = _git(live, "rev-parse", "HEAD")
+
+    (live / "mod.py").write_text(MODULE_BASE.replace("return 1", "return 100"))
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "local change")
+    local_head = _git(live, "rev-parse", "HEAD")
+
+    _git(live, "checkout", "-qb", "up", base)
+    (live / "mod.py").write_text("def kept():\n    return 999\n")
+    (live / "untouched.py").unlink()
+    _git(live, "add", "-A")
+    _git(live, "commit", "-qm", "upstream drops local_only")
+    upstream_head = _git(live, "rev-parse", "HEAD")
+    _git(live, "checkout", "-q", "local/customizations")
+
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "pending.json").write_text(json.dumps({
+        "schema": "upstream-sync-pending/v1",
+        "status": "awaiting_decision",
+        "local_head": local_head,
+        "upstream_head": upstream_head,
+        "features": [{"id": "F1", "decision": "keep-local", "files": ["mod.py"],
+                      "local_subjects": ["local change"]}],
+    }))
+    return {"live": live, "state": state, "local_head": local_head,
+            "upstream_head": upstream_head}
+
+
+class TestAcceptedDeletionsDoNotBlock:
+    """The same resolution, judged against two different bases.
+
+    ``test_a_dropped_definition_blocks_the_commit`` writes this exact file and
+    is refused, because there both parents still defined ``local_only``. Here
+    upstream deleted it, so following the deletion is the merge working — and
+    the gate must be able to tell the two apart, or its findings are noise and
+    the operator learns to bypass it wholesale.
+    """
+
+    def test_following_an_upstream_deletion_commits(self, pyworld_upstream_deletes):
+        scratch = _prepared(pyworld_upstream_deletes)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld_upstream_deletes["state"],
+                        pyworld_upstream_deletes["live"]))
+
+        assert out["status"] == "committed", out
+        assert out["invariant_report"]["findings"] == []
+        assert "invariants_skipped" not in out
+
+    def test_dropping_a_definition_both_parents_kept_still_blocks(self, pyworld):
+        """Guards against over-suppression: the original alarm must still fire."""
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert [f["symbol"] for f in out["findings"]] == ["local_only"]
+
+
 class TestAmendIsCheckedToo:
     def test_amend_cannot_smuggle_a_broken_file_into_the_merge(self, pyworld):
         scratch = _prepared(pyworld)
@@ -171,8 +256,8 @@ class TestHandoffIsCheckedToo:
 
 
 class TestOverride:
-    def test_the_escape_hatch_commits_and_says_so(self, pyworld):
-        """A legitimate mass deletion must not wedge the pipeline forever."""
+    def test_environment_escape_hatch_is_ignored_and_gate_stays_blocked(self, pyworld):
+        """The old global skip cannot discharge a finding."""
         scratch = _prepared(pyworld)
         (scratch / "mod.py").write_text("def kept():\n    return 100\n")
         _git(scratch, "add", "mod.py")
@@ -180,8 +265,9 @@ class TestOverride:
         out = _out(_run("commit", pyworld["state"], pyworld["live"],
                         env={"HERMES_SYNC_SKIP_INVARIANTS": "1"}))
 
-        assert out["status"] == "committed"
-        assert out["invariants_skipped"] is True
+        assert out["status"] == "invariants_failed"
+        assert "invariants_skipped" not in out
+        assert not (pyworld["state"] / "finalize-request.json").exists()
 
 
 class TestMechanicalResolutionValidatesItsOutput:
@@ -338,3 +424,182 @@ class TestFindingsRenderer:
         m = self._mod()
 
         assert "finalize-detail.log" in m.render([])
+
+
+class TestStageZeroCommitContract:
+    def test_unstaged_tracked_edit_is_refused_with_add_hint(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "unstaged_tree"
+        assert "git add -- <paths>" in out["reason"]
+
+    def test_untracked_file_is_refused(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "operator-note.txt").write_text("not part of the merge")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "unstaged_tree"
+        assert "untracked" in out["reason"]
+
+    def test_break_glass_is_explicit_and_audited(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"], "--break-glass"))
+        assert out["status"] == "committed"
+        assert out["invariants_break_glass"]["mode"] == "manual-only"
+
+
+    def test_deleted_stage_zero_path_is_one_ackable_file_finding(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").unlink()
+        _git(scratch, "add", "-u", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert len(out["findings"]) == 1
+        finding = out["findings"][0]
+        assert finding["kind"] == "deleted_in_result"
+        assert finding["path"] == "mod.py"
+        assert finding.get("finding_id")
+
+
+class TestResolutionPolicySnapshot:
+    def test_conflicting_policies_for_one_path_are_a_hard_refusal(self, pyworld):
+        pending_path = pyworld["state"] / "pending.json"
+        data = json.loads(pending_path.read_text())
+        data["features"].append({"id": "F2", "decision": "take-upstream", "files": ["mod.py"]})
+        pending_path.write_text(json.dumps(data))
+        out = _out(_run("prepare", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "policy_error"
+        assert "ambiguous" in out["reason"]
+
+    def test_keep_local_journals_expected_upstream_contribution_loss(self, pyworld):
+        scratch = _prepared(pyworld)
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "committed"
+        prep = json.loads((pyworld["state"] / "apply-prepare.json").read_text())
+        expected = prep["invariant_report"]["expected_policy_losses"]
+        assert any(item["symbol"] == "kept" for item in expected)
+        pending = json.loads((pyworld["state"] / "invariants-pending.json").read_text())
+        assert any(item["event"] == "expected_policy_loss" for item in pending["journal"])
+        assert pending["status"] == "reported"
+
+
+    def test_invariant_mode_is_snapshotted_at_prepare(self, pyworld, monkeypatch):
+        pending_path = pyworld["state"] / "pending.json"
+        pending = json.loads(pending_path.read_text())
+        pending["features"][0]["decision"] = "merge-both"
+        pending_path.write_text(json.dumps(pending))
+        monkeypatch.setenv("HERMES_SYNC_INVARIANT_MODE", "report")
+        scratch = _prepared(pyworld)
+        prep = json.loads((pyworld["state"] / "apply-prepare.json").read_text())
+        assert prep["invariant_mode"] == "report"
+
+        monkeypatch.setenv("HERMES_SYNC_INVARIANT_MODE", "block")
+        (scratch / "mod.py").write_text(
+            "def kept():\n    return 100\n\n\ndef local_only():\n    return 2\n"
+        )
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "committed"
+        assert out["invariant_report"]["mode"] == "report"
+
+
+    def test_report_only_mode_records_contribution_without_blocking(self, pyworld):
+        pending_path = pyworld["state"] / "pending.json"
+        pending = json.loads(pending_path.read_text())
+        pending["features"][0]["decision"] = "merge-both"
+        pending_path.write_text(json.dumps(pending))
+        prep = _run(
+            "prepare", pyworld["state"], pyworld["live"], "--invariant-mode", "report",
+        )
+        assert _out(prep)["status"] == "ready", prep.stdout
+        scratch = pyworld["state"] / "scratch"
+        (scratch / "mod.py").write_text(
+            "def kept():\n    return 100\n\n\ndef local_only():\n    return 2\n"
+        )
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run(
+            "commit", pyworld["state"], pyworld["live"],
+        ))
+
+        assert out["status"] == "committed"
+        report = out["invariant_report"]
+        assert report["mode"] == "report"
+        assert any(f["kind"] == "discarded_contribution" for f in report["findings"])
+
+
+    def test_incomplete_origin_is_reported_before_arming_receipts(self, pyworld):
+        scratch = _prepared(pyworld)
+        pending_path = pyworld["state"] / "pending.json"
+        pending = json.loads(pending_path.read_text())
+        pending.pop("slack_user_id")
+        pending_path.write_text(json.dumps(pending))
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "invariant_origin_incomplete"
+        assert "user_id" in out["reason"]
+        assert not (pyworld["state"] / "invariants-pending.json").exists()
+
+
+    def test_blocked_hard_finding_explains_that_receipts_are_disabled(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept(:\n    return 1\n")
+        _git(scratch, "add", "mod.py")
+
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+
+        assert out["status"] == "invariants_failed"
+        assert "blocked" in out["hint"].lower()
+        assert "receipt" in out["hint"].lower()
+
+
+    def test_merge_both_catches_a_dropped_body_contribution(self, pyworld):
+        pending_path = pyworld["state"] / "pending.json"
+        data = json.loads(pending_path.read_text())
+        data["features"][0]["decision"] = "merge-both"
+        pending_path.write_text(json.dumps(data))
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        out = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "invariants_failed"
+        assert any(f.get("symbol") == "kept" for f in out["findings"])
+
+
+class TestReceiptAndAmendLifecycle:
+    def test_matching_receipt_survives_amend_of_unrelated_file(self, pyworld):
+        scratch = _prepared(pyworld)
+        (scratch / "mod.py").write_text("def kept():\n    return 100\n")
+        _git(scratch, "add", "mod.py")
+        failed = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert failed["status"] == "invariants_failed"
+        finding_id = failed["acknowledgements_required"][0]
+        from hermes_cli.upstream_sync_reply import record_invariant_ack
+        ack = record_invariant_ack(
+            pyworld["state"], finding_id,
+            {"platform": "slack", "chat_id": "C0B3X1E5SJZ",
+             "thread_id": "1783420000.000", "user_id": "U123"},
+        )
+        assert ack["requested"] is True
+        committed = _out(_run("commit", pyworld["state"], pyworld["live"]))
+        assert committed["status"] == "committed"
+        (scratch / "unrelated.txt").write_text("amend\n")
+        _git(scratch, "add", "unrelated.txt")
+        amended = _out(_run("commit", pyworld["state"], pyworld["live"], "--amend"))
+        assert amended["status"] == "committed"
+
+    def test_new_prepare_invalidates_old_receipt_state_when_live_head_moves(self, pyworld):
+        (pyworld["state"] / "invariants-pending.json").write_text(json.dumps({"merge_scope": {"local_parent": "old"}}))
+        (pyworld["live"] / "new.txt").write_text("moved\n")
+        _git(pyworld["live"], "add", "new.txt")
+        _git(pyworld["live"], "commit", "-qm", "move live head")
+        out = _out(_run("prepare", pyworld["state"], pyworld["live"]))
+        assert out["status"] == "ready"
+        assert not (pyworld["state"] / "invariants-pending.json").exists()

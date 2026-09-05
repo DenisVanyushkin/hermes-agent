@@ -61,6 +61,25 @@ class TestParseFailures:
         assert parse_failures({"website/docs/security.md": "{ not python at all"}) == []
 
 
+def test_expected_policy_loss_does_not_duplicate_one_discarded_fact():
+    from upstream_sync_invariants import expected_policy_losses
+
+    events = expected_policy_losses(
+        ours="def kept():\n    return 1\n",
+        theirs="def kept():\n    return 1\n\ndef upstream_only():\n    return 2\n",
+        result="def kept():\n    return 1\n",
+        base="def kept():\n    return 0\n",
+        path="mod.py",
+        policy="keep-local",
+    )
+
+    facts = [
+        (item["path"], item["symbol"], item["discarded_side"])
+        for item in events
+    ]
+    assert facts == [("mod.py", "upstream_only", "upstream")]
+
+
 class TestLostDefinitions:
     def test_reports_every_definition_the_resolver_dropped(self):
         """The 211-vs-1 block: the model kept the signature, dropped the payload."""
@@ -127,6 +146,151 @@ class TestLostDefinitions:
         findings = lost_definitions(ours=ours, theirs=theirs, result=ours, path="tools/approval.py")
 
         assert [f.symbol for f in findings] == ["submit_pending"]
+
+
+class TestBaseAwareSuppression:
+    """With the merge base in hand, an accepted deletion stops looking like a loss.
+
+    Without it the check can only ask "was this symbol on a parent?", which
+    conflates two different events: a resolver dropping code (the thing the gate
+    exists for) and one side deliberately deleting code the other side never
+    removed (routine, and the majority of what a 164-commit upstream batch
+    brings). Every finding of 2026-08-21 and 2026-08-22 was the second kind, and
+    a gate whose findings are noise teaches its operator to bypass it wholesale.
+    """
+
+    FOO = "def foo():\n    pass\n"
+    BAR = "def bar():\n    pass\n"
+
+    def test_upstream_deleting_a_symbol_we_never_removed_is_not_a_loss(self):
+        from upstream_sync_invariants import lost_definitions
+
+        # 2026-08-22: upstream removed 27 duplicate _ensure_telegram_mock copies
+        # in c1693d7dcc; the fork had only edited neighbouring lines.
+        assert lost_definitions(
+            base=self.FOO + self.BAR, ours=self.FOO + self.BAR,
+            theirs=self.BAR, result=self.BAR, path="x.py",
+        ) == []
+
+    def test_our_deletion_of_a_symbol_upstream_kept_is_not_a_loss(self):
+        from upstream_sync_invariants import lost_definitions
+
+        # The mirror image: 2026-08-21, submit_pending deleted on the fork.
+        assert lost_definitions(
+            base=self.FOO + self.BAR, ours=self.BAR,
+            theirs=self.FOO + self.BAR, result=self.BAR, path="x.py",
+        ) == []
+
+    def test_a_symbol_both_parents_still_define_is_lost_when_dropped(self):
+        """Neither side deleted it, so the resolution had no licence to."""
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base=self.FOO + self.BAR, ours=self.FOO + self.BAR,
+            theirs=self.FOO + self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+        assert findings[0].kind == "lost_definition"
+
+    def test_a_symbol_added_by_one_side_and_then_dropped_is_lost(self):
+        """Absent from the base means nobody deleted it — it was added and lost."""
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base=self.BAR, ours=self.FOO + self.BAR,
+            theirs=self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+
+    def test_a_rename_on_one_side_is_not_reported_as_a_loss(self):
+        """foo -> renamed upstream: the old name is gone from exactly one side."""
+        from upstream_sync_invariants import lost_definitions
+
+        renamed = "def foo_v2():\n    pass\n"
+
+        assert lost_definitions(
+            base=self.FOO, ours=self.FOO, theirs=renamed, result=renamed, path="x.py",
+        ) == []
+
+    def test_an_unparseable_base_suppresses_nothing(self):
+        """An unreadable base is unknown intent, and unknown intent gets reported.
+
+        Not an ``unreadable_parent`` finding either: the base is not a parent of
+        this merge and its syntax is not this merge's problem. It just stops
+        being evidence, so the check falls back to reporting.
+        """
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base="def broken(:\n", ours=self.FOO + self.BAR,
+            theirs=self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+        assert {f.kind for f in findings} == {"lost_definition"}
+
+    def test_without_a_base_every_absence_is_still_reported(self):
+        """The pre-base contract stays intact for callers that supply nothing."""
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            ours=self.FOO + self.BAR, theirs=self.BAR, result=self.BAR, path="x.py",
+        )
+
+        assert [f.symbol for f in findings] == ["foo"]
+
+
+class TestASideWithoutTheFile:
+    """``None`` means the side has no file; ``""`` means it has an empty one.
+
+    They are different events and only one of them says anything about intent.
+    A side that does not have the file presents the same empty name set as a
+    side that deleted every symbol in it — and read as the latter, every single
+    base-era name satisfies "exactly one side removed it" and the whole file is
+    excused, leaving the resolution checked against nothing. That is the routine
+    shape of upstream retiring a module the fork still edits, resolved by
+    keeping the file.
+    """
+
+    BASE = "def a():\n    pass\ndef b():\n    pass\ndef c():\n    pass\n"
+    OURS = BASE + "def d():\n    pass\n"
+    RESULT = "def a():\n    pass\n"
+
+    def test_upstream_not_having_the_file_suppresses_nothing(self):
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base=self.BASE, ours=self.OURS, theirs=None, result=self.RESULT, path="m.py",
+        )
+
+        assert [f.symbol for f in findings] == ["b", "c", "d"]
+
+    def test_us_not_having_the_file_suppresses_nothing(self):
+        from upstream_sync_invariants import lost_definitions
+
+        theirs = self.BASE + "def d():\n    pass\n"
+        findings = lost_definitions(
+            base=self.BASE, ours=None, theirs=theirs, result=self.RESULT, path="m.py",
+        )
+
+        assert [f.symbol for f in findings] == ["b", "c", "d"]
+
+    def test_a_side_that_emptied_the_file_still_counts_as_deleting(self):
+        """Having the file and defining nothing in it IS a deletion of everything.
+
+        This is the half the presence check must keep: the side is there, it
+        removed the definitions on purpose, and a resolution that follows it has
+        lost nothing. Only "no file at all" is unknowable from the name sets.
+        """
+        from upstream_sync_invariants import lost_definitions
+
+        findings = lost_definitions(
+            base=self.BASE, ours=self.OURS, theirs="", result=self.RESULT, path="m.py",
+        )
+
+        assert [f.symbol for f in findings] == ["d"]
 
 
 class TestCheckMerge:
@@ -196,3 +360,55 @@ class TestUnparseableParent:
 
         kinds = {f.kind for f in findings}
         assert "unreadable_parent" in kinds
+
+
+def test_merge_both_reports_a_dropped_duplicate_definition_occurrence():
+    from upstream_sync_invariants import lost_definitions
+
+    ours = "def foo():\n    return 1\n\ndef foo():\n    return 2\n"
+    theirs = ours
+    result = "def foo():\n    return 1\n"
+    findings = lost_definitions(ours=ours, theirs=theirs, result=result, path="x.py", policy="merge-both")
+    assert any(f.symbol == "foo#2" for f in findings)
+
+
+def test_merge_both_reports_one_finding_when_the_whole_name_is_absent():
+    from upstream_sync_invariants import lost_definitions
+
+    src = "def foo():\n    return 1\n"
+    findings = lost_definitions(
+        ours=src, theirs=src, result="", path="x.py", policy="merge-both",
+    )
+    assert [(f.kind, f.symbol) for f in findings] == [("lost_definition", "foo")]
+
+
+def test_body_contribution_has_a_distinct_kind_and_message():
+    from upstream_sync_invariants import lost_definitions
+
+    base = "def guarded():\n    return 1\n"
+    ours = "def guarded():\n    return 2\n"
+    theirs = "def guarded():\n    return 3\n"
+    findings = lost_definitions(
+        ours=ours, theirs=theirs, result=ours, base=base,
+        path="x.py", policy="merge-both",
+    )
+    finding = next(f for f in findings if f.symbol == "guarded")
+    assert finding.kind == "discarded_contribution"
+    assert "absent from the resolution" not in finding.message
+    assert "upstream" in finding.message.lower()
+
+
+def test_decorator_only_change_is_a_discarded_contribution():
+    from upstream_sync_invariants import lost_definitions
+
+    base = "def guarded():\n    pass\n"
+    ours = "@local\n\ndef guarded():\n    pass\n"
+    theirs = "@upstream\n\ndef guarded():\n    pass\n"
+    findings = lost_definitions(
+        ours=ours, theirs=theirs, result=ours, base=base,
+        path="x.py", policy="merge-both",
+    )
+    assert any(
+        f.kind == "discarded_contribution" and f.symbol == "guarded"
+        for f in findings
+    )

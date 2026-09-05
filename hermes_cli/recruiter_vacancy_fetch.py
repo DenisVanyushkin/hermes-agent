@@ -63,7 +63,11 @@ def _get(url: str) -> Any:
 
 
 def _fetch_hh(vacancy_id: str) -> dict[str, Any]:
-    payload = _get(f"https://api.hh.ru/vacancies/{vacancy_id}").json()
+    # Reuse Job Intel's application-token transport. This module must not mint
+    # a second token: HeadHunter invalidates the previous app token on mint.
+    from job_intel import hh_api
+
+    payload = hh_api.fetch_vacancy_detail(vacancy_id)
     return _details(
         title=payload.get("name"),
         company=(payload.get("employer") or {}).get("name"),

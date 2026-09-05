@@ -1,0 +1,569 @@
+"""Regression: the consumer-declared final + interim-send contract
+(live findings, 2026-08-16 canary — the duplicate-final class).
+
+Three invariants:
+
+1. ``finish(final_text=...)`` makes the finalize payload the AUTHORITATIVE
+   completed final_response — post-stream augmentation (file-mutation
+   verifier footer) rides the seal/final edit instead of arriving via a
+   separate corrective send (live finding #11).
+
+2. Interim sends (commentary) from the consumer carry ``_interim_send``
+   metadata, and the relay adapter's seal-interception ignores them — a
+   mid-turn commentary must never seal the live native stream (which
+   orphaned the true final into a plain-send duplicate).
+
+3. The queued-follow-up lane reconciles an unconfirmed final by EDITING the
+   consumer's delivered message in place, not by plain-sending a duplicate.
+"""
+
+import asyncio
+import sys
+import types
+from types import SimpleNamespace
+
+import pytest
+
+from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+
+def _make_draft_adapter():
+    """BasePlatformAdapter subclass with stream-is-the-message drafts."""
+    from gateway.platforms.base import BasePlatformAdapter, SendResult
+
+    A = type("StreamIsMsgAdapter", (BasePlatformAdapter,), {"MAX_MESSAGE_LENGTH": 39000})
+    A.__abstractmethods__ = frozenset()
+    a = A.__new__(A)
+    a._typing_paused = set()
+    a._fatal_error_message = None
+    a.draft_stream_is_message = True
+    a.draft_calls = []
+    a.send_calls = []
+    a.edit_calls = []
+
+    def _supports(chat_type=None, metadata=None):
+        return True
+    a.supports_draft_streaming = _supports
+
+    async def _send_draft(*, chat_id, draft_id, content, metadata=None):
+        a.draft_calls.append({"draft_id": draft_id, "content": content})
+        return SendResult(success=True, message_id=None)
+    a.send_draft = _send_draft
+
+    async def _send(chat_id, content, reply_to=None, metadata=None, **kw):
+        a.send_calls.append({"content": content, "metadata": dict(metadata or {})})
+        return SendResult(success=True, message_id="sealed_ts_1")
+    a.send = _send
+
+    async def _edit(chat_id, message_id, content, **kw):
+        a.edit_calls.append({"message_id": message_id, "content": content})
+        return SendResult(success=True, message_id=message_id)
+    a.edit_message = _edit
+    return a
+
+
+class TestConsumerDeclaredFinal:
+    @pytest.mark.asyncio
+    async def test_finish_final_text_rides_the_final_send(self):
+        """The footer-bearing final_response must BE the finalize payload —
+        one message, no separate corrective send needed."""
+        adapter = _make_draft_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto", chat_type="dm",
+            edit_interval=0.01, buffer_threshold=1, cursor="",
+        )
+        sc = GatewayStreamConsumer(adapter, "D1", cfg)
+
+        task = asyncio.create_task(sc.run())
+        sc.on_delta("streamed answer body")
+        await asyncio.sleep(0.06)
+        # Turn completes; turn_finalizer appended the verifier footer.
+        final_with_footer = (
+            "streamed answer body\n\n"
+            "⚠️ File-mutation verifier: 1 file(s) were NOT modified this turn."
+        )
+        sc.finish(final_with_footer)
+        await task
+
+        # The turn-final send carried the COMPLETE footer-bearing final.
+        assert adapter.send_calls, "expected a turn-final send"
+        assert adapter.send_calls[-1]["content"] == final_with_footer
+        # And the recorded payload reconciles → gateway suppression is safe.
+        assert sc.delivered_final_matches(final_with_footer) is True
+
+    @pytest.mark.asyncio
+    async def test_finish_bare_keeps_legacy_behavior(self):
+        adapter = _make_draft_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto", chat_type="dm",
+            edit_interval=0.01, buffer_threshold=1, cursor="",
+        )
+        sc = GatewayStreamConsumer(adapter, "D1", cfg)
+        task = asyncio.create_task(sc.run())
+        sc.on_delta("plain answer")
+        await asyncio.sleep(0.06)
+        sc.finish()
+        await task
+        assert adapter.send_calls[-1]["content"] == "plain answer"
+
+
+class TestInterimSendContract:
+    @pytest.mark.asyncio
+    async def test_commentary_is_marked_interim(self):
+        adapter = _make_draft_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto", chat_type="dm",
+            edit_interval=0.01, buffer_threshold=1, cursor="",
+        )
+        sc = GatewayStreamConsumer(adapter, "D1", cfg)
+        ok = await sc._send_commentary("Using the browser tool…")
+        assert ok is True
+        assert adapter.send_calls[-1]["metadata"].get("_interim_send") is True
+
+    @pytest.mark.asyncio
+    async def test_relay_adapter_interim_send_does_not_seal(self):
+        """An armed open draft must survive an interim send untouched."""
+        from tests.gateway.relay.test_relay_live_cards import _connected_adapter
+
+        adapter, _ = _connected_adapter(
+            supported_ops=("send", "edit", "typing", "draft"),
+        )
+
+        class _T:
+            def __init__(self):
+                self.ops = []
+            async def send_outbound(self, payload, platform=None):
+                self.ops.append(dict(payload))
+                return {"success": True, "message_id": "111.222"}
+
+        t = _T()
+        adapter._transport = t
+        md = {"thread_ts": "1700.42"}
+        await adapter.send_draft("C1", 5, "streaming...", metadata=md)
+        key = adapter._draft_key("C1", md)
+        assert adapter._open_draft_by_chat.get(key) == 5
+
+        # Interim commentary while the stream is open: must NOT seal.
+        res = await adapter.send(
+            "C1", "delegation dispatched, continuing…",
+            metadata={**md, "_interim_send": True},
+        )
+        assert res.success
+        assert adapter._open_draft_by_chat.get(key) == 5, "interim send sealed the stream"
+        sent_ops = [o for o in t.ops if o["op"] == "send"]
+        assert len(sent_ops) == 1
+        # Marker never leaks to the wire.
+        assert "_interim_send" not in (sent_ops[0].get("metadata") or {})
+
+        # The true turn-final still seals.
+        final = await adapter.send("C1", "streaming... done.", metadata=md)
+        assert final.success
+        assert key not in adapter._open_draft_by_chat
+        seals = [o for o in t.ops if o["op"] == "draft" and o.get("final")]
+        assert len(seals) == 1
+
+    @pytest.mark.asyncio
+    async def test_send_for_platform_interim_does_not_seal(self):
+        """The delivery-resolver egress door honors the interim contract too.
+
+        send_for_platform is the second seal-interception site (finding #7);
+        an interim send routed through it must neither seal the open stream
+        nor leak the gateway-internal marker onto the wire.
+        """
+        from tests.gateway.relay.test_relay_live_cards import _connected_adapter
+
+        adapter, _ = _connected_adapter(
+            supported_ops=("send", "edit", "typing", "draft"),
+        )
+
+        class _T:
+            def __init__(self):
+                self.ops = []
+                # fronts_platform reads the handshake identity set off the
+                # transport; advertise slack so send_for_platform proceeds.
+                self._identities = [("slack", "U-bot")]
+            async def send_outbound(self, payload, platform=None):
+                self.ops.append(dict(payload))
+                return {"success": True, "message_id": "111.333"}
+
+        t = _T()
+        adapter._transport = t
+        md = {"thread_ts": "1700.77"}
+        await adapter.send_draft("C2", 9, "streaming...", metadata=md)
+        key = adapter._draft_key("C2", md)
+        assert adapter._open_draft_by_chat.get(key) == 9
+
+        res = await adapter.send_for_platform(
+            "slack", "C2", "interim status", metadata={**md, "_interim_send": True},
+        )
+        assert res.success
+        assert adapter._open_draft_by_chat.get(key) == 9, "interim send_for_platform sealed the stream"
+        sent_ops = [o for o in t.ops if o["op"] == "send"]
+        assert len(sent_ops) == 1
+        assert "_interim_send" not in (sent_ops[0].get("metadata") or {})
+
+
+@pytest.mark.asyncio
+async def test_real_gateway_runner_suppresses_codex_protocol_before_interim_slack_send(
+    monkeypatch, tmp_path
+):
+    """The production GatewayRunner seam must not publish Codex protocol text.
+
+    The fake agent emits the same completed Codex event shape as the runtime;
+    the call still traverses ``GatewayRunner._run_agent`` and its real
+    interim-assistant callback before reaching the capture Slack adapter.
+    """
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _make_runner
+
+    class _MalformedCodexAgent:
+        def __init__(self, **kwargs):
+            self.interim_assistant_callback = None
+            self.tools = []
+            self.model = kwargs.get("model", "gpt-5-codex")
+            self.provider = "openai-codex"
+            self.session_id = kwargs.get("session_id", "session-1")
+            self.context_compressor = None
+
+        def run_conversation(self, _message, **_kwargs):
+            from agent.codex_runtime import _consume_codex_event_stream
+
+            malformed = (
+                '<|start|>assistant<|channel|>commentary '
+                'to=functions.skill_view<|constrain|>json\n'
+                '{"name":"skill_view","arguments":{"path":"/secret"}}'
+            )
+            item = SimpleNamespace(
+                type="message",
+                phase="commentary",
+                status="completed",
+                content=[SimpleNamespace(type="output_text", text=malformed)],
+            )
+            _consume_codex_event_stream(
+                [
+                    SimpleNamespace(
+                        type="response.output_item.added",
+                        item=SimpleNamespace(type="message", phase="commentary"),
+                    ),
+                    SimpleNamespace(type="response.output_text.delta", delta=malformed),
+                    SimpleNamespace(type="response.output_item.done", item=item),
+                    SimpleNamespace(
+                        type="response.completed",
+                        response=SimpleNamespace(status="completed"),
+                    ),
+                ],
+                model=self.model,
+                on_commentary_message=self.interim_assistant_callback,
+                valid_tool_names={"skill_view"},
+            )
+            return {
+                "final_response": "safe final answer",
+                "messages": [],
+                "api_calls": 1,
+                "completed": True,
+            }
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _MalformedCodexAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+    (tmp_path / "config.yaml").write_text(
+        "display:\n  interim_assistant_messages: true\n  platforms:\n"
+        "    slack:\n      interim_assistant_messages: true\n",
+        encoding="utf-8",
+    )
+
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "interim_assistant_messages": True,
+                "platforms": {"slack": {"interim_assistant_messages": True}},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
+    runner = _make_runner(adapter)
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-codex-protocol",
+        session_key="agent:main:slack:dm:C123",
+        event_message_id="171717.000001",
+    )
+
+    delivered = [call["content"] for call in adapter.sent + adapter.edits]
+    assert result["final_response"] == "safe final answer"
+    # _run_agent returns the final result to the outer message handler; this
+    # seam owns only interim delivery.  The malformed commentary produced no
+    # Slack send, leaving the normal final-delivery path authoritative.
+    assert delivered == []
+    assert all("<|start|>" not in text for text in delivered)
+    assert all("to=functions." not in text for text in delivered)
+
+
+@pytest.mark.asyncio
+async def test_gateway_runner_uses_real_codex_recovery_composition(monkeypatch, tmp_path):
+    """GatewayRunner drives the actual Codex runtime, loop, and Slack seam."""
+    from unittest.mock import MagicMock
+
+    import run_agent as run_agent_module
+    from gateway.config import Platform
+    from gateway.session import SessionSource
+    from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _make_runner
+    from tests.run_agent.test_run_agent_codex_responses import _FakeCreateStream
+
+    tool_definition = {
+        "type": "function",
+        "function": {
+            "name": "skill_view",
+            "description": "Read a skill file.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    monkeypatch.setattr(
+        run_agent_module,
+        "get_tool_definitions",
+        lambda **_kwargs: [tool_definition],
+    )
+    monkeypatch.setattr(run_agent_module, "check_toolset_requirements", lambda: {})
+    monkeypatch.setattr(run_agent_module, "OpenAI", MagicMock())
+
+    malformed = (
+        '<|start|>assistant<|channel|>commentary '
+        'to=functions.skill_view<|constrain|>json\n'
+        '{"name":"skill_view","arguments":{}}'
+    )
+    streams = iter([
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="commentary"),
+            ),
+            SimpleNamespace(type="response.output_text.delta", delta=malformed),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="message",
+                    phase="commentary",
+                    status="completed",
+                    content=[SimpleNamespace(type="output_text", text=malformed)],
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="function_call"),
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc_1",
+                    call_id="call_1",
+                    name="skill_view",
+                    arguments="{}",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+        _FakeCreateStream([
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="message", phase="final_answer"),
+            ),
+            SimpleNamespace(
+                type="response.output_text.delta",
+                delta="Recovered through native call.",
+            ),
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="message",
+                    phase="final_answer",
+                    status="completed",
+                    content=[
+                        SimpleNamespace(
+                            type="output_text", text="Recovered through native call."
+                        )
+                    ],
+                ),
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(status="completed"),
+            ),
+        ]),
+    ])
+    execution_calls = []
+
+    def _real_interruptible_call(self, api_kwargs):
+        stream = next(streams)
+        self.client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **_kwargs: stream)
+        )
+        return self._run_codex_stream(api_kwargs)
+
+    def _execute_native_call(self, assistant_message, messages, effective_task_id, api_call_count=0):
+        execution_calls.append(assistant_message.tool_calls)
+
+    monkeypatch.setattr(
+        run_agent_module.AIAgent,
+        "_interruptible_api_call",
+        _real_interruptible_call,
+    )
+    monkeypatch.setattr(
+        run_agent_module.AIAgent,
+        "_execute_tool_calls",
+        _execute_native_call,
+    )
+
+    import gateway.run as gateway_run
+
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {"display": {"interim_assistant_messages": True}},
+    )
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"api_key": "***"},
+    )
+    adapter = ProgressCaptureAdapter(platform=Platform.SLACK)
+    runner = _make_runner(adapter)
+    runner._resolve_session_agent_runtime = lambda **_kwargs: (
+        "gpt-5-codex",
+        {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "test-token",
+        },
+    )
+    runner._resolve_turn_agent_config = lambda _message, _model, _runtime: {
+        "model": "gpt-5-codex",
+        "runtime": {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "test-token",
+        },
+    }
+    runner._resolve_enabled_toolsets_for_source = lambda *_args: []
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="dm",
+        thread_id=None,
+    )
+
+    result = await runner._run_agent(
+        message="inspect the skill",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-real-codex-recovery",
+        session_key="agent:main:slack:dm:C123",
+        event_message_id="171717.000002",
+    )
+
+    visible_interim = [call["content"] for call in adapter.sent + adapter.edits]
+    assert result["final_response"] == "Recovered through native call."
+    assert len(execution_calls) == 1
+    assert visible_interim == []
+    assert all("to=functions.skill_view" not in text for text in visible_interim)
+
+
+class TestFinalAdoptionGuards:
+    @pytest.mark.asyncio
+    async def test_no_stream_turn_does_not_adopt_final(self):
+        """finish(final_text) on a turn that never streamed must not move
+        delivery ownership into the consumer — the gateway's normal final
+        send path owns those turns (non-streaming models, tool-only turns)."""
+        adapter = _make_draft_adapter()
+        cfg = StreamConsumerConfig(
+            transport="auto", chat_type="dm",
+            edit_interval=0.01, buffer_threshold=1, cursor="",
+        )
+        sc = GatewayStreamConsumer(adapter, "D1", cfg)
+        task = asyncio.create_task(sc.run())
+        # No on_delta at all — straight to completion with a payload.
+        sc.finish("the final answer from a non-streaming turn")
+        await task
+        assert adapter.send_calls == [], "no-stream turn must not deliver via the consumer"
+        assert adapter.draft_calls == []
+
+
+class TestQueuedLaneReconcile:
+    @pytest.mark.asyncio
+    async def test_queued_first_response_edits_in_place(self):
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        adapter = _make_draft_adapter()
+        sc = SimpleNamespace(message_id="sealed_ts_9", _turn_split_delivery=False)
+        source = SimpleNamespace(chat_id="D1")
+        await GatewayRunner._deliver_queued_first_response(
+            runner,
+            "the complete final with footer",
+            source=source,
+            adapter=adapter,
+            metadata=None,
+            text_already_delivered=False,
+            deliver_media=False,
+            stream_consumer=sc,
+        )
+        # Edited the sealed message; did NOT plain-send a duplicate.
+        assert adapter.edit_calls == [
+            {"message_id": "sealed_ts_9", "content": "the complete final with footer"}
+        ]
+        assert adapter.send_calls == []
+
+    @pytest.mark.asyncio
+    async def test_queued_first_response_falls_back_without_message(self):
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        adapter = _make_draft_adapter()
+        sc = SimpleNamespace(message_id=None, _turn_split_delivery=False)
+        source = SimpleNamespace(chat_id="D1")
+        await GatewayRunner._deliver_queued_first_response(
+            runner,
+            "final text",
+            source=source,
+            adapter=adapter,
+            metadata=None,
+            text_already_delivered=False,
+            deliver_media=False,
+            stream_consumer=sc,
+        )
+        assert adapter.edit_calls == []
+        assert len(adapter.send_calls) == 1

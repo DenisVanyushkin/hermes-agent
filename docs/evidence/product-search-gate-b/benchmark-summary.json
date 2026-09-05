@@ -1,0 +1,447 @@
+{
+  "schema_version": "1.0.0",
+  "gate": "gate-b",
+  "status": "launch_failed_before_exec_start_pre",
+  "prepared_at": "2026-08-17T12:00:00+05:00",
+  "last_attempt_at": "2026-08-21T13:38:18Z",
+  "authoritative_attempt_evidence": "docs/evidence/product-search-gate-b/task9-launch-attempt.json",
+  "prepared_from_base": "09bd9daabbb12711230e3c6920486fa712634997",
+  "gate_a_input": {
+    "commit": "65d60daae16093a9a7e34a11a159e2f789dd14dd",
+    "manifest_sha256": "6ecc500c291061a34c4482edb5c2a0d6c547993bea0d346ad306041dfa81df3d",
+    "run_id": "gate-a-20260816T141344Z",
+    "raw_observed": 2414,
+    "corrected_canonical_current": 1814,
+    "minimum_evidence_sufficient": 1314,
+    "minimum_evidence_is_not_qualified": true
+  },
+  "gate_b_experiment": {
+    "root": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "created": true,
+    "content_addressed": true,
+    "recordings_created": false
+  },
+  "corpus": {
+    "status": "materialized",
+    "selection_denominator": 1314,
+    "selected_count": 48,
+    "manifest_sha256": "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "selection_algorithm": "deterministic-coverage-first-stratified-round-robin-v1",
+    "immutable_source_ids_preserved": true,
+    "immutable_content_hashes_preserved": true,
+    "strategic_watchlist_origin_available": false,
+    "selection_modes_assigned": false,
+    "coverage": {
+      "companies": 37,
+      "lanes": ["americas", "apac_excluding_australia_new_zealand", "australia_new_zealand", "europe_including_uk", "gcc", "global_ats", "global_remote", "kazakhstan", "other_central_asia"],
+      "origins": ["open_market"],
+      "role_patterns": ["adjacent", "chief_product", "director", "general_manager", "head_product", "product_other", "vp_product"],
+      "sampling_case_types": ["core_hypothesis", "exploration_hypothesis", "hard_block_hypothesis", "important_unknown"],
+      "source_families": ["ashby", "duckduckgo", "greenhouse", "headhunter", "linkedin", "remoteok"]
+    },
+    "note": "Core and Exploration names are sampling hypotheses only; no Decision v2 selection mode has been assigned. The denominator 1314 means minimum-evidence sufficient, not qualified."
+  },
+  "inputs": {
+    "status": "materialized",
+    "schema_version": "2.0.0",
+    "record_count": 48,
+    "vacancy_artifact_count": 48,
+    "company_authority_status": "unavailable",
+    "company_authority_reason": "unresolved_company_identity",
+    "manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r2/run-manifest.v2.json",
+    "next_manifest_path": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r3/run-manifest.v2.json",
+    "next_manifest_materialized": false,
+    "manifest_sha256": "9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987",
+    "ordered_input_hashes_sha256": "32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a",
+    "provider_allowlist_count": 48,
+    "company_identity_discovery_required": false,
+    "official_domain_claims": 0,
+    "company_facts": 0,
+    "company_citations": 0
+  },
+  "budget": {
+    "estimated_calls": 48,
+    "exact_call_cap": 48,
+    "exact_spend_cap_usd": "0.48",
+    "max_cost_per_call_usd": "0.01",
+    "maximum_spend_usd": "0.48"
+  },
+  "record_identity": {
+    "corpus_manifest_sha256": "b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "decision_contract_sha256": "2a3240e4d39c886c9afe11d66f67c1515b722d26d43ab7c134c78af9f2521db8",
+    "max_output_tokens": "2000",
+    "model_id": "openai/gpt-5-mini",
+    "model_sha256": "020751dc92eb7ffd06a66f45b63322618c811e48a4553198624dfa88200dc6b2",
+    "policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
+    "pricing_sha256": "975559f76b1e8c6bebdbbae3011a166f3d490caf703e555cebb53e45ebc8eb3e",
+    "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
+    "record_state_protocol_version": "gate-b-record-state-r3",
+    "profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
+    "provider_adapter_version": "product-search-evidence-replay/2.0",
+    "provider_output_schema_sha256": "428586420dd32c64343c5ac8d59466870319037ab84702b0c7ee1866bf5274ab",
+    "provider_output_schema_version": "2.0.0",
+    "search_contract_sha256": "faf9a81564d29b3b71b67908f47e54d2c6bbbf416db19914176f410e24df4ab1",
+    "semantic_prompt_sha256": "051c18e40d15d65c15309d217831044267bf01abb77ac5019cbb6ec29e1d29d3",
+    "semantic_prompt_version": "llm-obs-1.0.0",
+    "task10_prompt_sha256": "6036372aef577b91c0b36b873fb9e44c351311641424c831971f8c59b6d666aa",
+    "task10_prompt_version": "product-search-evidence-synthesis-2.0.0",
+    "input_manifest_sha256": "9dd9261c6359d1cd3c899b5df8c85ef0526aea78f83b985d0a1822436f3b5987",
+    "ordered_input_hashes_sha256": "32b2d546aa0312ecb42bb65aadbf2a913277cfbb676d21d07f542dbd26b6b89a"
+  },
+  "record_identity_sha256": "2d05c09a4fea98b9fc8de93cc0afe5994cfa02988ada7ea4a673f91be9cfeb1f",
+  "approval_capability": {
+    "status": "not_supplied",
+    "value": null
+  },
+  "record_runtime_control": {
+    "state_protocol": "gate-b-record-state-r3",
+    "canonical_namespace_root": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69",
+    "canonical_package_root": "/home/hermes/.hermes/job_intel/experiments/gate-b/b1db802dbb3d0e2a18771f32da12b901b3bb9e941ae71b785a3c71142abf2d69/input-package-v2-r3",
+    "runner_mode": "one_shot_non_resumable",
+    "caller_selected_root_allowed": false,
+    "whole_namespace_inventory_required": true,
+    "full_recording_scan_before_each_call": true,
+    "historical_checkpoint_restart_allowed": false,
+    "owner_reconciliation_artifact_required_after_state": true,
+    "reconciliation_authorization_live_calls_allowed": false
+  },
+  "privileged_launch_witness": {
+    "required": true,
+    "fixed_path": "/var/lib/job-intel/gate-b-launch-witness/r3-launch.json",
+    "required_owner_uid": 0,
+    "required_regular_single_link": true,
+    "group_world_writable_allowed": false,
+    "binds_process_and_runner_instance": true,
+    "installed_by_this_task": false,
+    "installation_authorized": false,
+    "live_launch_available": false
+  },
+  "privileged_reconciliation_witness": {
+    "required_after_any_record_state": true,
+    "fixed_path": "/var/lib/job-intel/gate-b-launch-witness/r3-reconciliation.json",
+    "required_owner_uid": 0,
+    "required_regular_single_link": true,
+    "group_world_writable_allowed": false,
+    "binds_complete_observed_namespace": true,
+    "self_appended_request_sufficient": false,
+    "installed_by_this_task": false,
+    "installation_authorized": false,
+    "offline_reconciliation_available": false
+  },
+  "record_run_authorized": false,
+  "stage_4": {
+    "status": "not_run",
+    "reason": "live_benchmark_not_authorized",
+    "input_denominator": null,
+    "hard_gate_eligible": null,
+    "fail_closed": null
+  },
+  "dimensions": {
+    "feasibility": {
+      "status": "not_run",
+      "reason": "live_benchmark_not_authorized",
+      "evaluated": null,
+      "outcomes": null
+    },
+    "mandate_fit": {
+      "status": "not_run",
+      "reason": "live_benchmark_not_authorized",
+      "evaluated": null,
+      "outcomes": null
+    },
+    "company_fit": {
+      "status": "not_run",
+      "reason": "live_benchmark_not_authorized",
+      "evaluated": null,
+      "outcomes": null
+    },
+    "transferability": {
+      "status": "not_run",
+      "reason": "live_benchmark_not_authorized",
+      "evaluated": null,
+      "outcomes": null
+    },
+    "career_value": {
+      "status": "not_run",
+      "reason": "live_benchmark_not_authorized",
+      "evaluated": null,
+      "outcomes": null
+    },
+    "evidence_confidence": {
+      "status": "not_run",
+      "reason": "live_benchmark_not_authorized",
+      "evaluated": null,
+      "outcomes": null
+    }
+  },
+  "verdicts": {
+    "status": "not_run",
+    "reason": "decision_v2_not_run",
+    "counts": null
+  },
+  "unresolved_questions": {
+    "status": "not_computable",
+    "reason": "evidence_synthesis_not_run",
+    "vacancies": null,
+    "questions": null
+  },
+  "delivery": {
+    "status": "not_computable",
+    "reason": "decision_v2_not_run",
+    "daily_eligible": null,
+    "urgent_eligible": null
+  },
+  "provider": {
+    "status": "not_run_launch_failed_pre_transport",
+    "reason": "systemd_namespace_failed_before_exec_start_pre",
+    "operational_counters": {
+      "status": "observed",
+      "reason": "exec_start_and_provider_transport_not_reached",
+      "calls_attempted": 0,
+      "calls_succeeded": 0,
+      "calls_failed": 0
+    },
+    "results": {
+      "status": "not_computable",
+      "reason": "no_provider_attempts",
+      "failures_by_reason": null,
+      "cost_usd": "0.00",
+      "latency_ms": null
+    }
+  },
+  "offline_replay": {
+    "status": "not_run",
+    "reason": "no_task10_recordings",
+    "recordings": null,
+    "byte_stable_matches": null,
+    "mismatches": null,
+    "network_enabled": null
+  },
+  "decision_trace": {
+    "status": "not_run",
+    "reason": "decision_v2_not_run",
+    "traces": null,
+    "replays": null,
+    "exact_matches": null,
+    "mismatches": null,
+    "invariant_violations": null
+  },
+  "human_audit": {
+    "status": "not_run",
+    "reason": "no_decision_v2_results",
+    "high_risk_invariants_reviewed": null,
+    "random_sample_reviewed": null,
+    "factual_errors": null,
+    "policy_errors": null,
+    "interpretation_disagreements": null
+  },
+  "legacy_counterfactual": {
+    "status": "not_run",
+    "reason": "canonical_benchmark_not_run",
+    "result": null,
+    "authority": false,
+    "automatic_truth": false
+  },
+  "candidate_hashes": {
+    "decision_contract_policy_sha256": "2a3240e4d39c886c9afe11d66f67c1515b722d26d43ab7c134c78af9f2521db8",
+    "decision_result_schema_sha256": "4f32b8094b75d630352326cc034db5c6a36086b97911eab13103eaf98c8fdc94",
+    "decision_v2_code_sha256": "6570f1d079c30e5c827b1faf7077380b3a23e0566808c4ba20bcddc06716d3c9",
+    "career_profile_sha256": "19d63f738bf5317ef51ee676851c50e0085c970269a3b25e3df9e86c1f6d7651",
+    "semantic_contract_sha256": "23aee2f238b692bafe1fbc70fdf0534ae63cc21eb38673781c525b5cc05464f5",
+    "evidence_synthesis_policy_sha256": "6f2506f74514db1df7fe3db8060fa849b5f026d35ef617ab9fe3f7b81304610f",
+    "provider_output_schema_sha256": "428586420dd32c64343c5ac8d59466870319037ab84702b0c7ee1866bf5274ab"
+  },
+  "side_effects": {
+    "status": "observed",
+    "reason": "one_shot_launch_failed_before_receipt_consumption_or_exec_start",
+    "production_database_writes": 0,
+    "product_store_writes": 0,
+    "slack_calls": 0,
+    "outbox_writes": 0,
+    "profile_writes": 0,
+    "cache_writes": 0,
+    "protected_source_writes": 0
+  },
+  "task_9_launch_attempt": {
+    "status": "launch_failed_before_exec_start_pre",
+    "attempted_at": "2026-08-21T13:38:18Z",
+    "systemctl_start_count_for_checkpoint": 1,
+    "systemd_status": "226/NAMESPACE",
+    "missing_namespace_path": "/run/job-intel/gate-b-at-most-once",
+    "receipt_consumed": false,
+    "exec_start_executed": false,
+    "provider_transport_reached": false,
+    "calls_attempted": 0,
+    "spend_usd": "0.00",
+    "unstarted_inputs": 48,
+    "retry_or_manual_redispatch": false,
+    "unit_and_unconsumed_receipt_removed": true,
+    "immutable_package_runtime_checkpoint_preserved": true
+  },
+  "owner_decision": "pending",
+  "recommendation": "request_revision",
+  "task_13_authorized": false,
+  "v3_checkpoint_request": {
+    "status": "launch_ready_pending_owner_approval",
+    "prepared_at": "2026-08-21T09:39:29Z",
+    "candidate_commit": "21938df34b6a9976fddc27a80d008d4f60e76c6d",
+    "historical_task12b_base": "c7981218a03e616da8e4d60084c0bfb9633ca892",
+    "rebased_patch_equivalent_base": "b24c5f3f11c56a5705dab537bf63baf359a15b04",
+    "rebased_base_patch_id": "400e78ad23e34a89a172553c8853ed5b0904a8b2",
+    "prospective_package": {
+      "materialized": false,
+      "root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e",
+      "manifest_sha256": "6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e",
+      "ordered_input_count": 48,
+      "ordered_input_hashes_sha256": "a952f9188fb47f06f6cdb6925e48123ecb6da6eed4b24cf472f16530dfea736f",
+      "ordered_projection_hashes_sha256": "8c89aa27f3b48b464cb408d34b51bc7739b11d3a1f25cefd4b92178f64a8f243"
+    },
+    "prospective_runtime": {
+      "materialized": false,
+      "root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/immutable-runtime",
+      "manifest_sha256": "03278316997f454b722ef5a8a9f52ca752f88a8687eaa63fa3840931beaf4cee",
+      "manifest": {
+        "schema_version": "3.0.0",
+        "runtime_kind": "gate_b_at_most_once",
+        "candidate_commit": "21938df34b6a9976fddc27a80d008d4f60e76c6d",
+        "python_version": "3.12.13",
+        "runtime_tree_sha256": "f0c5aa64693bd746fee8e4628cb27437147358531a9ec5dd6fa26e679d8bbdde",
+        "python_executable_sha256": "cd6a26a9b2367f36eda6fa4381373d96c96f155b0ef8fae505f9f5e923b1c162",
+        "stdlib_tree_sha256": "9575d6493bc5817e49175e251b9825125e771b21ecb3576feb180601872ad078",
+        "dependency_lock_sha256": "e262172c0285bdfa9b2be095e3a2481dd620593dd440339170fa484cda8602cd",
+        "installed_distributions_sha256": "8fddf51dcf13d58533601b6ee0578bce2b885c236b4a10eda4f0e7ebb9fc8267",
+        "sys_path_sha256": "8e63ea541c14f997b9ca4cb6dc417eef216a4003a17b2ad2214f0ad2f274cba8",
+        "editable_installs": []
+      },
+      "installed_distribution_count": 69
+    },
+    "provider_environment_contract": {
+      "status": "installed_verified",
+      "contract_path": "docs/evidence/product-search-gate-b/provider-env-contract.json",
+      "contract_file_sha256": "6b6385155673eaa564664bc166687787f08922707ac8829dc8e378d6a2186ee6",
+      "runtime_path": "/etc/job-intel/gate-b-provider.env",
+      "installed": true,
+      "installed_at": "2026-08-21T09:33:07Z",
+      "owner_mode": "root:root 0400",
+      "regular_file": true,
+      "link_count": 1,
+      "symlink": false,
+      "permitted_keys_in_order": [
+        "HERMES_HOME",
+        "OPENROUTER_API_KEY"
+      ],
+      "hermes_home_literal": "/var/empty",
+      "provider_value_source_path": "/home/hermes/.hermes/.env",
+      "provider_value_source_key": "OPENROUTER_API_KEY",
+      "provider_value_observed": true,
+      "provider_value_copy_authorized": true,
+      "canonical_template_sha256": "92d46371aa237956959b9a9b2657ca274bac09986556000fa76457e98695e856",
+      "live_content_sha256": "bd26b7b07417f068efa14ef223108bf953328ccfa4c278c7e122e8ca994ed450",
+      "live_content_sha256_status": "computed_and_verified_from_installed_raw_bytes",
+      "forbidden_authorities": [
+        "Slack credentials, channel ids, or webhook URLs",
+        "production Job Intel DB paths",
+        "production Job Intel outbox paths"
+      ],
+      "remaining_owner_input": "explicitly approve the exact launch-ready checkpoint before 2026-08-22T08:00:00Z"
+    },
+    "launch": {
+      "status": "launch_ready_pending_owner_approval",
+      "run_id": "gate-b-at-most-once-6c3cbd6318e8e03e",
+      "launch_identity_sha256": "7dc08dc11e93fe97ad0f682da51a198f327c20691f2b8774cc0ef1c8351471b3",
+      "owner_checkpoint_sha256": "964d29683b4e19c04b4b005ef04236bd3134933038b887d730deeca4ede9f53b",
+      "launch_ready_checkpoint_bundle": {
+        "schema_version": "1.0.0",
+        "checkpoint_kind": "gate_b_launch_ready_checkpoint_bundle",
+        "canonical_sha256": "efc2335bed52860a96b3cf6c6c6bfd4365dd58169988ecbe6872c859291d477e",
+        "owner_checkpoint_sha256": "964d29683b4e19c04b4b005ef04236bd3134933038b887d730deeca4ede9f53b",
+        "provider_environment_contract_file_sha256": "6b6385155673eaa564664bc166687787f08922707ac8829dc8e378d6a2186ee6",
+        "provider_environment_live_content_sha256": "bd26b7b07417f068efa14ef223108bf953328ccfa4c278c7e122e8ca994ed450"
+      },
+      "owner_approval_effective_at": "2026-08-22T08:00:00Z",
+      "model_id": "openai/gpt-5-mini",
+      "pricing_version": "openrouter-openai-gpt5-mini-2026-08-17",
+      "input_usd_per_mtok": "0.25",
+      "output_usd_per_mtok": "2.00",
+      "maximum_input_tokens": 24000,
+      "maximum_output_tokens": 2000,
+      "ordered_call_cap": 48,
+      "per_call_maximum_usd": "0.01",
+      "aggregate_maximum_usd": "0.48"
+    },
+    "root_owned_receipt": {
+      "status": "prospective_ready_after_explicit_owner_approval",
+      "installed": false,
+      "launch_kind": "initial",
+      "pending_path": "/etc/job-intel/gate-b-at-most-once/gate-b-at-most-once-6c3cbd6318e8e03e-15e5ca368239b6ef63146fc129fa31dca14905af103f5bc9b219295cacbfc9ed/launch.pending.json",
+      "consumed_root": "/run/job-intel/gate-b-at-most-once",
+      "launch_attempt_id": "gate-b-at-most-once-6c3cbd6318e8e03e-15e5ca368239b6ef63146fc129fa31dca14905af103f5bc9b219295cacbfc9ed",
+      "content_sha256": "1f4fdcfb5dac2848095aa924ffbbfe05fcd1e41302057e78e55241d902134b39",
+      "nonce_policy": "gate-b-launch-ready-provider-authority-v1",
+      "nonce_material_sha256": "15e5ca368239b6ef63146fc129fa31dca14905af103f5bc9b219295cacbfc9ed",
+      "issued_at": "2026-08-22T08:00:00Z",
+      "expires_at": "2026-08-22T08:30:00Z",
+      "exact_window_minutes": 30,
+      "pending_owner_mode": "root:root 0400",
+      "consumed_owner_mode": "root:hermes 0440"
+    },
+    "unit": {
+      "installed": false,
+      "path": "/etc/systemd/system/job-intel-gate-b-benchmark.service",
+      "source_sha256": "95ef9ce28e32dc96a469ff539c2dd897d75ccd921ce3837982b8f7599109272c",
+      "type": "oneshot",
+      "restart": "no"
+    },
+    "state": {
+      "run_root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e",
+      "ledger_path": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e/ledger/ledger.jsonl",
+      "recordings_root": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e/provider-recordings",
+      "summary_path": "/home/hermes/.hermes/job_intel/experiments/gate-b-at-most-once/runs/6c3cbd6318e8e03ec58118103fd64ec7829fe5ed763837174546a08729f4953e/gate-b-at-most-once-6c3cbd6318e8e03e/summary.json",
+      "historical_gate_b_authoritative": false
+    },
+    "legacy_runtime": {
+      "job-intel-daily.timer": "masked/inactive",
+      "job-intel-daily.service": "masked/inactive",
+      "job-intel-weekly-kpi.timer": "masked/inactive",
+      "job-intel-weekly-kpi.service": "masked/inactive",
+      "restoration_authorized": false
+    },
+    "verification": {
+      "python": "3.12.13",
+      "venv_created_or_mutated": false,
+      "tests_passed": 632,
+      "tests_failed": 0,
+      "pytest_seconds": "403.75",
+      "ruff_check": "passed",
+      "ruff_format_named_files": "6 already formatted",
+      "scope_guard": "passed",
+      "systemd_analyze_verify": "passed",
+      "bash_syntax": "passed",
+      "diff_check": "passed",
+      "credential_literal_scan": "passed",
+      "provider_env_metadata": "passed",
+      "provider_env_live_hash": "passed",
+      "whole_diff_review": "no Critical or Important findings",
+      "worktree_clean_before_evidence_update": true
+    },
+    "authorization": {
+      "provider_value_access": true,
+      "provider_env_live_hash": true,
+      "materialization": false,
+      "receipt_installation": false,
+      "unit_installation": false,
+      "provider_calls": false,
+      "network": false,
+      "spend": false,
+      "task_9": false
+    },
+    "void_if": [
+      "owner approval is not explicit before 2026-08-22T08:00:00Z",
+      "launch is outside 2026-08-22T08:00:00Z through 2026-08-22T08:30:00Z",
+      "installed provider environment raw SHA-256 or metadata differs from the exact checkpoint bundle",
+      "provider environment contains any key outside the exact two-key contract",
+      "any prospective hash differs when reproduced",
+      "candidate code is substituted"
+    ]
+  }
+}

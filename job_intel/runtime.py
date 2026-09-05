@@ -29,8 +29,6 @@ DEFAULT_SCRIPTS_CANDIDATES = (
 BROWSER_PROFILE_BASE = Path("/var/lib/browser-desktop/profiles")
 BROWSER_PROFILE_DEFAULTS = {
     "linkedin": BROWSER_PROFILE_BASE / "linkedin",
-    "headhunter": BROWSER_PROFILE_BASE / "hh",
-    "hh": BROWSER_PROFILE_BASE / "hh",
     "company_career": BROWSER_PROFILE_BASE / "company-career",
 }
 
@@ -184,11 +182,7 @@ def _browser_profile_paths() -> dict[str, str]:
     resolved: dict[str, str] = {}
     for source, default in BROWSER_PROFILE_DEFAULTS.items():
         env_name = f"JOB_INTEL_BROWSER_PROFILE_DIR_{source.upper()}"
-        if source == "hh":
-            env_name = "JOB_INTEL_BROWSER_PROFILE_DIR_HH"
         override = os.getenv(env_name, "").strip()
-        if not override and source in {"headhunter", "hh"}:
-            override = os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip()
         if not override:
             override = os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR", "").strip()
         if override:
@@ -229,7 +223,7 @@ def build_runtime_contract() -> dict[str, Any]:
     browser_profile_dir = resolve_browser_profile_base()
     service_user = resolve_service_user()
     browser_profile_paths = _browser_profile_paths()
-    required_browser_profile_names = ("linkedin", "headhunter", "hh")
+    required_browser_profile_names = ("linkedin",)
     required_browser_profile_paths = {
         name: path_str
         for name, path_str in browser_profile_paths.items()
@@ -437,3 +431,26 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+DELIVERY_DISABLED_ENV = "JOB_INTEL_DELIVERY_DISABLED"
+_DELIVERY_ALLOWED_VALUES = frozenset({"", "0", "false"})
+
+
+def delivery_disabled() -> bool:
+    """Whether outbound Slack delivery is switched off for this process.
+
+    The variable is a hard disable layered over unchanged legacy behaviour,
+    not a global opt-in to delivery:
+
+    - unset: delivery proceeds exactly as it did before this switch existed,
+      so introducing the switch changes no existing production path;
+    - ``""``, ``0``, ``false``: delivery proceeds; the switch is explicitly off;
+    - any other present value: delivery is suppressed.
+
+    The last rule is the fail-closed one: a typo, a leftover ``shadow``, or a
+    future third state someone invents all suppress. A shadow run that stays
+    silent because of a misspelled variable is a nuisance; a production send
+    that happens because of one is not recoverable.
+    """
+    return os.getenv(DELIVERY_DISABLED_ENV, "").strip().lower() not in _DELIVERY_ALLOWED_VALUES

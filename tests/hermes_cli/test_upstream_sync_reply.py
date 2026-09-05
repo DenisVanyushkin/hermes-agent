@@ -257,6 +257,8 @@ class TestRecordOperatorDecisions:
         assert f2["decision"] == "merge-both" and f2["source"] == "operator" and f2["status"] == "decided"
         assert pending["status"] == "auto_apply"
         assert pending["slack_channel"] == "C1" and pending["slack_thread_ts"] == "1786.001"
+        assert pending["slack_platform"] == "slack"
+        assert pending["slack_user_id"] == "U1"
         req = json.loads((tmp_path / "finalize-request.json").read_text())
         assert req["action"] == "apply-decisions"
         assert req["origin"]["thread_id"] == "1786.001"

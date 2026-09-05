@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import imaplib
+import hashlib
 import json
 import os
 import random
@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import time
+from collections import Counter
 from contextlib import suppress
 
 
@@ -48,15 +49,14 @@ class _WallTimeout:
         return False
 
 
-from email import message_from_bytes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote_plus, urljoin, urlparse
+from typing import Any, Literal, Mapping, get_args
+from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import urlopen
 
 from .models import Vacancy
@@ -66,10 +66,64 @@ from .runtime import resolve_browser_profile_base, sha256_text
 _BROWSER_PROFILE_DEFAULT = resolve_browser_profile_base() / "company-career"
 _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
     "linkedin": resolve_browser_profile_base() / "linkedin",
-    "headhunter": resolve_browser_profile_base() / "hh",
-    "hh": resolve_browser_profile_base() / "hh",
     "company_career": _BROWSER_PROFILE_DEFAULT,
 }
+
+
+@dataclass(frozen=True)
+class ExclusionReasonCatalog:
+    """Versioned, closed data vocabulary for parser exclusions."""
+
+    version: str
+    codes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.version.strip():
+            raise ValueError("exclusion reason catalog version is required")
+        if tuple(sorted(set(self.codes))) != self.codes or not self.codes:
+            raise ValueError("exclusion reason catalog codes must be sorted and unique")
+
+    @property
+    def canonical_json(self) -> str:
+        return json.dumps(
+            {"codes": list(self.codes), "version": self.version},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json.encode("utf-8")).hexdigest()
+
+    def validate(self, reason: str) -> None:
+        if reason not in self.codes:
+            raise ValueError(f"unknown LinkedIn exclusion reason: {reason}")
+
+
+# This is deliberately data, not a collection of ad-hoc string literals at
+# call sites. A new reason needs review and a new version before it can hide a
+# parser loss behind an exclusion label.
+EXCLUSION_REASON_CATALOG = ExclusionReasonCatalog(
+    version="1.0",
+    codes=("role_filter",),
+)
+
+
+def build_linkedin_search_url(
+    *,
+    keywords: str,
+    location: str | None = None,
+    geo_id: str | None = None,
+    start: int | None = None,
+) -> str:
+    params: list[tuple[str, str]] = [("keywords", keywords)]
+    if location:
+        params.append(("location", location))
+    if geo_id:
+        params.append(("geoId", geo_id))
+    if start:
+        params.append(("start", str(start)))
+    return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
 
 
 @dataclass(frozen=True)
@@ -86,7 +140,6 @@ class BrowserAcquisitionConfig:
     noise_probability: float = 0.18
     linkedin_followup_page_probability: float = 0.35
     max_linkedin_pages: int = 2
-    max_headhunter_pages: int = 2
 
 
 @dataclass
@@ -110,9 +163,25 @@ class BrowserSessionHealth:
     session_state: str = "unknown"
     cookie_mismatch: bool = False
     page_unrecognised: bool = False
-    email_challenge_attempted: bool = False
-    email_challenge_resolved: bool = False
+    critical_degradation: bool = False
+    critical_degradation_reason: str | None = None
     status: str = "healthy"
+    last_page_login_wall: bool = False
+    last_page_auth_redirect: bool = False
+    last_page_safety_reason: str | None = None
+
+    def page_requires_abort(self) -> bool:
+        """Whether the page just observed carried a safety reason.
+
+        Two changes from what this used to be, and they are separate. The
+        decision follows the page in hand rather than counters accumulated
+        since before the loop began. And it follows the safety axis rather
+        than the wall counters: a page that showed a sign-in wall said
+        something about itself, not about whether the next offset can be
+        asked. The counters remain, as telemetry.
+        """
+
+        return self.last_page_safety_reason is not None
 
     def snapshot(self) -> dict[str, Any]:
         age_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
@@ -124,7 +193,7 @@ class BrowserSessionHealth:
         payload["anti_bot_events"] = max(self.login_walls, self.auth_redirects) + self.extraction_degradation
         return payload
 
-    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False, page_load_seconds: float | None = None, page_depth: int | None = None) -> None:
+    def update(self, *, url: str, html: str, vacancies_found: int, detail_page: bool = False, page_load_seconds: float | None = None, page_depth: int | None = None, http_status: int | None = None) -> None:
         self.pages_fetched += 1
         self.last_url = url
         if page_load_seconds is not None:
@@ -137,9 +206,17 @@ class BrowserSessionHealth:
             self.pagination_depth_reached = max(self.pagination_depth_reached, self.pages_fetched)
         auth_redirect = _looks_like_auth_redirect(url, html)
         login_wall = _looks_like_login_wall(url, html)
-        if vacancies_found > 0 and _page_has_source_results(self.source, url, html):
+        # Not "and vacancies_found > 0": that count is taken after the role
+        # filter, so a page of real vacancies the filter happened to reject
+        # would have been recorded as a wall -- the same defect one step on.
+        if _page_has_source_results(self.source, url, html):
             auth_redirect = False
             login_wall = False
+        self.last_page_auth_redirect = auth_redirect
+        self.last_page_login_wall = login_wall
+        self.last_page_safety_reason = linkedin_safety_reason(
+            final_url=url, html=html, status=http_status
+        )
         if auth_redirect:
             self.auth_redirects += 1
         if login_wall:
@@ -182,6 +259,176 @@ class AcquisitionMetrics:
 
 class BrowserNativeUnavailable(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class BrowserFetchResult:
+    requested_url: str
+    final_url: str
+    html: str
+    html_sha256: str
+    page_offset: int
+    planned_scroll_steps: int
+    completed_scroll_steps: int
+    scroll_trace: tuple[dict[str, Any], ...]
+    dom_unique_job_ids: frozenset[str]
+    artifact_ref: str | None
+    scroll_checkpoints: tuple[dict[str, Any], ...] = ()
+    scroll_stop_reason: str = "legacy"
+    scroll_failure_reason: str | None = None
+    # None is a real value, not a gap: a same-document navigation returns no
+    # response at all, and reading that as an error would invent one.
+    http_status: int | None = None
+
+
+def _linkedin_job_id_from_url(url: str) -> str | None:
+    match = re.search(r"/jobs/view/([^/?#]+)", urlparse(url).path, flags=re.I)
+    return match.group(1) if match else None
+
+
+@dataclass(frozen=True)
+class LinkedInDomJobIdAccounting:
+    outcome_by_id: dict[str, str]
+    parsed_ids: frozenset[str]
+    duplicate_canonical_ids: frozenset[str]
+    duplicate_canonical_returned_ids: frozenset[str]
+    excluded_by_reason: dict[str, str]
+    unexplained_ids: frozenset[str]
+    parser_before_filter_count: int
+    returned_count: int
+    vacancies_extracted: int
+    returned_outside_dom_job_ids: frozenset[str]
+    returned_outside_dom_row_count: int
+    returned_without_canonical_job_id_count: int
+
+    @property
+    def dom_count(self) -> int:
+        return len(self.outcome_by_id)
+
+    @property
+    def parsed_count(self) -> int:
+        return len(self.parsed_ids)
+
+    @property
+    def duplicate_canonical_count(self) -> int:
+        return len(self.duplicate_canonical_ids)
+
+    @property
+    def duplicate_canonical_returned_count(self) -> int:
+        return len(self.duplicate_canonical_returned_ids)
+
+    @property
+    def excluded_count(self) -> int:
+        return len(self.excluded_by_reason)
+
+    @property
+    def unexplained_count(self) -> int:
+        return len(self.unexplained_ids)
+
+
+def classify_linkedin_dom_job_ids(
+    *,
+    dom_job_ids: frozenset[str] | set[str],
+    parser_vacancies: list[Vacancy],
+    returned_vacancies: list[Vacancy],
+    excluded_by_reason: Mapping[str, str] | None = None,
+) -> LinkedInDomJobIdAccounting:
+    """Assign every observed DOM ID exactly one auditable terminal outcome."""
+
+    dom_ids = frozenset(str(job_id) for job_id in dom_job_ids)
+    parser_counts = Counter(
+        job_id
+        for vacancy in parser_vacancies
+        for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+        if job_id in dom_ids
+    )
+    parser_ids = frozenset(parser_counts)
+    duplicate_ids = frozenset(
+        job_id for job_id, count in parser_counts.items() if count > 1
+    )
+    returned_job_ids = tuple(
+        _linkedin_job_id_from_url(vacancy.url) for vacancy in returned_vacancies
+    )
+    returned_without_canonical_job_id_count = sum(
+        job_id is None for job_id in returned_job_ids
+    )
+    returned_outside_dom_row_count = sum(
+        job_id is not None and job_id not in dom_ids for job_id in returned_job_ids
+    )
+    all_returned_ids = frozenset(job_id for job_id in returned_job_ids if job_id)
+    returned_ids = all_returned_ids & dom_ids
+    returned_outside_dom_job_ids = all_returned_ids - dom_ids
+    expected_excluded = parser_ids - duplicate_ids - returned_ids
+    provided_excluded = dict(excluded_by_reason or {})
+    if excluded_by_reason is None:
+        excluded = {
+            job_id: "role_filter" for job_id in sorted(expected_excluded)
+        }
+    else:
+        for reason in provided_excluded.values():
+            EXCLUSION_REASON_CATALOG.validate(reason)
+        if set(provided_excluded) != set(expected_excluded):
+            raise ValueError("excluded IDs do not match parser/qualification output")
+        excluded = provided_excluded
+    for reason in excluded.values():
+        EXCLUSION_REASON_CATALOG.validate(reason)
+
+    parsed_ids = parser_ids - duplicate_ids - frozenset(excluded)
+    unexplained_ids = dom_ids - parser_ids
+    if parsed_ids & duplicate_ids or parsed_ids & frozenset(excluded):
+        raise ValueError("LinkedIn DOM ID outcomes overlap")
+    outcome_by_id: dict[str, str] = {}
+    outcome_by_id.update({job_id: "parsed" for job_id in sorted(parsed_ids)})
+    outcome_by_id.update(
+        {job_id: "duplicate-canonical" for job_id in sorted(duplicate_ids)}
+    )
+    outcome_by_id.update({job_id: "excluded" for job_id in sorted(excluded)})
+    outcome_by_id.update(
+        {job_id: "unexplained" for job_id in sorted(unexplained_ids)}
+    )
+    if set(outcome_by_id) != set(dom_ids) or len(outcome_by_id) != len(dom_ids):
+        raise ValueError("LinkedIn DOM ID outcomes are not exhaustive")
+
+    duplicate_returned = duplicate_ids & returned_ids
+    returned_count = len(returned_ids)
+    # The DOM accounting contract is over unique observed identities, while
+    # the extraction count remains the number of returned rows. Keep rows
+    # outside that observed set visible instead of filtering them away.
+    vacancies_extracted = len(returned_vacancies)
+    returned_dom_row_count = sum(
+        job_id is not None and job_id in dom_ids for job_id in returned_job_ids
+    )
+    if len(dom_ids) != (
+        len(parsed_ids)
+        + len(duplicate_ids)
+        + len(excluded)
+        + len(unexplained_ids)
+    ):
+        raise ValueError("LinkedIn DOM ID accounting does not close")
+    if len(parser_ids) != len(parsed_ids) + len(duplicate_ids) + len(excluded):
+        raise ValueError("LinkedIn parser accounting does not close")
+    if returned_count != len(parsed_ids) + len(duplicate_returned):
+        raise ValueError("LinkedIn returned accounting does not close")
+    if vacancies_extracted != (
+        returned_dom_row_count
+        + returned_outside_dom_row_count
+        + returned_without_canonical_job_id_count
+    ):
+        raise ValueError("LinkedIn returned row accounting does not close")
+    return LinkedInDomJobIdAccounting(
+        outcome_by_id=outcome_by_id,
+        parsed_ids=parsed_ids,
+        duplicate_canonical_ids=duplicate_ids,
+        duplicate_canonical_returned_ids=duplicate_returned,
+        excluded_by_reason=excluded,
+        unexplained_ids=unexplained_ids,
+        parser_before_filter_count=len(parser_ids),
+        returned_count=returned_count,
+        vacancies_extracted=vacancies_extracted,
+        returned_outside_dom_job_ids=returned_outside_dom_job_ids,
+        returned_outside_dom_row_count=returned_outside_dom_row_count,
+        returned_without_canonical_job_id_count=returned_without_canonical_job_id_count,
+    )
 
 
 class _LinkCapture(HTMLParser):
@@ -271,11 +518,7 @@ def resolve_browser_config(source: str | None = None) -> BrowserAcquisitionConfi
     if source_key:
         env_suffix = source_key.upper().replace("-", "_")
         overrides.append(os.getenv(f"JOB_INTEL_BROWSER_PROFILE_DIR_{env_suffix}", "").strip())
-        if source_key == "headhunter":
-            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip())
-        elif source_key == "hh":
-            overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_HH", "").strip())
-        elif source_key == "linkedin":
+        if source_key == "linkedin":
             overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR_LINKEDIN", "").strip())
     overrides.append(os.getenv("JOB_INTEL_BROWSER_PROFILE_DIR", "").strip())
     default_dir = _BROWSER_PROFILE_DEFAULTS.get(source_key, BrowserAcquisitionConfig().user_data_dir)
@@ -310,7 +553,7 @@ def _browser_profile_is_populated(path: Path) -> bool:
 
 
 def _ensure_required_browser_profile(source: str, config: BrowserAcquisitionConfig) -> None:
-    if source not in {"linkedin", "headhunter", "hh", "company_career"}:
+    if source not in {"linkedin", "company_career"}:
         return
     if not _browser_profile_is_populated(config.user_data_dir):
         raise BrowserNativeUnavailable(
@@ -368,22 +611,23 @@ def _clean_html_text(value: str) -> str:
 
 
 def _looks_like_linkedin_results_page(url: str, html: str) -> bool:
-    lowered_url = url.lower()
-    lowered_html = html.lower()
-    return "linkedin.com/jobs/search" in lowered_url and (
-        "job-card-container__link" in lowered_html
-        or "job-card-list__title--link" in lowered_html
-        or "artdeco-entity-lockup__subtitle" in lowered_html
-    )
+    """A results page is one results were extracted from.
 
+    This used to name three CSS classes. All three belong to the authenticated
+    layout, so the logged-out page -- which carries the same vacancies under a
+    different dialect -- matched none of them and was read as a wall. Adding
+    the public names to the list would have moved the defect rather than fixed
+    it: the next dialect would fail the same way.
 
-def _looks_like_headhunter_results_page(url: str, html: str) -> bool:
-    lowered_url = url.lower()
-    lowered_html = html.lower()
-    return "hh.ru/search/vacancy" in lowered_url and (
-        'data-qa="serp-item__title"' in lowered_html
-        or 'data-qa="vacancy-serp__vacancy-employer-text"' in lowered_html
-        or 'data-qa="vacancy-serp__vacancy-address"' in lowered_html
+    The question is answered by the parser instead, which already understands
+    both dialects, and answered before the role filter runs: whether a page
+    existed is not a matter of whether its vacancies were wanted.
+    """
+
+    if "linkedin.com/jobs/search" not in url.lower():
+        return False
+    return bool(
+        _linkedin_card_vacancies_from_html(html, page_url=url, apply_role_filter=False)
     )
 
 
@@ -391,8 +635,6 @@ def _page_has_source_results(source: str, url: str, html: str) -> bool:
     source_key = (source or "").strip().lower()
     if source_key == "linkedin":
         return _looks_like_linkedin_results_page(url, html)
-    if source_key in {"headhunter", "hh"}:
-        return _looks_like_headhunter_results_page(url, html)
     return False
 
 
@@ -435,8 +677,6 @@ def _company_from_url(url: str) -> str:
         return _normalize_whitespace(brand.replace("-", " ").replace("_", " ").title()) or "Unknown"
     if ("greenhouse.io" in host or "boards.greenhouse.io" in host or "lever.co" in host or "ashbyhq.com" in host) and path_parts:
         return _normalize_whitespace(path_parts[0].replace("-", " ").replace("_", " ").title())
-    if "hh.ru" in host:
-        return "HeadHunter"
     if path_parts and path_parts[0] not in {"jobs", "vacancy", "careers", "roles", "positions", "openings"}:
         return _normalize_whitespace(path_parts[0].replace("-", " ").replace("_", " ").title())
     return _normalize_whitespace(host.replace("www.", "").split(":")[0].split(".")[0].title()) or "Unknown"
@@ -508,6 +748,161 @@ def _looks_like_login_wall(url: str, html: str) -> bool:
     )
 
 
+# Declared once, as types. The tuples are read back out of the types rather
+# than written a second time: a tuple maintained beside a Literal is two
+# definitions of one contract, and the pair drifts the moment one is edited.
+LinkedInPageClassification = Literal[
+    "usable_result_surface",
+    "terminal_empty_surface",
+    "auth_wall_surface",
+    "http_error_surface",
+    "unknown_non_usable_surface",
+]
+LinkedInSafetyReason = Literal[
+    "unexpected_linkedin_auth_cookie",
+    "http_429_rate_limit",
+    "challenge_redirect",
+    "rendered_challenge",
+    "rendered_rate_limit",
+    "http_401_antibot_or_auth",
+    "http_403_antibot_or_auth",
+]
+LINKEDIN_PAGE_CLASSIFICATIONS = get_args(LinkedInPageClassification)
+LINKEDIN_SAFETY_REASONS = get_args(LinkedInSafetyReason)
+_LINKEDIN_EMPTY_STATE_HEADING = "we couldn't find a match for"
+_LINKEDIN_CHALLENGE_PATHS = ("/checkpoint", "/challenge", "/captcha")
+_LINKEDIN_AUTH_WALL_PATHS = ("/authwall", "/login", "/uas/login")
+_LINKEDIN_CHALLENGE_NODE = re.compile(
+    r"<(?:form|iframe|input)\b[^>]*(?:action|src|name|id)\s*=\s*[\"\'][^\"\']*"
+    r"(?:challenge|checkpoint|captcha)",
+    flags=re.I,
+)
+_LINKEDIN_RATE_LIMIT_TEXT = re.compile(
+    r"\b(too many requests|rate[- ]limit(?:ed|ing)?)\b", flags=re.I
+)
+
+
+def _normalize_linkedin_heading(value: str) -> str:
+    """Compare rendered text, not markup.
+
+    The empty-state heading in the corpus carries a typographic apostrophe
+    (U+2019), so a comparison against the ASCII form silently never matches.
+    The class name is no substitute: no-results is present on non-empty
+    authenticated pages too, which is why the heading is what is read.
+    """
+
+    return " ".join(
+        (value or "").replace("\u2019", "'").replace("\u00a0", " ").split()
+    ).lower()
+
+
+def _linkedin_headings(html: str) -> list[str]:
+    return [
+        _clean_html_text(match.group(1))
+        for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", html or "", flags=re.I | re.S)
+    ]
+
+
+def _is_linkedin_search_url(value: str) -> bool:
+    parsed = urlparse(value or "")
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "www.linkedin.com"
+        and (parsed.path or "").rstrip("/") == "/jobs/search"
+    )
+
+
+def _linkedin_public_card_count(url: str, html: str) -> int:
+    return len(
+        {
+            vacancy.source_id
+            for vacancy in _linkedin_card_vacancies_from_html(
+                html or "", page_url=url, apply_role_filter=False
+            )
+            if vacancy.source_id
+        }
+    )
+
+
+def linkedin_safety_reason(
+    *,
+    final_url: str,
+    html: str,
+    status: int | None = None,
+    auth_cookie_present: bool = False,
+) -> LinkedInSafetyReason | None:
+    """Positive evidence that the source pushed back. Ported from the frozen driver.
+
+    Every branch needs evidence of its own. Absence of results is evidence for
+    none of them, and the substring "captcha" is evidence for none of them
+    either: it appears on 288 of 288 captured pages in both modes, so a
+    predicate resting on it would have stopped every run ever made. A rendered
+    challenge is therefore read from a structural node, and a rendered rate
+    limit from rendered text with no cards beside it.
+
+    status is optional, and None is a value rather than a gap: a same-document
+    navigation returns no response at all, so there is no status to read, and
+    reading its absence as an error would invent one. When the navigation does
+    return a response, page.goto's status is carried on
+    BrowserFetchResult.http_status and reaches this function and
+    classify_linkedin_page from the page loop, which is what makes the three
+    status branches live rather than merely implemented.
+    """
+
+    if auth_cookie_present:
+        return "unexpected_linkedin_auth_cookie"
+    if status == 429:
+        return "http_429_rate_limit"
+    path = (urlparse(final_url or "").path or "").lower()
+    if any(token in path for token in _LINKEDIN_CHALLENGE_PATHS):
+        return "challenge_redirect"
+    if _LINKEDIN_CHALLENGE_NODE.search(html or ""):
+        return "rendered_challenge"
+    cards = _linkedin_public_card_count(final_url, html)
+    rendered = " ".join([*_linkedin_headings(html), _clean_html_text(html or "")])
+    if cards == 0 and _LINKEDIN_RATE_LIMIT_TEXT.search(rendered):
+        return "rendered_rate_limit"
+    benign_authwall = status == 401 and any(
+        token in path for token in _LINKEDIN_AUTH_WALL_PATHS
+    )
+    if status in {401, 403} and cards == 0 and not benign_authwall:
+        return f"http_{status}_antibot_or_auth"
+    return None
+
+
+def classify_linkedin_page(
+    *, final_url: str, html: str, status: int | None = None
+) -> LinkedInPageClassification:
+    """Ordered, five outcomes, no sixth. Ported from the frozen driver.
+
+    The order is the contract. A page carrying cards is usable whatever else
+    it also shows, including its own sign-in call to action. A page with no
+    positive sign of any of the first four is unknown, never a wall: an
+    invented wall is a claim about a market nobody looked at.
+
+    /checkpoint is deliberately absent from the auth-wall paths. It belongs to
+    the safety axis as challenge_redirect, and the same page may carry a value
+    on each axis; that is two measurements, not a contradiction.
+    """
+
+    if _linkedin_public_card_count(final_url, html) > 0:
+        return "usable_result_surface"
+    if _is_linkedin_search_url(final_url) and any(
+        heading == _LINKEDIN_EMPTY_STATE_HEADING
+        or heading.startswith(_LINKEDIN_EMPTY_STATE_HEADING + " ")
+        for heading in (
+            _normalize_linkedin_heading(value) for value in _linkedin_headings(html)
+        )
+    ):
+        return "terminal_empty_surface"
+    path = (urlparse(final_url or "").path or "").lower()
+    if any(token in path for token in _LINKEDIN_AUTH_WALL_PATHS):
+        return "auth_wall_surface"
+    if status is not None and status >= 400:
+        return "http_error_surface"
+    return "unknown_non_usable_surface"
+
+
 def _looks_like_auth_redirect(url: str, html: str) -> bool:
     lowered_url = url.lower()
     return any(token in lowered_url for token in ("/login", "/checkpoint", "/signin", "/auth")) or _looks_like_login_wall(url, html)
@@ -561,6 +956,8 @@ def apply_linkedin_verdict(health: BrowserSessionHealth, verdict: Any) -> None:
 
 
 def _session_status(health: BrowserSessionHealth) -> str:
+    if health.critical_degradation:
+        return "blocked"
     if health.login_walls >= 2 or health.auth_redirects >= 3:
         return "blocked"
     if health.login_walls >= 1 or health.auth_redirects >= 1:
@@ -635,7 +1032,105 @@ def _merge_vacancy_lists(primary: list[Vacancy], secondary: list[Vacancy]) -> li
     return _dedupe_vacancies(list(merged.values()))
 
 
-def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
+_HTML_VOID_TAGS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+)
+
+
+class _LinkedInPublicCardParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cards: list[dict[str, str]] = []
+        self._depth = 0
+        self._card_depth: int | None = None
+        self._card: dict[str, str] = {}
+        self._field: str | None = None
+        self._field_tag: str | None = None
+        self._field_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HTML_VOID_TAGS:
+            return
+        self._depth += 1
+        attributes = {key: value or "" for key, value in attrs}
+        if (
+            self._card_depth is None
+            and tag == "div"
+            and re.fullmatch(r"urn:li:jobPosting:\d+", attributes.get("data-entity-urn", ""))
+        ):
+            self._card_depth = self._depth
+            self._card = {}
+        if self._card_depth is None:
+            return
+        classes = set(attributes.get("class", "").split())
+        if tag == "a" and "base-card__full-link" in classes:
+            self._card["href"] = attributes.get("href", "")
+        elif tag == "h3" and "base-search-card__title" in classes:
+            self._field, self._field_tag, self._field_text = "title", tag, []
+        elif tag == "a" and "hidden-nested-link" in classes:
+            self._field, self._field_tag, self._field_text = "company", tag, []
+        elif tag == "span" and "job-search-card__location" in classes:
+            self._field, self._field_tag, self._field_text = "location", tag, []
+
+    def handle_data(self, data: str) -> None:
+        if self._field is not None:
+            self._field_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_VOID_TAGS:
+            return
+        if self._field_tag == tag:
+            self._card[self._field or ""] = _normalize_whitespace("".join(self._field_text))
+            self._field = None
+            self._field_tag = None
+            self._field_text = []
+        if self._card_depth == self._depth:
+            self.cards.append(dict(self._card))
+            self._card = {}
+            self._card_depth = None
+        self._depth -= 1
+
+
+def _contains_linkedin_public_card_evidence(html: str) -> bool:
+    return bool(
+        re.search(r'data-entity-urn=["\']urn:li:jobPosting:\d+["\']', html)
+        and re.search(r'class=["\'][^"\']*base-card__full-link', html)
+        and re.search(r'class=["\'][^"\']*base-search-card__title', html)
+    )
+
+
+def _linkedin_public_card_vacancies_from_html(
+    html: str, *, page_url: str, apply_role_filter: bool = True
+) -> list[Vacancy]:
+    parser = _LinkedInPublicCardParser()
+    parser.feed(html)
+    vacancies: list[Vacancy] = []
+    for card in parser.cards:
+        href = card.get("href", "")
+        title = _clean_html_text(card.get("title", ""))
+        if not href or not title or (apply_role_filter and not _looks_executive(title)):
+            continue
+        absolute = urljoin(page_url, unescape(href))
+        vacancies.append(
+            Vacancy(
+                source="linkedin",
+                source_id=_vacancy_source_id("linkedin", absolute, title),
+                company=card.get("company") or "Unknown",
+                title=title,
+                location=card.get("location") or "Unknown",
+                url=absolute,
+                description=title,
+                metadata={"source_url": page_url, "href": href},
+            )
+        )
+    return _dedupe_vacancies(vacancies)
+
+
+def _linkedin_card_vacancies_from_html(html: str, *, page_url: str, apply_role_filter: bool = True) -> list[Vacancy]:
+    if _contains_linkedin_public_card_evidence(html):
+        return _linkedin_public_card_vacancies_from_html(
+            html, page_url=page_url, apply_role_filter=apply_role_filter
+        )
     vacancies: list[Vacancy] = []
     pattern = re.compile(
         r'<a[^>]+href="(?P<href>/jobs/view/[^"]+)"[^>]*class="[^"]*job-card-container__link[^"]*"[^>]*>.*?<strong><!---->(?P<title>.*?)<!----></strong>.*?</a>(?P<tail>.{0,2500}?)job-card-list__footer-wrapper',
@@ -643,7 +1138,7 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vaca
     )
     for match in pattern.finditer(html):
         title = _clean_html_text(match.group("title"))
-        if not title or not _looks_executive(title):
+        if not title or (apply_role_filter and not _looks_executive(title)):
             continue
         tail = match.group("tail")
         company_match = re.search(r'artdeco-entity-lockup__subtitle[^>]*>.*?<span[^>]*>\s*<!---->(?P<company>.*?)<!---->\s*</span>', tail, flags=re.S)
@@ -664,33 +1159,16 @@ def _linkedin_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vaca
     return _dedupe_vacancies(vacancies)
 
 
-def _headhunter_card_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
-    vacancies: list[Vacancy] = []
-    title_pattern = re.compile(
-        r'<a[^>]+data-qa="serp-item__title"[^>]+href="(?P<href>(?:https://hh\.ru)?/vacancy/[^"]+)"[^>]*>.*?<span[^>]+data-qa="serp-item__title-text"[^>]*>(?P<title>.*?)</span>.*?</a>',
-        flags=re.S,
+def _qualify_linkedin_vacancies(vacancies: list[Vacancy]) -> list[Vacancy]:
+    """Apply product qualification after the parser has yielded source rows."""
+
+    return _dedupe_vacancies(
+        [
+            vacancy
+            for vacancy in vacancies
+            if _looks_executive(vacancy.title, vacancy.description)
+        ]
     )
-    for match in title_pattern.finditer(html):
-        title = _clean_html_text(match.group("title"))
-        if not title or not _looks_executive(title):
-            continue
-        tail = html[match.end():match.end() + 4000]
-        company_match = re.search(r'data-qa="vacancy-serp__vacancy-employer-text"[^>]*>(?P<company>.*?)</span>', tail, flags=re.S)
-        location_match = re.search(r'data-qa="vacancy-serp__vacancy-address"[^>]*>(?P<location>.*?)</span>', tail, flags=re.S)
-        company = _clean_html_text(company_match.group("company")) if company_match else _company_from_url(match.group("href"))
-        location = _normalize_location_text(location_match.group("location")) if location_match else "Unknown"
-        absolute = urljoin(page_url, match.group("href"))
-        vacancies.append(Vacancy(
-            source="headhunter",
-            source_id=_vacancy_source_id("headhunter", absolute, title),
-            company=company or "Unknown",
-            title=title,
-            location=location or "Unknown",
-            url=absolute,
-            description=title,
-            metadata={"source_url": page_url, "href": match.group("href")},
-        ))
-    return _dedupe_vacancies(vacancies)
 
 
 def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_override: str | None = None) -> list[Vacancy]:
@@ -707,7 +1185,7 @@ def _link_vacancies_from_html(html: str, *, source: str, page_url: str, company_
             if "linkedin.com/jobs/view/" not in normalized:
                 continue
         elif not (
-            any(domain in normalized for domain in ("hh.ru/vacancy", "greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "teamtailor.com", "personio", "recruitee"))
+            any(domain in normalized for domain in ("greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "teamtailor.com", "personio", "recruitee"))
             or any(token in path_tokens for token in {"careers", "jobs", "vacancy", "vacancies", "positions", "openings", "roles", "job"})
             or any(token in page_host for token in ("careers", "jobs", "vacancies", "openings"))
         ):
@@ -769,13 +1247,6 @@ def extract_linkedin_vacancies_from_html(html: str, *, page_url: str) -> list[Va
     return merged
 
 
-def extract_headhunter_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
-    card_vacancies = _headhunter_card_vacancies_from_html(html, page_url=page_url)
-    structured = [_vacancy_from_jobposting(jobposting, source="headhunter", page_url=page_url) for jobposting in _jobposting_objects(html)]
-    fallback = _link_vacancies_from_html(html, source="headhunter", page_url=page_url) if not card_vacancies and not structured else []
-    return _merge_vacancy_lists(card_vacancies or structured, structured + fallback)
-
-
 def extract_company_career_vacancies_from_html(html: str, *, page_url: str) -> list[Vacancy]:
     structured = [_vacancy_from_jobposting(jobposting, source="company_career", page_url=page_url) for jobposting in _jobposting_objects(html)]
     link_vacancies = _link_vacancies_from_html(html, source="company_career", page_url=page_url)
@@ -811,7 +1282,7 @@ class BrowserSourceClient:
         from playwright.sync_api import sync_playwright  # type: ignore
 
         profile_name = self.config.source_name.strip().lower().replace("-", "_")
-        if profile_name in {"linkedin", "headhunter", "hh", "company_career"}:
+        if profile_name in {"linkedin", "company_career"}:
             _ensure_required_browser_profile(profile_name, self.config)
 
         cdp_url = os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip()
@@ -899,29 +1370,23 @@ class BrowserSourceClient:
         with suppress(Exception):
             meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
 
-    def _capture_page_diagnostics(self, *, page: Any, label: str, html: str | None = None, extra: dict[str, Any] | None = None) -> None:
+    def _capture_page_diagnostics(self, *, page: Any, label: str, html: str | None = None, extra: dict[str, Any] | None = None) -> str | None:
         if self._diagnostics_dir is None:
-            return
-        try:
-            self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            return
+            return None
+        self._diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        self._diagnostics_dir.chmod(0o700)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         slug = self._diagnostic_slug(label)
         base = self._diagnostics_dir / f"{timestamp}-{slug}"
-        screenshot_path = base.with_suffix(".png")
-        html_path = base.with_suffix(".html")
-        meta_path = base.with_suffix(".json")
-        try:
-            page.screenshot(path=str(screenshot_path), full_page=True)
-        except Exception:
-            screenshot_path = None
+        screenshot_path = base.with_name(base.name + ".png")
+        html_path = base.with_name(base.name + ".html")
+        meta_path = base.with_name(base.name + ".json")
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        screenshot_path.chmod(0o600)
         if html is None:
-            with suppress(Exception):
-                html = page.content()
-        if html is not None:
-            with suppress(Exception):
-                html_path.write_text(html)
+            html = page.content()
+        html_path.write_text(html, encoding="utf-8")
+        html_path.chmod(0o600)
         payload: dict[str, Any] = {
             "label": label,
             "source": self.config.source_name or self._health.source,
@@ -929,9 +1394,9 @@ class BrowserSourceClient:
             "page_url": getattr(page, "url", ""),
             "page_title": "",
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "screenshot_path": str(screenshot_path) if screenshot_path else None,
-            "html_path": str(html_path) if html is not None else None,
-            "diagnostics_dir": str(self._diagnostics_dir),
+            "screenshot_ref": screenshot_path.name,
+            "html_ref": html_path.name,
+            "html_sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
         }
         with suppress(Exception):
             payload["page_title"] = page.title()
@@ -947,11 +1412,11 @@ class BrowserSourceClient:
                 "gmail": "gmail" in lowered,
                 "hermes_at_vanyushk": "hermes@vanyushk.in" in lowered,
             }
-            payload["html_excerpt"] = html[:4000]
         if extra:
             payload["extra"] = extra
-        with suppress(Exception):
-            meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
+        meta_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        meta_path.chmod(0o600)
+        return meta_path.name
 
     def _browser_state_snapshot(self) -> dict[str, Any]:
         snapshot: dict[str, Any] = {
@@ -1036,125 +1501,7 @@ class BrowserSourceClient:
             raise BrowserNativeUnavailable(f"{source} authenticated feed/profile markers were not visible at {url}")
         self._health.last_successful_authenticated_request = url
 
-    @staticmethod
-    def _extract_message_text(message: Any) -> str:
-        parts: list[str] = []
-        if getattr(message, "is_multipart", lambda: False)():
-            for part in message.walk():
-                if part.get_content_maintype() != "text":
-                    continue
-                try:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="ignore"))
-                except Exception:
-                    continue
-        else:
-            try:
-                payload = message.get_payload(decode=True)
-                if payload:
-                    parts.append(payload.decode(message.get_content_charset() or "utf-8", errors="ignore"))
-            except Exception:
-                body = message.get_payload()
-                if isinstance(body, str):
-                    parts.append(body)
-        try:
-            subject = message.get("Subject") or ""
-        except Exception:
-            subject = ""
-        if subject:
-            parts.append(str(subject))
-        return "\n".join(parts)
-
-    def _read_headhunter_otp_from_gmail(self) -> str | None:
-        gmail_account = os.getenv("JOB_INTEL_GMAIL_ADDRESS", "").strip() or os.getenv("JOB_INTEL_GMAIL_USERNAME", "").strip()
-        gmail_password = os.getenv("JOB_INTEL_GMAIL_APP_PASSWORD", "").strip() or os.getenv("JOB_INTEL_GMAIL_PASSWORD", "").strip()
-        if not gmail_account or not gmail_password:
-            return None
-        host = os.getenv("JOB_INTEL_GMAIL_IMAP_HOST", "imap.gmail.com").strip()
-        port = int(os.getenv("JOB_INTEL_GMAIL_IMAP_PORT", "993"))
-        sender_hint = os.getenv("JOB_INTEL_HH_OTP_FROM", "hh.ru").strip() or "hh.ru"
-        subject_hint = os.getenv("JOB_INTEL_HH_OTP_SUBJECT_HINT", "code").strip() or "code"
-        try:
-            with imaplib.IMAP4_SSL(host, port) as client:
-                client.login(gmail_account, gmail_password)
-                client.select("INBOX")
-                status, data = client.search(None, f'(FROM "{sender_hint}" SUBJECT "{subject_hint}")')
-                if status != "OK":
-                    status, data = client.search(None, 'ALL')
-                ids = [item for item in (data[0].split() if data and data[0] else []) if item]
-                for message_id in reversed(ids[-10:]):
-                    fetch_status, payload = client.fetch(message_id, "(RFC822)")
-                    if fetch_status != "OK" or not payload or not payload[0]:
-                        continue
-                    raw_bytes = payload[0][1]
-                    if not raw_bytes:
-                        continue
-                    message = message_from_bytes(raw_bytes)
-                    body = self._extract_message_text(message)
-                    match = re.search(r"\b(\d{4,8})\b", body)
-                    if match:
-                        return match.group(1)
-        except Exception:
-            return None
-        return None
-
-    def _attempt_headhunter_otp_recovery(self, login_url: str) -> bool:
-        if self._context is None:
-            raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
-        self._health.email_challenge_attempted = True
-        page = self._context.new_page()
-        try:
-            page.goto(login_url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
-            page.wait_for_timeout(self.config.scroll_pause_ms)
-            login_email = os.getenv("JOB_INTEL_HH_LOGIN_EMAIL", "").strip() or os.getenv("JOB_INTEL_GMAIL_ADDRESS", "").strip()
-            if login_email:
-                for selector in (
-                    "input[type='email']",
-                    "input[name*='email']",
-                    "input[name='login']",
-                    "input[name*='login']",
-                ):
-                    locator = page.locator(selector)
-                    if locator.count():
-                        locator.first.fill(login_email)
-                        break
-            otp_code = self._read_headhunter_otp_from_gmail()
-            if not otp_code:
-                return False
-            for selector in (
-                "input[name*='code']",
-                "input[name*='otp']",
-                "input[type='tel']",
-                "input[inputmode='numeric']",
-                "input[autocomplete='one-time-code']",
-            ):
-                locator = page.locator(selector)
-                if locator.count():
-                    locator.first.fill(otp_code)
-                    break
-            for selector in (
-                "button:has-text('Verify')",
-                "button:has-text('Continue')",
-                "button:has-text('Submit')",
-                "button:has-text('Sign in')",
-                "button[type='submit']",
-            ):
-                locator = page.locator(selector)
-                if locator.count():
-                    locator.first.click()
-                    break
-            else:
-                page.keyboard.press("Enter")
-            page.wait_for_timeout(self.config.scroll_pause_ms)
-            self._health.email_challenge_resolved = True
-            return True
-        except Exception:
-            return False
-        finally:
-            page.close()
-
-    def _validate_linkedin_auth(self) -> None:
+    def _validate_linkedin_auth(self, *, allow_unauthenticated: bool = False) -> str:
         from job_intel.linkedin_session import (
             SESSION_MISSING,
             SESSION_OK,
@@ -1195,7 +1542,10 @@ class BrowserSourceClient:
                     label="linkedin-auth-page-unrecognised",
                     extra={"requested_url": url, "cookie_state": cookie_state},
                 )
-            return
+            return "with_session"
+
+        if verdict.state == SESSION_MISSING and allow_unauthenticated:
+            return "without_session"
 
         self._write_attach_diagnostics(
             label=f"linkedin-auth-{verdict.state}",
@@ -1211,34 +1561,6 @@ class BrowserSourceClient:
         # свойство обеспечивал _validate_authenticated_html.
         raise BrowserNativeUnavailable(
             f"linkedin authentication validation: {verdict.state} at {url}"
-        )
-
-    def _validate_headhunter_auth(self) -> None:
-        search_url = "https://hh.ru/search/vacancy?text=Head+of+Product"
-        self._health.auth_attempted = True
-        required_markers = (
-            "hh.ru/search/vacancy",
-            "vacancy_search",
-            "vacancy search",
-            "поиск вакансий",
-            "найдено",
-            "resume",
-            "резюме",
-        )
-        search_html = self.fetch_html(search_url, scrolls=0)
-        has_results_markers = self._page_contains_any(search_html, required_markers) or _looks_like_headhunter_results_page(search_url, search_html)
-        if not has_results_markers and (_looks_like_login_wall(search_url, search_html) or _looks_like_auth_redirect(search_url, search_html)):
-            self._write_attach_diagnostics(label="headhunter-auth-search-otp-recovery-attempt", extra={"requested_url": search_url})
-            if self._attempt_headhunter_otp_recovery("https://hh.ru/account/login?backurl=https%3A%2F%2Fhh.ru%2Fsearch%2Fvacancy"):
-                search_html = self.fetch_html(search_url, scrolls=0)
-        elif has_results_markers:
-            self._write_attach_diagnostics(label="headhunter-auth-search-results-detected", extra={"requested_url": search_url})
-        self._validate_authenticated_html(
-            source="headhunter",
-            url=search_url,
-            html=search_html,
-            required_markers=required_markers,
-            login_markers=("sign in", "log in", "authorize", "verification code"),
         )
 
     def session_health_snapshot(self) -> dict[str, Any]:
@@ -1260,48 +1582,6 @@ class BrowserSourceClient:
                     label=f"{label}-page-{idx}",
                     extra={"browser_state": snapshot, "page_index": idx},
                 )
-
-    def _reuse_or_prepare_headhunter_page(self, *, requested_url: str, label: str) -> Any | None:
-        if self._context is None:
-            return None
-        pages = list(getattr(self._context, "pages", []) or [])
-        if not pages:
-            return None
-        keep = None
-        closed = 0
-        page_urls: list[str] = []
-        for page in pages:
-            url = ""
-            with suppress(Exception):
-                url = getattr(page, "url", "") or ""
-            page_urls.append(url)
-            normalized = url.lower()
-            should_keep = (
-                normalized.startswith("https://hh.ru/search/vacancy")
-                or normalized == "https://hh.ru/"
-                or normalized == "about:blank"
-            )
-            if keep is None and should_keep:
-                keep = page
-                continue
-            with suppress(Exception):
-                page.close()
-                closed += 1
-        if keep is None:
-            return None
-        with suppress(Exception):
-            keep.bring_to_front()
-        self._write_attach_diagnostics(
-            label=f"{label}-reuse-page",
-            extra={
-                "requested_url": requested_url,
-                "closed_pages": closed,
-                "remaining_url": getattr(keep, "url", ""),
-                "seen_urls": page_urls[:15],
-            },
-        )
-        return keep
-
 
     def _reuse_or_prepare_linkedin_page(self, *, requested_url: str, label: str) -> Any | None:
         if self._context is None:
@@ -1344,22 +1624,171 @@ class BrowserSourceClient:
         )
         return keep
 
-    def fetch_html(self, url: str, *, scrolls: int | None = None, capture_label: str | None = None) -> str:
+    def _mark_critical_degradation(self, reason: str) -> None:
+        self._health.critical_degradation = True
+        self._health.critical_degradation_reason = reason
+        self._health.status = "blocked"
+
+    def _linkedin_dom_unique_job_ids(self, page: Any) -> frozenset[str]:
+        locator = page.locator("a[href*='/jobs/view/']")
+        hrefs = locator.evaluate_all(
+            "(anchors) => anchors.map(anchor => anchor.href || anchor.getAttribute('href'))"
+        )
+        return frozenset(
+            job_id
+            for href in hrefs
+            if isinstance(href, str)
+            for job_id in [_linkedin_job_id_from_url(href)]
+            if job_id
+        )
+
+    def _coerce_linkedin_execution_plan(
+        self, plan: Mapping[str, Any] | Any | None
+    ) -> Any | None:
+        if plan is None:
+            return None
+        from .product_search.acquisition_probe import LinkedInExecutionPlan
+
+        if isinstance(plan, LinkedInExecutionPlan):
+            return plan
+        return LinkedInExecutionPlan.model_validate(plan)
+
+    def _linkedin_scroll_container(
+        self, *, page: Any, selector: str
+    ) -> tuple[Any | None, str | None]:
+        """Find the results scroller from the rendered document.
+
+        The authenticated LinkedIn UI does not always expose the configured
+        results selector.  In that case, identify the first substantial
+        ``div`` or ``ul`` whose scroll geometry and vacancy links prove that
+        it owns the results.
+        This deliberately uses the document's observed geometry rather than
+        session or profile metadata.
+        """
+        failure_reason: str | None = None
+        try:
+            configured = page.locator(selector)
+            count = configured.count() if callable(getattr(configured, "count", None)) else 1
+            if count > 0:
+                return getattr(configured, "first", configured), None
+        except Exception as exc:  # noqa: BLE001 - geometry fallback is explicit
+            failure_reason = f"configured_results_container_unavailable: {exc}"
+
+        try:
+            candidates = page.locator("div, ul")
+            measurements = candidates.evaluate_all(
+                """(elements) => elements.map((element) => ({
+                    clientHeight: element.clientHeight,
+                    scrollHeight: element.scrollHeight,
+                    jobLinkCount: element.querySelectorAll(
+                        "a[href*='/jobs/view/']"
+                    ).length,
+                }))"""
+            )
+            for index, measurement in enumerate(measurements):
+                if not isinstance(measurement, Mapping):
+                    continue
+                client_height = measurement.get("clientHeight")
+                scroll_height = measurement.get("scrollHeight")
+                if (
+                    isinstance(client_height, (int, float))
+                    and isinstance(scroll_height, (int, float))
+                    and client_height > 200
+                    and scroll_height > client_height + 200
+                    and isinstance(measurement.get("jobLinkCount"), (int, float))
+                    and measurement["jobLinkCount"] > 0
+                ):
+                    return candidates.nth(index), None
+            failure_reason = "results_container_unavailable"
+        except Exception as exc:  # noqa: BLE001 - fallback is explicitly traced
+            failure_reason = f"results_container_unavailable: {exc}"
+        return None, failure_reason
+
+    def _execute_linkedin_scroll_plan(
+        self, *, page: Any, plan: Any, page_offset: int
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str, str | None]:
+        checkpoints: list[dict[str, Any]] = []
+        scroll_trace: list[dict[str, Any]] = []
+        consecutive_without_new = 0
+        mode = "results_container"
+        container, failure_reason = self._linkedin_scroll_container(
+            page=page, selector=plan.results_selector
+        )
+        if container is None:
+            mode = "page_fallback"
+            self._health.status = "degraded"
+
+        for step in range(1, plan.max_scroll_checkpoints + 1):
+            before_ids = self._linkedin_dom_unique_job_ids(page)
+            try:
+                if container is None:
+                    page.mouse.wheel(0, 1800)
+                else:
+                    moved = container.evaluate(
+                        """(element) => {
+                            const before = element.scrollTop;
+                            element.scrollTop += element.clientHeight;
+                            return element.scrollTop !== before;
+                        }"""
+                    )
+                    if moved is False:
+                        raise RuntimeError("results container did not execute scroll")
+                page.wait_for_timeout(plan.settle_timeout_ms)
+                after_ids = self._linkedin_dom_unique_job_ids(page)
+            except Exception as exc:  # noqa: BLE001 - incomplete plan is critical
+                reason = f"scroll plan failed at checkpoint {step}: {exc}"
+                self._mark_critical_degradation(reason)
+                raise BrowserNativeUnavailable(reason) from exc
+
+            new_ids = sorted(after_ids - before_ids)
+            consecutive_without_new = (
+                consecutive_without_new + 1 if not new_ids else 0
+            )
+            checkpoint = {
+                "step": step,
+                "page_offset": page_offset,
+                "mode": mode,
+                "before_unique_dom_ids": sorted(before_ids),
+                "after_unique_dom_ids": sorted(after_ids),
+                "before_unique_dom_id_count": len(before_ids),
+                "after_unique_dom_id_count": len(after_ids),
+                "cumulative_unique_dom_id_count": len(after_ids),
+                "new_unique_dom_ids": new_ids,
+                "completed": True,
+            }
+            checkpoints.append(checkpoint)
+            scroll_trace.append(checkpoint)
+            if consecutive_without_new >= plan.saturation_checkpoints:
+                return scroll_trace, checkpoints, "saturation", failure_reason
+
+        return scroll_trace, checkpoints, "max_steps", failure_reason
+
+    def fetch_page(
+        self,
+        url: str,
+        *,
+        scrolls: int | None = None,
+        page_offset: int = 0,
+        capture_label: str | None = None,
+        execution_plan: Mapping[str, Any] | Any | None = None,
+    ) -> BrowserFetchResult:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
         scroll_count = self.config.max_scrolls if scrolls is None else max(0, scrolls)
         start = time.perf_counter()
         source_key = (self.config.source_name or "").strip().lower()
         fetch_label = capture_label or "fetch"
+        plan = self._coerce_linkedin_execution_plan(execution_plan)
 
-        def _attempt_fetch() -> str:
+        def _attempt_fetch() -> BrowserFetchResult:
             page = None
             reuse_existing = False
+            scroll_trace: list[dict[str, Any]] = []
+            scroll_checkpoints: list[dict[str, Any]] = []
+            scroll_stop_reason = "legacy"
+            scroll_failure_reason: str | None = None
             try:
-                if source_key in {"headhunter", "hh"}:
-                    page = self._reuse_or_prepare_headhunter_page(requested_url=url, label=fetch_label)
-                    reuse_existing = page is not None
-                elif source_key == "linkedin":
+                if source_key == "linkedin":
                     # For LinkedIn search pages we prefer a fresh tab. Reusing the feed tab sometimes
                     # yields Page.goto net::ERR_ABORTED / frame-detached.
                     if fetch_label.startswith("linkedin-search"):
@@ -1376,13 +1805,21 @@ class BrowserSourceClient:
                     self._write_attach_diagnostics(label=f"{fetch_label}-reuse-page-opened", extra={"requested_url": url, "current_url": getattr(page, "url", "")})
                 self._sleep(source=self.config.source_name)
                 self._write_attach_diagnostics(label=f"{fetch_label}-goto-start", extra={"requested_url": url, "timeout_ms": self.config.navigation_timeout_ms, "reused_page": reuse_existing})
+                http_status: int | None = None
+
                 def _do_goto() -> None:
+                    nonlocal http_status
                     if source_key == "linkedin" and fetch_label.startswith("linkedin-search"):
                         wall = float(os.getenv("JOB_INTEL_BROWSER_GOTO_WALL_TIMEOUT_SECONDS", "70"))
                         with _WallTimeout(wall, f"Page.goto wall-timeout after {wall}s"):
-                            page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                            response = page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
                     else:
-                        page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                        response = page.goto(url, wait_until="domcontentloaded", timeout=self.config.navigation_timeout_ms)
+                    # The navigation always returned this and the fetch always
+                    # dropped it, which is why every status-derived reason was
+                    # unreachable while being implemented and tested.
+                    status = getattr(response, "status", None)
+                    http_status = int(status) if isinstance(status, int) else None
                 try:
                     _do_goto()
                 except Exception as exc:
@@ -1395,15 +1832,69 @@ class BrowserSourceClient:
                     _do_goto()
                 self._write_attach_diagnostics(label=f"{fetch_label}-goto-done", extra={"requested_url": url, "reused_page": reuse_existing})
                 page.wait_for_timeout(self.config.scroll_pause_ms)
-                self._humanize_page(page, url=url)
-                for _ in range(scroll_count):
-                    page.mouse.wheel(0, 1800)
-                    page.wait_for_timeout(self.config.scroll_pause_ms)
+                self._humanize_page(page, url=url, deterministic_measurement=plan is not None)
+                if plan is not None and source_key == "linkedin":
+                    (
+                        scroll_trace,
+                        scroll_checkpoints,
+                        scroll_stop_reason,
+                        scroll_failure_reason,
+                    ) = self._execute_linkedin_scroll_plan(
+                        page=page, plan=plan, page_offset=page_offset
+                    )
+                else:
+                    for _ in range(scroll_count):
+                        page.mouse.wheel(0, 1800)
+                        page.wait_for_timeout(self.config.scroll_pause_ms)
+                        scroll_trace.append({"step": len(scroll_trace) + 1, "completed": True})
                 html = page.content()
                 self._write_attach_diagnostics(label=f"{fetch_label}-content-read", extra={"requested_url": url, "html_length": len(html), "reused_page": reuse_existing})
+                final_url = str(getattr(page, "url", "") or url)
+                dom_ids = self._linkedin_dom_unique_job_ids(page) if source_key == "linkedin" else frozenset()
+                artifact_ref = None
                 if capture_label:
-                    self._capture_page_diagnostics(page=page, label=capture_label, html=html, extra={"requested_url": url, "scroll_count": scroll_count, "reused_page": reuse_existing})
-                return html
+                    try:
+                        artifact_ref = self._capture_page_diagnostics(
+                            page=page,
+                            label=capture_label,
+                            html=html,
+                            extra={
+                                "requested_url": url,
+                                "final_url": final_url,
+                                "page_offset": page_offset,
+                                "planned_scroll_steps": (
+                                    plan.max_scroll_checkpoints if plan is not None else scroll_count
+                                ),
+                                "completed_scroll_steps": len(scroll_trace),
+                                "reused_page": reuse_existing,
+                            },
+                        )
+                    except Exception as exc:
+                        reason = f"diagnostic artifact unavailable: {exc}"
+                        self._mark_critical_degradation(reason)
+                        raise BrowserNativeUnavailable(reason) from exc
+                    if artifact_ref is None:
+                        reason = "diagnostic artifact unavailable: no diagnostics directory"
+                        self._mark_critical_degradation(reason)
+                        raise BrowserNativeUnavailable(reason)
+                return BrowserFetchResult(
+                    requested_url=url,
+                    final_url=final_url,
+                    html=html,
+                    html_sha256=hashlib.sha256(html.encode("utf-8")).hexdigest(),
+                    page_offset=page_offset,
+                    planned_scroll_steps=(
+                        plan.max_scroll_checkpoints if plan is not None else scroll_count
+                    ),
+                    completed_scroll_steps=len(scroll_trace),
+                    scroll_trace=tuple(scroll_trace),
+                    dom_unique_job_ids=dom_ids,
+                    artifact_ref=artifact_ref,
+                    scroll_checkpoints=tuple(scroll_checkpoints),
+                    scroll_stop_reason=scroll_stop_reason,
+                    scroll_failure_reason=scroll_failure_reason,
+                    http_status=http_status,
+                )
             finally:
                 if page is not None and not reuse_existing:
                     with suppress(Exception):
@@ -1411,7 +1902,11 @@ class BrowserSourceClient:
 
         try:
             return _attempt_fetch()
+        except BrowserNativeUnavailable:
+            raise
         except Exception as exc:
+            if plan is not None:
+                self._mark_critical_degradation(f"page plan failed: {exc}")
             page_obj = locals().get("page")
             html_obj = locals().get("html")
             self._write_browser_failure_diagnostics(
@@ -1421,44 +1916,21 @@ class BrowserSourceClient:
                 page=page_obj,
                 html=html_obj,
             )
-            should_retry = (
-                source_key in {"headhunter", "hh"}
-                and ("Target page, context or browser has been closed" in str(exc) or "BrowserContext.new_page" in str(exc))
-            )
-            if should_retry:
-                self._write_browser_failure_diagnostics(
-                    label=f"{fetch_label}-retry-context-close",
-                    requested_url=url,
-                    error=str(exc),
-                    page=page_obj,
-                    html=html_obj,
-                )
-                try:
-                    if self._browser is not None and self._cdp_attached:
-                        with suppress(Exception):
-                            self._browser.close()
-                    if self._playwright is not None:
-                        with suppress(Exception):
-                            self._playwright.stop()
-                finally:
-                    self._browser = None
-                    self._context = None
-                    self._playwright = None
-                    self._cdp_attached = False
-                    self._cdp_url = ""
-                raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
             raise BrowserNativeUnavailable(f"Playwright browser fetch failed: {exc}") from exc
         finally:
             self._last_fetch_seconds = max(0.0, time.perf_counter() - start)
+
+    def fetch_html(self, url: str, *, scrolls: int | None = None, capture_label: str | None = None) -> str:
+        result = self.fetch_page(url, scrolls=scrolls, capture_label=capture_label)
+        self._last_fetch_result = result
+        return result.html
+
 
     def _sleep(self, *, source: str | None = None, extra_bias_ms: tuple[int, int] | None = None) -> None:
         source_key = (source or self.config.source_name or "").strip().lower()
         min_delay = self.config.min_delay_ms
         max_delay = self.config.max_delay_ms
-        if source_key in {"headhunter", "hh"}:
-            min_delay += 250
-            max_delay += 1200
-        elif source_key == "linkedin":
+        if source_key == "linkedin":
             min_delay += 200
             max_delay += 900
         if extra_bias_ms:
@@ -1467,21 +1939,16 @@ class BrowserSourceClient:
         delay = random.uniform(min_delay, max_delay) / 1000.0
         time.sleep(delay)
 
-    def _humanize_page(self, page: Any, *, url: str) -> None:
+    def _humanize_page(
+        self, page: Any, *, url: str, deterministic_measurement: bool = False
+    ) -> None:
         source_key = (self.config.source_name or "").strip().lower()
         lowered_url = url.lower()
         try:
-            if source_key in {"headhunter", "hh"} and "hh.ru" in lowered_url:
-                if random.random() < 0.65:
-                    page.wait_for_timeout(random.randint(450, 1800))
-                if random.random() < 0.45:
-                    page.mouse.wheel(0, random.randint(180, 900))
-                    page.wait_for_timeout(random.randint(250, 900))
-                if random.random() < 0.18:
-                    page.mouse.wheel(0, -random.randint(120, 420))
-                    page.wait_for_timeout(random.randint(150, 700))
-                return
             if source_key == "linkedin" and "linkedin.com/jobs" in lowered_url:
+                if deterministic_measurement:
+                    page.wait_for_timeout(random.randint(700, 2400))
+                    return
                 if random.random() < 0.75:
                     page.wait_for_timeout(random.randint(700, 2400))
                 if random.random() < 0.50:
@@ -1498,7 +1965,7 @@ class BrowserSourceClient:
         except Exception:
             return
 
-    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False, page_depth: int | None = None) -> None:
+    def _observe_page(self, url: str, html: str, vacancies_found: int, *, detail_page: bool = False, page_depth: int | None = None, http_status: int | None = None) -> None:
         self._health.update(
             url=url,
             html=html,
@@ -1506,6 +1973,7 @@ class BrowserSourceClient:
             detail_page=detail_page,
             page_load_seconds=getattr(self, "_last_fetch_seconds", None),
             page_depth=page_depth,
+            http_status=http_status,
         )
 
     def _detail_candidates(self, html: str, *, page_url: str, source: str) -> list[str]:
@@ -1517,15 +1985,11 @@ class BrowserSourceClient:
             normalized = absolute.lower()
             if source == "linkedin" and "linkedin.com/jobs/view" in normalized:
                 candidates.append(absolute)
-            elif source == "headhunter" and "hh.ru/vacancy" in normalized:
-                candidates.append(absolute)
             elif source == "company_career" and any(domain in normalized for domain in ("greenhouse.io", "lever.co", "ashbyhq.com", "careers", "jobs", "vacancy", "openings")):
                 candidates.append(absolute)
         return list(dict.fromkeys(candidates))
 
     def _maybe_open_noise_page(self, *, page_url: str, html: str, source: str) -> list[Vacancy]:
-        if source == "headhunter":
-            return []
         if random.random() > self.config.noise_probability:
             return []
         candidates = self._detail_candidates(html, page_url=page_url, source=source)
@@ -1535,15 +1999,12 @@ class BrowserSourceClient:
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
-            "headhunter": extract_headhunter_vacancies_from_html,
             "company_career": extract_company_career_vacancies_from_html,
         }[source](detail_html, page_url=detail_url)
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
 
     def _maybe_open_detail_vacancy(self, *, source: str, vacancies: list[Vacancy]) -> list[Vacancy]:
-        if source == "headhunter":
-            return []
         if not vacancies or random.random() > max(0.25, self.config.noise_probability):
             return []
         candidates = [vacancy for vacancy in vacancies if vacancy.url]
@@ -1554,12 +2015,13 @@ class BrowserSourceClient:
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
-            "headhunter": extract_headhunter_vacancies_from_html,
         }.get(source, extract_company_career_vacancies_from_html)(detail_html, page_url=detail_url)
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
 
-    def _linkedin_page_plan(self, max_pages: int) -> list[int]:
+    def _linkedin_page_plan(self, max_pages: int, *, execution_plan: Any | None = None) -> list[int]:
+        if execution_plan is not None:
+            return list(execution_plan.page_offsets)
         allowed_pages = max(1, min(max_pages, self.config.max_linkedin_pages))
         plan = [0]
         if allowed_pages > 1 and random.random() < self.config.linkedin_followup_page_probability:
@@ -1568,17 +2030,29 @@ class BrowserSourceClient:
             plan.extend(followups[:1])
         return plan
 
-    def _headhunter_page_plan(self, max_pages: int) -> list[int]:
-        allowed_pages = max(1, min(max_pages, self.config.max_headhunter_pages))
-        plan = [0]
-        if allowed_pages > 1 and random.random() < 0.25:
-            followups = list(range(1, allowed_pages))
-            random.shuffle(followups)
-            plan.extend(followups[:1])
-        return plan
-
-    def search_linkedin(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
-        url = f"https://www.linkedin.com/jobs/search/?keywords={quote_plus(query)}"
+    def search_linkedin(
+        self,
+        query: str,
+        *,
+        max_pages: int = 1,
+        run_id: str | None = None,
+        query_id: str | None = None,
+        cell_id: str | None = None,
+        geography_location: str | None = None,
+        geography_geo_id: str | None = None,
+        execution_plan: Mapping[str, Any] | Any | None = None,
+        allow_unauthenticated: bool = False,
+    ) -> list[Vacancy]:
+        if not (geography_location or geography_geo_id):
+            raise BrowserNativeUnavailable(
+                "blocked_unsupported_geography: LinkedIn search requires a confirmed location or geoId"
+            )
+        url = build_linkedin_search_url(
+            keywords=query,
+            location=geography_location,
+            geo_id=geography_geo_id,
+        )
+        plan = self._coerce_linkedin_execution_plan(execution_plan)
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
         trace: dict[str, Any] = {
@@ -1596,102 +2070,267 @@ class BrowserSourceClient:
             "login_wall_hits": 0,
             "auth_redirects": 0,
             "anti_bot_events": 0,
+            "pages": [],
             "zero_result_reason": "",
+            "planned_page_offsets": [],
+            "completed_page_offsets": [],
+            "scroll_checkpoints": [],
+            "extraction_counts": {
+                "dom": 0,
+                "parsed_before_filter": 0,
+                "returned": 0,
+                "returned_outside_dom": 0,
+                "returned_outside_dom_rows": 0,
+                "returned_without_canonical_job_id": 0,
+                "duplicate_canonical": 0,
+                "duplicate_canonical_returned": 0,
+                "excluded": 0,
+                "unexplained": 0,
+                "vacancies_extracted": 0,
+            },
+            "stop_reason": "",
+            "failure_reason": None,
+            "execution_plan_version": plan.version if plan is not None else None,
+            "session_observation": "not_observed",
         }
         started = time.perf_counter()
-        self._validate_linkedin_auth()
+        try:
+            if allow_unauthenticated:
+                observation = self._validate_linkedin_auth(allow_unauthenticated=True)
+            else:
+                observation = self._validate_linkedin_auth()
+            trace["session_observation"] = observation or "with_session"
+        except Exception as exc:
+            if plan is not None:
+                self._mark_critical_degradation(f"linkedin authentication failed: {exc}")
+                trace["failure_reason"] = str(exc)
+                trace["stop_reason"] = "critical_degradation"
+                self._last_search_trace = trace
+            raise
         trace["login_wall_check_ms"] = int(round((time.perf_counter() - started) * 1000))
-        page_plan = self._linkedin_page_plan(max_pages)
+        page_plan = self._linkedin_page_plan(max_pages, execution_plan=plan)
+        trace["planned_page_offsets"] = list(page_plan)
         for page_index in page_plan:
             self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
-            page_url = f"{url}&start={page_index * 25}" if page_index else url
+            page_url = (
+                build_linkedin_search_url(
+                    keywords=query,
+                    location=geography_location,
+                    geo_id=geography_geo_id,
+                    start=page_index if plan is not None else page_index * 25,
+                )
+                if page_index
+                else url
+            )
             started = time.perf_counter()
-            html = self.fetch_html(page_url)
+            capture_label = f"{run_id or 'run-unknown'}-{query_id or 'query-unknown'}-cell-{cell_id or 'unknown'}-page-{page_index}"
+            try:
+                if plan is not None:
+                    page_result = self.fetch_page(
+                        page_url,
+                        page_offset=page_index,
+                        capture_label=capture_label,
+                        execution_plan=plan,
+                    )
+                    fetched = page_result.html
+                    self._last_fetch_result = page_result
+                else:
+                    fetched = self.fetch_html(page_url, capture_label=capture_label)
+                    page_result = getattr(self, "_last_fetch_result", None)
+            except Exception as exc:
+                if plan is not None:
+                    self._mark_critical_degradation(f"page offset {page_index} failed: {exc}")
+                    trace["failure_reason"] = str(exc)
+                    trace["stop_reason"] = "critical_degradation"
+                    self._last_search_trace = trace
+                raise
+            if not isinstance(page_result, BrowserFetchResult) or page_result.requested_url != page_url or page_result.html != fetched:
+                page_result = BrowserFetchResult(
+                    requested_url=page_url,
+                    final_url=page_url,
+                    html=fetched,
+                    html_sha256=hashlib.sha256(fetched.encode("utf-8")).hexdigest(),
+                    page_offset=page_index,
+                    planned_scroll_steps=0,
+                    completed_scroll_steps=0,
+                    scroll_trace=(),
+                    dom_unique_job_ids=frozenset(),
+                    artifact_ref=None,
+                )
+            trace["completed_page_offsets"].append(page_index)
+            trace["scroll_checkpoints"].extend(page_result.scroll_checkpoints)
+            if page_result.scroll_failure_reason and plan is not None:
+                trace["failure_reason"] = page_result.scroll_failure_reason
+            trace["stop_reason"] = page_result.scroll_stop_reason
+            html = page_result.html
             trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
             started = time.perf_counter()
-            page_vacancies = extract_linkedin_vacancies_from_html(html, page_url=page_url)
+            pre_filter_vacancies = _linkedin_card_vacancies_from_html(
+                html, page_url=page_url, apply_role_filter=False
+            )
+            pre_filter_vacancies.extend(
+                _vacancy_from_jobposting(jobposting, source="linkedin", page_url=page_url)
+                for jobposting in _jobposting_objects(html)
+            )
+            page_vacancies = (
+                _qualify_linkedin_vacancies(pre_filter_vacancies)
+                if plan is not None
+                else extract_linkedin_vacancies_from_html(html, page_url=page_url)
+            )
             trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
-            self._observe_page(page_url, html, len(page_vacancies))
+            dom_ids = page_result.dom_unique_job_ids
+            accounting = (
+                classify_linkedin_dom_job_ids(
+                    dom_job_ids=dom_ids,
+                    parser_vacancies=pre_filter_vacancies,
+                    returned_vacancies=page_vacancies,
+                )
+                if plan is not None or dom_ids
+                else None
+            )
+            if accounting is None:
+                # Legacy fetch_html callers predate DOM-ID diagnostics. Their
+                # rows remain supported, but cannot claim a four-way DOM
+                # accounting proof that they did not provide.
+                trace_counts = {
+                    "dom": 0,
+                    "parsed_before_filter": 0,
+                    "returned": 0,
+                    "returned_outside_dom": 0,
+                    "duplicate_canonical": 0,
+                    "duplicate_canonical_returned": 0,
+                    "excluded": 0,
+                    "unexplained": 0,
+                    "vacancies_extracted": len(page_vacancies),
+                }
+                page_outcomes: dict[str, str] = {}
+                parser_before_filter_ids: list[str] = []
+                returned_unique_ids: list[str] = []
+                returned_outside_dom_ids: list[str] = []
+                returned_without_canonical_job_id_count = 0
+                parsed_ids: list[str] = []
+                duplicate_ids: list[str] = []
+                excluded_by_reason: dict[str, str] = {}
+                unexplained_ids: list[str] = []
+            else:
+                trace_counts = {
+                    "dom": accounting.dom_count,
+                    "parsed_before_filter": accounting.parser_before_filter_count,
+                    "returned": accounting.returned_count,
+                    "returned_outside_dom": len(accounting.returned_outside_dom_job_ids),
+                    "returned_outside_dom_rows": accounting.returned_outside_dom_row_count,
+                    "returned_without_canonical_job_id": accounting.returned_without_canonical_job_id_count,
+                    "duplicate_canonical": accounting.duplicate_canonical_count,
+                    "duplicate_canonical_returned": accounting.duplicate_canonical_returned_count,
+                    "excluded": accounting.excluded_count,
+                    "unexplained": accounting.unexplained_count,
+                    "vacancies_extracted": accounting.vacancies_extracted,
+                }
+                page_outcomes = dict(sorted(accounting.outcome_by_id.items()))
+                parser_before_filter_ids = sorted(
+                    accounting.parsed_ids
+                    | accounting.duplicate_canonical_ids
+                    | accounting.excluded_by_reason.keys()
+                )
+                returned_unique_ids = sorted(
+                    set(
+                        job_id
+                        for vacancy in page_vacancies
+                        for job_id in [_linkedin_job_id_from_url(vacancy.url)]
+                        if job_id
+                    )
+                    & dom_ids
+                )
+                returned_outside_dom_ids = sorted(
+                    accounting.returned_outside_dom_job_ids
+                )
+                returned_without_canonical_job_id_count = (
+                    accounting.returned_without_canonical_job_id_count
+                )
+                parsed_ids = sorted(accounting.parsed_ids)
+                duplicate_ids = sorted(accounting.duplicate_canonical_ids)
+                excluded_by_reason = accounting.excluded_by_reason
+                unexplained_ids = sorted(accounting.unexplained_ids)
+            for name, count in trace_counts.items():
+                trace["extraction_counts"][name] += count
+            # Both axes, recorded per page and read from the final URL. The
+            # classification says what the page was; the safety reason says
+            # whether the source pushed back. One page may carry a value on
+            # each, so they are two fields rather than one enum.
+            trace["pages"].append(
+                {
+                    "requested_url": page_result.requested_url,
+                    "final_url": page_result.final_url,
+                    "http_status": page_result.http_status,
+                    "page_classification": classify_linkedin_page(
+                        final_url=page_result.final_url,
+                        html=html,
+                        status=page_result.http_status,
+                    ),
+                    "safety_reason": linkedin_safety_reason(
+                        final_url=page_result.final_url,
+                        html=html,
+                        status=page_result.http_status,
+                    ),
+                    "html_sha256": page_result.html_sha256,
+                    "dom_unique_job_ids": sorted(page_result.dom_unique_job_ids),
+                    "parsed_unique_job_ids_before_role_filter": parser_before_filter_ids,
+                    "returned_unique_job_ids": returned_unique_ids,
+                    "returned_outside_dom_job_ids": returned_outside_dom_ids,
+                    "returned_without_canonical_job_id_count": returned_without_canonical_job_id_count,
+                    "parsed_job_ids": parsed_ids,
+                    "duplicate_canonical_job_ids": duplicate_ids,
+                    "excluded_job_ids_by_reason": excluded_by_reason,
+                    "unexplained_dom_job_ids": unexplained_ids,
+                    "job_id_outcomes": page_outcomes,
+                    "extraction_counts": trace_counts,
+                    "planned_scroll_steps": page_result.planned_scroll_steps,
+                    "completed_scroll_steps": page_result.completed_scroll_steps,
+                    "scroll_trace": list(page_result.scroll_trace),
+                    "artifact_ref": page_result.artifact_ref,
+                }
+            )
+            # The final URL, not the requested one. Observing the request
+            # made every redirect invisible to the safety axis: a walk that
+            # ended on /checkpoint was recorded as a walk to the search page.
+            self._observe_page(
+                page_result.final_url,
+                html,
+                len(page_vacancies),
+                http_status=page_result.http_status,
+            )
             trace["vacancies_extracted"] += len(page_vacancies)
             vacancies.extend(page_vacancies)
             started = time.perf_counter()
-            detail_rows = self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
+            detail_rows = (
+                []
+                if plan is not None
+                else self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
+            )
             vacancies.extend(detail_rows)
-            if self._health.login_walls or self._health.auth_redirects:
+            if self._health.page_requires_abort():
+                if plan is not None:
+                    reason = (
+                        self._health.last_page_safety_reason
+                        or "login_wall_or_auth_redirect"
+                    )
+                    self._mark_critical_degradation(reason)
+                    trace["failure_reason"] = reason
+                    trace["stop_reason"] = "critical_degradation"
                 trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
                 break
-            noise_rows = self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
+            noise_rows = (
+                []
+                if plan is not None
+                else self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
+            )
             vacancies.extend(noise_rows)
             trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-        started = time.perf_counter()
-        deduped = _dedupe_vacancies(vacancies)
-        trace["filter_ms"] = int(round((time.perf_counter() - started) * 1000))
-        started = time.perf_counter()
-        snapshot = self.session_health_snapshot()
-        trace["session_health_ms"] = int(round((time.perf_counter() - started) * 1000))
-        trace["pages_fetched"] = int(snapshot.get("pages_fetched") or 0)
-        trace["detail_pages_opened"] = int(snapshot.get("detail_pages_opened") or 0)
-        trace["login_wall_hits"] = int(snapshot.get("login_walls") or 0)
-        trace["auth_redirects"] = int(snapshot.get("auth_redirects") or 0)
-        trace["anti_bot_events"] = int(snapshot.get("anti_bot_events") or 0)
-        if deduped:
-            trace["zero_result_reason"] = ""
-        elif trace["login_wall_hits"]:
-            trace["zero_result_reason"] = "login_wall"
-        elif trace["auth_redirects"]:
-            trace["zero_result_reason"] = "auth_redirect"
-        elif trace["pages_fetched"] > 0:
-            trace["zero_result_reason"] = "search_returned_no_actionable_results"
-        else:
-            trace["zero_result_reason"] = "no_pages_fetched"
-        trace["normalize_ms"] = 0
-        trace["planned_search_pages"] = len(page_plan)
-        self._last_search_trace = trace
-        return deduped
-
-    def search_headhunter(self, query: str, *, max_pages: int = 1) -> list[Vacancy]:
-        url = f"https://hh.ru/search/vacancy?text={quote_plus(query)}"
-        vacancies: list[Vacancy] = []
-        self._health.source = "headhunter"
-        trace: dict[str, Any] = {
-            "browser_start_ms": 0,
-            "search_pages_ms": 0,
-            "detail_pages_ms": 0,
-            "extract_ms": 0,
-            "normalize_ms": 0,
-            "filter_ms": 0,
-            "session_health_ms": 0,
-            "login_wall_check_ms": 0,
-            "pages_fetched": 0,
-            "detail_pages_opened": 0,
-            "vacancies_extracted": 0,
-            "login_wall_hits": 0,
-            "auth_redirects": 0,
-            "anti_bot_events": 0,
-            "zero_result_reason": "",
-        }
-        started = time.perf_counter()
-        self._validate_headhunter_auth()
-        trace["login_wall_check_ms"] = int(round((time.perf_counter() - started) * 1000))
-        page_plan = self._headhunter_page_plan(max_pages)
-        for page_index in page_plan:
-            self._sleep(source="headhunter", extra_bias_ms=(300, 1600))
-            page_url = f"{url}&page={page_index}" if page_index else url
-            started = time.perf_counter()
-            html = self.fetch_html(page_url)
-            trace["search_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-            started = time.perf_counter()
-            page_vacancies = extract_headhunter_vacancies_from_html(html, page_url=page_url)
-            trace["extract_ms"] += int(round((time.perf_counter() - started) * 1000))
-            self._observe_page(page_url, html, len(page_vacancies))
-            trace["vacancies_extracted"] += len(page_vacancies)
-            vacancies.extend(page_vacancies)
-            started = time.perf_counter()
-            detail_rows = self._maybe_open_detail_vacancy(source="headhunter", vacancies=page_vacancies)
-            vacancies.extend(detail_rows)
-            trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-            if self._health.login_walls or self._health.auth_redirects:
-                break
+        if plan is not None and trace["completed_page_offsets"] != trace["planned_page_offsets"]:
+            reason = "planned page offsets were not all completed"
+            self._mark_critical_degradation(reason)
+            trace["failure_reason"] = trace["failure_reason"] or reason
+            trace["stop_reason"] = "critical_degradation"
         started = time.perf_counter()
         deduped = _dedupe_vacancies(vacancies)
         trace["filter_ms"] = int(round((time.perf_counter() - started) * 1000))

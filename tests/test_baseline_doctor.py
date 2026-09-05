@@ -18,6 +18,7 @@ def _git(repo, *a):
 
 
 def _seed(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "t@t")
     _git(tmp_path, "config", "user.name", "t")
@@ -28,12 +29,20 @@ def _seed(tmp_path):
 
 
 def test_clean_repo(tmp_path):
-    result = baseline_doctor.run_doctor(_seed(tmp_path))
+    result = baseline_doctor.run_doctor(_seed(tmp_path / "repo"))
     assert result == {"clean": True, "fixed": [], "remaining": []}
 
 
+def test_clean_repo_does_not_include_hermetic_home_files(tmp_path):
+    assert baseline_doctor.run_doctor(_seed(tmp_path / "repo")) == {
+        "clean": True,
+        "fixed": [],
+        "remaining": [],
+    }
+
+
 def test_untracked_reported_not_touched(tmp_path):
-    repo = _seed(tmp_path)
+    repo = _seed(tmp_path / "repo")
     (repo / "scripts").mkdir()
     (repo / "scripts" / "x.py").write_text("y\n")
     result = baseline_doctor.run_doctor(repo)
@@ -47,7 +56,7 @@ def test_untracked_reported_not_touched(tmp_path):
 
 
 def test_root_owned_is_chowned_via_injected_callable(tmp_path):
-    repo = _seed(tmp_path)
+    repo = _seed(tmp_path / "repo")
     (repo / "leftover.pyc").write_text("z\n")
     calls = []
 

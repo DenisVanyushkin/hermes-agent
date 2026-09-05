@@ -1,0 +1,41 @@
+[Unit]
+Description=Job Intel shadow collection (no user delivery)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+# The generated shadow env file is the only environment source. It is produced
+# by scripts/job_intel_make_shadow_env.sh from the production file, so the
+# acquisition configuration stays complete while delivery credentials are
+# dropped. EnvironmentFile is applied after Environment=, which is why the
+# authority lives in the file and not in a drop-in.
+EnvironmentFile=/etc/job-intel/job-intel-shadow.env
+Environment=PYTHONNOUSERSITE=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+WorkingDirectory=/home/hermes/.hermes/hermes-agent
+# Absence of a variable is not a barrier: the delivery path can re-read an env
+# file and repopulate credentials from it, and hermes_cli/env_loader.py knows
+# several stores beyond the job-intel env. All of them are made unreachable
+# inside the namespace rather than merely left unmentioned. The leading dash
+# tolerates a store that does not exist yet but might later.
+InaccessiblePaths=/etc/job-intel/job-intel.env
+InaccessiblePaths=-/home/hermes/.hermes/.env
+InaccessiblePaths=-/home/hermes/.hermes/.op.env
+InaccessiblePaths=-/etc/hermes
+InaccessiblePaths=-/home/hermes/.hermes/config.yaml
+InaccessiblePaths=-/home/hermes/.hermes/auth.json
+ExecStartPre=/usr/bin/env bash /home/hermes/.hermes/hermes-agent/scripts/job_intel_shadow_preflight.sh
+ExecStart=/usr/bin/env bash /home/hermes/.hermes/hermes-agent/scripts/job_intel_host_wrapper.sh daily
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/job-intel /var/log/job-intel /var/lib/browser-desktop
+UMask=0077
+
+# Deliberately no [Install] section: this oneshot is started by its timer only.
+# A WantedBy target here would let `systemctl enable` arm it at boot, which is
+# how a bounded experiment quietly becomes a permanent service.

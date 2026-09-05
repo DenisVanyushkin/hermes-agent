@@ -12,9 +12,9 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from . import hh_api
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
-from .sources import fetch_headhunter_detail_html
 
 
 @dataclass
@@ -783,10 +783,12 @@ DETAIL_RATE_LIMITED = _DetailSignal("DETAIL_RATE_LIMITED")
 #: rate-limit looks like.
 _DETAIL_ABSENT_STATUSES = frozenset({404, 410})
 
-#: Pause before every detail request. 400 sequential requests with no delay
-#: against a third-party API is what provokes the 429 in the first place.
+#: Pause before every non-HH detail request. 400 sequential requests with no
+#: delay against a third-party API is what provokes the 429 in the first place.
 #: Override with JOB_INTEL_TEXT_BACKFILL_DELAY_SECONDS (float seconds; 0
-#: disables). The 0.5s default adds ~3.5 minutes to a full 400-row budget.
+#: disables). HH detail requests go through job_intel.hh_api, which owns their
+#: pacing and uses JOB_INTEL_HH_DELAY_SECONDS.
+#: The 0.5s default adds ~3.5 minutes to a full 400-row budget.
 DETAIL_REQUEST_DELAY_SECONDS = 0.5
 #: A typo like "999999" must not stall a run for eleven days.
 _DETAIL_MAX_DELAY_SECONDS = 60.0
@@ -936,33 +938,21 @@ _HH_VACANCY_ID = re.compile(r"/vacancy/(\d+)")
 
 
 def fetch_headhunter_detail(url: str) -> str | _DetailSignal | None:
+    """Fetch HH detail; pacing is owned by ``hh_api``."""
     match = _HH_VACANCY_ID.search(url or "")
     if not match:
         # A URL we cannot address is permanently unfetchable, not transient.
         return None
-    # api.hh.ru/vacancies/<id> returns a wholesale 403 from this VPS's IP
-    # (DDoS-Guard IP-reputation block, not a header/UA check -- confirmed
-    # live across 4 different User-Agent values on 2026-08-09). The
-    # browser-native page, fetched through the already-cleared `hh` CDP
-    # session, is the primary path; the api.hh.ru request below is a
-    # fallback for when the browser itself is unavailable or the page has
-    # no JSON-LD JobPosting to read.
     try:
-        html_text = fetch_headhunter_detail_html(url)
-    except Exception:
-        html_text = ""
-    if html_text:
-        jobs = _jobposting_objects(html_text)
-        if jobs:
-            raw = jobs[0].get("description")
-            text = _clean_html_text(str(raw)) if isinstance(raw, str) else ""
-            if text:
-                return text
-    payload = _detail_json(f"https://api.hh.ru/vacancies/{match.group(1)}")
-    if is_transient_detail(payload):
-        return payload
-    if not isinstance(payload, dict) or not payload:
+        payload = hh_api.fetch_vacancy_detail(match.group(1))
+    except hh_api.HHNotFound:
         return None
+    except hh_api.HHRateLimited:
+        return DETAIL_RATE_LIMITED
+    except hh_api.HHError:
+        return DETAIL_TRANSIENT
+    except Exception:
+        return DETAIL_TRANSIENT
     raw = payload.get("description")
     text = _clean_html_text(raw) if isinstance(raw, str) else ""
     return text or None
