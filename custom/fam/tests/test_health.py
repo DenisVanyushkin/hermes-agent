@@ -45,7 +45,7 @@ def test_all_probes_isolates_broken_probe(db, monkeypatch):
 # ---- extcal_staleness (Task 8) ----------------------------------------
 
 def test_extcal_staleness_disabled_is_silent(db):
-    # No extcal_last_ok at all either -- disabled must win over "never
+    # No extcal_last_run at all either -- disabled must win over "never
     # synced", it is not a degradation.
     result = health.extcal_staleness(
         db, {"extcal_enabled": False, "extcal_stale_hours": 6}, now_utc=_now())
@@ -64,7 +64,7 @@ def test_extcal_staleness_disabled_silent_even_with_stale_last_ok(db):
 
 
 def test_extcal_staleness_never_synced_is_degraded(db):
-    # enabled, meta.extcal_last_ok never written -- distinct from disabled.
+    # enabled, meta.extcal_last_run never written -- distinct from disabled.
     result = health.extcal_staleness(
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=_now())
     assert result["status"] == "degraded"
@@ -75,7 +75,7 @@ def test_extcal_staleness_stale_is_degraded_with_age(db):
     from fam import db as famdb
     now = _now()
     old = (now - timedelta(hours=10)).isoformat()
-    famdb.meta_set(db, "extcal_last_ok", old)
+    famdb.meta_set(db, "extcal_last_run", old)
     db.commit()
     result = health.extcal_staleness(
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=now)
@@ -88,7 +88,7 @@ def test_extcal_staleness_fresh_is_silent(db):
     from fam import db as famdb
     now = _now()
     fresh = (now - timedelta(hours=1)).isoformat()
-    famdb.meta_set(db, "extcal_last_ok", fresh)
+    famdb.meta_set(db, "extcal_last_run", fresh)
     db.commit()
     result = health.extcal_staleness(
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=now)
@@ -99,7 +99,7 @@ def test_extcal_staleness_threshold_comes_from_cfg_not_hardcoded(db):
     from fam import db as famdb
     now = _now()
     ts = (now - timedelta(hours=2)).isoformat()
-    famdb.meta_set(db, "extcal_last_ok", ts)
+    famdb.meta_set(db, "extcal_last_run", ts)
     db.commit()
     # Same age (2h), two different configured thresholds -> two different
     # verdicts: proves the 6h default from the spec isn't baked in.
@@ -114,7 +114,7 @@ def test_extcal_staleness_threshold_comes_from_cfg_not_hardcoded(db):
 def test_extcal_staleness_never_writes_db(db):
     from fam import db as famdb
     now = _now()
-    before = famdb.meta_get(db, "extcal_last_ok")
+    before = famdb.meta_get(db, "extcal_last_run")
     assert before is None
     health.extcal_staleness(
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=now)
@@ -122,7 +122,7 @@ def test_extcal_staleness_never_writes_db(db):
     health.extcal_staleness(
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=now)
     assert db.execute("SELECT COUNT(*) AS c FROM meta").fetchone()["c"] == after_count
-    assert famdb.meta_get(db, "extcal_last_ok") is None
+    assert famdb.meta_get(db, "extcal_last_run") is None
 
 
 def test_all_probes_isolates_broken_extcal_probe(db, monkeypatch):
@@ -151,3 +151,31 @@ def test_all_probes_includes_extcal_staleness(db):
         db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now=_now())
     names = {r["name"] for r in results}
     assert "extcal_staleness" in names
+
+
+def test_extcal_staleness_uses_last_run_even_when_last_ok_is_old(db):
+    from fam import db as famdb
+    now = _now()
+    old_ok = (now - timedelta(hours=100)).isoformat()
+    fresh_run = (now - timedelta(hours=1)).isoformat()
+    famdb.meta_set(db, "extcal_last_ok", old_ok)
+    famdb.meta_set(db, "extcal_last_run", fresh_run)
+    db.commit()
+
+    result = health.extcal_staleness(
+        db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=now)
+
+    assert result["status"] == "ok"
+    assert result["last_ok_ts"] == fresh_run
+
+
+def test_extcal_staleness_ignores_last_ok_without_last_run(db):
+    from fam import db as famdb
+    old_ok = (_now() - timedelta(hours=1)).isoformat()
+    famdb.meta_set(db, "extcal_last_ok", old_ok)
+    db.commit()
+
+    result = health.extcal_staleness(
+        db, {"extcal_enabled": True, "extcal_stale_hours": 6}, now_utc=_now())
+
+    assert result["status"] == "degraded"

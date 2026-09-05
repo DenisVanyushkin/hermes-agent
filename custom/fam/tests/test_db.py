@@ -897,3 +897,41 @@ def test_resolve_receipt_migration_adds_table_to_existing_db(tmp_path):
     assert "resolve_receipts" in tables
     assert "idx_audit_resolve_key" in indexes
     conn.close()
+
+def test_extcal_legacy_streak_cleanup_is_exact_and_does_not_bump_schema(db):
+    from fam import db as famdb
+    legacy_streak = "extcal_fail_streak:__apply__"
+    legacy_alert = "extcal_fail_alerted:__apply__"
+    famdb.meta_set(db, legacy_streak, "897")
+    famdb.meta_set(db, legacy_alert, "1")
+    famdb.meta_set(db, "extcal_fail_streak:https://calendar.example/a", "4")
+    famdb.meta_set(db, "extcal_fail_alerted:https://calendar.example/a", "1")
+    famdb.meta_set(db, "unrelated_meta", "keep")
+    db.commit()
+
+    before = {
+        (row["key"], row["value"])
+        for row in db.execute("SELECT key, value FROM meta ORDER BY key")
+    }
+    version_before = famdb.meta_get(db, "schema_version")
+
+    famdb.init_db(db)
+
+    after = {
+        (row["key"], row["value"])
+        for row in db.execute("SELECT key, value FROM meta ORDER BY key")
+    }
+    assert before - after == {
+        (legacy_streak, "897"), (legacy_alert, "1")
+    }
+    assert after - before == set()
+    assert famdb.meta_get(db, legacy_streak) is None
+    assert famdb.meta_get(db, legacy_alert) is None
+    assert famdb.meta_get(db, "schema_version") == version_before == "12"
+
+    famdb.init_db(db)
+    after_second = {
+        (row["key"], row["value"])
+        for row in db.execute("SELECT key, value FROM meta ORDER BY key")
+    }
+    assert after_second == after

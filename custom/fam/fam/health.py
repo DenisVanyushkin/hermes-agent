@@ -53,7 +53,7 @@ def starline_staleness(conn, cfg, now=None):
                    last_ok_ts=last)
 
 def extcal_staleness(conn, cfg, now_utc=None):
-    """Calque of car.check_staleness, but reading `meta.extcal_last_ok`
+    """Calque of car.check_staleness, but reading `meta.extcal_last_run`
     instead of a car_metrics row -- Task 6's cal-ext tick is a 15-minute
     silent timer that never messages Amina on its own (invariant), so a
     dead timer (unit disabled, VM rebooted, Apple ID password rotated)
@@ -63,10 +63,10 @@ def extcal_staleness(conn, cfg, now_utc=None):
     Three-way read, pure (never writes conn or meta):
     - `extcal_enabled` falsy -> "ok", silent: sync is deliberately off,
       that is not a degradation. Must be checked BEFORE looking at
-      `extcal_last_ok` -- a prod box with the sync never turned on has no
+      `extcal_last_run` -- a prod box with the sync never turned on has no
       such key either, and that is the *other*, non-degraded, reason for
       it being absent.
-    - enabled but `meta.extcal_last_ok` missing entirely -> "degraded":
+    - enabled but `meta.extcal_last_run` missing entirely -> "degraded":
       the sync has never once completed successfully, distinct from
       merely being stale.
     - enabled and present but older than `extcal_stale_hours` -> "degraded"
@@ -75,7 +75,7 @@ def extcal_staleness(conn, cfg, now_utc=None):
     """
     if not cfg.get("extcal_enabled"):
         return _result("extcal_staleness", "ok", "extcal выключен")
-    last = famdb.meta_get(conn, "extcal_last_ok")
+    last = famdb.meta_get(conn, "extcal_last_run")
     if not last:
         return _result("extcal_staleness", "degraded",
                         "extcal включён, но синк ни разу не отработал успешно")

@@ -470,6 +470,12 @@ def init_db(conn):
     # audit_log already carries 22k+ tick.reminders rows and a
     # per-recheck audit row per dose would swamp it.
     _ensure_column(conn, "med_intakes", "gate_reason", "gate_reason TEXT")
+    # S2 data cleanup: the old aggregate apply streak is not a
+    # meaningful value after the split.  This is deliberately DML only:
+    # schema_version remains 12, and the legacy value is not migrated.
+    conn.execute(
+        "DELETE FROM meta WHERE key IN (?, ?)",
+        ("extcal_fail_streak:__apply__", "extcal_fail_alerted:__apply__"))
     conn.execute(
         "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
     conn.execute(

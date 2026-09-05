@@ -1886,7 +1886,11 @@ _EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
 # double-underscore shape specifically so neither can ever collide with a
 # real CalDAV URL (which always contains "://").
 _EXTCAL_STREAK_DISCOVERY_KEY = "__discovery__"
-_EXTCAL_STREAK_APPLY_KEY = "__apply__"
+_EXTCAL_STREAK_IMPORT_APPLY_KEY = "__import_apply__"
+_EXTCAL_STREAK_EXPORT_KEY = "__export__"
+# Kept as an internal compatibility alias for existing callers/tests.  The
+# legacy "__apply__" meta key is never written and is removed by db.init_db.
+_EXTCAL_STREAK_APPLY_KEY = _EXTCAL_STREAK_IMPORT_APPLY_KEY
 
 # Cap on how many bodies ONE tick may re-fetch one-by-one after a delta
 # entry arrived without <C:calendar-data> (see `_cal_ext_sync`). A
@@ -2790,22 +2794,36 @@ def cmd_tick_cal_ext(args):
     else:
         _extcal_record_success(conn, _EXTCAL_STREAK_DISCOVERY_KEY)
 
-    if apply_errors or export_errors:
-        if _extcal_record_failure(conn, _EXTCAL_STREAK_APPLY_KEY, threshold):
+    if apply_errors:
+        if _extcal_record_failure(
+                conn, _EXTCAL_STREAK_IMPORT_APPLY_KEY, threshold):
             escalate_messages += [
                 f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
                 for e in apply_errors]
-            # Task 7: export_own's errors have no "branch" (there is only
-            # one kind of row on this side, events) -- reported as
-            # "export.<action> event_id=<id>: <error>" instead, same
-            # overall shape.
+    else:
+        _extcal_record_success(conn, _EXTCAL_STREAK_IMPORT_APPLY_KEY)
+
+    if export_errors:
+        if _extcal_record_failure(conn, _EXTCAL_STREAK_EXPORT_KEY, threshold):
             escalate_messages += [
                 f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
                 for e in export_errors]
     else:
-        _extcal_record_success(conn, _EXTCAL_STREAK_APPLY_KEY)
+        _extcal_record_success(conn, _EXTCAL_STREAK_EXPORT_KEY)
 
     conn.commit()
+
+    # Heartbeat is written only after all terminal accounting decisions above.
+    # Keep it in the same final transaction boundary: a failed write/commit
+    # must not make a marker visible to a separate reader.
+    try:
+        famdb.meta_set(conn, "extcal_last_run", now.isoformat())
+        conn.commit()
+    except Exception as e:                         # noqa: BLE001
+        conn.rollback()
+        _audit_tick_error("cal-ext heartbeat", e)
+        print(f"cal-ext failed: heartbeat marker: {e}")
+        return 1
 
     if escalate_messages:
         # Blocker 3: redacted -- this string is what maint.problem_summary
