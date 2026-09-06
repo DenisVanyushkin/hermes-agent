@@ -166,7 +166,18 @@ def cancel(conn, sid, now_utc=None):
         conn.execute(
             "UPDATE plans SET attached_event_id=NULL "
             "WHERE attached_event_id=?", (event_id,))
-        conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        managed = conn.execute(
+            "SELECT 1 FROM ext_exports WHERE event_id=? "
+            "UNION SELECT 1 FROM ext_exports_taya WHERE event_id=?",
+            (event_id, event_id),
+        ).fetchone()
+        if managed:
+            conn.execute(
+                "UPDATE events SET status='cancelled', updated_at=? WHERE id=?",
+                (now, event_id))
+            rem.cancel_chain(conn, event_id)
+        else:
+            conn.execute("DELETE FROM events WHERE id=?", (event_id,))
     audit.log(conn, "cal.series.cancel",
               {"id": sid, "deleted_future": len(future)})
     return len(future)

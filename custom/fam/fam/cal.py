@@ -349,7 +349,7 @@ _REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id", "prep_min")
 _MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc", "title")
 
 
-def update(conn, event_id, **fields):
+def update(conn, event_id, strict_hooks=False, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
     end_utc, place, transport, notes, travel_min, prep_min,
     subject_person_id, add_person (list of refs), rm_person (list of refs).
@@ -550,6 +550,8 @@ def update(conn, event_id, **fields):
     road_value_changed = False
     if new_road_state != old_road_state:
         road_result = recompute_road(conn, event_id)
+        if strict_hooks and road_result.get("reason") == "error":
+            raise RuntimeError("road hook failed")
         if road_result.get("minutes") is not None:
             road_value_changed = road_result["minutes"] != old_travel_min_road
 

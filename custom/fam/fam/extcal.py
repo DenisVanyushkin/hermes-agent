@@ -91,7 +91,7 @@ from zoneinfo import ZoneInfo
 # send_event_email, never at module level (test_no_google_import.py pins
 # this), so importing it here costs nothing and creates no cycle -- `mail`
 # does not import `extcal` either.
-from fam import audit, cal, mail, places, plans, rem
+from fam import audit, cal, mail, people, places, plans, rem
 
 # ---- constants -------------------------------------------------------
 
@@ -3096,13 +3096,11 @@ def _export_put(cfg, url, body, etag, request):
     """One PUT attempt. Returns `(ok, new_etag, status, conflict)` --
     `conflict` is True ONLY on an HTTP 412 (etag precondition failed, RFC
     4791/RFC 7232) -- the ONE status `_export_put_event` retries, exactly
-    once (requirement #5). `new_etag` is read off the response when
-    present (iCloud returns it on both 201 Created and 204/200); it is
-    None when absent (some servers only return it on a follow-up GET) --
-    the caller handles a None etag exactly like any other value (a later
-    update simply omits If-Match, an unconditional overwrite of OUR OWN
-    resource, never a risk to her data since this collection holds nothing
-    but this module's own writes).
+    once (requirement #5). A successful response must carry an ETag; without
+    one the write is treated as unverified and the caller records an error.
+    Existing journal rows are never PUT without their stored ETag, while
+    initial inserts use the collection's create semantics and still require
+    the response ETag before recording success.
 
     Never raises: `request(...)` (the injected seam, `_request` by
     default) already never raises; a None response (network/timeout/
@@ -3122,6 +3120,10 @@ def _export_put(cfg, url, body, etag, request):
     if resp.status not in (200, 201, 204):
         return False, None, resp.status, False
     new_etag = resp.headers.get("ETag") or resp.headers.get("Etag") or resp.headers.get("etag")
+    if not new_etag:
+        # A successful write without a server version cannot be used for a
+        # later conditional write. Treat the response as unverified.
+        return False, None, resp.status, False
     return True, new_etag, resp.status, False
 
 
@@ -3189,9 +3191,10 @@ def _export_delete(cfg, url, etag, request):
     module never got to record that before crashing) is treated as
     SUCCESS, not a failure: either way, the end state ("nothing there")
     is exactly what this call wanted. Never raises."""
+    if not etag:
+        return False, None
     headers = _export_headers(cfg)
-    if etag:
-        headers["If-Match"] = etag
+    headers["If-Match"] = etag
     resp = request("DELETE", url, headers=headers, timeout=DEFAULT_TIMEOUT)
     if resp is None:
         return False, None
@@ -3290,7 +3293,9 @@ _EXPORT_ISSUE_TARGET = "hermes"
 
 def _export_issue_action(action):
     """Map a planner action to the database issue action enum."""
-    return "put" if action in ("insert", "update", "route-transition") else action
+    return "put" if action in (
+        "insert", "update", "route-transition", "configuration-error"
+    ) else action
 
 
 def _export_issue_upsert(conn, event_id, action, status=None, kind="error",
@@ -3349,12 +3354,18 @@ def _export_remote_state(response, event):
                              reason_code="invalid_response")
     etag = (response.headers.get("ETag") or response.headers.get("Etag")
             or response.headers.get("etag"))
+    if not etag:
+        raise _ExportFailure("GET resource missing ETag", status=response.status,
+                             reason_code="invalid_response")
     return hashes, etag
 
 
 def _export_record_success(conn, event_id, href, etag, new_hash, now_dt,
                            journal_table="ext_exports"):
-    """Write a successful export row without committing the caller transaction."""
+    """Write a verified export row without committing the caller transaction."""
+    if not etag:
+        raise _ExportFailure("successful export response missing ETag",
+                             reason_code="invalid_response")
     _export_record(conn, event_id, href, etag, new_hash, _iso(now_dt),
                    journal_table=journal_table)
 
@@ -3471,10 +3482,8 @@ def drop_valarm(cfg, href, etag, request=None):
         that isn't actually conditional on anything.
 
     Returns `(ok, new_etag, detail)`:
-      - `ok=True`: the PUT succeeded (with or without the one retry);
-        `new_etag` is whatever the server returned (may be None -- some
-        servers only hand back ETag on a follow-up GET, same caveat
-        `_export_put` already documents for the other collection).
+      - `ok=True`: the PUT succeeded and returned an ETag (with or without
+        the one retry); `new_etag` is the server's version token.
       - `ok=False`: the initial GET failed, the resource didn't pass the
         integrity check above, no etag was available to write with
         safely, or the PUT itself (including after the one retry)
@@ -3515,20 +3524,29 @@ def drop_valarm(cfg, href, etag, request=None):
 
     ok, new_etag, status, conflict = _export_put(cfg, href, stripped, etag, request)
     if conflict:
-        # Requirement (task 9 brief): exactly one re-read-and-retry on a
-        # 412 ETag conflict -- never a second retry, regardless of THIS
-        # attempt's own outcome. Same helper `_export_put_event` already
-        # uses for its own 412 path.
-        fresh_etag = _export_reread_etag(cfg, href, request)
+        # Re-read the complete resource after 412. The body and ETag must
+        # come from the same response so a phone edit cannot be overwritten
+        # by retrying the stale pre-conflict body.
+        try:
+            fresh_response = _export_get_resource(cfg, href, request)
+        except _ExportFailure as exc:
+            return False, None, str(exc)
+        if fresh_response is None or fresh_response.status not in (200, 207):
+            status = getattr(fresh_response, "status", None)
+            return False, None, f"GET {href} failed (status={status})"
+        fresh_stripped = _strip_valarm_ics(fresh_response.text)
+        if fresh_stripped is None:
+            return False, None, f"GET {href} returned malformed ICS"
+        fresh_etag = (fresh_response.headers.get("ETag")
+                      or fresh_response.headers.get("Etag")
+                      or fresh_response.headers.get("etag"))
         if not fresh_etag:
-            # Fix-round 1, finding I2: a retry with no etag at all would
-            # be an unconditional overwrite of a resource that is NOT
-            # ours -- refuse instead (see this function's own docstring).
             return False, None, (
                 f"412 conflict on {href}, and the re-read found no fresh "
                 f"etag -- refusing an unconditional retry PUT"
             )
-        ok, new_etag, status, _conflict2 = _export_put(cfg, href, stripped, fresh_etag, request)
+        ok, new_etag, status, _conflict2 = _export_put(
+            cfg, href, fresh_stripped, fresh_etag, request)
     if not ok:
         return False, None, f"PUT {href} failed (status={status})"
     return True, new_etag, None
@@ -3617,6 +3635,9 @@ def _export_put_event(conn, cfg, request, event, exp, location, participants,
     is_update = exp is not None
     href = exp["href"] if is_update else _export_href(write_url, event["id"])
     etag = exp.get("etag") if is_update else None
+    if is_update and not etag:
+        raise _ExportFailure("PUT journal row has no ETag",
+                             reason_code="invalid_response")
     body = _build_export_vevent(event, location, participants, now_dt)
     if is_update and _export_legacy_preflight(
             conn, cfg, request, event, exp, location, participants,
@@ -3648,6 +3669,9 @@ def _export_delete_event(conn, cfg, request, event_id, exp,
     if not href:
         conn.execute(f"DELETE FROM {journal_table} WHERE event_id=?", (event_id,))
         return
+    if not exp.get("etag"):
+        raise _ExportFailure("DELETE journal row has no ETag",
+                             reason_code="invalid_response")
     ok, status = _export_delete(cfg, href, exp.get("etag"), request)
     if ok:
         conn.execute(f"DELETE FROM {journal_table} WHERE event_id=?", (event_id,))
@@ -3791,6 +3815,57 @@ def _export_record_conflict(conn, event_id, action, counts, now_dt,
     conn.commit()
 
 
+def _export_record_error(conn, event_id, action, counts, exc, now_utc, target):
+    """Record a bounded export failure while preserving per-row isolation."""
+    status = getattr(exc, "status", None)
+    reason_code = getattr(exc, "reason_code", "export_error")
+    safe_error = reason_code[:280]
+    if status is not None:
+        safe_error = f"{safe_error} (status={status})"[:300]
+    counts["errors"].append({"event_id": event_id, "action": action,
+                             "error": safe_error, "reason_code": reason_code,
+                             "http_status": status,
+                             "audit_recorded": False})
+    try:
+        conn.rollback()
+        issue_recorded = True
+        issue_write_error = None
+        issue_exception_type = None
+        try:
+            _export_issue_upsert(
+                conn, event_id, action, status=status, kind="error",
+                reason_code=(reason_code if reason_code in {
+                    "export_error", "conflict", "not_found", "invalid_response"
+                } else "export_error"), now_utc=now_utc, target=target)
+        except sqlite3.IntegrityError as issue_exc:
+            issue_recorded = False
+            issue_exception_type = type(issue_exc).__name__[:100]
+            exists = conn.execute(
+                "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
+            issue_write_error = "issue_integrity_error" if exists else "orphan_event"
+        except Exception as issue_exc:
+            issue_recorded = False
+            issue_write_error = "issue_write_error"
+            issue_exception_type = type(issue_exc).__name__[:100]
+        payload = {"event_id": event_id, "target": target,
+                   "action": _export_issue_action(action), "kind": "error",
+                   "reason_code": reason_code, "http_status": status,
+                   "exception_type": type(exc).__name__[:100],
+                   "issue_recorded": issue_recorded}
+        if issue_write_error:
+            payload["issue_write_error"] = issue_write_error
+        if issue_exception_type:
+            payload["issue_exception_type"] = issue_exception_type
+        audit.log(conn, "cal.ext.export_error", payload)
+        conn.commit()
+        counts["errors"][-1]["audit_recorded"] = True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+
 def _export_commit_one(conn, event_id, action, count_key, counts, fn,
                        now_utc=None, target="hermes"):
     """Run one planned row with transaction and per-row failure isolation."""
@@ -3810,58 +3885,18 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn,
                                      "audit_recorded": False})
         return
     except Exception as exc:
-        status = getattr(exc, "status", None)
-        reason_code = getattr(exc, "reason_code", "export_error")
-        safe_error = reason_code[:280]
-        if status is not None:
-            safe_error = f"{safe_error} (status={status})"[:300]
-        counts["errors"].append({"event_id": event_id, "action": action,
-                                 "error": safe_error, "reason_code": reason_code,
-                                 "http_status": status,
-                                 "audit_recorded": False})
-        try:
-            conn.rollback()
-            issue_recorded = True
-            issue_write_error = None
-            issue_exception_type = None
-            try:
-                _export_issue_upsert(
-                    conn, event_id, action, status=status, kind="error",
-                    reason_code=reason_code, now_utc=now_utc, target=target)
-            except sqlite3.IntegrityError as issue_exc:
-                issue_recorded = False
-                issue_exception_type = type(issue_exc).__name__[:100]
-                exists = conn.execute(
-                    "SELECT 1 FROM events WHERE id=?", (event_id,)).fetchone()
-                issue_write_error = "issue_integrity_error" if exists else "orphan_event"
-            except Exception as issue_exc:
-                issue_recorded = False
-                issue_write_error = "issue_write_error"
-                issue_exception_type = type(issue_exc).__name__[:100]
-            payload = {"event_id": event_id, "target": target,
-                       "action": _export_issue_action(action), "kind": "error",
-                       "reason_code": reason_code, "http_status": status,
-                       "exception_type": type(exc).__name__[:100],
-                       "issue_recorded": issue_recorded}
-            if issue_write_error:
-                payload["issue_write_error"] = issue_write_error
-            if issue_exception_type:
-                payload["issue_exception_type"] = issue_exception_type
-            audit.log(conn, "cal.ext.export_error", payload)
-            conn.commit()
-            counts["errors"][-1]["audit_recorded"] = True
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception:
-                pass
+        _export_record_error(conn, event_id, action, counts, exc, now_utc, target)
         return
-    _export_issue_resolve(conn, event_id, target)
-    counts[count_key] += 1
-    audit.log(conn, "cal.ext.export", {
-        "event_id": event_id, "target": target,
-        "action": _export_issue_action(action)})
-    conn.commit()
+    try:
+        _export_issue_resolve(conn, event_id, target)
+        if count_key:
+            counts[count_key] += 1
+        audit.log(conn, "cal.ext.export", {
+            "event_id": event_id, "target": target,
+            "action": _export_issue_action(action)})
+        conn.commit()
+    except Exception as exc:
+        _export_record_error(conn, event_id, action, counts, exc, now_utc, target)
 
 
 def _export_rebaseline(conn, item, now_dt, journal_table="ext_exports"):
@@ -4058,13 +4093,37 @@ def _export_route_plan(conn, cfg, now_dt):
 
 
 def _export_run_route_transition(conn, cfg, request, now_dt, item, counts):
-    """PUT destination, verify committed journal+ETag, then delete source."""
+    """Prove or recreate destination before deleting the source journal."""
     dest = item["destination_target"]
     source = item["source_target"]
     dest_table = _export_journal_table(dest)
     dest_exp = conn.execute(
         f"SELECT * FROM {dest_table} WHERE event_id=?",
         (item["event_id"],)).fetchone()
+    try:
+        if dest_exp is not None:
+            response = _export_get_resource(cfg, dest_exp["href"], request)
+            if response is not None and response.status in (404, 410):
+                conn.execute(
+                    f"DELETE FROM {dest_table} WHERE event_id=?",
+                    (item["event_id"],))
+                dest_exp = None
+            else:
+                remote, fresh_etag = _export_remote_state(response, item["event"])
+                if remote["uid"] != _export_uid(item["event_id"]):
+                    raise _ExportFailure("destination UID mismatch",
+                                         reason_code="invalid_response")
+                _export_record_success(
+                    conn, item["event_id"], dest_exp["href"], fresh_etag,
+                    dest_exp["body_hash"], now_dt, dest_table)
+                dest_exp = conn.execute(
+                    f"SELECT * FROM {dest_table} WHERE event_id=?",
+                    (item["event_id"],)).fetchone()
+    except Exception as exc:
+        _export_record_error(conn, item["event_id"], "route-transition",
+                             counts, exc, now_dt, dest)
+        return
+
     if dest_exp is None:
         _export_commit_one(
             conn, item["event_id"], "insert", "exported", counts,
@@ -4077,10 +4136,9 @@ def _export_run_route_transition(conn, cfg, request, now_dt, item, counts):
         f"SELECT * FROM {dest_table} WHERE event_id=?",
         (item["event_id"],)).fetchone()
     if dest_exp is None or not dest_exp["href"] or not dest_exp["etag"]:
-        counts["errors"].append({
-            "event_id": item["event_id"], "action": "route-transition",
-            "error": "destination_unverified", "reason_code": "export_error",
-            "http_status": None, "audit_recorded": False})
+        exc = _ExportFailure("destination_unverified", reason_code="export_error")
+        _export_record_error(conn, item["event_id"], "route-transition",
+                             counts, exc, now_dt, dest)
         return
     source_row = conn.execute(
         f"SELECT * FROM {_export_journal_table(source)} WHERE event_id=?",
@@ -4112,10 +4170,12 @@ def export_routes(conn, cfg, request=None, now_utc=None):
         if item["action"] == "route-transition":
             _export_run_route_transition(conn, cfg, request, now_dt, item, counts)
         elif item["action"] == "configuration-error":
-            counts["errors"].append({
-                "event_id": item["event_id"], "action": item["action"],
-                "error": item["reason"], "reason_code": "export_error",
-                "http_status": None, "audit_recorded": False})
+            def configuration_error():
+                raise _ExportFailure(item["reason"],
+                                     reason_code="invalid_response")
+            _export_commit_one(
+                conn, item["event_id"], item["action"], None, counts,
+                configuration_error, now_utc=now_dt, target=item["target"])
         else:
             target_counts = _export_run_plan(
                 conn, cfg, request, now_dt, [item], item["target"])
@@ -4144,10 +4204,24 @@ def _export_remote_component(response, event):
     return component
 
 
-def _export_remote_participant_names(component):
-    'Extract domain participant names from the remote component description.'
+def _export_remote_participant_names(conn, component):
+    """Resolve every remote participant name, refusing ambiguous joins."""
     raw = component.get("participant_names") or ""
-    return [name.strip() for name in raw.split(",") if name.strip()]
+    if not raw.strip():
+        return []
+    names = [name.strip() for name in raw.split(",") if name.strip()]
+    # A comma can be either the export separator or part of one person's
+    # literal name. If both interpretations resolve, accepting either would
+    # silently change the participant set.
+    if len(names) > 1 and people.resolve(conn, raw) is not None:
+        raise _ExportFailure("remote participant names are ambiguous",
+                             reason_code="invalid_response")
+    for name in names:
+        if people.resolve(conn, name) is None:
+            raise _ExportFailure(
+                "remote participant name is unknown or ambiguous",
+                reason_code="invalid_response")
+    return names
 
 
 def _export_local_participant_names(event):
@@ -4165,27 +4239,27 @@ def _export_apply_remote(conn, event_id, component):
     event = cal.get(conn, event_id)
     if event is None:
         raise _ExportFailure("event no longer exists", reason_code="invalid_response")
-    cal.update(
-        conn, event_id,
-        title=component.get("summary") or "",
-        start_utc=component["dtstart_utc"].isoformat(),
-        end_utc=component["dtend_utc"].isoformat(),
-        place=place_id,
-        rm_person=_export_local_participant_names(event),
-        add_person=_export_remote_participant_names(component),
-    )
+    try:
+        cal.update(
+            conn, event_id,
+            title=component.get("summary") or "",
+            start_utc=component["dtstart_utc"].isoformat(),
+            end_utc=component["dtend_utc"].isoformat(),
+            place=place_id,
+            rm_person=_export_local_participant_names(event),
+            add_person=_export_remote_participant_names(conn, component),
+            strict_hooks=True,
+        )
+    except RuntimeError as exc:
+        if str(exc) != "road hook failed":
+            raise
+        raise _ExportFailure(str(exc), reason_code="export_error") from exc
     return cal.get(conn, event_id)
 
 
 def resolve_conflict(conn, event_id, target=None, decision=None,
                      request=None, cfg=None, now_utc=None):
-    """Resolve one conflict after an explicit operator choice.
-
-    Both choices prove the remote UID before any local write. The keep-remote
-    branch applies managed fields through cal.update, whose road and reminder
-    hooks remain inside this transaction. Any failure rolls the complete
-    local transaction back and leaves the issue and journal unchanged.
-    """
+    """Resolve one explicit conflict for its journal target and action."""
     if decision not in ("keep-remote", "force-push"):
         raise _ExportFailure("explicit resolution choice required",
                              reason_code="conflict")
@@ -4195,11 +4269,12 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
             "WHERE event_id=? AND kind='conflict' ORDER BY target",
             (event_id,)).fetchall()
         if len(candidates) != 1:
-            reason = "target required for ambiguous conflict" if candidates else "conflict not found"
+            reason = ("target required for ambiguous conflict" if candidates
+                      else "conflict not found")
             code = "conflict" if candidates else "not_found"
             raise _ExportFailure(reason, reason_code=code)
         target = candidates[0]["target"]
-    if target != _EXPORT_ISSUE_TARGET:
+    if target not in ("hermes", "taya"):
         raise _ExportFailure("unsupported conflict target",
                              reason_code="invalid_response")
     issue = conn.execute(
@@ -4208,8 +4283,13 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
         (target, event_id)).fetchone()
     if issue is None:
         raise _ExportFailure("conflict not found", reason_code="not_found")
+    action = issue["action"]
+    if action not in ("put", "delete"):
+        raise _ExportFailure("unsupported conflict action",
+                             reason_code="invalid_response")
+    table = _export_journal_table(target)
     exp = conn.execute(
-        "SELECT * FROM ext_exports WHERE event_id=?", (event_id,)).fetchone()
+        f"SELECT * FROM {table} WHERE event_id=?", (event_id,)).fetchone()
     event = cal.get(conn, event_id)
     if event is None:
         raise _ExportFailure("conflict event is no longer resolvable",
@@ -4217,7 +4297,7 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
     cfg = cfg or {}
     request = request or _request
     href = exp["href"] if exp is not None else _export_href(
-        cfg.get("extcal_write_calendar"), event_id)
+        _export_target_url(cfg, target), event_id)
     if not href:
         raise _ExportFailure("conflict resource is no longer resolvable",
                              reason_code="not_found")
@@ -4229,43 +4309,53 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
     now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
 
     try:
-        if decision == "force-push":
+        if action == "delete":
+            if decision != "force-push":
+                raise _ExportFailure(
+                    "keep-remote is unsupported for delete conflict",
+                    reason_code="conflict")
+            ok, status = _export_delete(
+                cfg, href, component["etag"], request)
+            if not ok:
+                raise _ExportFailure(
+                    "resolve delete failed", status=status,
+                    reason_code="conflict" if status == 412 else "export_error")
+            conn.execute(f"DELETE FROM {table} WHERE event_id=?", (event_id,))
+        elif decision == "force-push":
             location = _export_location(conn, event)
             participants = _export_participants(conn, event_id)
             new_hash = _export_body_hash(event, location, participants)
             body = _build_export_vevent(event, location, participants, now_dt)
             desired_payload = new_hash[3:] if new_hash.startswith("v2:") else new_hash
             if component["hashes"]["v2"] == desired_payload:
-                # A prior force-push may have reached iCloud before its local
-                # commit failed. Re-read proof repairs the journal without a
-                # second PUT.
                 _export_record(conn, event_id, href, component["etag"],
-                               new_hash, _iso(now_dt))
+                               new_hash, _iso(now_dt), table)
             else:
                 ok, new_etag, status, conflict = _export_put(
                     cfg, href, body, component["etag"], request)
                 if conflict:
                     raise _ExportFailure("resolve force-push received 412",
-                                         status=412)
+                                         status=412, reason_code="conflict")
                 if not ok:
                     raise _ExportFailure("resolve force-push PUT failed",
                                          status=status)
                 _export_record(conn, event_id, href, new_etag, new_hash,
-                               _iso(now_dt))
+                               _iso(now_dt), table)
         else:
             event = _export_apply_remote(conn, event_id, component)
             location = _export_location(conn, event)
             participants = _export_participants(conn, event_id)
             new_hash = _export_body_hash(event, location, participants)
             _export_record(conn, event_id, href, component["etag"],
-                           new_hash, _iso(now_dt))
+                           new_hash, _iso(now_dt), table)
     except Exception:
         conn.rollback()
         raise
 
     _export_issue_resolve(conn, event_id, target)
     audit.log(conn, "cal.ext.resolve", {
-        "event_id": event_id, "target": target, "decision": decision})
+        "event_id": event_id, "target": target, "decision": decision,
+        "action": action})
     conn.commit()
     return {"event_id": event_id, "target": target, "decision": decision,
             "resolved": True}

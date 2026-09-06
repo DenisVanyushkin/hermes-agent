@@ -110,10 +110,9 @@ def extcal_failures(conn, cfg, now_utc=None):
     from extcal_staleness: it does not use a timestamp or extcal_last_ok.
     """
     rows = conn.execute(
-        "SELECT event_id, action, kind, http_status, reason_code, "
+        "SELECT target, event_id, action, kind, http_status, reason_code, "
         "first_seen_utc, last_seen_utc "
-        "FROM extcal_export_issues WHERE target=? ORDER BY event_id",
-        ("hermes",),
+        "FROM extcal_export_issues ORDER BY target, event_id",
     ).fetchall()
     issues = [dict(row) for row in rows]
     streaks = {}
@@ -130,7 +129,8 @@ def extcal_failures(conn, cfg, now_utc=None):
     if issues:
         ids = ", ".join(str(row["event_id"]) for row in issues)
         actions = "; ".join(
-            f"{str(row['action']).upper()} {row['http_status'] or ''}".strip()
+            (f"{str(row['target']).upper()} " if row["target"] != "hermes" else "")
+            + f"{str(row['action']).upper()} {row['http_status'] or ''}".strip()
             for row in issues)
         count = len(issues)
         if 10 < count % 100 < 20:

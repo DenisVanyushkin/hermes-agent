@@ -114,7 +114,7 @@ def test_exported_vevent_no_dtend_defaults_to_one_hour(db, monkeypatch):
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             captured["body"] = req.data.decode("utf-8")
-        return extcal.Response(201, b"", {})
+        return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     _hermes_event(db, title="Звонок", start="2037-07-20T09:00:00+00:00")
@@ -131,7 +131,7 @@ def test_exported_vevent_includes_resolved_place_name_as_location(db, monkeypatc
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             captured["body"] = req.data.decode("utf-8")
-        return extcal.Response(201, b"", {})
+        return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     places.add(db, "Invictus")
@@ -156,7 +156,7 @@ def test_participants_are_exported_matching_mail_convention(db, monkeypatch):
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             captured["body"] = req.data.decode("utf-8")
-        return extcal.Response(201, b"", {})
+        return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     taya = people.add(db, "Таня")
@@ -199,7 +199,7 @@ def test_export_delegates_participant_join_to_shared_mail_function(db, monkeypat
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             captured["body"] = req.data.decode("utf-8")
-        return extcal.Response(201, b"", {})
+        return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     people.add(db, "Таня")
@@ -220,7 +220,7 @@ def test_event_with_no_participants_has_no_description_line(db, monkeypatch):
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             captured["body"] = req.data.decode("utf-8")
-        return extcal.Response(201, b"", {})
+        return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
@@ -262,7 +262,7 @@ def test_export_participants_delegates_to_cal_get_not_a_raw_query(db, monkeypatc
     def fake_open(req, timeout):
         if req.get_method() == "PUT":
             captured["body"] = req.data.decode("utf-8")
-        return extcal.Response(201, b"", {})
+        return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
@@ -523,7 +523,7 @@ def test_start_moved_beyond_horizon_after_export_is_retained_and_updated(db, mon
 
     def fake_open(req, timeout):
         calls.append(req.get_method())
-        return extcal.Response(204, b"", {})
+        return extcal.Response(204, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")

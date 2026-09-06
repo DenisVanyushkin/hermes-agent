@@ -1201,7 +1201,7 @@ def _ok_valarm_response(*a, **kw):
     return extcal.Response(
         200,
         "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
-        {},
+        {"ETag": '"adopt"'},
     )
 
 def test_cal_adopt_flips_owner_and_builds_chain(db, capsys, monkeypatch):

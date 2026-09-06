@@ -285,6 +285,17 @@ def test_crash_6b_committed_destination_retries_source_delete(db, monkeypatch):
 
     def request(method, url, **kwargs):
         calls.append(method)
+        if method == "GET":
+            body = (
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+                f"UID:fam-{row['id']}@hermes-home\r\n"
+                "DTSTAMP:20370715T000000Z\r\n"
+                "DTSTART:20370720T130000Z\r\n"
+                "DTEND:20370720T140000Z\r\n"
+                "SUMMARY:Taya event\r\n"
+                "END:VEVENT\r\nEND:VCALENDAR\r\n"
+            )
+            return extcal.Response(200, body, {"ETag": '"taya-e2"'})
         return extcal.Response(204, b"", {})
 
     original_delete = extcal._export_delete_event
