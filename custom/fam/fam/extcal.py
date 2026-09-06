@@ -3550,6 +3550,37 @@ def _export_put_event(conn, cfg, request, event, exp, location, participants,
 
 
 
+def _export_delete_issue_resource(conn, cfg, request, event_id, target):
+    """Remove a cancelled event's issue-only remote resource.
+
+    A cancelled event can have an export issue from an initial PUT that never
+    produced a journal row. Probe the deterministic resource href, validate
+    its managed UID and ETag, then delete it conditionally. A 404/410 means
+    the resource is already gone; the caller will resolve the issue in its
+    commit guard. Any other failure leaves the issue visible for retry.
+    """
+    url = _export_target_url(cfg, target)
+    href = _export_href(url, event_id)
+    response = _export_get_resource(cfg, href, request)
+    if response is not None and response.status in (404, 410):
+        return
+    component = _export_remote_component(response, {"id": event_id})
+    ok, status = _export_delete(cfg, href, component["etag"], request)
+    if ok:
+        return
+    if status != 412:
+        raise _ExportFailure(f"DELETE {href} failed (status={status})",
+                             status=status)
+    response = _export_get_resource(cfg, href, request)
+    if response is not None and response.status in (404, 410):
+        return
+    component = _export_remote_component(response, {"id": event_id})
+    ok, status = _export_delete(cfg, href, component["etag"], request)
+    if not ok:
+        raise _ExportFailure(f"DELETE retry {href} failed (status={status})",
+                             status=status)
+
+
 def _export_delete_event(conn, cfg, request, event_id, exp,
                          target="hermes", conflict_on_412=False):
     """Delete one managed resource with conditional, idempotent handling."""
@@ -3717,10 +3748,14 @@ def _export_run_item(conn, cfg, request, now_dt, item, counts):
         counts["unchanged"] += 1
         return
     if action == "delete":
+        if item.get("issue_only"):
+            delete_fn = lambda: _export_delete_issue_resource(
+                conn, cfg, request, event_id, target)
+        else:
+            delete_fn = lambda: _export_delete_event(
+                conn, cfg, request, event_id, item["export"], target)
         _export_commit_one(
-            conn, event_id, action, "deleted", counts,
-            lambda: _export_delete_event(
-                conn, cfg, request, event_id, item["export"], target),
+            conn, event_id, action, "deleted", counts, delete_fn,
             now_utc=now_dt, target=target)
         return
     count_key = "updated" if action == "update" else "exported"
@@ -3768,6 +3803,14 @@ def _export_route_plan(conn, cfg, now_dt):
         }
         for target in ("hermes", "taya")
     }
+    issues = {
+        target: {
+            row["event_id"]: dict(row) for row in conn.execute(
+                "SELECT * FROM extcal_export_issues WHERE target=?",
+                (target,))
+        }
+        for target in ("hermes", "taya")
+    }
     union = set(events) | set(journals["hermes"]) | set(journals["taya"])
     plan = []
     for event_id in sorted(union):
@@ -3787,6 +3830,11 @@ def _export_route_plan(conn, cfg, now_dt):
                     plan.append({"event_id": event_id, "action": "delete",
                                  "reason": reason, "event": event,
                                  "export": exp, "target": target})
+                elif event_id in issues[target]:
+                    plan.append({"event_id": event_id, "action": "delete",
+                                 "reason": reason, "event": event,
+                                 "export": None, "target": target,
+                                 "issue_only": True})
             continue
         try:
             desired_target = _export_route_target(conn, event)

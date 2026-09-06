@@ -169,6 +169,50 @@ def test_series_cancel_tombstones_issue_only_occurrence_instead_of_fk_delete(db)
         "SELECT 1 FROM extcal_export_issues WHERE event_id=?", (row["id"],)
     ).fetchone() is not None
 
+    calls = []
+    def request(method, url, **kwargs):
+        calls.append(method)
+        if method == "GET":
+            return extcal.Response(200, ics(row["id"], title="series"),
+                                   {"ETag": '"orphan"'})
+        if method == "DELETE":
+            return extcal.Response(204, b"", {})
+        pytest.fail("cancelled issue cleanup must not write or probe another method")
+
+    counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
+
+    assert calls == ["GET", "DELETE"]
+    assert counts["deleted"] == 1
+    assert db.execute(
+        "SELECT 1 FROM extcal_export_issues WHERE event_id=?", (row["id"],)
+    ).fetchone() is None
+
+
+
+def test_series_cancel_clears_issue_when_orphan_resource_is_already_gone(db):
+    sid = series.add(db, "series", "tue", "10:00", until_local="2037-07-21")
+    series.generate(db, now_utc=NOW)
+    row = db.execute(
+        "SELECT * FROM events WHERE series_id=? AND status='active' "
+        "ORDER BY start_utc LIMIT 1", (sid["id"],)
+    ).fetchone()
+    issue(db, row)
+    series.cancel(db, sid["id"], now_utc=NOW)
+
+    calls = []
+    def request(method, url, **kwargs):
+        calls.append(method)
+        assert method == "GET"
+        return extcal.Response(404, b"", {})
+
+    counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
+
+    assert calls == ["GET"]
+    assert counts["deleted"] == 1
+    assert db.execute(
+        "SELECT 1 FROM extcal_export_issues WHERE event_id=?", (row["id"],)
+    ).fetchone() is None
+
 
 def test_series_cancel_preserves_plan_links_for_tombstoned_occurrence(db):
     sid = series.add(db, "series", "tue", "10:00", until_local="2037-08-01")
@@ -193,6 +237,9 @@ def test_series_cancel_preserves_plan_links_for_tombstoned_occurrence(db):
     ).fetchall()
     assert links[0]["prep_for_event_id"] == row["id"]
     assert links[1]["attached_event_id"] == row["id"]
+    assert db.execute(
+        "SELECT status FROM plans WHERE id=?", (prep_id,)
+    ).fetchone()[0] == "dropped"
 
 
 def test_delete_resolve_recovers_after_local_commit_failure(db, monkeypatch):

@@ -159,6 +159,9 @@ def cancel(conn, sid, now_utc=None):
             "UNION SELECT 1 FROM extcal_export_issues WHERE event_id=?",
             (event_id, event_id, event_id),
         ).fetchone()
+        # Both physical deletion and managed tombstoning cancel open prep
+        # work. Only the physical-delete branch below clears the event FKs.
+        cal._prep_cascade_cancel(conn, event_id)
         if managed:
             conn.execute(
                 "UPDATE events SET status='cancelled', updated_at=? WHERE id=?",
@@ -169,7 +172,6 @@ def cancel(conn, sid, now_utc=None):
         # A physical delete must clear every plan FK first. Managed
         # tombstones retain these links so later cleanup can still identify
         # and report the cancelled occurrence without losing plan history.
-        cal._prep_cascade_cancel(conn, event_id)
         conn.execute(
             "UPDATE plans SET prep_for_event_id=NULL "
             "WHERE prep_for_event_id=?", (event_id,))
