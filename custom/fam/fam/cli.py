@@ -601,7 +601,7 @@ def cmd_cal_series_cancel(args):
         print(f"error: {e}", file=sys.stderr)
         return 2
     conn.commit()
-    print(f"cancelled series {args.id}; removed {removed} upcoming occurrence(s)")
+    print(f"cancelled series {args.id}; processed {removed} upcoming occurrence(s)")
     return 0
 
 def cmd_cal_series_update(args):

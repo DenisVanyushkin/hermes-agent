@@ -3049,6 +3049,8 @@ def _export_put(cfg, url, body, etag, request):
     headers = _export_headers(cfg, {"Content-Type": "text/calendar; charset=utf-8"})
     if etag:
         headers["If-Match"] = etag
+    else:
+        headers["If-None-Match"] = "*"
     resp = request("PUT", url, headers=headers, body=body, timeout=DEFAULT_TIMEOUT)
     if resp is None:
         return False, None, None
@@ -3676,14 +3678,15 @@ def _export_commit_one(conn, event_id, action, count_key, counts, fn,
         return
     try:
         _export_issue_resolve(conn, event_id, target)
-        if count_key:
-            counts[count_key] += 1
         audit.log(conn, "cal.ext.export", {
             "event_id": event_id, "target": target,
             "action": _export_issue_action(action)})
         conn.commit()
+        if count_key:
+            counts[count_key] += 1
     except Exception as exc:
         _export_record_error(conn, event_id, action, counts, exc, now_utc, target)
+
 
 
 def _export_run_item(conn, cfg, request, now_dt, item, counts):
@@ -3859,60 +3862,94 @@ def _export_route_plan(conn, cfg, now_dt):
 
 
 def _export_run_route_transition(conn, cfg, request, now_dt, item, counts):
-    """Prove or recreate destination before deleting the source journal."""
+    """Prove destination state before deleting the source journal.
+
+    A destination 404 invalidates its journal in a committed transaction.
+    That fact must survive a later destination PUT failure, so rollback from
+    per-row error handling cannot resurrect a stale row that would authorize
+    source deletion.
+    """
+    event_id = item["event_id"]
     dest = item["target"]
     source = item["source_target"]
     dest_table = _export_journal_table(dest)
     dest_exp = conn.execute(
-        f"SELECT * FROM {dest_table} WHERE event_id=?",
-        (item["event_id"],)).fetchone()
+        f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
+    ).fetchone()
     try:
         if dest_exp is not None:
             response = _export_get_resource(cfg, dest_exp["href"], request)
             if response is not None and response.status in (404, 410):
                 conn.execute(
-                    f"DELETE FROM {dest_table} WHERE event_id=?",
-                    (item["event_id"],))
+                    f"DELETE FROM {dest_table} WHERE event_id=?", (event_id,)
+                )
+                conn.commit()
                 dest_exp = None
             else:
                 remote, fresh_etag = _export_remote_state(response, item["event"])
+                stored_version, stored_hash = _export_stored_hash(
+                    dest_exp["body_hash"]
+                )
+                if remote[stored_version] != stored_hash:
+                    raise _ExportConflict()
                 _export_record_success(
-                    conn, item["event_id"], dest_exp["href"], fresh_etag,
-                    dest_exp["body_hash"], now_dt, dest_table)
+                    conn, event_id, dest_exp["href"], fresh_etag,
+                    dest_exp["body_hash"], now_dt, dest_table
+                )
                 dest_exp = conn.execute(
-                    f"SELECT * FROM {dest_table} WHERE event_id=?",
-                    (item["event_id"],)).fetchone()
-    except Exception as exc:
-        _export_record_error(conn, item["event_id"], "route-transition",
-                             counts, exc, now_dt, dest)
+                    f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
+                ).fetchone()
+    except _ExportConflict:
+        try:
+            _export_record_conflict(conn, event_id, "route-transition", counts,
+                                    now_dt, dest)
+        except Exception as exc:
+            _export_record_error(conn, event_id, "route-transition", counts,
+                                 exc, now_dt, dest)
         return
+    except Exception as exc:
+        _export_record_error(conn, event_id, "route-transition", counts,
+                             exc, now_dt, dest)
+        return
+
     if dest_exp is None:
         _export_commit_one(
-            conn, item["event_id"], "insert", "exported", counts,
+            conn, event_id, "insert", "exported", counts,
             lambda: _export_put_event(
                 conn, cfg, request, item["event"], None,
                 item["location"], item["participants"], item["new_hash"],
                 now_dt, dest),
             now_utc=now_dt, target=dest)
-    dest_exp = conn.execute(
-        f"SELECT * FROM {dest_table} WHERE event_id=?",
-        (item["event_id"],)).fetchone()
-    if dest_exp is None or not dest_exp["href"] or not dest_exp["etag"]:
-        exc = _ExportFailure("destination_unverified", reason_code="export_error")
-        _export_record_error(conn, item["event_id"], "route-transition",
-                             counts, exc, now_dt, dest)
+        dest_exp = conn.execute(
+            f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if dest_exp is None:
+            _export_record_error(
+                conn, event_id, "route-transition", counts,
+                _ExportFailure("destination_unverified", reason_code="export_error"),
+                now_dt, dest)
+            return
+
+    if not dest_exp["href"] or not dest_exp["etag"]:
+        _export_record_error(
+            conn, event_id, "route-transition", counts,
+            _ExportFailure("destination_unverified", reason_code="export_error"),
+            now_dt, dest)
         return
+
     source_row = conn.execute(
         f"SELECT * FROM {_export_journal_table(source)} WHERE event_id=?",
-        (item["event_id"],)).fetchone()
+        (event_id,),
+    ).fetchone()
     source_exp = dict(source_row) if source_row is not None else None
     if source_exp is None:
         return
     _export_commit_one(
-        conn, item["event_id"], "delete", "deleted", counts,
+        conn, event_id, "delete", "deleted", counts,
         lambda: _export_delete_event(
-            conn, cfg, request, item["event_id"], source_exp, source, True),
+            conn, cfg, request, event_id, source_exp, source, True),
         now_utc=now_dt, target=source)
+
 
 
 
@@ -4035,7 +4072,8 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
         candidates = conn.execute(
             "SELECT * FROM extcal_export_issues "
             "WHERE event_id=? AND kind='conflict' ORDER BY target",
-            (event_id,)).fetchall()
+            (event_id,),
+        ).fetchall()
         if len(candidates) != 1:
             reason = ("target required for ambiguous conflict" if candidates
                       else "conflict not found")
@@ -4048,7 +4086,8 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
     issue = conn.execute(
         "SELECT * FROM extcal_export_issues "
         "WHERE target=? AND event_id=? AND kind='conflict'",
-        (target, event_id)).fetchone()
+        (target, event_id),
+    ).fetchone()
     if issue is None:
         raise _ExportFailure("conflict not found", reason_code="not_found")
     action = issue["action"]
@@ -4057,7 +4096,8 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
                              reason_code="invalid_response")
     table = _export_journal_table(target)
     exp = conn.execute(
-        f"SELECT * FROM {table} WHERE event_id=?", (event_id,)).fetchone()
+        f"SELECT * FROM {table} WHERE event_id=?", (event_id,)
+    ).fetchone()
     event = cal.get(conn, event_id)
     if event is None:
         raise _ExportFailure("conflict event is no longer resolvable",
@@ -4070,10 +4110,11 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
         raise _ExportFailure("conflict resource is no longer resolvable",
                              reason_code="not_found")
     response = _export_get_resource(cfg, href, request)
-    if response is not None and response.status in (404, 410):
+    already_gone = response is not None and response.status in (404, 410)
+    if already_gone and not (action == "delete" and decision == "force-push"):
         raise _ExportFailure("conflict resource disappeared",
                              status=response.status, reason_code="not_found")
-    component = _export_remote_component(response, event)
+    component = None if already_gone else _export_remote_component(response, event)
     now_dt = _coerce_utc_dt(now_utc) or datetime.now(timezone.utc)
 
     try:
@@ -4082,12 +4123,14 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
                 raise _ExportFailure(
                     "keep-remote is unsupported for delete conflict",
                     reason_code="conflict")
-            ok, status = _export_delete(
-                cfg, href, component["etag"], request)
-            if not ok:
-                raise _ExportFailure(
-                    "resolve delete failed", status=status,
-                    reason_code="conflict" if status == 412 else "export_error")
+            if not already_gone:
+                ok, status = _export_delete(
+                    cfg, href, component["etag"], request)
+                if not ok:
+                    raise _ExportFailure(
+                        "resolve delete failed", status=status,
+                        reason_code=("conflict" if status == 412
+                                     else "export_error"))
             conn.execute(f"DELETE FROM {table} WHERE event_id=?", (event_id,))
         elif decision == "force-push":
             location = _export_location(conn, event)
@@ -4116,14 +4159,14 @@ def resolve_conflict(conn, event_id, target=None, decision=None,
             new_hash = _export_body_hash(event, location, participants)
             _export_record(conn, event_id, href, component["etag"],
                            new_hash, _iso(now_dt), table)
+        _export_issue_resolve(conn, event_id, target)
+        audit.log(conn, "cal.ext.resolve", {
+            "event_id": event_id, "target": target,
+            "decision": decision, "action": action})
+        conn.commit()
     except Exception:
         conn.rollback()
         raise
 
-    _export_issue_resolve(conn, event_id, target)
-    audit.log(conn, "cal.ext.resolve", {
-        "event_id": event_id, "target": target, "decision": decision,
-        "action": action})
-    conn.commit()
     return {"event_id": event_id, "target": target, "decision": decision,
             "resolved": True}

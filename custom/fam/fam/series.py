@@ -132,11 +132,13 @@ def _to_utc_iso(now_utc):
 
 
 def cancel(conn, sid, now_utc=None):
-    """Cancel a series: mark it cancelled and delete FUTURE untouched
-    occurrences (status='active', start_utc > now). Past, done and
-    individually-cancelled occurrences are left intact. Returns the number of
-    future occurrences removed. A cancelled series is never regenerated.
-    now_utc is a test seam (defaults to wall-clock now).
+    """Cancel a series and process its future occurrences.
+
+    Managed occurrences are tombstoned so their export journal or issue can
+    drive the later external-calendar cleanup; their plan links stay intact.
+    Unmanaged occurrences are physically deleted after their plan references
+    are cleared. Returns the number of future occurrences processed.
+    ``now_utc`` is a test seam (defaults to wall-clock now).
     """
     s = get(conn, sid)
     if s is None:
@@ -148,17 +150,25 @@ def cancel(conn, sid, now_utc=None):
     future = conn.execute(
         "SELECT id FROM events WHERE series_id=? AND status='active' AND "
         "start_utc > ?", (sid, now)).fetchall()
+    physically_deleted = 0
     for r in future:
         event_id = r["id"]
-        # plans.prep_for_event_id and plans.attached_event_id both
-        # REFERENCE events(id) with foreign_keys=ON, so deleting the
-        # event out from under a plan that still points at it raises
-        # IntegrityError. Drop any open prep-plan first (same cascade
-        # cal.cancel() uses), then null out the dangling reference on
-        # every OTHER plan still pointing at this event (a done/dropped
-        # prep-plan, or a plan merely attached via plans.attach()) --
-        # the plan row itself is kept, only the FK is cleared, so
-        # history isn't lost.
+        managed = conn.execute(
+            "SELECT 1 FROM ext_exports WHERE event_id=? "
+            "UNION SELECT 1 FROM ext_exports_taya WHERE event_id=? "
+            "UNION SELECT 1 FROM extcal_export_issues WHERE event_id=?",
+            (event_id, event_id, event_id),
+        ).fetchone()
+        if managed:
+            conn.execute(
+                "UPDATE events SET status='cancelled', updated_at=? WHERE id=?",
+                (now, event_id))
+            rem.cancel_chain(conn, event_id)
+            continue
+
+        # A physical delete must clear every plan FK first. Managed
+        # tombstones retain these links so later cleanup can still identify
+        # and report the cancelled occurrence without losing plan history.
         cal._prep_cascade_cancel(conn, event_id)
         conn.execute(
             "UPDATE plans SET prep_for_event_id=NULL "
@@ -166,20 +176,11 @@ def cancel(conn, sid, now_utc=None):
         conn.execute(
             "UPDATE plans SET attached_event_id=NULL "
             "WHERE attached_event_id=?", (event_id,))
-        managed = conn.execute(
-            "SELECT 1 FROM ext_exports WHERE event_id=? "
-            "UNION SELECT 1 FROM ext_exports_taya WHERE event_id=?",
-            (event_id, event_id),
-        ).fetchone()
-        if managed:
-            conn.execute(
-                "UPDATE events SET status='cancelled', updated_at=? WHERE id=?",
-                (now, event_id))
-            rem.cancel_chain(conn, event_id)
-        else:
-            conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        physically_deleted += 1
     audit.log(conn, "cal.series.cancel",
-              {"id": sid, "deleted_future": len(future)})
+              {"id": sid, "processed_future": len(future),
+               "physically_deleted": physically_deleted})
     return len(future)
 
 

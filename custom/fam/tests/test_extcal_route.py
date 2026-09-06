@@ -281,6 +281,11 @@ def test_crash_6b_committed_destination_retries_source_delete(db, monkeypatch):
     row = event(db, taya["id"])
     journal(db, "ext_exports", row["id"], HERMES)
     journal(db, "ext_exports_taya", row["id"], TAYA, etag='"taya-e1"')
+    db.execute(
+        "UPDATE ext_exports_taya SET body_hash=? WHERE event_id=?",
+        (extcal._export_body_hash(row, "", []), row["id"]),
+    )
+    db.commit()
     calls = []
 
     def request(method, url, **kwargs):
@@ -324,6 +329,11 @@ def test_crash_6c_source_delete_done_but_journal_stale_is_idempotent(db, monkeyp
     row = event(db, taya["id"])
     journal(db, "ext_exports", row["id"], HERMES)
     journal(db, "ext_exports_taya", row["id"], TAYA, etag='"taya-e1"')
+    db.execute(
+        "UPDATE ext_exports_taya SET body_hash=? WHERE event_id=?",
+        (extcal._export_body_hash(row, "", []), row["id"]),
+    )
+    db.commit()
     original_delete = extcal._export_delete_event
     left_stale = {"value": True}
 
@@ -348,11 +358,19 @@ def test_crash_6c_source_delete_done_but_journal_stale_is_idempotent(db, monkeyp
 
     def request(method, url, **kwargs):
         calls.append(method)
-        return (
-            extcal.Response(204, b"", {})
-            if len(calls) == 1
-            else extcal.Response(404, b"", {})
-        )
+        if method == "GET":
+            body = (
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
+                f"UID:fam-{row['id']}@hermes-home\r\n"
+                "DTSTAMP:20370715T000000Z\r\n"
+                "DTSTART:20370720T130000Z\r\n"
+                "DTEND:20370720T140000Z\r\n"
+                "SUMMARY:Taya event\r\n"
+                "END:VEVENT\r\nEND:VCALENDAR\r\n"
+            )
+            return extcal.Response(200, body, {"ETag": '"taya-e2"'})
+        delete_calls = calls.count("DELETE")
+        return extcal.Response(204 if delete_calls == 1 else 404, b"", {})
 
     extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
     monkeypatch.setattr(extcal, "_export_delete_event", original_delete)
