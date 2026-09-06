@@ -58,12 +58,12 @@ def test_active_past_journal_is_retained_without_network(db):
         calls.append((args, kwargs))
         raise AssertionError("retained event must not use the transport")
 
-    plan = extcal._export_plan(db, _cfg(), extcal._coerce_utc_dt(TEST_NOW))
+    plan = extcal._export_route_plan(db, _cfg(), extcal._coerce_utc_dt(TEST_NOW))
     entry = _plan_by_id(plan)[event["id"]]
     assert entry["action"] == "retain"
     assert entry["reason"] == "past_retained"
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=TEST_NOW)
     assert counts == {
         "exported": 0, "updated": 0, "unchanged": 0,
         "deleted": 0, "retained": 1, "errors": [], "conflicts": [],
@@ -91,7 +91,7 @@ def test_export_plan_matrix_uses_explicit_reasons_and_horizon_rules(db):
     db.execute("UPDATE events SET external_uid='legacy-uid' WHERE id=?", (external_uid["id"],))
     db.commit()
 
-    plan = extcal._export_plan(db, _cfg(), extcal._coerce_utc_dt(TEST_NOW))
+    plan = extcal._export_route_plan(db, _cfg(), extcal._coerce_utc_dt(TEST_NOW))
     by_id = _plan_by_id(plan)
     assert (by_id[cancelled["id"]]["action"], by_id[cancelled["id"]]["reason"]) == ("delete", "cancelled")
     assert (by_id[done["id"]]["action"], by_id[done["id"]]["reason"]) == ("delete", "done")
@@ -110,7 +110,7 @@ def test_cancelled_past_event_has_delete_priority_over_retention(db):
     db.commit()
 
     entry = _plan_by_id(
-        extcal._export_plan(db, _cfg(), extcal._coerce_utc_dt(TEST_NOW))
+        extcal._export_route_plan(db, _cfg(), extcal._coerce_utc_dt(TEST_NOW))
     )[event["id"]]
     assert entry["action"] == "delete"
     assert entry["reason"] == "cancelled"
@@ -127,7 +127,7 @@ def test_legacy_external_uid_journal_is_planned_for_cleanup(db):
         calls.append(method)
         return extcal.Response(204, b"", {})
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=TEST_NOW)
     assert counts["deleted"] == 1
     assert counts["retained"] == 0
     assert calls == ["DELETE"]

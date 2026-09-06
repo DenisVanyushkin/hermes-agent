@@ -1791,7 +1791,7 @@ def test_garbage_streak_threshold_config_falls_back_to_default_without_crashing(
 
 
 def test_apply_errors_go_through_the_same_streak_not_immediate_escalation(db, monkeypatch):
-    """Design decision: `apply_changes`/`export_own` per-row errors are
+    """Design decision: `apply_changes`/`export_routes` per-row errors are
     folded into the SAME streak-gated path as calendar/discovery errors,
     not escalated on the first occurrence -- justified in the report
     (transient `database is locked` contention with the per-minute

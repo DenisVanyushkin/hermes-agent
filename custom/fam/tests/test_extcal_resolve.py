@@ -41,7 +41,7 @@ def _make_conflict(db, event):
             return extcal.Response(412, b"", {})
         return extcal.Response(200, _ics(event["id"]).encode(),
                                {"ETag": '"phone"'})
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
     assert counts["conflicts"]
     return counts
 

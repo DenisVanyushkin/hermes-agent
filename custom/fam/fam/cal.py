@@ -113,13 +113,13 @@ def subject_for_event(conn, event):
 
 
 def filter_events_by_subject(conn, events, subject_person_id=None):
-    """Filter materialized event rows through the shared subject classifier."""
+    """Filter materialized event rows by one validated person subject."""
     if subject_person_id is None:
         return list(events)
     _validate_subject_id(conn, subject_person_id)
     return [event for event in events
-            if subject_for_event(conn, event) is not None
-            and event.get("subject_person_id") == subject_person_id]
+            if event.get("subject_person_id") == subject_person_id]
+
 
 
 def _resolve_place(conn, place_ref):

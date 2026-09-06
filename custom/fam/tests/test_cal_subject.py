@@ -66,15 +66,29 @@ def test_series_subject_propagates_only_old_subject_grid_rows(db):
     assert all(value == taya["id"] for value in values)
 
 
-def test_subject_views_and_export_share_filter_helper(db):
+def test_subject_views_and_global_export_plan_share_stored_filter(db):
     _, taya, _ = _seed(db)
     event = cal.add(db, "Тая", "2030-01-08T10:00:00+00:00", subject_person_id=taya["id"])
     cal.add(db, "Общее", "2030-01-08T11:00:00+00:00")
-    db.execute("INSERT INTO ext_exports(event_id, href, etag, body_hash, synced_at) VALUES (?,?,?,?,?)", (event["id"], "/e", "e", "h", "2030-01-01T00:00:00+00:00"))
     db.commit()
-    viewed = {e["id"] for e in cal.list_range(db, "2030-01-08T00:00:00+00:00", "2030-01-09T00:00:00+00:00", subject_person_id=taya["id"])}
-    planned = {e["event_id"] for e in extcal._export_plan(db, {"extcal_horizon_weeks": 8}, datetime(2030, 1, 1, tzinfo=timezone.utc), subject_person_id=taya["id"])}
-    assert viewed == planned
+    viewed = {
+        e["id"] for e in cal.list_range(
+            db, "2030-01-08T00:00:00+00:00", "2030-01-09T00:00:00+00:00",
+            subject_person_id=taya["id"])
+    }
+    cfg = {
+        "extcal_write_calendar": "https://caldav.icloud.com/hermes/",
+        "extcal_taya_calendar": "https://caldav.icloud.com/taya/",
+        "extcal_horizon_weeks": 8,
+    }
+    route_ids = {
+        item["event_id"] for item in extcal._export_route_plan(
+            db, cfg, datetime(2030, 1, 1, tzinfo=timezone.utc))
+        if item.get("target") == "taya"
+    }
+    assert viewed == {event["id"]}
+    assert route_ids == viewed
+
 
 
 def test_reminders_use_participants_not_subject(db):
@@ -147,40 +161,38 @@ def test_day_range_filter_and_no_flag_regression(db):
 def test_fresh_and_v13_migrated_schema_match_and_history_stays_null(tmp_path):
     import sqlite3
     from fam import db as famdb
+
+    def shape(conn, table):
+        return {
+            row["name"]: (row["type"], row["notnull"], row["dflt_value"], row["pk"])
+            for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+
     fresh = famdb.connect(str(tmp_path / "fresh.db"))
     famdb.init_db(fresh)
-    shape = lambda conn, table: {r["name"]: (r["type"], r["notnull"], r["dflt_value"], r["pk"]) for r in conn.execute(f"PRAGMA table_info({table})")}
     fresh_shape = {table: shape(fresh, table) for table in ("events", "event_series")}
+
     legacy = sqlite3.connect(str(tmp_path / "legacy.db"))
     legacy.row_factory = sqlite3.Row
-    legacy.executescript(famdb.SCHEMA)
-    legacy.execute("PRAGMA foreign_keys=OFF")
-    legacy.execute("ALTER TABLE events RENAME TO events_with_subject")
-    legacy.execute("""CREATE TABLE events (
-        id INTEGER PRIMARY KEY, title TEXT NOT NULL, start_utc TEXT NOT NULL,
-        end_utc TEXT, place_id INTEGER REFERENCES places(id),
-        transport TEXT NOT NULL DEFAULT 'unknown' CHECK (transport IN ('car','walk','public','unknown')),
-        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled','done')),
-        notes TEXT NOT NULL DEFAULT '', travel_min INTEGER, travel_min_road INTEGER,
-        road_checked_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
-    legacy.execute("""INSERT INTO events SELECT id,title,start_utc,end_utc,place_id,transport,status,notes,travel_min,travel_min_road,road_checked_at,created_at,updated_at FROM events_with_subject""")
-    legacy.execute("DROP TABLE events_with_subject")
-    legacy.execute("ALTER TABLE event_series RENAME TO event_series_with_subject")
-    legacy.execute("""CREATE TABLE event_series (
-        id INTEGER PRIMARY KEY, title TEXT NOT NULL, place_id INTEGER REFERENCES places(id),
-        weekdays TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT,
-        transport TEXT NOT NULL DEFAULT 'unknown' CHECK (transport IN ('car','walk','public','unknown')),
-        notes TEXT NOT NULL DEFAULT '', until_local TEXT,
-        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','cancelled')),
-        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
-    legacy.execute("""INSERT INTO event_series SELECT id,title,place_id,weekdays,start_time,end_time,transport,notes,until_local,status,created_at,updated_at FROM event_series_with_subject""")
-    legacy.execute("DROP TABLE event_series_with_subject")
-    legacy.execute("INSERT INTO meta(key,value) VALUES('schema_version','13')")
-    legacy.execute("INSERT INTO events(title,start_utc,created_at,updated_at) VALUES('history','2030-01-08T10:00:00+00:00','2030-01-01','2030-01-01')")
+    famdb.init_db(legacy)
+    legacy.execute("ALTER TABLE events DROP COLUMN subject_person_id")
+    legacy.execute("ALTER TABLE event_series DROP COLUMN subject_person_id")
+    legacy.execute("DROP TABLE ext_exports_taya")
+    legacy.execute("UPDATE meta SET value='13' WHERE key='schema_version'")
+    legacy.execute(
+        "INSERT INTO events(title,start_utc,created_at,updated_at) "
+        "VALUES('history','2030-01-08T10:00:00+00:00','2030-01-01','2030-01-01')"
+    )
     legacy.commit()
+
     famdb.init_db(legacy)
     migrated_shape = {table: shape(legacy, table) for table in ("events", "event_series")}
     assert migrated_shape == fresh_shape
-    assert legacy.execute("SELECT subject_person_id FROM events WHERE title='history'").fetchone()[0] is None
-    assert legacy.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
-    fresh.close(); legacy.close()
+    assert legacy.execute(
+        "SELECT subject_person_id FROM events WHERE title='history'"
+    ).fetchone()[0] is None
+    assert legacy.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()[0] == "15"
+    fresh.close()
+    legacy.close()

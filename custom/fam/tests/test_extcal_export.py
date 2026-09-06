@@ -1,11 +1,11 @@
-"""Task 7: reverse write -- `extcal.export_own` (PUT/DELETE owner='hermes'
+"""Task 7: reverse write -- `extcal.export_routes` (PUT/DELETE owner='hermes'
 events into the "Гермес" collection, without VALARM) plus its wiring into
 `fam tick cal-ext` (`cli._cal_ext_sync`/`cli.cmd_tick_cal_ext`).
 
 Only `extcal._default_open` is monkeypatched here (the module's own
 lowest-level network seam -- see test_extcal_transport.py's identical
 style): every test exercises the REAL `_request`/`_export_put`/
-`_export_delete`/`export_own` code, including the host-guard, header
+`_export_delete`/`export_routes` code, including the host-guard, header
 building, and 412-retry logic -- no test here ever touches the real
 network. `cal.add`/`cal.cancel`/`places.add` run for real against the `db`
 fixture's tmp sqlite file.
@@ -66,7 +66,7 @@ def test_write_calendar_unset_is_zero_network_noop(db, monkeypatch):
     _hermes_event(db)
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=""), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=""), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
                        "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
@@ -89,7 +89,7 @@ def test_exported_vevent_has_no_valarm_and_mail_uid_convention(db, monkeypatch):
                            end_utc="2037-07-20T14:00:00+00:00")
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["exported"] == 1
     assert counts["errors"] == []
 
@@ -119,7 +119,7 @@ def test_exported_vevent_no_dtend_defaults_to_one_hour(db, monkeypatch):
 
     _hermes_event(db, title="Звонок", start="2037-07-20T09:00:00+00:00")
     db.commit()
-    extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
 
     assert "DTSTART:20370720T090000Z" in captured["body"]
     assert "DTEND:20370720T100000Z" in captured["body"]
@@ -139,7 +139,7 @@ def test_exported_vevent_includes_resolved_place_name_as_location(db, monkeypatc
     _hermes_event(db, title="Тренировка", start="2037-07-20T09:00:00+00:00",
                   place="Invictus")
     db.commit()
-    extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
 
     assert "LOCATION:Invictus" in captured["body"]
 
@@ -166,7 +166,7 @@ def test_participants_are_exported_matching_mail_convention(db, monkeypatch):
                            participants=("Таня", "Денис"))
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["exported"] == 1
 
     body = captured["body"]
@@ -208,7 +208,7 @@ def test_export_delegates_participant_join_to_shared_mail_function(db, monkeypat
                    participants=("Таня",))
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["exported"] == 1
     assert len(calls) >= 1  # invoked at least once (body build + body_hash)
     assert "FAKE-JOIN-MARKER" in captured["body"]
@@ -225,7 +225,7 @@ def test_event_with_no_participants_has_no_description_line(db, monkeypatch):
 
     _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     db.commit()
-    extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
 
     assert "DESCRIPTION" not in captured["body"]
 
@@ -241,7 +241,7 @@ def test_export_participants_delegates_to_cal_get_not_a_raw_query(db, monkeypatc
     # Create the event BEFORE monkeypatching cal.get -- cal.add() itself
     # calls the real get() internally to build its own return value, and
     # that internal call must not be confused with the one this test
-    # actually wants to observe (export_own's own use of cal.get).
+    # actually wants to observe (export_routes's own use of cal.get).
     event = _hermes_event(db, title="Ужин", start="2037-07-20T18:00:00+00:00")
     db.commit()
 
@@ -265,7 +265,7 @@ def test_export_participants_delegates_to_cal_get_not_a_raw_query(db, monkeypatc
         return extcal.Response(201, b"", {"ETag": '"new"'})
     monkeypatch.setattr(extcal, "_default_open", fake_open)
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["exported"] == 1
     assert event["id"] in calls
     assert "ПОДСТАВНОЙ УЧАСТНИК" in captured["body"]
@@ -288,7 +288,7 @@ def test_participant_set_change_triggers_a_fresh_put_via_body_hash(db, monkeypat
     db.commit()
     cfg = _cfg(extcal_write_calendar=WRITE_URL)
 
-    c1 = extcal.export_own(db, cfg, now_utc=TEST_NOW)
+    c1 = extcal.export_routes(db, cfg, now_utc=TEST_NOW)
     assert c1["exported"] == 1
     assert calls == ["PUT"]
 
@@ -297,7 +297,7 @@ def test_participant_set_change_triggers_a_fresh_put_via_body_hash(db, monkeypat
                (event["id"], taya["id"]))
     db.commit()
 
-    c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:10:00+00:00")
+    c2 = extcal.export_routes(db, cfg, now_utc="2037-07-15T00:10:00+00:00")
     assert c2 == {"exported": 0, "updated": 1, "unchanged": 0,
                   "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert calls == ["PUT", "PUT"]
@@ -319,13 +319,13 @@ def test_second_export_of_unchanged_event_touches_no_network(db, monkeypatch):
     db.commit()
     cfg = _cfg(extcal_write_calendar=WRITE_URL)
 
-    c1 = extcal.export_own(db, cfg, now_utc=TEST_NOW)
+    c1 = extcal.export_routes(db, cfg, now_utc=TEST_NOW)
     assert c1["exported"] == 1
     assert calls == ["PUT"]
 
     # A later tick, different wall-clock time (a fresh DTSTAMP would
     # differ if it were part of the hash) but the SAME event content.
-    c2 = extcal.export_own(db, cfg, now_utc="2037-07-15T00:15:00+00:00")
+    c2 = extcal.export_routes(db, cfg, now_utc="2037-07-15T00:15:00+00:00")
     assert c2 == {"exported": 0, "updated": 0, "unchanged": 1,
                   "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert calls == ["PUT"]  # no new network call at all
@@ -348,7 +348,7 @@ def test_changed_time_triggers_put_with_if_match_etag(db, monkeypatch):
     href = _seed_export_row(db, event["id"], etag='"old-etag"',
                              body_hash="v2:" + "0" * 64)
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["updated"] == 1
     assert seen["if_match"] == '"old-etag"'
 
@@ -379,7 +379,7 @@ def test_412_remote_desired_is_recorded_without_retry(db, monkeypatch):
     event = _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     _seed_export_row(db, event["id"], etag='"old-etag"', body_hash="v2:" + "0" * 64)
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["updated"] == 1
     assert counts["errors"] == []
     assert calls == ["PUT", "GET"]
@@ -402,7 +402,7 @@ def test_412_conflict_retry_also_failing_is_recorded_as_one_error_not_retried_ag
     _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["exported"] == 0
     assert len(counts["errors"]) == 1
     assert counts["errors"][0]["action"] == "insert"
@@ -435,7 +435,7 @@ def test_export_commit_one_caps_error_length_for_export_failure_too(db):
     assert payload["reason_code"] == "export_error"
     assert payload["exception_type"] == "_ExportFailure"
     assert payload["issue_recorded"] is False
-    assert payload["issue_write_error"] == "orphan_event"
+    assert "issue_write_error" not in payload
     assert "error" not in payload
     assert long_href not in json.dumps(payload, ensure_ascii=False)
 
@@ -457,7 +457,7 @@ def test_cancelled_event_triggers_delete_and_drops_ext_exports_row(db, monkeypat
     cal.cancel(db, event["id"])
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
                        "deleted": 1, "retained": 0, "errors": [], "conflicts": []}
     assert calls == [("DELETE", href, '"e5"')]
@@ -469,9 +469,9 @@ def test_cancelled_event_triggers_delete_and_drops_ext_exports_row(db, monkeypat
 
 def test_done_event_previously_exported_is_also_deleted(db, monkeypatch):
     """Not literally 'cancelled' but exactly as wrong to leave visible on
-    her phone -- export_own's eligibility query is status='active' only,
+    her phone -- export_routes's eligibility query is status='active' only,
     so a transition to 'done' routes through the same DELETE cleanup path
-    as an explicit cancellation (see export_own's own docstring: broader
+    as an explicit cancellation (see export_routes's own docstring: broader
     than requirement #6's literal wording, on purpose)."""
     calls = []
 
@@ -485,7 +485,7 @@ def test_done_event_previously_exported_is_also_deleted(db, monkeypatch):
     cal.done(db, event["id"])
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["deleted"] == 1
     assert calls == ["DELETE"]
 
@@ -508,7 +508,7 @@ def test_owner_flipped_away_from_hermes_after_export_is_also_deleted(db, monkeyp
     db.execute("UPDATE events SET owner='iphone' WHERE id=?", (event["id"],))
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["deleted"] == 1
     assert calls == ["DELETE"]
     assert db.execute(
@@ -534,7 +534,7 @@ def test_start_moved_beyond_horizon_after_export_is_retained_and_updated(db, mon
                ("2038-01-01T00:00:00+00:00", event["id"]))
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["updated"] == 1
     assert counts["deleted"] == 0
     assert calls == ["PUT"]
@@ -557,7 +557,7 @@ def test_deleted_href_is_treated_as_already_gone_success(db, monkeypatch):
     cal.cancel(db, event["id"])
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["deleted"] == 1
     assert counts["errors"] == []
 
@@ -576,7 +576,7 @@ def test_owner_iphone_event_never_exported(db, monkeypatch):
     db.execute("UPDATE events SET owner='iphone' WHERE id=?", (event["id"],))
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
                        "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
 
@@ -606,7 +606,7 @@ def test_adopted_event_with_external_uid_is_never_exported(db, monkeypatch):
         (event["id"],))
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts == {"exported": 0, "updated": 0, "unchanged": 0,
                        "deleted": 0, "retained": 0, "errors": [], "conflicts": []}
     assert db.execute("SELECT COUNT(*) AS n FROM ext_exports").fetchone()["n"] == 0
@@ -630,7 +630,7 @@ def test_plain_hermes_event_still_exports_alongside_an_adopted_one(db, monkeypat
     _hermes_event(db, title="Обычное от Гермеса", start="2037-07-21T10:00:00+00:00")
     db.commit()
 
-    counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert counts["exported"] == 1
     assert counts["errors"] == []
 
@@ -641,7 +641,7 @@ def test_plain_hermes_event_still_exports_alongside_an_adopted_one(db, monkeypat
 
 def test_gate_deliver_never_called(db, monkeypatch):
     def _boom(*a, **k):
-        raise AssertionError("gate.deliver must never be called by export_own")
+        raise AssertionError("gate.deliver must never be called by export_routes")
     monkeypatch.setattr(gate, "deliver", _boom)
 
     def fake_open(req, timeout):
@@ -650,12 +650,12 @@ def test_gate_deliver_never_called(db, monkeypatch):
 
     _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     db.commit()
-    extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     # No assertion needed beyond "this didn't raise" -- _boom would have.
 
 
 # ---------------------------------------------------------------------
-# anti-echo (invariant #4), both belts, against export_own's OWN output
+# anti-echo (invariant #4), both belts, against export_routes's OWN output
 # ---------------------------------------------------------------------
 
 def test_export_uid_matches_anti_echo_belt2_pattern(db):
@@ -691,7 +691,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_blank(db, monk
 
     _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     db.commit()
-    export_counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    export_counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert export_counts["exported"] == 1
     exported_ics = captured["body"]
     assert "fam-" in exported_ics and "@hermes-home" in exported_ics
@@ -725,7 +725,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_blank(db, monk
 def test_belt2_filters_our_own_exported_event_even_with_write_url_pointing_elsewhere(db, monkeypatch):
     """N3: the brief's literal "even with a WRONG URL in config" case, not
     just blank -- extcal_write_calendar at IMPORT time is set to a
-    DIFFERENT, unrelated calendar than either the one export_own actually
+    DIFFERENT, unrelated calendar than either the one export_routes actually
     wrote to or the one the remote item is read from. Belt 1 is therefore
     inactive for a different reason than the blank case above (it matches
     the wrong thing, rather than nothing) -- belt 2 (UID pattern) must
@@ -740,7 +740,7 @@ def test_belt2_filters_our_own_exported_event_even_with_write_url_pointing_elsew
 
     _hermes_event(db, title="Йога", start="2037-07-20T13:00:00+00:00")
     db.commit()
-    export_counts = extcal.export_own(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
+    export_counts = extcal.export_routes(db, _cfg(extcal_write_calendar=WRITE_URL), now_utc=TEST_NOW)
     assert export_counts["exported"] == 1
     exported_ics = captured["body"]
 
@@ -824,7 +824,7 @@ def test_export_error_below_streak_threshold_does_not_escalate_but_is_still_audi
     more often than genuinely broken -- and a real, persistent export
     outage still reaches Denis by the Nth consecutive tick, same as any
     other class. `cal.ext.export_error` (the per-attempt audit row) is
-    written by `extcal.export_own` itself, unconditionally, on every
+    written by `extcal.export_routes` itself, unconditionally, on every
     attempt regardless of the streak -- nothing about the failure is
     hidden, only the nightly escalation is delayed."""
     def fake_open(req, timeout):
@@ -897,10 +897,10 @@ def test_export_wired_into_tick_and_reported_in_cal_ext_sync_audit(db, monkeypat
     ).fetchone()["n"] == 1
 
 
-def test_dry_run_never_calls_export_own(db, monkeypatch):
+def test_dry_run_never_calls_export_routes(db, monkeypatch):
     def _boom(*a, **k):
-        raise AssertionError("export_own must not run on --dry-run")
-    monkeypatch.setattr(cli.extcal, "export_own", _boom)
+        raise AssertionError("export_routes must not run on --dry-run")
+    monkeypatch.setattr(cli.extcal, "export_routes", _boom)
     monkeypatch.setattr(cli.gate, "load_config",
                          lambda *a, **k: _cfg(extcal_write_calendar=WRITE_URL))
     monkeypatch.setattr(cli.extcal, "discover", lambda cfg, request=None: [])

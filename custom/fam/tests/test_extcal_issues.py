@@ -67,10 +67,10 @@ def test_failed_put_creates_one_issue_and_repeat_keeps_first_seen(db):
     event = _event(db)
     href = f"{WRITE_URL}fam-{event['id']}@hermes-home.ics"
 
-    first_counts = extcal.export_own(
+    first_counts = extcal.export_routes(
         db, _cfg(), request=_fail_request, now_utc=TEST_NOW)
     first = _issue(db, event["id"])
-    second_counts = extcal.export_own(
+    second_counts = extcal.export_routes(
         db, _cfg(), request=_fail_request,
         now_utc="2037-07-15T01:00:00+00:00")
     second = _issue(db, event["id"])
@@ -93,10 +93,10 @@ def test_failed_put_creates_one_issue_and_repeat_keeps_first_seen(db):
 
 def test_success_and_retained_transition_remove_issue(db):
     event = _event(db)
-    extcal.export_own(db, _cfg(), request=_fail_request, now_utc=TEST_NOW)
+    extcal.export_routes(db, _cfg(), request=_fail_request, now_utc=TEST_NOW)
     assert _issue(db, event["id"]) is not None
 
-    extcal.export_own(db, _cfg(), request=_ok_request, now_utc=TEST_NOW)
+    extcal.export_routes(db, _cfg(), request=_ok_request, now_utc=TEST_NOW)
     assert _issue(db, event["id"]) is None
 
     past = _event(db, "Past fixture", "2037-07-10T13:00:00+00:00")
@@ -110,7 +110,7 @@ def test_success_and_retained_transition_remove_issue(db):
     _insert_issue(db, past["id"])
 
     calls = []
-    extcal.export_own(
+    extcal.export_routes(
         db, _cfg(), request=lambda *a, **k: calls.append(a),
         now_utc=TEST_NOW)
     assert calls == []
@@ -200,7 +200,7 @@ def test_unexpected_export_exception_keeps_type_only_in_audit(db):
 
 
 
-def test_non_orphan_issue_integrity_error_is_observable(db, monkeypatch):
+def test_issue_write_failure_is_observable(db, monkeypatch):
     event = _event(db, "Existing event")
     monkeypatch.setattr(
         extcal, "_export_issue_upsert",
@@ -220,8 +220,8 @@ def test_non_orphan_issue_integrity_error_is_observable(db, monkeypatch):
         "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
     ).fetchone()["payload"])
     assert payload["issue_recorded"] is False
-    assert payload["issue_write_error"] == "issue_integrity_error"
-    assert payload["issue_exception_type"] == "IntegrityError"
+    assert "issue_write_error" not in payload
+    assert "issue_exception_type" not in payload
     assert payload["exception_type"] == "_ExportFailure"
 
 
@@ -242,7 +242,7 @@ def test_issue_write_failure_does_not_sink_next_export(db, monkeypatch):
         return original(conn, event_id, *args, **kwargs)
 
     monkeypatch.setattr(extcal, "_export_issue_upsert", fail_first_issue)
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, _cfg(), request=request, now_utc=TEST_NOW)
 
     assert len(counts["errors"]) == 1
@@ -254,7 +254,7 @@ def test_issue_write_failure_does_not_sink_next_export(db, monkeypatch):
         "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"
     ).fetchone()["payload"])
     assert first_audit["issue_recorded"] is False
-    assert first_audit["issue_write_error"] == "issue_integrity_error"
+    assert "issue_write_error" not in first_audit
 
 
 
@@ -264,7 +264,7 @@ def test_issue_audit_payload_is_safe_and_no_gate_delivery_or_amina_message(
     calls = []
     monkeypatch.setattr(gate, "deliver",
                         lambda *a, **k: calls.append(("deliver", a, k)))
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, _cfg(), request=_fail_request, now_utc=TEST_NOW)
     rows = db.execute(
         "SELECT payload FROM audit_log WHERE kind='cal.ext.export_error'"

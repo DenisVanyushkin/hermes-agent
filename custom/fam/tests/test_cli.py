@@ -1161,7 +1161,7 @@ def test_med_defer_unknown_intake_exits_2(db, capsys):
 # --- Task 9 (extcal): `fam cal adopt` / `fam cal disown` --------------------
 # Only `extcal._request` is monkeypatched in this section (the seam the task
 # 9 brief names explicitly) -- these tests exercise the real
-# `extcal.drop_valarm`/`_strip_valarm_ics`/`_export_put`/`_export_reread_etag`
+# `extcal.drop_valarm`/`_strip_valarm_ics`/`_export_put`
 # code (including the host-guard-adjacent header building and the 412-retry
 # logic), never the real network.
 
@@ -1384,7 +1384,7 @@ def test_cal_adopt_without_external_href_skips_network_entirely(db, capsys, monk
 # refused -- flipping such an event to owner='iphone' would silently drop
 # its ONLY reminder source (nothing on her iPhone could ever ring for it).
 # I2 (Important): `drop_valarm` must never PUT into her collection without
-# a real If-Match etag (unlike export_own's own write-target, this
+# a real If-Match etag (unlike export_routes's own write-target, this
 # collection can hold HER concurrent edits).
 # I3 (Important): `_strip_valarm_ics` must refuse (not silently truncate)
 # an unclosed VALARM or an otherwise unbalanced/incomplete resource.

@@ -59,7 +59,7 @@ def test_put_412_remote_equals_desired_records_without_second_put(db):
             return extcal.Response(412, b"", {})
         return extcal.Response(200, desired.encode(), {"ETag": '"remote"'})
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert counts["errors"] == []
     assert counts["conflicts"] == []
@@ -86,7 +86,7 @@ def test_put_412_remote_equals_last_retries_once_with_fresh_etag(db):
                                    {"ETag": '"fresh"'})
         return extcal.Response(200, b"", {"ETag": '"new"'})
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert counts["updated"] == 1
     assert counts["conflicts"] == []
@@ -105,7 +105,7 @@ def test_put_412_remote_differs_creates_conflict_without_second_put(db):
         return extcal.Response(200, _ics(event["id"], "На телефоне").encode(),
                                {"ETag": '"phone"'})
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert calls == ["PUT", "GET"]
     assert counts["conflicts"] and counts["errors"] == []
@@ -127,11 +127,11 @@ def test_conflict_quarantine_skips_network_on_next_tick(db):
         return extcal.Response(200, _ics(event["id"], "На телефоне").encode(),
                                {"ETag": '"phone"'})
 
-    first = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    first = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
     assert first["conflicts"]
     calls_before = list(calls)
 
-    second = extcal.export_own(
+    second = extcal.export_routes(
         db, _cfg(), request=lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("quarantine must not call network")),
         now_utc=NOW,
@@ -142,10 +142,10 @@ def test_conflict_quarantine_skips_network_on_next_tick(db):
 
 def test_bare_v1_hash_rebaselines_locally_without_network(db):
     event = _event(db)
-    bare_v1 = extcal._export_body_hash_v1(event, "", [])
+    bare_v1 = extcal._export_hash_for_version(event, "", [], "v1")
     _seed_export(db, event, bare_v1)
 
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, _cfg(), request=lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("legacy equivalent must not call network")),
         now_utc=NOW,
@@ -172,7 +172,7 @@ def test_delete_412_requires_matching_uid_before_delete(db):
         return extcal.Response(200, _ics(event["id"], "foreign", uid="other@phone").encode(),
                                {"ETag": '"phone"'})
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert calls == ["DELETE", "GET"]
     assert len(counts["errors"]) == 1

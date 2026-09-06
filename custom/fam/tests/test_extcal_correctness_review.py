@@ -87,7 +87,7 @@ def test_success_without_etag_is_not_a_verified_put(db):
         calls.append((method, kwargs.get("headers", {})))
         return extcal.Response(201, b"", {})
 
-    counts = extcal.export_own(db, cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["errors"]
     assert counts["exported"] == 0
@@ -101,7 +101,7 @@ def test_existing_journal_without_etag_never_sends_put(db):
     seed_journal(db, "ext_exports", row, etag=None, body_hash="v2:" + "0" * 64)
     calls = []
 
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, cfg(),
         request=lambda method, url, **kwargs: calls.append(method),
         now_utc=NOW,
@@ -121,7 +121,7 @@ def test_delete_without_etag_never_sends_unconditional_request(db):
     db.commit()
     calls = []
 
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, cfg(),
         request=lambda method, url, **kwargs: calls.append(method),
         now_utc=NOW,
@@ -236,7 +236,7 @@ def test_existing_destination_journal_requires_remote_proof_before_source_delete
             return extcal.Response(201, b"", {"ETag": '"new-taya"'})
         return extcal.Response(204, b"", {})
 
-    counts = extcal.export_own(db, cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["exported"] == 1
     assert counts["deleted"] == 1
@@ -253,7 +253,7 @@ def test_existing_destination_without_remote_etag_creates_issue(db):
         assert method == "GET"
         return extcal.Response(200, ics(row["id"]).encode(), {})
 
-    counts = extcal.export_own(db, cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["errors"]
     assert db.execute(
@@ -338,7 +338,7 @@ def test_health_surfaces_taya_issue(db):
 def test_configuration_error_creates_issue(db):
     taya = seed_taya(db)
     row = event(db, taya["id"])
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, cfg(extcal_taya_calendar=""),
         request=lambda *args, **kwargs: pytest.fail("configuration error must not use transport"),
         now_utc=NOW,
@@ -363,7 +363,7 @@ def test_destination_unverified_creates_issue_and_keeps_source_after_put(db, mon
         assert method == "PUT"
         return extcal.Response(201, b"", {"ETag": '"destination"'})
 
-    counts = extcal.export_own(db, cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["errors"]
     assert calls == ["PUT"]
@@ -393,7 +393,7 @@ def test_successful_item_isolation_covers_post_remote_bookkeeping(db, monkeypatc
         return original_resolve(conn, event_id, target)
 
     monkeypatch.setattr(extcal, "_export_issue_resolve", fail_first)
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, cfg(),
         request=lambda *args, **kwargs: extcal.Response(201, b"", {"ETag": '"e1"'}),
         now_utc=NOW,

@@ -256,7 +256,7 @@ def test_split_streaks_are_wired_through_real_cal_ext_pipeline(
         dict(clean_apply, errors=[import_error]
              if phase["kind"] == "import" else []))
     monkeypatch.setattr(
-        extcal, "export_own",
+        extcal, "export_routes",
         lambda conn, cfg, request=None, now_utc=None:
         {"exported": 0, "updated": 0, "unchanged": 0, "deleted": 0,
          "retained": 0,

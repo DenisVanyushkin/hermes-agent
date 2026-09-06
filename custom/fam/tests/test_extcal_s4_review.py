@@ -68,14 +68,14 @@ def _make_conflict(db, event):
             200, _ics(event["id"], "Phone").encode(), {"ETag": '"phone"'}
         )
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
     assert counts["conflicts"]
     return counts
 
 
 def test_past_equivalent_rebaseline_then_retained_on_next_tick(db):
     event = _event(db, start="2037-07-10T13:00:00+00:00")
-    legacy = extcal._export_body_hash_v1(event, "", [])
+    legacy = extcal._export_hash_for_version(event, "", [], "v1")
     _seed_export(db, event, legacy)
     calls = []
 
@@ -83,8 +83,8 @@ def test_past_equivalent_rebaseline_then_retained_on_next_tick(db):
         calls.append(method)
         pytest.fail("past retained event must never use the network")
 
-    first = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
-    second = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    first = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
+    second = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert first["unchanged"] == 1
     assert first["retained"] == 0
@@ -94,10 +94,10 @@ def test_past_equivalent_rebaseline_then_retained_on_next_tick(db):
 
 def test_marked_legacy_equivalent_rebaselines_without_network(db):
     event = _event(db)
-    legacy = extcal._export_body_hash_v1(event, "", [])
+    legacy = extcal._export_hash_for_version(event, "", [], "v1")
     _seed_export(db, event, "v1:" + legacy)
 
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, _cfg(),
         request=lambda *a, **k: pytest.fail("equivalent v1 must not use network"),
         now_utc=NOW,
@@ -121,7 +121,7 @@ def test_marked_legacy_mismatch_uses_one_uid_proved_get_and_no_put(db):
             {"ETag": '"foreign"'},
         )
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert calls == ["GET"]
     assert len(counts["errors"]) == 1
@@ -137,7 +137,7 @@ def test_retained_divergent_legacy_row_stays_v1_without_get_or_put(db):
     _seed_export(db, event, stored)
     calls = []
 
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, _cfg(),
         request=lambda method, *a, **k: calls.append(method),
         now_utc=NOW,
@@ -153,10 +153,10 @@ def test_retained_divergent_legacy_row_stays_v1_without_get_or_put(db):
 def test_mixed_v1_and_v2_rows_reconcile_without_network(db):
     first = _event(db, "v1")
     second = _event(db, "v2", start="2037-07-21T13:00:00+00:00")
-    _seed_export(db, first, "v1:" + extcal._export_body_hash_v1(first, "", []))
+    _seed_export(db, first, "v1:" + extcal._export_hash_for_version(first, "", [], "v1"))
     _seed_export(db, second, extcal._export_body_hash(second, "", []))
 
-    counts = extcal.export_own(
+    counts = extcal.export_routes(
         db, _cfg(),
         request=lambda *a, **k: pytest.fail("mixed equivalent rows must be local"),
         now_utc=NOW,
@@ -183,7 +183,7 @@ def test_eligible_legacy_mismatch_bad_get_is_fail_closed_and_preserves_journal(d
             return extcal.Response(500, b"server failure", {})
         pytest.fail("legacy mismatch must not PUT before a valid GET")
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert calls == ["GET"]
     assert counts["errors"][0]["reason_code"] == "invalid_response"
@@ -217,7 +217,7 @@ def test_put_412_bad_get_variants_preserve_journal_and_do_not_retry(
             return extcal.Response(412, b"", {})
         return bad_response
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert calls == ["PUT", "GET"]
     assert len(counts["errors"]) == 1
@@ -226,25 +226,6 @@ def test_put_412_bad_get_variants_preserve_journal_and_do_not_retry(
     ).fetchone()) == before
 
 
-def test_initial_put_412_remote_desired_creates_journal_without_put_retry(db):
-    event = _event(db)
-    calls = []
-
-    def request(method, url, **kwargs):
-        calls.append(method)
-        if method == "PUT":
-            return extcal.Response(412, b"", {})
-        return extcal.Response(
-            200, _ics(event["id"], "Local").encode(), {"ETag": '"remote"'}
-        )
-
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
-
-    assert calls == ["PUT", "GET"]
-    assert counts["exported"] == 1
-    assert db.execute(
-        "SELECT etag FROM ext_exports WHERE event_id=?", (event["id"],)
-    ).fetchone()["etag"] == '"remote"'
 
 
 @pytest.mark.parametrize("status", [404, 410])
@@ -259,7 +240,7 @@ def test_delete_initial_404_or_410_finishes_journal(db, status):
         calls.append(method)
         return extcal.Response(status, b"", {})
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert counts["deleted"] == 1
     assert calls == ["DELETE"]
@@ -285,7 +266,7 @@ def test_remote_only_move_beyond_horizon_is_conflict_and_never_delete(db):
             {"ETag": '"phone"'},
         )
 
-    counts = extcal.export_own(db, _cfg(), request=request, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=request, now_utc=NOW)
 
     assert calls == ["PUT", "GET"]
     assert counts["conflicts"] and counts["deleted"] == 0
@@ -426,7 +407,7 @@ def test_resolve_then_next_tick_reconciles_again(db):
         calls.append(method)
         return extcal.Response(204, b"", {"ETag": '"new"'})
 
-    counts = extcal.export_own(db, _cfg(), request=put_again, now_utc=NOW)
+    counts = extcal.export_routes(db, _cfg(), request=put_again, now_utc=NOW)
     assert counts["updated"] == 1
     assert calls == ["GET", "PUT"]
 

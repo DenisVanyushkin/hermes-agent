@@ -1914,7 +1914,7 @@ _EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
 # configured but 0 calendars matched (discover() degrades to `[]` on ANY
 # failure -- missing credentials, timeout, 5xx, or a genuinely renamed
 # calendar, see `_cal_ext_sync`'s own comment), and `apply_changes`/
-# `export_own` per-row errors (no single calendar to blame -- these are
+# `export_routes` per-row errors (no single calendar to blame -- these are
 # keyed by branch/id or event_id, not calendar URL). Both share the
 # double-underscore shape specifically so neither can ever collide with a
 # real CalDAV URL (which always contains "://").
@@ -2519,11 +2519,10 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # regardless of whether apply_changes itself hit any errors: import and
     # export are independent directions over independent row sets
     # (owner='iphone' vs owner='hermes'), so a problem in one must not
-    # withhold the other. `extcal.export_own` is itself a hard no-op (zero
-    # DB reads, zero network calls) whenever `extcal_write_calendar` is
-    # unset -- which it is on every VM until T10 (a separate, later task)
-    # actually creates the "Гермес" collection and fills in the config key.
-    export_counts = extcal.export_own(conn, cfg, now_utc=now)
+    # withhold the other. `extcal.export_routes` still inspects the local
+    # events and journal rows when no write calendar is configured, but it
+    # performs no network writes and reports configuration errors safely.
+    export_counts = extcal.export_routes(conn, cfg, now_utc=now)
     return {
         "counts": counts, "calendars": per_calendar,
         "changeset": changeset, "sync_errors": sync_errors,
@@ -2633,8 +2632,8 @@ def cmd_tick_cal_ext(args):
     change is still one of the triggers for writing `audit cal.ext.sync`
     at all (fix-round finding I5: that audit is no longer unconditional --
     a perfectly healthy, zero-change, steady-state tick would otherwise
-    write 96 near-identical rows a day forever; `meta["extcal_last_ok"]`
-    already covers the heartbeat).
+    write 96 near-identical rows a day forever; `meta["extcal_last_run"]`
+    records liveness separately).
     """
     cfg = gate.load_config()
     if not cfg.get("extcal_enabled"):
@@ -2694,7 +2693,7 @@ def cmd_tick_cal_ext(args):
     export_counts = result.get("export_counts") or {}
     calendar_errors = [c for c in result["calendars"] if c["mode"] == "error"]
     apply_errors = counts.get("errors") or []
-    # Task 7: export_own's own errors (`{event_id, action, error}` --
+    # Task 7: export_routes's own errors (`{event_id, action, error}` --
     # shaped like apply_errors' entries but keyed by event_id instead of
     # branch/id/external_uid, since export has no branch of its own and no
     # remote identity to report) fold into the SAME has_error/tick.error
@@ -2764,9 +2763,8 @@ def cmd_tick_cal_ext(args):
             if url in result["tokens"]:
                 famdb.meta_set(conn, f"extcal_last_full:{url}", now.isoformat())
 
-    # extcal_last_ok: only a FULLY clean tick counts (matches the exit
-    # code -- "last_ok" means "last full success", not "last time SOME
-    # calendar happened to sync").
+    # extcal_last_ok: only a FULLY clean tick counts.  Run liveness is
+    # recorded separately in extcal_last_run below.
     if not has_error:
         famdb.meta_set(conn, "extcal_last_ok", now.isoformat())
 
@@ -2795,7 +2793,7 @@ def cmd_tick_cal_ext(args):
     #     blame, so it gets its own counter, not folded into any real
     #     calendar's;
     #   - _EXTCAL_STREAK_IMPORT_APPLY_KEY covers apply_changes errors.
-    #     _EXTCAL_STREAK_EXPORT_KEY covers export_own errors; both use one
+    #     _EXTCAL_STREAK_EXPORT_KEY covers export_routes errors; both use one
     #     streak-gated path (not escalated immediately) deliberately: they
     #     freeze every calendar's sync-token progress this tick (the
     #     blanket gate below, untouched by this change) and the design
