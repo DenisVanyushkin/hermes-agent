@@ -17,7 +17,8 @@ backup instead of the latest:
 ## Real recovery (assistant.db corrupt/lost)
 1. Stop writers so nothing races the swap:
        systemctl --user stop fam-reminders.timer fam-digest.timer \
-                              fam-meds-gen.timer fam-maintenance.timer
+                              fam-meds-gen.timer fam-maintenance.timer \
+                              fam-cal-ext.timer
 2. Pick the CHOSEN backup (newest, or an older one if the newest is
    suspect) and verify exactly that file before trusting it:
        CHOSEN=$(ls -1t ~/.hermes/private/amina/backups/assistant-*.db | head -1)   # or an older one
@@ -30,7 +31,8 @@ backup instead of the latest:
        custom/fam/bin/fam med list --pending
 5. Restart writers:
        systemctl --user start fam-reminders.timer fam-digest.timer \
-                              fam-meds-gen.timer fam-maintenance.timer
+                              fam-meds-gen.timer fam-maintenance.timer \
+                              fam-cal-ext.timer
 
 state.db (hermes dialogue history) restores the same way — stop the gateway,
 copy `state-YYYYMMDD.db` over `~/.hermes/state.db`, restart. Losing it drops
@@ -48,9 +50,11 @@ Local daily backups (`~/.hermes/private/amina/backups/`, keep 7) are unaffected.
 2. Decrypt with the off-VM private key (bring the key in transiently; do not persist it on the VM):
    `age -d -i /path/to/amina-offsite.key -o /tmp/restored.db /mnt/nas-hermes/assistant-YYYYMMDD.db.age`
 3. Verify: `cd ~/.hermes/hermes-agent/custom/fam && python3 -c "from fam import maint; print(maint.verify_backup('/tmp/restored.db'))"`
-   → expect `(True, {'integrity': 'ok', 'schema_version': '6'})`.
-4. Swap in (stop the minute timer first): `systemctl --user stop fam-reminders.timer`,
-   copy `/tmp/restored.db` over `~/.hermes/private/amina/assistant.db`, then restart it.
+   → expect `(True, {'integrity': 'ok', 'schema_version': '15'})`. This is the current schema version; it increases with migrations, so verify the expected value against `custom/fam/fam/db.py` rather than relying on this runbook.
+4. Swap in (stop the writers first):
+   `systemctl --user stop fam-reminders.timer fam-cal-ext.timer`,
+   copy `/tmp/restored.db` over `~/.hermes/private/amina/assistant.db`, then
+   restart both: `systemctl --user start fam-reminders.timer fam-cal-ext.timer`.
 
 ### Rehearsal (non-destructive)
 `bash custom/fam/scripts/offsite-restore-rehearsal.sh /path/to/amina-offsite.key`
