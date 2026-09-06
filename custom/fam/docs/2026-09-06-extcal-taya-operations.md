@@ -21,8 +21,10 @@ remote resource still exists.
 ## Health probes
 
 The probes are included in the nightly diagnostics digest under
-`~/.hermes/diagnostics/fam-digest-latest.json`, in the `probes` section. To
-read them directly:
+`~/.hermes/diagnostics/fam-digest-latest.json`, under `sections.probes`. Older
+digests may contain four probes: `extcal_failures` appears after the first
+nightly run following deployment, so its absence from an older file is not a
+failure. To read them directly:
 
 ```bash
 cd ~/.hermes/hermes-agent/custom/fam
