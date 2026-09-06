@@ -3064,6 +3064,34 @@ def _export_put(cfg, url, body, etag, request):
 
 
 
+def _export_move(cfg, source_href, destination_href, request):
+    """Move one managed resource between export collections.
+
+    The caller must prove that ``destination_href`` is free before invoking
+    this helper.  iCloud does not reliably honor ``Overwrite: F`` or return
+    an ETag from MOVE, so the caller must GET the destination afterwards and
+    commit its journal before removing the source journal.
+    """
+    headers = _export_headers(cfg)
+    headers.update({"Destination": destination_href, "Overwrite": "F"})
+    try:
+        response = request("MOVE", source_href, headers=headers,
+                           timeout=DEFAULT_TIMEOUT)
+    except Exception as exc:
+        raise _ExportFailure("MOVE failed", reason_code="invalid_response") from exc
+    if response is None:
+        raise _ExportFailure("MOVE returned no response",
+                             reason_code="invalid_response")
+    if response.status in (405, 501):
+        raise _ExportFailure("MOVE unsupported", status=response.status,
+                             reason_code="invalid_response")
+    if response.status not in (201, 204):
+        raise _ExportFailure(f"MOVE failed (status={response.status})",
+                             status=response.status)
+    return response.status
+
+
+
 def fetch_resource(cfg, href, request=None):
     """GET one calendar resource and return its raw ICS text, or None.
 
@@ -3910,43 +3938,105 @@ def _export_route_plan(conn, cfg, now_dt):
 
 
 def _export_run_route_transition(conn, cfg, request, now_dt, item, counts):
-    """Prove destination state before deleting the source journal.
+    """Move one managed event between export collections with row isolation.
 
-    A destination 404 invalidates its journal in a committed transaction.
-    That fact must survive a later destination PUT failure, so rollback from
-    per-row error handling cannot resurrect a stale row that would authorize
-    source deletion.
+    The destination is proved free before MOVE.  A successful MOVE is
+    followed by a UID/ETag-checked GET and a committed destination journal
+    row; only then is the source journal removed locally.  If the destination
+    journal commit was lost after MOVE, the next tick recognizes the remote
+    destination plus a missing source resource and records it without moving
+    the resource a second time.
     """
     event_id = item["event_id"]
     dest = item["target"]
     source = item["source_target"]
     dest_table = _export_journal_table(dest)
-    dest_exp = conn.execute(
-        f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
-    ).fetchone()
+    source_table = _export_journal_table(source)
+    event = item["event"]
+    destination_href = _export_href(_export_target_url(cfg, dest), event_id)
+
+    def fail(exc):
+        _export_record_error(conn, event_id, "route-transition", counts,
+                             exc, now_dt, dest)
+
+    def commit_destination(href, component, action):
+        new_hash = item["new_hash"]
+        _export_commit_one(
+            conn, event_id, action, "exported" if action == "insert" else None,
+            counts,
+            lambda: _export_record_success(
+                conn, event_id, href, component["etag"], new_hash, now_dt,
+                dest_table),
+            now_utc=now_dt, target=dest)
+        row = conn.execute(
+            f"SELECT href, etag FROM {dest_table} WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if row is None or not row["href"] or not row["etag"]:
+            raise _ExportFailure("destination journal is not committed",
+                                 reason_code="destination_unverified")
+
+    def remove_source():
+        def remove_local():
+            conn.execute(
+                f"DELETE FROM {source_table} WHERE event_id=?", (event_id,)
+            )
+
+        _export_commit_one(
+            conn, event_id, "delete", "deleted", counts, remove_local,
+            now_utc=now_dt, target=source)
+
     try:
-        if dest_exp is not None:
-            response = _export_get_resource(cfg, dest_exp["href"], request)
+        dest_row = conn.execute(
+            f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
+        ).fetchone()
+
+        if dest_row is not None:
+            response = _export_get_resource(cfg, dest_row["href"], request)
             if response is not None and response.status in (404, 410):
                 conn.execute(
                     f"DELETE FROM {dest_table} WHERE event_id=?", (event_id,)
                 )
                 conn.commit()
-                dest_exp = None
+                dest_row = None
             else:
-                remote, fresh_etag = _export_remote_state(response, item["event"])
-                stored_version, stored_hash = _export_stored_hash(
-                    dest_exp["body_hash"]
-                )
-                if remote[stored_version] != stored_hash:
+                component = _export_remote_component(response, event)
+                if component["hashes"][_EXPORT_HASH_V2] != item["new_hash"][3:]:
                     raise _ExportConflict()
-                _export_record_success(
-                    conn, event_id, dest_exp["href"], fresh_etag,
-                    dest_exp["body_hash"], now_dt, dest_table
-                )
-                dest_exp = conn.execute(
-                    f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
-                ).fetchone()
+                commit_destination(dest_row["href"], component, "update")
+                remove_source()
+                return
+
+        if dest_row is None:
+            source_row = conn.execute(
+                f"SELECT href FROM {source_table} WHERE event_id=?", (event_id,)
+            ).fetchone()
+            if source_row is None:
+                raise _ExportFailure("source journal missing",
+                                     reason_code="invalid_response")
+            response = _export_get_resource(cfg, destination_href, request)
+            if response is not None and response.status in (200, 207):
+                component = _export_remote_component(response, event)
+                source_response = _export_get_resource(
+                    cfg, source_row["href"], request)
+                if source_response is None or source_response.status not in (404, 410):
+                    raise _ExportFailure("destination is occupied",
+                                         reason_code="invalid_response")
+                if component["hashes"][_EXPORT_HASH_V2] != item["new_hash"][3:]:
+                    raise _ExportConflict()
+                commit_destination(destination_href, component, "insert")
+                remove_source()
+                return
+            if response is None or response.status not in (404, 410):
+                raise _ExportFailure("destination preflight failed",
+                                     status=getattr(response, "status", None),
+                                     reason_code="invalid_response")
+            _export_move(cfg, source_row["href"], destination_href, request)
+            response = _export_get_resource(cfg, destination_href, request)
+            component = _export_remote_component(response, event)
+            if component["hashes"][_EXPORT_HASH_V2] != item["new_hash"][3:]:
+                raise _ExportConflict()
+            commit_destination(destination_href, component, "insert")
+            remove_source()
     except _ExportConflict:
         try:
             _export_record_conflict(conn, event_id, "route-transition", counts,
@@ -3954,50 +4044,8 @@ def _export_run_route_transition(conn, cfg, request, now_dt, item, counts):
         except Exception as exc:
             _export_record_error(conn, event_id, "route-transition", counts,
                                  exc, now_dt, dest)
-        return
     except Exception as exc:
-        _export_record_error(conn, event_id, "route-transition", counts,
-                             exc, now_dt, dest)
-        return
-
-    if dest_exp is None:
-        _export_commit_one(
-            conn, event_id, "insert", "exported", counts,
-            lambda: _export_put_event(
-                conn, cfg, request, item["event"], None,
-                item["location"], item["participants"], item["new_hash"],
-                now_dt, dest),
-            now_utc=now_dt, target=dest)
-        dest_exp = conn.execute(
-            f"SELECT * FROM {dest_table} WHERE event_id=?", (event_id,)
-        ).fetchone()
-        if dest_exp is None:
-            _export_record_error(
-                conn, event_id, "route-transition", counts,
-                _ExportFailure("destination_unverified", reason_code="export_error"),
-                now_dt, dest)
-            return
-
-    if not dest_exp["href"] or not dest_exp["etag"]:
-        _export_record_error(
-            conn, event_id, "route-transition", counts,
-            _ExportFailure("destination_unverified", reason_code="export_error"),
-            now_dt, dest)
-        return
-
-    source_row = conn.execute(
-        f"SELECT * FROM {_export_journal_table(source)} WHERE event_id=?",
-        (event_id,),
-    ).fetchone()
-    source_exp = dict(source_row) if source_row is not None else None
-    if source_exp is None:
-        return
-    _export_commit_one(
-        conn, event_id, "delete", "deleted", counts,
-        lambda: _export_delete_event(
-            conn, cfg, request, event_id, source_exp, source, True),
-        now_utc=now_dt, target=source)
-
+        fail(exc)
 
 
 

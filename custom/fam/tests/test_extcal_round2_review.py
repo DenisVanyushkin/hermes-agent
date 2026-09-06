@@ -95,34 +95,28 @@ def test_route_transition_does_not_delete_source_after_destination_recreate_fail
     row = event(db, subject=subject["id"])
     journal(db, "ext_exports", row)
     journal(db, "ext_exports_taya", row)
-    before = {
-        table: [tuple(r) for r in db.execute(
-            f"SELECT * FROM {table} ORDER BY event_id"
-        ).fetchall()]
-        for table in ("ext_exports", "ext_exports_taya")
-    }
+    before_source = [tuple(r) for r in db.execute(
+        "SELECT * FROM ext_exports ORDER BY event_id"
+    ).fetchall()]
     calls = []
 
     def request(method, url, **kwargs):
         calls.append(method)
         if method == "GET":
             return extcal.Response(404, b"", {})
-        if method == "PUT":
+        if method == "MOVE":
             return extcal.Response(500, b"", {})
-        pytest.fail("source DELETE must wait for a committed destination")
+        pytest.fail("source DELETE or PUT must not follow failed MOVE")
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
-    assert calls == ["GET", "PUT"]
+    assert calls == ["GET", "GET", "MOVE"]
     assert counts["deleted"] == 0
-    after_source = [tuple(r) for r in db.execute(
+    assert [tuple(r) for r in db.execute(
         "SELECT * FROM ext_exports ORDER BY event_id"
-    ).fetchall()]
-    after_destination = [tuple(r) for r in db.execute(
-        "SELECT * FROM ext_exports_taya ORDER BY event_id"
-    ).fetchall()]
-    assert after_source == before["ext_exports"]
-    assert after_destination == []
+    ).fetchall()] == before_source
+    assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 0
+
 
 
 def test_route_transition_detects_remote_destination_edit_before_source_delete(db):

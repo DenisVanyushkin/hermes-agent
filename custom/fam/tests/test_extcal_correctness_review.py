@@ -226,21 +226,25 @@ def test_existing_destination_journal_requires_remote_proof_before_source_delete
     row = event(db, taya["id"])
     seed_journal(db, "ext_exports", row)
     seed_journal(db, "ext_exports_taya", row)
+    body = ics(row["id"], title="Local")
     calls = []
 
     def request(method, url, **kwargs):
-        calls.append(method)
+        calls.append((method, url))
         if method == "GET":
-            return extcal.Response(404, b"", {})
-        if method == "PUT":
-            return extcal.Response(201, b"", {"ETag": '"new-taya"'})
-        return extcal.Response(204, b"", {})
+            if len([call for call in calls if call[0] == "GET"]) < 3:
+                return extcal.Response(404, b"", {})
+            return extcal.Response(200, body.encode(), {"ETag": '"new-taya"'})
+        if method == "MOVE":
+            return extcal.Response(201, b"", {})
+        pytest.fail("route transition must not PUT or network DELETE")
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["exported"] == 1
     assert counts["deleted"] == 1
-    assert calls == ["GET", "PUT", "DELETE"]
+    assert [method for method, _ in calls] == ["GET", "GET", "MOVE", "GET"]
+
 
 
 def test_existing_destination_without_remote_etag_creates_issue(db):
@@ -351,7 +355,7 @@ def test_configuration_error_creates_issue(db):
     assert tuple(issue) == ("taya", "put", "error", "invalid_response")
 
 
-def test_destination_unverified_creates_issue_and_keeps_source_after_put(db, monkeypatch):
+def test_destination_unverified_creates_issue_and_keeps_source_after_move(db, monkeypatch):
     taya = seed_taya(db)
     row = event(db, subject_person_id=taya["id"])
     seed_journal(db, "ext_exports", row)
@@ -360,13 +364,18 @@ def test_destination_unverified_creates_issue_and_keeps_source_after_put(db, mon
 
     def request(method, url, **kwargs):
         calls.append(method)
-        assert method == "PUT"
-        return extcal.Response(201, b"", {"ETag": '"destination"'})
+        if method == "GET":
+            if calls.count("GET") == 1:
+                return extcal.Response(404, b"", {})
+            return extcal.Response(200, ics(row["id"], title="Local").encode(), {"ETag": '"destination"'})
+        if method == "MOVE":
+            return extcal.Response(201, b"", {})
+        pytest.fail("destination verification must not use PUT or network DELETE")
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["errors"]
-    assert calls == ["PUT"]
+    assert calls == ["GET", "MOVE", "GET"]
     assert db.execute(
         "SELECT 1 FROM ext_exports WHERE event_id=?", (row["id"],)
     ).fetchone() is not None
@@ -378,6 +387,7 @@ def test_destination_unverified_creates_issue_and_keeps_source_after_put(db, mon
         "WHERE event_id=?", (row["id"],)
     ).fetchone()
     assert tuple(issue) == ("taya", "put", "error", "export_error")
+
 
 
 def test_successful_item_isolation_covers_post_remote_bookkeeping(db, monkeypatch):

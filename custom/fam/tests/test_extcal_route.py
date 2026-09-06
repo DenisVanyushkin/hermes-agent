@@ -94,25 +94,37 @@ def test_subject_routes_to_exactly_one_target_destination_first(db):
     )
 
 
-def test_route_transition_puts_destination_commits_then_deletes_source(db):
+def test_route_transition_moves_destination_and_removes_only_local_source(db):
     _, taya = seed_people(db)
     row = event(db, taya["id"])
     journal(db, "ext_exports", row["id"], HERMES)
+    body = extcal._build_export_vevent(
+        row, "", [], extcal._coerce_utc_dt(NOW)
+    ).encode()
     calls = []
 
     def request(method, url, **kwargs):
-        calls.append((method, url))
-        if method == "PUT":
-            return extcal.Response(201, b"", {"ETag": '"taya-e1"'})
-        return extcal.Response(204, b"", {})
+        calls.append((method, url, kwargs))
+        if method == "GET":
+            assert url.startswith(TAYA)
+            if len([call for call in calls if call[0] == "GET"]) == 1:
+                return extcal.Response(404, b"", {})
+            return extcal.Response(200, body, {"ETag": '"taya-e1"'})
+        if method == "MOVE":
+            assert url.startswith(HERMES)
+            assert kwargs["headers"]["Destination"].startswith(TAYA)
+            assert kwargs["headers"]["Overwrite"] == "F"
+            return extcal.Response(201, b"", {})
+        pytest.fail("route transition must not PUT or network DELETE")
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
     assert counts["exported"] == 1
     assert counts["deleted"] == 1
-    assert [method for method, _ in calls] == ["PUT", "DELETE"]
+    assert [method for method, _, _ in calls] == ["GET", "MOVE", "GET"]
     assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 0
     assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 1
+
 
 
 def test_cleanup_has_priority_and_never_puts_without_taya_config(db):
@@ -241,42 +253,13 @@ def test_uid_belt_remains_independent_of_url_filter(db):
     assert counts["total"] == 0
 
 
-def test_crash_6a_uncommitted_destination_journal_converges_without_second_put(
-    db, monkeypatch
-):
-    _, taya = seed_people(db)
-    row = event(db, taya["id"])
-    journal(db, "ext_exports", row["id"], HERMES)
-    calls = []
-    remote_body = {"value": None}
-    original_record = extcal._export_record_success
-
-    def request(method, url, **kwargs):
-        calls.append(method)
-        if method == "PUT" and remote_body["value"] is None:
-            remote_body["value"] = kwargs["body"]
-            return extcal.Response(201, b"", {"ETag": '"first"'})
-        if method == "PUT":
-            return extcal.Response(412, b"", {})
-        if method == "GET":
-            return extcal.Response(
-                200, remote_body["value"].encode(), {"ETag": '"remote"'}
-            )
-        return extcal.Response(204, b"", {})
-
-    monkeypatch.setattr(extcal, "_export_record_success", lambda *args, **kwargs: None)
-    extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
-    monkeypatch.setattr(extcal, "_export_record_success", original_record)
-
-    assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 0
-    extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
-    assert calls.count("PUT") == 2
-    assert calls[-1] == "DELETE"
-    assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 0
-    assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 1
 
 
-def test_crash_6b_committed_destination_retries_source_delete(db, monkeypatch):
+
+
+
+
+def test_route_transition_remote_edit_is_conflict_without_delete(db):
     _, taya = seed_people(db)
     row = event(db, taya["id"])
     journal(db, "ext_exports", row["id"], HERMES)
@@ -286,125 +269,26 @@ def test_crash_6b_committed_destination_retries_source_delete(db, monkeypatch):
         (extcal._export_body_hash(row, "", []), row["id"]),
     )
     db.commit()
-    calls = []
-
-    def request(method, url, **kwargs):
-        calls.append(method)
-        if method == "GET":
-            body = (
-                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
-                f"UID:fam-{row['id']}@hermes-home\r\n"
-                "DTSTAMP:20370715T000000Z\r\n"
-                "DTSTART:20370720T130000Z\r\n"
-                "DTEND:20370720T140000Z\r\n"
-                "SUMMARY:Taya event\r\n"
-                "END:VEVENT\r\nEND:VCALENDAR\r\n"
-            )
-            return extcal.Response(200, body, {"ETag": '"taya-e2"'})
-        return extcal.Response(204, b"", {})
-
-    original_delete = extcal._export_delete_event
-    failed_once = {"value": True}
-
-    def fail_source_once(*args, **kwargs):
-        if failed_once["value"]:
-            failed_once["value"] = False
-            raise extcal._ExportFailure("simulated crash", reason_code="export_error")
-        return original_delete(*args, **kwargs)
-
-    monkeypatch.setattr(extcal, "_export_delete_event", fail_source_once)
-    first = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
-    monkeypatch.setattr(extcal, "_export_delete_event", original_delete)
-    assert first["errors"]
-    assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 1
-
-    second = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
-    assert second["deleted"] == 1
-    assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 0
-    assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 1
-
-
-def test_crash_6c_source_delete_done_but_journal_stale_is_idempotent(db, monkeypatch):
-    _, taya = seed_people(db)
-    row = event(db, taya["id"])
-    journal(db, "ext_exports", row["id"], HERMES)
-    journal(db, "ext_exports_taya", row["id"], TAYA, etag='"taya-e1"')
-    db.execute(
-        "UPDATE ext_exports_taya SET body_hash=? WHERE event_id=?",
-        (extcal._export_body_hash(row, "", []), row["id"]),
+    remote_event = dict(row)
+    remote_event["title"] = "phone edit"
+    body = extcal._build_export_vevent(
+        remote_event, "", [], extcal._coerce_utc_dt(NOW)
     )
-    db.commit()
-    original_delete = extcal._export_delete_event
-    left_stale = {"value": True}
-
-    def delete_then_leave_journal(conn, *args, **kwargs):
-        original_delete(conn, *args, **kwargs)
-        if left_stale["value"]:
-            left_stale["value"] = False
-            conn.execute(
-                "INSERT INTO ext_exports(event_id,href,etag,body_hash,synced_at) "
-                "VALUES(?,?,?,?,?)",
-                (
-                    row["id"],
-                    f"{HERMES}fam-{row['id']}@hermes-home.ics",
-                    '"e0"',
-                    "v2:" + "0" * 64,
-                    NOW,
-                ),
-            )
-
-    monkeypatch.setattr(extcal, "_export_delete_event", delete_then_leave_journal)
     calls = []
 
     def request(method, url, **kwargs):
         calls.append(method)
-        if method == "GET":
-            body = (
-                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n"
-                f"UID:fam-{row['id']}@hermes-home\r\n"
-                "DTSTAMP:20370715T000000Z\r\n"
-                "DTSTART:20370720T130000Z\r\n"
-                "DTEND:20370720T140000Z\r\n"
-                "SUMMARY:Taya event\r\n"
-                "END:VEVENT\r\nEND:VCALENDAR\r\n"
-            )
-            return extcal.Response(200, body, {"ETag": '"taya-e2"'})
-        delete_calls = calls.count("DELETE")
-        return extcal.Response(204 if delete_calls == 1 else 404, b"", {})
-
-    extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
-    monkeypatch.setattr(extcal, "_export_delete_event", original_delete)
-    assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 1
-    extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
-    assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 0
-    assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 1
-
-
-def test_source_412_is_conflict_and_preserves_both_journals(db):
-    _, taya = seed_people(db)
-    row = event(db, taya["id"])
-    journal(db, "ext_exports", row["id"], HERMES)
-    journal(db, "ext_exports_taya", row["id"], TAYA, etag='"taya-e1"')
-    body = extcal._build_export_vevent(row, "", [], extcal._coerce_utc_dt(NOW))
-    calls = []
-
-    def request(method, url, **kwargs):
-        calls.append(method)
-        if method == "DELETE":
-            return extcal.Response(412, b"", {})
+        assert method == "GET"
+        assert url.startswith(TAYA)
         return extcal.Response(200, body.encode(), {"ETag": '"phone"'})
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
+
     assert counts["conflicts"]
+    assert calls == ["GET"]
     assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 1
     assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 1
-    assert (
-        db.execute(
-            "SELECT kind,target FROM extcal_export_issues WHERE event_id=?",
-            (row["id"],),
-        ).fetchone()["kind"]
-        == "conflict"
-    )
+
 
 
 def test_iphone_owned_events_never_reach_taya_reconciler(db):
@@ -486,26 +370,37 @@ def test_v15_migration_from_v14_creates_only_taya_journal(db):
     )
 
 
-def test_route_transition_back_to_hermes_is_destination_first(db):
+def test_route_transition_back_to_hermes_uses_move(db):
     _, taya = seed_people(db)
     row = event(db, taya["id"])
     journal(db, "ext_exports_taya", row["id"], TAYA, etag='"taya-e1"')
     db.execute("UPDATE events SET subject_person_id=NULL WHERE id=?", (row["id"],))
     db.commit()
+    body = extcal._build_export_vevent(
+        row, "", [], extcal._coerce_utc_dt(NOW)
+    ).encode()
     calls = []
 
     def request(method, url, **kwargs):
-        calls.append((method, url))
-        if method == "PUT":
-            return extcal.Response(201, b"", {"ETag": '"hermes-e1"'})
-        return extcal.Response(204, b"", {})
+        calls.append((method, url, kwargs))
+        if method == "GET":
+            assert url.startswith(HERMES)
+            if len([call for call in calls if call[0] == "GET"]) == 1:
+                return extcal.Response(404, b"", {})
+            return extcal.Response(200, body, {"ETag": '"hermes-e1"'})
+        if method == "MOVE":
+            assert url.startswith(TAYA)
+            assert kwargs["headers"]["Destination"].startswith(HERMES)
+            return extcal.Response(201, b"", {})
+        pytest.fail("route transition must not PUT or network DELETE")
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
+
     assert counts["exported"] == 1 and counts["deleted"] == 1
-    assert [method for method, _ in calls] == ["PUT", "DELETE"]
-    assert calls[0][1].startswith(HERMES)
+    assert [method for method, _, _ in calls] == ["GET", "MOVE", "GET"]
     assert db.execute("SELECT COUNT(*) FROM ext_exports").fetchone()[0] == 1
     assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 0
+
 
 
 def test_empty_live_set_has_zero_route_count(db):
@@ -543,6 +438,9 @@ def test_taya_export_has_no_valarm_and_never_delivers_gate(db, monkeypatch):
     transition = event(db, taya["id"], title="transition Taya")
     hermes = event(db, title="direct Hermes")
     journal(db, "ext_exports", transition["id"], HERMES)
+    transition_body = extcal._build_export_vevent(
+        transition, "", [], extcal._coerce_utc_dt(NOW)
+    ).encode()
     bodies = []
     calls = []
     monkeypatch.setattr(
@@ -558,8 +456,16 @@ def test_taya_export_has_no_valarm_and_never_delivers_gate(db, monkeypatch):
         if method == "PUT":
             body = kwargs["body"]
             bodies.append(body.decode() if isinstance(body, bytes) else body)
-            return extcal.Response(201, b"", {"ETag": '"taya-e1"'})
-        return extcal.Response(204, b"", {})
+            return extcal.Response(201, b"", {"ETag": '"e1"'})
+        if method == "GET":
+            assert url.startswith(TAYA)
+            if len([call for call in calls if call[0] == "GET"]) == 1:
+                return extcal.Response(404, b"", {})
+            return extcal.Response(200, transition_body, {"ETag": '"moved"'})
+        if method == "MOVE":
+            assert kwargs["headers"]["Destination"].startswith(TAYA)
+            return extcal.Response(201, b"", {})
+        pytest.fail("Taya route must not use network DELETE")
 
     counts = extcal.export_routes(db, cfg(), request=request, now_utc=NOW)
 
@@ -567,13 +473,12 @@ def test_taya_export_has_no_valarm_and_never_delivers_gate(db, monkeypatch):
     assert counts["deleted"] == 1
     assert direct["id"] != transition["id"]
     assert hermes["id"] not in (direct["id"], transition["id"])
-    assert len(bodies) == 3
+    assert len(bodies) == 2
     assert all("VALARM" not in body for body in bodies)
-    assert {method for method, _ in calls} == {"PUT", "DELETE"}
-    assert [method for method, _ in calls].count("PUT") == 3
-    assert [method for method, _ in calls].count("DELETE") == 1
-    assert any(url.startswith(HERMES) for method, url in calls if method == "PUT")
-    assert any(url.startswith(TAYA) for method, url in calls if method == "PUT")
+    assert {method for method, _ in calls} == {"PUT", "MOVE", "GET"}
+    assert [method for method, _ in calls].count("MOVE") == 1
+    assert "DELETE" not in [method for method, _ in calls]
+
 
 
 def test_adopted_events_and_plans_never_reach_taya_reconciler(db):
