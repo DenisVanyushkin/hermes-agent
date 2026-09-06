@@ -204,7 +204,7 @@ show after cancel), make a second, separate terminal call.
     memory.** "каждую неделю по понедельникам/средам/пятницам", "по будням",
     "каждый вторник" + a time ⇒ `fam cal add --title <T> --repeat weekly
     --days mon,wed,fri --start-time 10:00 [--end-time 12:00] [--place <P>]
-    [--with <who>]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
+    [--for-person <person>] [--with <who>]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
     sat,sun; `--start-time`/`--end-time` are local `HH:MM` (no date). fam
     materializes the concrete occurrences itself — do NOT add each week by
     hand with separate `cal add --start` calls. To stop a whole series:
@@ -489,8 +489,8 @@ show after cancel), make a second, separate terminal call.
 
 | Goal | Command |
 | --- | --- |
-| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--with NAME]... [--notes N] [--allow-overlap]` |
-| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
+| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--for-person NAME] [--with NAME]... [--notes N] [--allow-overlap]` |
+| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--for-person N] [--clear-for-person] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
 | Take over reminding her about an iPhone-owned event | `fam cal adopt <event_id>` |
