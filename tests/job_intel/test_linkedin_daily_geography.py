@@ -268,3 +268,34 @@ def test_no_eligible_geography_is_not_an_empty_market(
     assert not called
     assert status["status"] not in {"ok", "empty", "skipped"}
     assert any("blocked_no_eligible_geography" in err for err in status["errors"])
+
+
+def test_daily_linkedin_public_mode_is_explicitly_env_gated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Keep the old authenticated default and opt into public mode explicitly."""
+
+    _only_linkedin(monkeypatch)
+    seen: list[dict[str, object]] = []
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="uk_gm",
+            location="United Kingdom",
+            geo_id=None,
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+    monkeypatch.setattr(
+        cli,
+        "fetch_linkedin_vacancies",
+        lambda query, **kwargs: seen.append({"query": query, **kwargs}) or [],
+    )
+
+    monkeypatch.delenv("JOB_INTEL_LINKEDIN_ALLOW_UNAUTHENTICATED", raising=False)
+    cli._collect_vacancies(store=_store(tmp_path))
+    assert seen[-1]["allow_unauthenticated"] is False
+
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_ALLOW_UNAUTHENTICATED", "1")
+    cli._collect_vacancies(store=_store(tmp_path))
+    assert seen[-1]["allow_unauthenticated"] is True
