@@ -1153,12 +1153,16 @@ def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Pat
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-            if self.path != "/json/version":
+            if self.path == "/json/version":
+                events.append("json/version")
+                body = b'{"Browser":"fake"}'
+            elif self.path == "/json/list":
+                events.append("json/list")
+                body = b'[{"type":"page","url":"https://www.linkedin.com/"}]'
+            else:
                 self.send_response(404)
                 self.end_headers()
                 return
-            events.append("json/version")
-            body = b'{"Browser":"fake"}'
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -1193,7 +1197,7 @@ def test_supervisor_notifies_ready_only_after_cdp_version_responds(tmp_path: Pat
                 f"returncode={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
             )
         assert message == b"READY=1\n"
-        assert events == ["json/version"]
+        assert events == ["json/version", "json/list"]
         assert bootstrap_log.read_text(encoding="utf-8").splitlines() == [
             "--profile",
             "linkedin",
@@ -1235,6 +1239,46 @@ def test_supervisor_times_out_without_cdp_ready_and_never_notifies(tmp_path: Pat
     with pytest.raises(socket.timeout):
         receiver.recvfrom(128)
     receiver.close()
+
+
+def test_cdp_ready_rejects_live_version_without_page_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    supervisor = _load_browser_supervisor()
+
+    class _Response:
+        def __init__(self, payload: bytes) -> None:
+            self.status = 200
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return self._payload
+
+    requests: list[str] = []
+
+    def fake_urlopen(url: str, *, timeout: float):
+        requests.append(url)
+        if url.endswith("/json/version"):
+            return _Response(b'{"Browser":"fake"}')
+        if url.endswith("/json/list"):
+            return _Response(b"[]")
+        raise AssertionError(url)
+
+    monkeypatch.setattr(supervisor, "urlopen", fake_urlopen)
+
+    result = supervisor._cdp_ready("http://127.0.0.1:19271")
+
+    assert result.ready is False
+    assert result.failure_kind == "response"
+    assert "no page targets" in result.detail
+    assert requests == [
+        "http://127.0.0.1:19271/json/version",
+        "http://127.0.0.1:19271/json/list",
+    ]
 
 
 def test_bootstrap_unit_declares_foreground_notify_and_explicit_teardown() -> None:
@@ -2359,12 +2403,15 @@ def test_gate_a_incomplete_page_plan_is_critical_and_not_a_clean_zero(
 def test_supervisor_keeps_a_slow_cdp_endpoint_alive(tmp_path: Path) -> None:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-            if self.path != "/json/version":
+            if self.path == "/json/version":
+                time.sleep(1.2)
+                body = b'{"Browser":"slow-fake"}'
+            elif self.path == "/json/list":
+                body = b'[{"type":"page","url":"https://www.linkedin.com/"}]'
+            else:
                 self.send_response(404)
                 self.end_headers()
                 return
-            time.sleep(1.2)
-            body = b'{"Browser":"slow-fake"}'
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -2412,13 +2459,17 @@ def test_supervisor_requires_three_consecutive_cdp_failures(tmp_path: Path) -> N
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             if self.path == "/json/version":
                 body = b'{"Browser":"fake"}'
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
+            elif self.path == "/json/list":
+                body = b'[{"type":"page","url":"https://www.linkedin.com/"}]'
+            else:
+                self.send_response(404)
                 self.end_headers()
-                self.wfile.write(body)
                 return
-            self.send_response(404)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
+            return
 
         def log_message(self, *_args) -> None:
             return

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -58,11 +59,28 @@ def _cdp_ready(cdp_url: str) -> _CdpProbeResult:
         with urlopen(
             f"{cdp_url.rstrip('/')}/json/version", timeout=CDP_PROBE_TIMEOUT_SECONDS
         ) as response:
-            if response.status == 200:
-                return _CdpProbeResult(ready=True)
+            if response.status != 200:
+                return _CdpProbeResult(
+                    ready=False, failure_kind="response", detail=f"HTTP {response.status}"
+                )
+        with urlopen(
+            f"{cdp_url.rstrip('/')}/json/list", timeout=CDP_PROBE_TIMEOUT_SECONDS
+        ) as response:
+            if response.status != 200:
+                return _CdpProbeResult(
+                    ready=False, failure_kind="response", detail=f"HTTP {response.status} for /json/list"
+                )
+            targets = json.loads(response.read().decode("utf-8", errors="replace"))
+        if not isinstance(targets, list) or not any(
+            isinstance(target, dict) and target.get("type") == "page"
+            for target in targets
+        ):
             return _CdpProbeResult(
-                ready=False, failure_kind="response", detail=f"HTTP {response.status}"
+                ready=False,
+                failure_kind="response",
+                detail="CDP endpoint returned no page targets",
             )
+        return _CdpProbeResult(ready=True)
     except (TimeoutError, socket.timeout) as exc:
         return _CdpProbeResult(ready=False, failure_kind="timeout", detail=str(exc))
     except URLError as exc:
@@ -71,6 +89,10 @@ def _cdp_ready(cdp_url: str) -> _CdpProbeResult:
         return _CdpProbeResult(ready=False, failure_kind="connection", detail=str(exc))
     except OSError as exc:
         return _CdpProbeResult(ready=False, failure_kind="connection", detail=str(exc))
+    except (TypeError, ValueError, UnicodeError) as exc:
+        return _CdpProbeResult(
+            ready=False, failure_kind="response", detail=f"invalid CDP target list: {exc}"
+        )
 
 
 def _terminate(process: subprocess.Popen[str] | None) -> None:
