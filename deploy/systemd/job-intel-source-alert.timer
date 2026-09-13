@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the LinkedIn source alert check periodically
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=1min
+Unit=job-intel-source-alert.service
+
+[Install]
+WantedBy=timers.target

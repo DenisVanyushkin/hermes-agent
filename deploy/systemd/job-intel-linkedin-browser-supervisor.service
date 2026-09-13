@@ -1,0 +1,29 @@
+[Unit]
+Description=Supervise the public LinkedIn browser desktop by CDP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=root
+Group=root
+EnvironmentFile=-/etc/job-intel/job-intel-shadow.env
+Environment=JOB_INTEL_BROWSER_PROFILE_ROOT=/var/lib/browser-desktop/profiles
+Environment=JOB_INTEL_BROWSER_PYTHON=/var/lib/browser-desktop/playwright-venv/bin/python
+WorkingDirectory=__JOB_INTEL_REPO_ROOT__
+ExecStart=/var/lib/browser-desktop/playwright-venv/bin/python __JOB_INTEL_REPO_ROOT__/scripts/job_intel_browser_supervisor.py --source linkedin --profile /var/lib/browser-desktop/profiles/linkedin-public-v1 --network-namespace ln-eg --cdp-url http://169.254.77.2:19271 --bootstrap-script __JOB_INTEL_REPO_ROOT__/scripts/browser-desktop-bootstrap.sh --lock-path /run/job-intel/linkedin-public-profile.lock --url https://www.linkedin.com/
+ExecStop=/var/lib/browser-desktop/playwright-venv/bin/python __JOB_INTEL_REPO_ROOT__/scripts/job_intel_browser_supervisor.py --stop --source linkedin --profile /var/lib/browser-desktop/profiles/linkedin-public-v1 --lock-path /run/job-intel/linkedin-public-profile.lock --supervisor-pid $MAINPID
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=900s
+TimeoutStopSec=30s
+KillMode=control-group
+RuntimeDirectory=job-intel
+ReadWritePaths=/var/lib/browser-desktop /var/log/browser-desktop /run/job-intel /etc/netns
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
