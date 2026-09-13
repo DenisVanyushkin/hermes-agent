@@ -1,11 +1,11 @@
 [Unit]
-Description=Run the LinkedIn WireGuard DDNS watchdog periodically
+Description=Resolve and apply the LinkedIn WireGuard DDNS endpoint periodically
 
 [Timer]
 OnBootSec=5min
 OnUnitActiveSec=5min
 Persistent=true
-Unit=job-intel-linkedin-ddns-watchdog.service
+Unit=job-intel-linkedin-ddns-resolver.service
 
 [Install]
 WantedBy=timers.target

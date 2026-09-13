@@ -54,46 +54,46 @@ def _create_source_db(path: Path, statuses: list[tuple[str, int]]) -> None:
     connection.close()
 
 
-def test_ddns_does_not_set_endpoint_when_host_resolution_fails() -> None:
+def test_ddns_does_not_set_endpoint_when_host_resolution_fails(tmp_path: Path) -> None:
     watchdog = _load_script("job_intel_ddns_watchdog.py")
-    commands: list[list[str]] = []
+    state = tmp_path / "linkedin-ddns.json"
+    previous = '{"endpoint":"213.211.78.39:3785"}\n'
+    state.write_text(previous, encoding="utf-8")
 
-    result = watchdog.refresh_endpoint(
+    result = watchdog.resolve_and_store(
         config_text=(
             "[Interface]\nPrivateKey = ignored\n[Peer]\n"
             "PublicKey = peer-key\nEndpoint = router.example:3785\n"
         ),
         resolve=lambda _host: [],
-        run=lambda command: commands.append(command),
-        current_endpoint=lambda _command, _peer: "95.56.123.201:3785",
+        state_path=state,
+        now="2026-09-13T17:00:00+00:00",
     )
 
     assert result.status == "resolution_failed"
-    assert commands == []
+    assert state.read_text(encoding="utf-8") == previous
 
 
 def test_ddns_sets_endpoint_only_when_resolved_address_differs() -> None:
     watchdog = _load_script("job_intel_ddns_watchdog.py")
     commands: list[list[str]] = []
 
-    result = watchdog.refresh_endpoint(
-        config_text=(
-            "[Peer]\nPublicKey = peer-key\nEndpoint = router.example:3785\n"
+    result = watchdog.apply_endpoint(
+        state_text=json.dumps(
+            {
+                "peer_key": "peer-key",
+                "endpoint_port": "3785",
+                "resolved_addresses": ["213.211.78.39"],
+            }
         ),
-        resolve=lambda _host: ["213.211.78.39"],
-        run=lambda command: commands.append(command),
-        current_endpoint=lambda _command, _peer: "95.56.123.201:3785",
-        namespace="ln-eg",
+        run=lambda command: commands.append(list(command)),
+        current_endpoint=lambda _interface, _peer: "95.56.123.201:3785",
         interface="wg0-ln",
     )
 
     assert result.status == "updated"
     assert commands == [
         [
-            "ip",
-            "netns",
-            "exec",
-            "ln-eg",
             "wg",
             "set",
             "wg0-ln",

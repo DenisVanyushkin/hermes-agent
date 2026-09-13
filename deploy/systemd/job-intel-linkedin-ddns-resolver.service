@@ -1,0 +1,25 @@
+[Unit]
+Description=Resolve the LinkedIn WireGuard DDNS endpoint
+After=network-online.target
+Wants=network-online.target
+OnSuccess=job-intel-linkedin-ddns-watchdog.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/
+ExecStart=/usr/bin/python3 __JOB_INTEL_REPO_ROOT__/scripts/job_intel_ddns_watchdog.py --mode resolve --config /etc/wireguard/wg0-ln.conf --state /run/job-intel-ddns/linkedin-endpoint.json
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=__JOB_INTEL_REPO_ROOT__/scripts/job_intel_ddns_watchdog.py
+RuntimeDirectory=job-intel-ddns
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/run/job-intel-ddns
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

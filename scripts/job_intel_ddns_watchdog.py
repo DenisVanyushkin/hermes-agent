@@ -3,12 +3,18 @@
 
 import argparse
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import ipaddress
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
+import tempfile
 from typing import Callable, Sequence
+
+
+DEFAULT_STATE_PATH = Path("/run/job-intel-ddns/linkedin-endpoint.json")
 
 
 @dataclass(frozen=True)
@@ -76,18 +82,34 @@ def _read_current_endpoint(command: Sequence[str], peer_key: str) -> str | None:
     raise RuntimeError(f"WireGuard peer was not found: {peer_key}")
 
 
-def _set_endpoint(command: Sequence[str]) -> None:
-    subprocess.run(command, check=True)
+def _write_state(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
-def refresh_endpoint(
+def resolve_and_store(
     *,
     config_text: str,
     resolve: Callable[[str], list[str]],
-    run: Callable[[Sequence[str]], object],
-    current_endpoint: Callable[[Sequence[str], str], str | None],
-    namespace: str = "ln-eg",
-    interface: str = "wg0-ln",
+    state_path: Path,
+    now: str | None = None,
 ) -> RefreshResult:
     endpoint = _config_value(config_text, "Endpoint")
     peer_key = _config_value(config_text, "PublicKey")
@@ -95,8 +117,6 @@ def refresh_endpoint(
         raise RuntimeError("WireGuard config needs Endpoint and peer PublicKey")
     endpoint_host, endpoint_port = _split_endpoint(endpoint)
 
-    # Do not call wg set before a successful host-side DNS result. An empty
-    # resolution therefore leaves the live endpoint untouched by construction.
     resolved = tuple(resolve(endpoint_host))
     if not resolved:
         return RefreshResult(
@@ -108,8 +128,52 @@ def refresh_endpoint(
             current_endpoint=None,
         )
 
-    show_command = ("ip", "netns", "exec", namespace, "wg", "show", interface, "endpoints")
-    live_endpoint = current_endpoint(show_command, peer_key)
+    _write_state(
+        state_path,
+        {
+            "version": 1,
+            "endpoint_host": endpoint_host,
+            "endpoint_port": endpoint_port,
+            "peer_key": peer_key,
+            "resolved_addresses": list(resolved),
+            "resolved_at": now or datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    return RefreshResult(
+        status="resolved",
+        endpoint_host=endpoint_host,
+        endpoint_port=endpoint_port,
+        peer_key=peer_key,
+        resolved_addresses=resolved,
+        current_endpoint=None,
+        selected_endpoint=f"{resolved[0]}:{endpoint_port}",
+    )
+
+
+def apply_endpoint(
+    *,
+    state_text: str,
+    run: Callable[[Sequence[str]], object],
+    current_endpoint: Callable[[str, str], str | None],
+    interface: str = "wg0-ln",
+) -> RefreshResult:
+    try:
+        state = json.loads(state_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid DDNS state JSON: {exc}") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("DDNS state must be a JSON object")
+    endpoint_host = str(state.get("endpoint_host", ""))
+    endpoint_port = str(state.get("endpoint_port", ""))
+    peer_key = str(state.get("peer_key", ""))
+    raw_addresses = state.get("resolved_addresses")
+    if not endpoint_port or not peer_key or not isinstance(raw_addresses, list):
+        raise RuntimeError("DDNS state is missing endpoint_port, peer_key, or resolved_addresses")
+    resolved = tuple(str(address) for address in raw_addresses if str(address))
+    if not resolved:
+        raise RuntimeError("DDNS state has no resolved addresses")
+
+    live_endpoint = current_endpoint(interface, peer_key)
     live_parts = _endpoint_address(live_endpoint)
     if live_parts is not None and live_parts[0] in resolved and live_parts[1] == endpoint_port:
         return RefreshResult(
@@ -122,7 +186,7 @@ def refresh_endpoint(
         )
 
     selected = f"{resolved[0]}:{endpoint_port}"
-    set_command = list(show_command[:5]) + ["set", interface, "peer", peer_key, "endpoint", selected]
+    set_command = ["wg", "set", interface, "peer", peer_key, "endpoint", selected]
     run(set_command)
     return RefreshResult(
         status="updated",
@@ -138,20 +202,28 @@ def refresh_endpoint(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=("resolve", "apply"), default="resolve")
     parser.add_argument("--config", type=Path, default=Path("/etc/wireguard/wg0-ln.conf"))
-    parser.add_argument("--namespace", default="ln-eg")
     parser.add_argument("--interface", default="wg0-ln")
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH)
     args = parser.parse_args(argv)
 
     try:
-        result = refresh_endpoint(
-            config_text=args.config.read_text(encoding="utf-8"),
-            resolve=resolve_ipv4,
-            run=_set_endpoint,
-            current_endpoint=_read_current_endpoint,
-            namespace=args.namespace,
-            interface=args.interface,
-        )
+        if args.mode == "resolve":
+            result = resolve_and_store(
+                config_text=args.config.read_text(encoding="utf-8"),
+                resolve=resolve_ipv4,
+                state_path=args.state,
+            )
+        else:
+            result = apply_endpoint(
+                state_text=args.state.read_text(encoding="utf-8"),
+                run=lambda command: subprocess.run(command, check=True),
+                current_endpoint=lambda interface, peer: _read_current_endpoint(
+                    ["wg", "show", interface, "endpoints"], peer
+                ),
+                interface=args.interface,
+            )
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"ddns watchdog failed: {exc}")
         return 1

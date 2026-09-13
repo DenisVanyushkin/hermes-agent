@@ -36,6 +36,7 @@ if systemctl is-active --quiet job-intel-shadow-collection.service; then
 fi
 
 units=(
+  job-intel-linkedin-ddns-resolver.service
   job-intel-linkedin-ddns-watchdog.service
   job-intel-linkedin-ddns-watchdog.timer
   job-intel-linkedin-browser-supervisor.service
