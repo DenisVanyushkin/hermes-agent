@@ -198,6 +198,8 @@ def test_production_watchdog_units_declare_scoped_recovery_guards() -> None:
     assert "19271" in browser_text
     assert "Restart=on-failure" in browser_text
     assert "KillMode=control-group" in browser_text
+    assert "/var/lib/browser-desktop" in browser_text
+    assert "/var/log/browser-desktop" not in browser_text
     alert_text = alert_unit.read_text()
     assert "executive_search_report" in alert_text
     assert "JOB_INTEL_SOURCE_ALERT_STATE" in alert_text
