@@ -7,13 +7,14 @@ Wants=network-online.target
 Type=oneshot
 User=root
 Group=root
-WorkingDirectory=__JOB_INTEL_REPO_ROOT__
+WorkingDirectory=/
 ExecStart=/usr/bin/python3 __JOB_INTEL_REPO_ROOT__/scripts/job_intel_ddns_watchdog.py --config /etc/wireguard/wg0-ln.conf --namespace ln-eg --interface wg0-ln
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=tmpfs
+BindReadOnlyPaths=__JOB_INTEL_REPO_ROOT__/scripts/job_intel_ddns_watchdog.py
 PrivateTmp=yes
 
 [Install]
