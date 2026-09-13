@@ -76,3 +76,12 @@ def test_split_units_keep_dns_host_side_and_apply_capability_narrow() -> None:
     assert "AmbientCapabilities=CAP_NET_ADMIN\n" in apply_unit
     assert "CAP_SYS_ADMIN" not in apply_unit
     assert "ip netns exec" not in apply_unit
+
+
+def test_source_alert_unit_uses_hermes_runtime() -> None:
+    source_unit = (ROOT / "deploy/systemd/job-intel-source-alert.service").read_text()
+
+    assert (
+        "Environment=JOB_INTEL_BROWSER_PYTHON="
+        "/home/hermes/.hermes/hermes-agent/.venv/bin/python\n"
+    ) in source_unit

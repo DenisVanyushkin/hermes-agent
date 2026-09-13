@@ -6,6 +6,7 @@ Type=oneshot
 User=hermes
 Group=hermes
 EnvironmentFile=/etc/job-intel/job-intel.env
+Environment=JOB_INTEL_BROWSER_PYTHON=/home/hermes/.hermes/hermes-agent/.venv/bin/python
 Environment=JOB_INTEL_SOURCE_ALERT_CHANNEL=executive_search_report
 Environment=JOB_INTEL_SOURCE_ALERT_THRESHOLD=3
 Environment=JOB_INTEL_SOURCE_ALERT_STATE=/var/lib/job-intel/state/linkedin-source-alert.json
