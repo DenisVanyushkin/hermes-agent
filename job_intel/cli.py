@@ -541,6 +541,12 @@ def _collect_vacancies(
             # query: LinkedIn refuses a search carrying neither a location nor
             # a geoId, and the daily path had been passing neither since the
             # guard was introduced on 2026-08-27.
+            linkedin_allow_unauthenticated = (
+                (os.getenv("JOB_INTEL_LINKEDIN_ALLOW_UNAUTHENTICATED", "0") or "0")
+                .strip()
+                .lower()
+                in {"1", "true", "yes", "on"}
+            )
             linkedin_plan = rotating_linkedin_queries(limit=18)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
@@ -564,6 +570,7 @@ def _collect_vacancies(
                         location=item.location,
                         geo_id=item.geo_id,
                         cell_id=item.cell_id,
+                        allow_unauthenticated=linkedin_allow_unauthenticated,
                     )
                     linkedin_hits += len(results)
                     vacancies.extend(results)
