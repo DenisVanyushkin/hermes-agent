@@ -39,10 +39,11 @@ NETWORK_NAMESPACE=""
 BROWSER_TIMEZONE="${BROWSER_TIMEZONE:-Asia/Almaty}"
 EXPLICIT_NETWORK_NAMESPACE=0
 PRINT_RUNTIME_CONFIG=0
+CHECK_INSTALL_ARTIFACTS=0
 NOVNC_BIND="127.0.0.1"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-CDP_RELAY_SOURCE="${SCRIPT_DIR}/browser-desktop-cdp-relay.py"
-CDP_RELAY="/usr/local/libexec/browser-desktop-cdp-relay.py"
+CDP_RELAY_SOURCE="${JOB_INTEL_BROWSER_CDP_RELAY_SOURCE:-${SCRIPT_DIR}/browser-desktop-cdp-relay.py}"
+CDP_RELAY="${JOB_INTEL_BROWSER_CDP_RELAY:-/usr/local/libexec/browser-desktop-cdp-relay.py}"
 # Объявляется здесь, до первого использования: под `set -u` раскрытие
 # необъявленного массива — ошибка. Значение выставляется ниже, после
 # разбора профиля.
@@ -54,8 +55,8 @@ VNC_DIR="${BASE_DIR}/.vnc"
 LOG_DIR="${BASE_DIR}/logs"
 RUNTIME_DIR=""
 CHROMIUM_PKG="chromium"
-CHROMIUM_BIN=""
-CHROMIUM_LAUNCHER="/usr/local/bin/browser-chromium"
+CHROMIUM_BIN="${JOB_INTEL_BROWSER_CHROMIUM_BIN:-}"
+CHROMIUM_LAUNCHER="${JOB_INTEL_BROWSER_CHROMIUM_LAUNCHER:-/usr/local/bin/browser-chromium}"
 PLAYWRIGHT_VENV="${BASE_DIR}/playwright-venv"
 
 validate_profile_name() {
@@ -125,6 +126,8 @@ Options:
                    Run this profile inside an existing network namespace
   --print-runtime-config
                    Print the selected runtime values without side effects
+  --check-install-artifacts
+                   Check the relay and launcher without starting the desktop
   -h, --help       Show this help
 
 Examples:
@@ -162,6 +165,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --print-runtime-config)
       PRINT_RUNTIME_CONFIG=1
+      shift
+      ;;
+    --check-install-artifacts)
+      CHECK_INSTALL_ARTIFACTS=1
       shift
       ;;
     -h|--help)
@@ -289,8 +296,11 @@ install_cdp_relay() {
     echo "CDP relay source is missing: ${CDP_RELAY_SOURCE}" >&2
     exit 1
   fi
-  install -d -o root -g root -m 0755 "$(dirname -- "${CDP_RELAY}")"
-  install -o root -g root -m 0755 "${CDP_RELAY_SOURCE}" "${CDP_RELAY}"
+  if [[ -f "${CDP_RELAY}" && -x "${CDP_RELAY}" ]] && cmp -s "${CDP_RELAY_SOURCE}" "${CDP_RELAY}"; then
+    return 0
+  fi
+  echo "Browser artifacts are missing or stale; run the browser desktop installer with write permission on /usr/local." >&2
+  return 1
 }
 
 is_snap_path() {
@@ -418,12 +428,19 @@ ensure_browser_binary() {
 
 write_browser_launcher() {
   need_root
-  cat > "${CHROMIUM_LAUNCHER}" <<EOF
-#!/usr/bin/env bash
-exec "${CHROMIUM_BIN}" "\$@"
-EOF
-  chmod 0755 "${CHROMIUM_LAUNCHER}"
+  if [[ -f "${CHROMIUM_LAUNCHER}" && -x "${CHROMIUM_LAUNCHER}" ]] && \
+    printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "${CHROMIUM_BIN}" | cmp -s - "${CHROMIUM_LAUNCHER}"; then
+    return 0
+  fi
+  echo "Browser artifacts are missing or stale; run the browser desktop installer with write permission on /usr/local." >&2
+  return 1
 }
+
+if (( CHECK_INSTALL_ARTIFACTS )); then
+  install_cdp_relay
+  write_browser_launcher
+  exit 0
+fi
 
 create_desktop_shortcuts() {
   need_root
