@@ -119,7 +119,6 @@ def _has_gaming_context(vacancy: Vacancy) -> bool:
     if not _contains_any(
         context,
         (
-            "brawl stars",
             "video game",
             "video games",
             "game studio",
@@ -152,8 +151,9 @@ def _has_adtech_or_ctv_context(vacancy: Vacancy) -> bool:
         return True
     return bool(
         re.search(
-            r"\bad[ -]?tech\b|\bconnected tv\b|\bctv\b|\bvideo advertising\b|"
-            r"\badvertising technology\b|\bprogrammatic advertising\b|\bssp\b|\bdsp\b",
+            r"\b(?:connected tv|connected television|ctv)\b|"
+            r"\b(?:ott|over[- ]the[- ]top)[ -](?:advertising|ads?|ad inventory)\b|"
+            r"\bvideo (?:advertising|ads?|inventory)\b",
             context,
         )
     )

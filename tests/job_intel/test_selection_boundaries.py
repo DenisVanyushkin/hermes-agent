@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from job_intel.models import Evaluation, Vacancy
 from job_intel.observability import record_daily_observability
@@ -253,3 +254,40 @@ def test_title_only_industry_outcome_does_not_depend_on_replay_company_name() ->
     assert [assessment.rejection_reasons for assessment in assessments] == [(), ()]
     assert all("gaming_experience_mismatch" not in assessment.rejection_reasons for assessment in assessments)
     assert all("industry_context_unknown" in assessment.unknown_reasons for assessment in assessments)
+
+
+def test_adtech_boundary_is_limited_to_ctv_and_video_advertising() -> None:
+    # Owner decision 2026-09-14: only CTV / video advertising is out of scope.
+    # Performance marketing, programmatic and advertiser/publisher marketplaces
+    # are adjacent growth work and must not be rejected by this boundary.
+    general_adtech = [
+        "A performance marketing marketplace where advertisers and publishers transact efficiently.",
+        "Lead our programmatic advertising platform and grow the ad tech revenue line.",
+        "Own the SSP and DSP roadmap for our advertising technology products.",
+    ]
+    for text in general_adtech:
+        assessment = assess_selection_boundaries(
+            vacancy(company="Example", title="Head of Product", description=evidence(text))
+        )
+        assert REASON_ADTECH_CTV not in assessment.rejection_reasons, text
+
+    ctv = [
+        "Build a scalable connected TV advertising business for brands.",
+        "Grow our CTV proposition across streaming inventory.",
+        "Own the video advertising product line for publishers.",
+    ]
+    for text in ctv:
+        assessment = assess_selection_boundaries(
+            vacancy(company="Example", title="Head of Product", description=evidence(text))
+        )
+        assert REASON_ADTECH_CTV in assessment.rejection_reasons, text
+
+
+def test_selection_boundaries_source_does_not_name_replay_companies() -> None:
+    source = Path(__file__).resolve().parents[2] / "job_intel" / "selection_boundaries.py"
+    source_text = source.read_text(encoding="utf-8").casefold()
+    for company_name in (
+        "scopely", "amanotes", "brawl stars", "brawlstars", "supercell",
+        "almedia", "vondel", "publicis",
+    ):
+        assert company_name not in source_text, company_name
