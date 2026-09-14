@@ -107,23 +107,81 @@ This slice does not execute a provider call. The code now exposes the following
 ready-to-run bounded experiment for a later owner-authorized run. The only
 enabling flag is `JOB_INTEL_QUERY_EXPERIMENT`; the date and slot are required
 fixed axes once it is enabled. All variables below are one-shot process
-environment, not configuration-file changes.
+environment, not configuration-file changes. Do not invoke the legacy
+`/home/hermes/.hermes/scripts/job_intel_daily.sh`: it is not the pinned shadow
+path and does not inherit the shadow service's pin preflight, public browser
+profile, CDP, delivery-disabled setting, or authoritative DB path.
 
 ```sh
-export JOB_INTEL_QUERY_EXPERIMENT=role_context_ab
-export JOB_INTEL_QUERY_EXPERIMENT_DATE=2026-09-15
-export JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT=0
-sudo -u hermes env \
-  JOB_INTEL_QUERY_EXPERIMENT="$JOB_INTEL_QUERY_EXPERIMENT" \
-  JOB_INTEL_QUERY_EXPERIMENT_DATE="$JOB_INTEL_QUERY_EXPERIMENT_DATE" \
-  JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT="$JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT" \
-  /home/hermes/.hermes/scripts/job_intel_daily.sh
+set -eu
+unit=job-intel-shadow-collection.service
+experiment_date=2026-09-13
+experiment_slot=1
+
+# This is a deliberately elapsed frozen axis, not the next timer slot. Refuse
+# to proceed if the service is not inactive; never overlap a live collection.
+state="$(sudo systemctl show -p ActiveState --value "$unit")"
+test "$state" = inactive
+
+sudo systemctl edit --runtime --stdin "$unit" <<EOF
+[Service]
+Environment=JOB_INTEL_QUERY_EXPERIMENT=role_context_ab
+Environment=JOB_INTEL_QUERY_EXPERIMENT_DATE=$experiment_date
+Environment=JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT=$experiment_slot
+EOF
+
+cleanup() {
+  rc=$?
+  set +e
+  sudo systemctl revert --runtime "$unit"
+  revert_rc=$?
+  sudo systemctl daemon-reload
+  reload_rc=$?
+  if test "$revert_rc" -ne 0 || test "$reload_rc" -ne 0; then
+    echo "failed to remove experiment runtime drop-in or reload systemd" >&2
+    rc=1
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+sudo systemctl daemon-reload
+
+set +e
+sudo systemctl start "$unit"
+run_rc=$?
+set -e
+sudo systemctl show "$unit" -p ActiveState -p Result -p ExecMainStatus
+exit "$run_rc"
 ```
+
+The runtime drop-in contains exactly the three experiment variables above.
+`EnvironmentFile=/etc/job-intel/job-intel-shadow.env` remains the service's
+authority for the public profile, CDP, delivery-disabled setting, budget,
+database path, and pin preflight. The `start` command waits for this oneshot;
+the `EXIT` trap removes the runtime drop-in and reloads systemd on success or
+failure. Verify afterward that `systemctl cat "$unit"` has no experiment
+override. If the inactive-state check, start, cleanup, or reload fails, stop
+and treat the experiment as invalid rather than retrying against a timer run.
+
+The example uses the already elapsed UTC axis `2026-09-13`, slot `1`, rather
+than today's or the next timer slot, so it cannot equal an upcoming scheduled
+service run. For a later execution, choose another already elapsed date/slot
+and first inspect the timer with:
+`systemctl list-timers --all job-intel-shadow-collection.timer`.
+Do not choose the current or next scheduled service run. The date/slot selects
+the query plan; it does not move or disable the timer.
 
 The normal production invocation must omit all three experiment variables. In
 that state the LinkedIn and HeadHunter plan sequences and request volume are
 unchanged. `ROTATION_SLOT=0` and `ROTATION_SLOT=1` are the two explicit daily
 slots; use the same frozen date and slot for both source plans in one run.
+
+For reference, the service's real entry point is:
+
+```text
+EnvironmentFile=/etc/job-intel/job-intel-shadow.env
+ExecStart=/usr/bin/env bash /home/hermes/.hermes/hermes-agent/scripts/job_intel_host_wrapper.sh daily
+```
 
 1. Freeze one UTC date, one `rotation_slot`, one source interface, and the
    current request budgets. The enabled plan itself produces 9 LinkedIn items
