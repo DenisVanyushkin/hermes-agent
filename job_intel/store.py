@@ -366,6 +366,11 @@ CREATE TABLE IF NOT EXISTS source_kpi_run (
     auth_redirects INTEGER,
     anti_bot_events INTEGER,
     extraction_failures INTEGER,
+    detail_pages_planned INTEGER,
+    detail_pages_opened INTEGER,
+    detail_pages_filled INTEGER,
+    detail_pages_blocked INTEGER,
+    detail_description_median_chars REAL,
 
     found_count INTEGER,
     executive_detected_count INTEGER,
@@ -814,6 +819,11 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_rejection_summary", "top_warning", "TEXT")
             self._ensure_column(conn, "source_kpi_run", "enabled", "INTEGER DEFAULT 1")
             self._ensure_column(conn, "source_kpi_run", "skip_reason", "TEXT")
+            self._ensure_column(conn, "source_kpi_run", "detail_pages_planned", "INTEGER")
+            self._ensure_column(conn, "source_kpi_run", "detail_pages_opened", "INTEGER")
+            self._ensure_column(conn, "source_kpi_run", "detail_pages_filled", "INTEGER")
+            self._ensure_column(conn, "source_kpi_run", "detail_pages_blocked", "INTEGER")
+            self._ensure_column(conn, "source_kpi_run", "detail_description_median_chars", "REAL")
             self._ensure_column(conn, "registry_company_runs", "source_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "registry_company_runs", "canonical_company_key", "TEXT")
             self._ensure_column(conn, "production_observation_daily", "vacancies_sent", "INTEGER NOT NULL DEFAULT 0")
@@ -1786,6 +1796,7 @@ PRAGMA foreign_keys=ON;
             "run_id","source","created_at",
             "source_status","acquisition_mode","runtime_seconds","attempts",
             "pages_fetched","login_walls","auth_redirects","anti_bot_events","extraction_failures",
+            "detail_pages_planned","detail_pages_opened","detail_pages_filled","detail_pages_blocked","detail_description_median_chars",
             "found_count","executive_detected_count","scored_count","accepted_count","notified_count",
             "vacancies_deduped","rejected_count",
             "avg_vacancy_score","vacancy_score_p50","vacancy_score_p90","accepted_score_p50",

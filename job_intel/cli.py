@@ -166,12 +166,24 @@ def _aggregate_browser_trace(target: dict[str, Any], trace: dict[str, Any] | Non
     if not trace:
         return
     for key, value in trace.items():
+        if key == "detail_description_lengths" and isinstance(value, list):
+            target.setdefault(key, []).extend(
+                int(item) for item in value if isinstance(item, (int, float))
+            )
+            continue
         if isinstance(value, (int, float)):
             target[key] = int(target.get(key) or 0) + int(value)
             continue
         if key == "zero_result_reason" and value:
             reasons = target.setdefault("zero_result_reasons", {})
             reasons[str(value)] = int(reasons.get(str(value)) or 0) + 1
+
+
+def _linkedin_detail_page_budget_from_env() -> int:
+    try:
+        return max(0, int(os.getenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "3")))
+    except ValueError:
+        return 3
 
 
 def _merge_hh_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
@@ -547,6 +559,7 @@ def _collect_vacancies(
                 .lower()
                 in {"1", "true", "yes", "on"}
             )
+            linkedin_detail_budget_remaining = _linkedin_detail_page_budget_from_env()
             linkedin_plan = rotating_linkedin_queries(limit=18)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
@@ -571,10 +584,17 @@ def _collect_vacancies(
                         geo_id=item.geo_id,
                         cell_id=item.cell_id,
                         allow_unauthenticated=linkedin_allow_unauthenticated,
+                        detail_page_budget=linkedin_detail_budget_remaining,
                     )
                     linkedin_hits += len(results)
                     vacancies.extend(results)
-                    _aggregate_browser_trace(linkedin_trace, getattr(fetch_linkedin_vacancies, "last_trace", None))
+                    query_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
+                    if isinstance(query_trace, dict):
+                        opened = max(0, int(query_trace.get("detail_pages_opened") or 0))
+                        linkedin_detail_budget_remaining = max(
+                            0, linkedin_detail_budget_remaining - opened
+                        )
+                    _aggregate_browser_trace(linkedin_trace, query_trace)
                 except Exception as exc:
                     linkedin_errors.append(str(exc))
             if linkedin_hits:
@@ -594,6 +614,38 @@ def _collect_vacancies(
                 runtime_seconds=perf_counter() - linkedin_started,
             )
             linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
+            if linkedin_health:
+                linkedin_health = dict(linkedin_health)
+            else:
+                linkedin_health = {}
+            for key in (
+                "detail_pages_planned",
+                "detail_pages_filled",
+                "detail_pages_blocked",
+                "detail_pages_errors",
+                "detail_description_median_chars",
+            ):
+                if key in linkedin_trace:
+                    linkedin_health[key] = linkedin_trace[key]
+            lengths = sorted(
+                int(item)
+                for item in linkedin_trace.get("detail_description_lengths", [])
+                if isinstance(item, (int, float))
+            )
+            if lengths:
+                middle = len(lengths) // 2
+                linkedin_trace["detail_description_median_chars"] = (
+                    lengths[middle]
+                    if len(lengths) % 2
+                    else (lengths[middle - 1] + lengths[middle]) / 2
+                )
+            else:
+                linkedin_trace["detail_description_median_chars"] = 0
+            linkedin_health["detail_description_median_chars"] = linkedin_trace[
+                "detail_description_median_chars"
+            ]
+            if linkedin_trace:
+                linkedin_source_status["search_trace"] = linkedin_trace
             if linkedin_health:
                 linkedin_source_status["session_health"] = linkedin_health
             statuses["linkedin"] = linkedin_source_status
@@ -2844,6 +2896,15 @@ def run_daily() -> str:
                         "auth_redirects": auth_redirects,
                         "anti_bot_events": anti_bot_events,
                         "extraction_failures": extraction_failures,
+                        "detail_pages_planned": int(session.get("detail_pages_planned") or 0),
+                        "detail_pages_opened": int(session.get("detail_pages_opened") or 0),
+                        "detail_pages_filled": int(session.get("detail_pages_filled") or 0),
+                        "detail_pages_blocked": int(session.get("detail_pages_blocked") or 0),
+                        "detail_description_median_chars": (
+                            float(session["detail_description_median_chars"])
+                            if session.get("detail_description_median_chars") is not None
+                            else None
+                        ),
                         "found_count": found,
                         "executive_detected_count": int(stats.get("executive_detected_count") or 0),
                         "scored_count": int(stats.get("scored_count") or 0),

@@ -299,3 +299,40 @@ def test_daily_linkedin_public_mode_is_explicitly_env_gated(
     monkeypatch.setenv("JOB_INTEL_LINKEDIN_ALLOW_UNAUTHENTICATED", "1")
     cli._collect_vacancies(store=_store(tmp_path))
     assert seen[-1]["allow_unauthenticated"] is True
+
+
+def test_daily_linkedin_detail_budget_is_shared_across_queries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "3")
+    seen: list[dict[str, object]] = []
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="uk_gm",
+            location="United Kingdom",
+            geo_id=None,
+        ),
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="ca_gm",
+            location="Canada",
+            geo_id=None,
+        ),
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    def fake_fetch(query, **kwargs):
+        seen.append({"query": query, **kwargs})
+        cli.fetch_linkedin_vacancies.last_trace = {
+            "detail_pages_opened": 1,
+            "detail_description_lengths": [4_000],
+        }
+        return []
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fake_fetch)
+
+    cli._collect_vacancies(store=_store(tmp_path))
+
+    assert [call["detail_page_budget"] for call in seen] == [3, 2]

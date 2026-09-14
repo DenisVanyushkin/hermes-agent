@@ -508,6 +508,7 @@ def fetch_linkedin_vacancies(
     query_id: str | None = None,
     cell_id: str | None = None,
     allow_unauthenticated: bool = False,
+    detail_page_budget: int | None = None,
 ) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
@@ -530,6 +531,8 @@ def fetch_linkedin_vacancies(
             worker_args.extend(["--cell-id", cell_id])
         if allow_unauthenticated:
             worker_args.append("--allow-unauthenticated")
+        if detail_page_budget is not None:
+            worker_args.extend(["--detail-page-budget", str(max(0, detail_page_budget))])
         if execution_plan is not None:
             worker_args.extend(
                 [

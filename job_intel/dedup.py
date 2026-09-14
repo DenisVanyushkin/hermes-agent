@@ -71,6 +71,18 @@ def description_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, _norm(a), _norm(b)).ratio()
 
 
+def _bounded_description_similarity(
+    a: str, b: str, *, threshold: float
+) -> float | None:
+    """Return the exact ratio, or None when an upper bound rejects the pair."""
+    matcher = SequenceMatcher(None, _norm(a), _norm(b))
+    if matcher.real_quick_ratio() < threshold:
+        return None
+    if matcher.quick_ratio() < threshold:
+        return None
+    return matcher.ratio()
+
+
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -94,8 +106,12 @@ def is_duplicate(
     if canonical_vacancy_key(candidate) == canonical_vacancy_key(existing):
         return True
 
-    similarity = description_similarity(candidate.description, existing.description)
-    if similarity < similarity_threshold:
+    similarity = _bounded_description_similarity(
+        candidate.description,
+        existing.description,
+        threshold=similarity_threshold,
+    )
+    if similarity is None or similarity < similarity_threshold:
         return False
 
     candidate_dt = _parse_dt(candidate.posted_at)

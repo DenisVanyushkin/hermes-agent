@@ -220,6 +220,21 @@ class BrowserSessionHealth:
         if _page_has_source_results(self.source, url, html):
             auth_redirect = False
             login_wall = False
+        if detail_page and self.source == "linkedin":
+            # Public detail pages may still render a benign sign-in CTA in
+            # their footer.  Recognized detail content is positive evidence
+            # even when the title filter found no row on that page; do not
+            # turn the CTA into an authenticated-search failure.  A detail
+            # page without recognized content remains subject to the normal
+            # wall/challenge detectors.
+            detail_content = extract_linkedin_detail_content_from_html(
+                html, page_url=url
+            )
+            if vacancies_found > 0 or (
+                detail_content is not None and detail_content.description
+            ):
+                auth_redirect = False
+                login_wall = False
         self.last_page_auth_redirect = auth_redirect
         self.last_page_login_wall = login_wall
         self.last_page_safety_reason = linkedin_safety_reason(
@@ -514,6 +529,20 @@ _EXECUTIVE_ROLE_HINTS = (
     "product",
 )
 
+# The eight families and their derived title tokens are the accepted M0
+# vocabulary (review-pool.json).  Detail fetches use this title-only gate;
+# they must not silently broaden the search vocabulary.
+LINKEDIN_DETAIL_TITLE_FAMILY_TOKENS: dict[str, tuple[str, ...]] = {
+    "product_executive": ("cpo", "chief product", "vp product", "head of product", "vp consumer product"),
+    "digital_business_executive": ("chief digital", "vp digital business", "director digital business", "digital business director"),
+    "customer_growth_commercial_hybrid": ("chief growth", "chief customer", "chief commercial", "consumer business director"),
+    "product_business_unit_leader": ("product director", "digital products director", "business unit director", "platform director"),
+    "gm_market_leader": ("gm digital", "gm product", "gm market", "regional gm", "general manager"),
+    "growth_monetization_executive": ("vp growth product", "head of growth product", "monetization director", "lifecycle director"),
+    "transformation_builder": ("digital transformation and growth director", "product transformation director", "product organization lead"),
+    "hybrid_executive_exploration": ("coo", "strategy and product", "chief commercial", "chief product", "commercial/product"),
+}
+
 _LOW_SIGNAL_HINTS = (
     "support",
     "customer success",
@@ -747,6 +776,20 @@ def _looks_executive(title: str, description: str = "") -> bool:
     if any(hint in text for hint in _LOW_SIGNAL_HINTS):
         return False
     return any(hint in text for hint in _EXECUTIVE_ROLE_HINTS)
+
+
+def linkedin_detail_title_matches(title: str) -> bool:
+    """Whether a title is eligible for public detail enrichment.
+
+    This is deliberately title-only and uses the eight-family vocabulary from
+    the accepted M0 review pool.  Mandate interpretation remains downstream.
+    """
+    text = _normalize_whitespace(title).lower()
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text)
+        for tokens in LINKEDIN_DETAIL_TITLE_FAMILY_TOKENS.values()
+        for token in tokens
+    )
 
 
 def _looks_like_login_wall(url: str, html: str) -> bool:
@@ -1334,6 +1377,105 @@ def extract_company_career_vacancies_from_html(html: str, *, page_url: str) -> l
     return _dedupe_vacancies(structured + link_vacancies)
 
 
+@dataclass(frozen=True)
+class LinkedInDetailContent:
+    description: str
+    criteria: dict[str, str]
+
+
+class _LinkedInDetailParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._depth = 0
+        self._description_depth: int | None = None
+        self._description_parts: list[str] = []
+        self._criteria_depth: int | None = None
+        self._criteria_label_depth: int | None = None
+        self._criteria_value_depth: int | None = None
+        self._criteria_label: list[str] = []
+        self._criteria_value: list[str] = []
+        self.criteria: dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {key: value or "" for key, value in attrs}
+        classes = set(attributes.get("class", "").split())
+        if tag in _HTML_VOID_TAGS:
+            if tag == "br" and self._description_depth is not None:
+                self._description_parts.append("\n")
+            return
+        self._depth += 1
+        if self._description_depth is None and "show-more-less-html__markup" in classes:
+            self._description_depth = self._depth
+        if self._criteria_depth is None and "description__job-criteria-item" in classes:
+            self._criteria_depth = self._depth
+            self._criteria_label = []
+            self._criteria_value = []
+        if self._criteria_depth is not None and "description__job-criteria-subheader" in classes:
+            self._criteria_label_depth = self._depth
+        if self._criteria_depth is not None and "description__job-criteria-text--criteria" in classes:
+            self._criteria_value_depth = self._depth
+        if tag == "li" and self._description_depth is not None:
+            self._description_parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._criteria_label_depth is not None:
+            self._criteria_label.append(data)
+        elif self._criteria_value_depth is not None:
+            self._criteria_value.append(data)
+        elif self._description_depth is not None:
+            self._description_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_VOID_TAGS:
+            return
+        if self._criteria_label_depth == self._depth:
+            self._criteria_label_depth = None
+        if self._criteria_value_depth == self._depth:
+            self._criteria_value_depth = None
+        if self._criteria_depth == self._depth:
+            label = _clean_html_text("".join(self._criteria_label))
+            value = _clean_html_text("".join(self._criteria_value))
+            if label and value:
+                self.criteria[label] = value
+            self._criteria_depth = None
+        if self._description_depth == self._depth:
+            self._description_depth = None
+        self._depth -= 1
+
+
+def extract_linkedin_detail_content_from_html(
+    html: str, *, page_url: str
+) -> LinkedInDetailContent | None:
+    """Extract public detail text and criteria, without executing page code."""
+    del page_url  # retained in the API so callers bind content to its URL
+    parser = _LinkedInDetailParser()
+    parser.feed(html or "")
+    parser.close()
+    description = _clean_html_text(" ".join(parser._description_parts))
+    if not description and not parser.criteria:
+        return None
+    return LinkedInDetailContent(description=description, criteria=dict(parser.criteria))
+
+
+def linkedin_detail_safety_reason(
+    *, final_url: str, html: str, status: int | None = None
+) -> str | None:
+    reason = linkedin_safety_reason(final_url=final_url, html=html, status=status)
+    if reason:
+        return reason
+    content = extract_linkedin_detail_content_from_html(html, page_url=final_url)
+    if content is None and _looks_like_login_wall(final_url, html):
+        return "detail_login_wall"
+    return None
+
+
+def _linkedin_detail_page_budget_from_env() -> int:
+    try:
+        return max(0, int(os.getenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "3")))
+    except ValueError:
+        return 3
+
+
 
 def extract_jobposting_vacancies_from_html(html: str, *, source: str, page_url: str) -> list[Vacancy]:
     """Extract JSON-LD JobPosting objects into Vacancy rows with a caller-provided source name.
@@ -1351,6 +1493,8 @@ class BrowserSourceClient:
         self._context = None
         self._cdp_attached = False
         self._linkedin_service_page = None
+        self._linkedin_detail_enriched_urls: set[str] = set()
+        self._linkedin_detail_budget_remaining: int | None = None
         self._cdp_url = ""
         self._health = BrowserSessionHealth(source="browser")
         self._health.browser_profile = str(self.config.user_data_dir)
@@ -1423,6 +1567,7 @@ class BrowserSourceClient:
         self._context = None
         self._playwright = None
         self._linkedin_service_page = None
+        self._linkedin_detail_budget_remaining = None
         self._cdp_attached = False
 
     def _ensure_linkedin_service_page(self) -> None:
@@ -2099,9 +2244,19 @@ class BrowserSourceClient:
         if random.random() > self.config.noise_probability:
             return []
         candidates = self._detail_candidates(html, page_url=page_url, source=source)
+        if source == "linkedin":
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate not in self._linkedin_detail_enriched_urls
+            ]
         if not candidates:
             return []
         detail_url = random.choice(candidates)
+        if source == "linkedin":
+            if not self._reserve_linkedin_detail_page():
+                return []
+            self._linkedin_detail_enriched_urls.add(detail_url)
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
@@ -2118,12 +2273,137 @@ class BrowserSourceClient:
             return []
         candidate = random.choice(candidates)
         detail_url = candidate.url
+        if source == "linkedin":
+            if detail_url in self._linkedin_detail_enriched_urls:
+                return []
+            if not self._reserve_linkedin_detail_page():
+                return []
+            self._linkedin_detail_enriched_urls.add(detail_url)
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
         }.get(source, extract_company_career_vacancies_from_html)(detail_html, page_url=detail_url)
         self._observe_page(detail_url, detail_html, len(detail_vacancies), detail_page=True)
         return detail_vacancies
+
+    def _enrich_linkedin_vacancies(
+        self,
+        vacancies: list[Vacancy],
+        *,
+        observed_at: str | None = None,
+        detail_page_budget: int | None = None,
+    ) -> dict[str, Any]:
+        """Fill title-qualified rows from public detail pages under a hard budget."""
+        if detail_page_budget is not None:
+            budget = max(0, int(detail_page_budget))
+        elif self._linkedin_detail_budget_remaining is not None:
+            budget = self._linkedin_detail_budget_remaining
+        else:
+            budget = _linkedin_detail_page_budget_from_env()
+        raw_delay = os.getenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_DELAY_MS", "1500")
+        try:
+            delay_ms = max(0, int(raw_delay))
+        except ValueError:
+            delay_ms = 1500
+        eligible = [
+            vacancy
+            for vacancy in vacancies
+            if vacancy.url and linkedin_detail_title_matches(vacancy.title)
+        ]
+        planned = min(len(eligible), budget)
+        stats: dict[str, Any] = {
+            "planned": planned,
+            "opened": 0,
+            "filled": 0,
+            "blocked": 0,
+            "errors": 0,
+            "description_lengths": [],
+            "stop_reason": "",
+        }
+        observed = observed_at or datetime.now(timezone.utc).isoformat()
+        for index, vacancy in enumerate(eligible[:budget]):
+            if index:
+                time.sleep(delay_ms / 1000.0)
+            detail_url = vacancy.url
+            if not self._reserve_linkedin_detail_page():
+                break
+            self._linkedin_detail_enriched_urls.add(detail_url)
+            stats["opened"] += 1
+            try:
+                detail_html = self.fetch_html(detail_url, scrolls=0)
+                fetch_result = getattr(self, "_last_fetch_result", None)
+                result_url = str(getattr(fetch_result, "final_url", "") or detail_url)
+                status = getattr(fetch_result, "http_status", None)
+                status = status if isinstance(status, int) else None
+                content = extract_linkedin_detail_content_from_html(
+                    detail_html, page_url=result_url
+                )
+                reason = linkedin_detail_safety_reason(
+                    final_url=result_url, html=detail_html, status=status
+                )
+                self._observe_page(
+                    result_url,
+                    detail_html,
+                    1 if content and content.description else 0,
+                    detail_page=True,
+                    http_status=status,
+                )
+                if reason:
+                    stats["blocked"] += 1
+                    stats["stop_reason"] = reason
+                    break
+                if content is None or not content.description:
+                    continue
+                criteria_lines = [
+                    f"{label}: {value}" for label, value in content.criteria.items()
+                ]
+                description = content.description
+                if criteria_lines:
+                    description = f"{description}\n\nJob criteria:\n" + "\n".join(criteria_lines)
+                vacancy.description = description
+                vacancy.metadata = {
+                    **vacancy.metadata,
+                    "linkedin_detail_enrichment": {
+                        "source": "public_linkedin_job_detail",
+                        "url": result_url,
+                        "observed_at": observed,
+                        "description_chars": len(description),
+                        "criteria": dict(content.criteria),
+                    },
+                }
+                stats["filled"] += 1
+                stats["description_lengths"].append(len(description))
+            except Exception as exc:
+                message = str(exc).lower()
+                if any(
+                    token in message
+                    for token in (
+                        "login",
+                        "sign in",
+                        "checkpoint",
+                        "challenge",
+                        "captcha",
+                        "rate limit",
+                        "too many requests",
+                        "429",
+                        "anti-bot",
+                    )
+                ):
+                    stats["blocked"] += 1
+                    stats["stop_reason"] = "detail_fetch_blocked"
+                else:
+                    stats["errors"] += 1
+                    stats["stop_reason"] = "detail_fetch_error"
+                break
+        return stats
+
+    def _reserve_linkedin_detail_page(self) -> bool:
+        if self._linkedin_detail_budget_remaining is None:
+            return True
+        if self._linkedin_detail_budget_remaining <= 0:
+            return False
+        self._linkedin_detail_budget_remaining -= 1
+        return True
 
     def _linkedin_page_plan(self, max_pages: int, *, execution_plan: Any | None = None) -> list[int]:
         if execution_plan is not None:
@@ -2148,6 +2428,7 @@ class BrowserSourceClient:
         geography_geo_id: str | None = None,
         execution_plan: Mapping[str, Any] | Any | None = None,
         allow_unauthenticated: bool = False,
+        detail_page_budget: int | None = None,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -2159,6 +2440,11 @@ class BrowserSourceClient:
             geo_id=geography_geo_id,
         )
         plan = self._coerce_linkedin_execution_plan(execution_plan)
+        self._linkedin_detail_budget_remaining = (
+            max(0, int(detail_page_budget))
+            if detail_page_budget is not None
+            else _linkedin_detail_page_budget_from_env()
+        )
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
         trace: dict[str, Any] = {
@@ -2172,6 +2458,13 @@ class BrowserSourceClient:
             "login_wall_check_ms": 0,
             "pages_fetched": 0,
             "detail_pages_opened": 0,
+            "detail_pages_planned": 0,
+            "detail_pages_filled": 0,
+            "detail_pages_blocked": 0,
+            "detail_pages_errors": 0,
+            "detail_description_lengths": [],
+            "detail_description_median_chars": 0,
+            "detail_stop_reason": "",
             "vacancies_extracted": 0,
             "login_wall_hits": 0,
             "auth_redirects": 0,
@@ -2432,8 +2725,22 @@ class BrowserSourceClient:
                 http_status=page_result.http_status,
             )
             trace["vacancies_extracted"] += len(page_vacancies)
-            vacancies.extend(page_vacancies)
             started = time.perf_counter()
+            detail_stats = (
+                {"planned": 0, "opened": 0, "filled": 0, "blocked": 0, "errors": 0, "description_lengths": [], "stop_reason": ""}
+                if plan is not None
+                else self._enrich_linkedin_vacancies(
+                    page_vacancies
+                )
+            )
+            trace["detail_pages_planned"] += int(detail_stats["planned"])
+            trace["detail_pages_filled"] += int(detail_stats["filled"])
+            trace["detail_pages_blocked"] += int(detail_stats["blocked"])
+            trace["detail_pages_errors"] += int(detail_stats["errors"])
+            trace["detail_description_lengths"].extend(detail_stats["description_lengths"])
+            if detail_stats["stop_reason"]:
+                trace["detail_stop_reason"] = detail_stats["stop_reason"]
+            vacancies.extend(page_vacancies)
             detail_rows = (
                 []
                 if plan is not None
@@ -2486,6 +2793,14 @@ class BrowserSourceClient:
             trace["zero_result_reason"] = "no_pages_fetched"
         trace["normalize_ms"] = 0
         trace["planned_search_pages"] = len(page_plan)
+        lengths = sorted(trace["detail_description_lengths"])
+        if lengths:
+            middle = len(lengths) // 2
+            trace["detail_description_median_chars"] = (
+                lengths[middle]
+                if len(lengths) % 2
+                else (lengths[middle - 1] + lengths[middle]) / 2
+            )
         self._last_search_trace = trace
         return deduped
 

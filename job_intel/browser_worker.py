@@ -334,6 +334,7 @@ def _run_linkedin(
     query_id: str | None = None,
     cell_id: str | None = None,
     allow_unauthenticated: bool = False,
+    detail_page_budget: int | None = None,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -348,6 +349,7 @@ def _run_linkedin(
             query_id=query_id,
             cell_id=cell_id,
             allow_unauthenticated=allow_unauthenticated,
+            detail_page_budget=detail_page_budget,
         )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
@@ -384,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--query-id")
     linkedin.add_argument("--cell-id")
     linkedin.add_argument("--allow-unauthenticated", action="store_true")
+    linkedin.add_argument("--detail-page-budget", type=int)
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -419,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
                 query_id=args.query_id,
                 cell_id=args.cell_id,
                 allow_unauthenticated=args.allow_unauthenticated,
+                detail_page_budget=args.detail_page_budget,
             )
         else:
             vacancies, session_health, search_trace = _probe(args.source)
