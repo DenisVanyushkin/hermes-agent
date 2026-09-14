@@ -6,7 +6,7 @@ import random
 import re
 import subprocess
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -873,6 +873,67 @@ def _query_rng(source: str) -> random.Random:
 QUERY_MODE_ROLE_ONLY = "role_only"
 QUERY_MODE_ROLE_PLUS_CONTEXT = "role_plus_context"
 QUERY_MODES = frozenset({QUERY_MODE_ROLE_ONLY, QUERY_MODE_ROLE_PLUS_CONTEXT})
+QUERY_EXPERIMENT_ROLE_CONTEXT_AB = "role_context_ab"
+QUERY_EXPERIMENT_BRANCH_DEFAULT = "default"
+QUERY_EXPERIMENT_BRANCH_ROLE_ONLY = "role_only"
+QUERY_EXPERIMENT_BRANCH_ROLE_CONTEXT = "role_context"
+
+
+@dataclass(frozen=True)
+class QueryExperimentSettings:
+    name: str
+    as_of: date
+    rotation_slot: int
+    order: str = "alternating"
+
+
+def query_experiment_from_env(
+    env: Mapping[str, str] | None = None,
+) -> QueryExperimentSettings | None:
+    """Parse the opt-in, fixed-axis query experiment configuration."""
+
+    values = os.environ if env is None else env
+    name = str(values.get("JOB_INTEL_QUERY_EXPERIMENT", "") or "").strip().lower()
+    if not name:
+        return None
+    if name != QUERY_EXPERIMENT_ROLE_CONTEXT_AB:
+        raise ValueError(
+            "JOB_INTEL_QUERY_EXPERIMENT must be role_context_ab when enabled"
+        )
+
+    date_text = str(
+        values.get("JOB_INTEL_QUERY_EXPERIMENT_DATE", "") or ""
+    ).strip()
+    slot_text = str(
+        values.get("JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT", "") or ""
+    ).strip()
+    if not date_text or not slot_text:
+        raise ValueError(
+            "JOB_INTEL_QUERY_EXPERIMENT requires "
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE and "
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT"
+        )
+    try:
+        as_of = date.fromisoformat(date_text)
+    except ValueError as exc:
+        raise ValueError(
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE must be YYYY-MM-DD"
+        ) from exc
+    try:
+        rotation_slot = int(slot_text)
+    except ValueError as exc:
+        raise ValueError(
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT must be 0 or 1"
+        ) from exc
+    if rotation_slot not in {0, 1}:
+        raise ValueError(
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT must be 0 or 1"
+        )
+    return QueryExperimentSettings(
+        name=name,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+    )
 
 
 def _validate_query_mode(query_mode: str) -> str:
@@ -919,6 +980,7 @@ class LinkedInQueryPlanItem:
     query_mode: str = QUERY_MODE_ROLE_ONLY
     requested_geography: str | None = None
     resolved_geography: str | None = None
+    experiment_branch: str = QUERY_EXPERIMENT_BRANCH_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -937,6 +999,7 @@ class SourceQueryPlanItem:
     query_mode: str
     requested_geography: str
     resolved_geography: str | None = None
+    experiment_branch: str = QUERY_EXPERIMENT_BRANCH_DEFAULT
 
 
 def linkedin_geography_coverage() -> dict[str, Any]:
@@ -1124,6 +1187,182 @@ def rotating_source_query_plan(
             )
         )
     return plan
+
+
+def _validate_experiment_limit(limit: int) -> int:
+    if limit < 2 or limit % 2:
+        raise ValueError(
+            "query experiment budget must be an even positive number"
+        )
+    return limit // 2
+
+
+def _same_linkedin_pair(
+    left: LinkedInQueryPlanItem, right: LinkedInQueryPlanItem
+) -> bool:
+    return (
+        left.cell_id,
+        left.role_family,
+        left.location,
+        left.geo_id,
+        left.requested_geography,
+        left.resolved_geography,
+    ) == (
+        right.cell_id,
+        right.role_family,
+        right.location,
+        right.geo_id,
+        right.requested_geography,
+        right.resolved_geography,
+    )
+
+
+def rotating_linkedin_experiment_queries(
+    *,
+    limit: int = 18,
+    as_of: date,
+    rotation_slot: int,
+) -> list[LinkedInQueryPlanItem]:
+    """Interleave role-only and role-plus-context on identical pairs."""
+
+    half = _validate_experiment_limit(limit)
+    role_only = rotating_linkedin_queries(
+        limit=half,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_ONLY,
+    )
+    role_context = rotating_linkedin_queries(
+        limit=half,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_PLUS_CONTEXT,
+    )
+    if len(role_only) != len(role_context):
+        raise RuntimeError("query experiment arms produced different plan lengths")
+    plan: list[LinkedInQueryPlanItem] = []
+    for control, treatment in zip(role_only, role_context):
+        if not _same_linkedin_pair(control, treatment):
+            raise RuntimeError(
+                "query experiment arms are not aligned on the same role/cell pair"
+            )
+        plan.extend(
+            (
+                replace(
+                    control,
+                    experiment_branch=QUERY_EXPERIMENT_BRANCH_ROLE_ONLY,
+                ),
+                replace(
+                    treatment,
+                    experiment_branch=QUERY_EXPERIMENT_BRANCH_ROLE_CONTEXT,
+                ),
+            )
+        )
+    return plan
+
+
+def _same_source_pair(
+    left: SourceQueryPlanItem, right: SourceQueryPlanItem
+) -> bool:
+    return (
+        left.role_family,
+        left.geo_family,
+        left.requested_geography,
+        left.resolved_geography,
+    ) == (
+        right.role_family,
+        right.geo_family,
+        right.requested_geography,
+        right.resolved_geography,
+    )
+
+
+def rotating_source_experiment_query_plan(
+    source: str,
+    *,
+    limit: int = 6,
+    as_of: date,
+    rotation_slot: int,
+) -> list[SourceQueryPlanItem]:
+    """Interleave two query modes on identical role/geography pairs."""
+
+    half = _validate_experiment_limit(limit)
+    role_only = rotating_source_query_plan(
+        source,
+        limit=half,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_ONLY,
+    )
+    role_context = rotating_source_query_plan(
+        source,
+        limit=half,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_PLUS_CONTEXT,
+    )
+    if len(role_only) != len(role_context):
+        raise RuntimeError("query experiment arms produced different plan lengths")
+    plan: list[SourceQueryPlanItem] = []
+    for control, treatment in zip(role_only, role_context):
+        if not _same_source_pair(control, treatment):
+            raise RuntimeError(
+                "query experiment arms are not aligned on the same role/geography pair"
+            )
+        plan.extend(
+            (
+                replace(
+                    control,
+                    experiment_branch=QUERY_EXPERIMENT_BRANCH_ROLE_ONLY,
+                ),
+                replace(
+                    treatment,
+                    experiment_branch=QUERY_EXPERIMENT_BRANCH_ROLE_CONTEXT,
+                ),
+            )
+        )
+    return plan
+
+
+def linkedin_query_plan_for_run(
+    *,
+    limit: int = 18,
+    as_of: date | None = None,
+    rotation_slot: int | None = None,
+    experiment: QueryExperimentSettings | None = None,
+) -> list[LinkedInQueryPlanItem]:
+    if experiment is None:
+        return rotating_linkedin_queries(
+            limit=limit, as_of=as_of, rotation_slot=rotation_slot
+        )
+    return rotating_linkedin_experiment_queries(
+        limit=limit,
+        as_of=experiment.as_of,
+        rotation_slot=experiment.rotation_slot,
+    )
+
+
+def source_query_plan_for_run(
+    source: str,
+    *,
+    limit: int = 6,
+    as_of: date | None = None,
+    rotation_slot: int | None = None,
+    experiment: QueryExperimentSettings | None = None,
+) -> list[SourceQueryPlanItem]:
+    if experiment is None:
+        return rotating_source_query_plan(
+            source,
+            limit=limit,
+            as_of=as_of,
+            rotation_slot=rotation_slot,
+        )
+    return rotating_source_experiment_query_plan(
+        source,
+        limit=limit,
+        as_of=experiment.as_of,
+        rotation_slot=experiment.rotation_slot,
+    )
 
 
 def rotating_source_queries(

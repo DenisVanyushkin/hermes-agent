@@ -11,10 +11,11 @@ eight `mandate_role_families` in `config/product_search/search_contract.v1.yaml`
 Titles are discovery vocabulary only. Mandate evaluation remains a separate
 consumer and is not performed by query generation.
 
-Implementation references at this revision: `job_intel/sources.py:788-804`
-defines the role/context vocabularies; `job_intel/sources.py:942-960` resolves
-LinkedIn geography; `job_intel/sources.py:963-1074` builds the LinkedIn plan;
-and `job_intel/sources.py:1077-1145` builds the HeadHunter plan. The contract
+Implementation references at this revision: `job_intel/sources.py:788-797`
+defines the role/context vocabularies; `job_intel/sources.py:876-934` parses
+the opt-in experiment axes; `job_intel/sources.py:1005-1022` resolves
+LinkedIn geography; `job_intel/sources.py:1026-1137` builds the LinkedIn plan;
+and `job_intel/sources.py:1140-1189` builds the HeadHunter plan. The contract
 declares the eight families at
 `config/product_search/search_contract.v1.yaml:10-18`; its attempt rule
 requires query, cell, family, timestamp, and result state at `:49-53`.
@@ -22,9 +23,9 @@ The source capability explicitly marks LinkedIn and HeadHunter geography as
 `no_structured_country_cell` at
 `config/product_search/source_capabilities.v1.yaml:48-72`.
 The collector materializes planned and executed events at
-`job_intel/cli.py:171-206`, merges per-query trace data at `:209-247`, copies
-coverage into performance spans at `:268-298`, and records LinkedIn and
-HeadHunter events at `:623-850`.
+`job_intel/cli.py:174-211`, adds experiment metadata at `:214-261`, merges
+per-query trace data at `:264-302`, copies coverage into performance spans at
+`:303-333`, and records LinkedIn and HeadHunter events at `:679-888`.
 
 | Contract family | Product SoT §5.4 representative vocabulary | Query status |
 | --- | --- | --- |
@@ -56,6 +57,7 @@ an industry condition.
 | HeadHunter geography | mixed keyword family, no structured Search Contract cell | requested keyword family is recorded; resolved geography remains `unknown` | source capability + trace contract |
 | Request volume | LinkedIn 18; HeadHunter `JOB_INTEL_HEADHUNTER_QUERY_LIMIT` (default 6) | unchanged | source code |
 | Empty LinkedIn terms | the measured-empty guard exists | context variant continues to use the measured safe substitution; role-only emits no context term | fixture test |
+| Bounded AB mode | no runnable in-process comparison | opt-in `role_context_ab`: 9 role-only and 9 role-context LinkedIn items, and 3+3 HeadHunter items, interleaved on identical pairs | fixture + composition tests |
 
 The five unsupported LinkedIn cells in the pinned geography mapping are:
 `cee`, `east_asia_other`, `genuinely_location_independent`,
@@ -77,8 +79,14 @@ span metadata. Planned items have `outcome=planned`; attempted items replace
 that with the observed outcome:
 
 `query_id`, query text, source, `cell_id` where available, role family, optional
-context family, query mode, requested geography, resolved geography,
-`outcome` (`productive`, `empty`, or `error`), and `found_count`.
+context family, query mode, `experiment_branch`, requested geography, resolved
+geography, `outcome` (`productive`, `empty`, or `error`), and `found_count`.
+
+When the experiment is enabled, `experiment_branch` is `role_only` or
+`role_context` on every planned and executed event. The query-coverage metadata
+also records `name`, fixed `date`, fixed `rotation_slot`, `order`, and the
+branch sequence. With the flag absent, events use `experiment_branch=default`
+and the established plan builders are called unchanged.
 
 LinkedIn writes this under `search_trace.executed_query_cells` and includes
 `query_coverage` with requested, resolved, and unsupported cells. HeadHunter
@@ -95,15 +103,36 @@ planned event completed.
 
 ## Bounded live comparison for owner execution
 
-This slice does not execute a provider call. The following is the ready-to-run
-bounded experiment for a later owner-authorized run:
+This slice does not execute a provider call. The code now exposes the following
+ready-to-run bounded experiment for a later owner-authorized run. The only
+enabling flag is `JOB_INTEL_QUERY_EXPERIMENT`; the date and slot are required
+fixed axes once it is enabled. All variables below are one-shot process
+environment, not configuration-file changes.
+
+```sh
+export JOB_INTEL_QUERY_EXPERIMENT=role_context_ab
+export JOB_INTEL_QUERY_EXPERIMENT_DATE=2026-09-15
+export JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT=0
+sudo -u hermes env \
+  JOB_INTEL_QUERY_EXPERIMENT="$JOB_INTEL_QUERY_EXPERIMENT" \
+  JOB_INTEL_QUERY_EXPERIMENT_DATE="$JOB_INTEL_QUERY_EXPERIMENT_DATE" \
+  JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT="$JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT" \
+  /home/hermes/.hermes/scripts/job_intel_daily.sh
+```
+
+The normal production invocation must omit all three experiment variables. In
+that state the LinkedIn and HeadHunter plan sequences and request volume are
+unchanged. `ROTATION_SLOT=0` and `ROTATION_SLOT=1` are the two explicit daily
+slots; use the same frozen date and slot for both source plans in one run.
 
 1. Freeze one UTC date, one `rotation_slot`, one source interface, and the
-   current request budgets: 9 LinkedIn items in `role_only` and the same 9
-   `(cell_id, role_family)` items in `role_plus_context`; for HeadHunter use 3
-   items per arm under the existing limit of 6. Alternate arms in the frozen
-   order to keep time-of-day comparable. Do not execute unsupported LinkedIn
-   cells and do not reintroduce `AI products` or another measured-empty term.
+   current request budgets. The enabled plan itself produces 9 LinkedIn items
+   in `role_only` and the same 9 `(cell_id, role_family)` items in
+   `role_context`; for HeadHunter it produces 3 items per arm under the
+   existing limit of 6. The order is
+   `role_only, role_context, role_only, role_context, ...`. Do not execute
+   unsupported LinkedIn cells and do not reintroduce `AI products` or another
+   measured-empty term.
 2. Use the generated item’s location/geoId for LinkedIn and the generated
    query text for HeadHunter. Keep the existing per-query page limits and
    public/auth policy unchanged. Record every trace event, including empty and
@@ -115,8 +144,18 @@ bounded experiment for a later owner-authorized run:
 4. Compare arms on unique canonical candidates, candidates with real usable
    text, M2-R reference controls matched by requisition/canonical URL, title-only
    noise, source outcome counts, and per-arm latency. Report counts separately
-   for each geography and family. Do not run the evaluator as part of this
-   comparison and do not infer that a larger raw count is a better result.
+   for each geography, family, and `experiment_branch`. Do not run the
+   evaluator as part of this comparison and do not infer that a larger raw
+   count is a better result.
+
+For the post-run read-only check, extract `search_trace` for LinkedIn and
+`api_trace` for HeadHunter from the run record, then group
+`executed_query_cells` by `experiment_branch`. Verify 9/9 and 3/3 planned
+items per arm, identical pair keys, outcome counts, unique canonical URLs,
+usable-text count, M2-R control matches, title-only count, and elapsed time.
+Also record any unsupported or unresolved geography instead of treating it as
+an empty result. A run with a source-level `ok` but a missing branch or a
+partial plan is incomplete evidence.
 
 The existing measured-empty LinkedIn terms are excluded from the context arm
 by the already-proven substitution. Therefore this experiment compares
@@ -145,10 +184,23 @@ The accepted run-489 baseline is retained for the live comparison: LinkedIn
 planned search pages 23, pages fetched 43, found 560, 468 collected rows, and
 368 companies; it was a public run with zero login-wall and anti-bot events.
 Those are prior-run measurements, not a post-change runtime result. The
-post-change query plan and trace composition are verified by fixtures only.
+authoritative read-only source is
+`/var/lib/job-intel/state/job_intel.sqlite3`, selected by
+`JOB_INTEL_DB_PATH` in `/etc/job-intel/job-intel-shadow.env` (and the matching
+`job-intel.env`). On that database, run 489 exists with status `ok`, its
+`source_kpi_run` LinkedIn row reports `found_count=560`,
+`executive_detected_count=278`, `accepted_count=25`, and the
+`vacancy_observability` rows report 468 rows and 368 companies. The query-only
+receipt used `PRAGMA query_only=1`.
+
+There is a stale trap: the repository-local
+`/home/hermes/.hermes/hermes-agent/.hermes/job_intel/job_intel.sqlite3` is a
+separate old copy (six runs, latest run 6 in July, and no run 489). It must not
+be used for baseline or post-run claims. The post-change query plan and trace
+composition are verified by fixtures only; runtime remains `runtime not
+verified`.
 
 The source still has public-provider limitations: unsupported geography cells,
 provider pagination/anti-bot behavior, and no structured HeadHunter geography
 resolution. Query generation does not prove that a page was fetched, that a
-candidate has a mandate, or that the market is fully covered. Runtime status:
-`runtime not verified`.
+candidate has a mandate, or that the market is fully covered.

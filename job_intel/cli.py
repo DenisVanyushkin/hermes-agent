@@ -88,8 +88,11 @@ from .sources import (
     fetch_linkedin_vacancies,
     linkedin_geography_coverage,
     normalize_search_hit,
+    query_experiment_from_env,
     rotating_linkedin_queries,
+    rotating_linkedin_experiment_queries,
     rotating_source_query_plan,
+    rotating_source_experiment_query_plan,
     rotating_source_queries,
     search_duckduckgo,
     search_remoteok_jobs,
@@ -178,6 +181,9 @@ def _query_attempt_event(
 ) -> dict[str, Any]:
     """Make the durable-in-trace unit: query, cell, family, and outcome."""
 
+    experiment_branch = (
+        getattr(plan_item, "experiment_branch", "default") or "default"
+    )
     fields = (
         source,
         getattr(plan_item, "query", ""),
@@ -188,6 +194,8 @@ def _query_attempt_event(
         getattr(plan_item, "resolved_geography", "") or "",
         getattr(plan_item, "query_mode", "") or "",
     )
+    if experiment_branch != "default":
+        fields += (experiment_branch,)
     event: dict[str, Any] = {
         "query_id": sha256_text("|".join(fields))[:16],
         "source": source,
@@ -198,12 +206,63 @@ def _query_attempt_event(
         "query_mode": getattr(plan_item, "query_mode", None),
         "requested_geography": getattr(plan_item, "requested_geography", None),
         "resolved_geography": getattr(plan_item, "resolved_geography", None),
+        "experiment_branch": experiment_branch,
         "outcome": outcome,
         "found_count": max(0, int(found_count)),
     }
     if error:
         event["error"] = error
     return event
+
+
+def _query_experiment_trace_metadata(
+    experiment: Any,
+    plan: list[Any],
+) -> dict[str, Any]:
+    return {
+        "enabled": experiment is not None,
+        "name": getattr(experiment, "name", None),
+        "date": (
+            experiment.as_of.isoformat()
+            if experiment is not None
+            else None
+        ),
+        "rotation_slot": (
+            experiment.rotation_slot if experiment is not None else None
+        ),
+        "order": getattr(experiment, "order", None),
+        "branch_sequence": [
+            getattr(item, "experiment_branch", "default") or "default"
+            for item in plan
+        ],
+    }
+
+
+def _linkedin_plan_for_collection(experiment: Any) -> list[Any]:
+    if experiment is None:
+        # Keep the disabled path exactly on the established production builder.
+        return rotating_linkedin_queries(limit=18)
+    return rotating_linkedin_experiment_queries(
+        limit=18,
+        as_of=experiment.as_of,
+        rotation_slot=experiment.rotation_slot,
+    )
+
+
+def _headhunter_plan_for_collection(
+    *,
+    limit: int,
+    experiment: Any,
+) -> list[Any]:
+    if experiment is None:
+        # Keep the disabled path exactly on the established production builder.
+        return rotating_source_query_plan("headhunter", limit=limit)
+    return rotating_source_experiment_query_plan(
+        "headhunter",
+        limit=limit,
+        as_of=experiment.as_of,
+        rotation_slot=experiment.rotation_slot,
+    )
 
 
 def _aggregate_browser_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
@@ -549,6 +608,7 @@ def _collect_vacancies(
     vacancies: list[Vacancy] = []
     statuses: dict[str, dict[str, Any]] = {}
     enabled_sources = _enabled_sources()
+    query_experiment = query_experiment_from_env()
     ats_seed_urls: list[str] = []
     ats_seeds: dict[str, list[str]] = {}
 
@@ -620,13 +680,18 @@ def _collect_vacancies(
             linkedin_detail_budget_remaining = _linkedin_detail_page_budget_from_env()
             linkedin_detail_skip_urls = store.fetch_linkedin_enriched_urls()
             linkedin_detail_first_seen_at = store.fetch_linkedin_first_seen_at()
-            linkedin_plan = rotating_linkedin_queries(limit=18)
+            linkedin_plan = _linkedin_plan_for_collection(query_experiment)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
             geography_coverage = linkedin_geography_coverage()
             linkedin_trace: dict[str, Any] = {
                 "query_coverage": {
-                    "query_mode": "role_only",
+                    "query_mode": (
+                        "mixed" if query_experiment is not None else "role_only"
+                    ),
+                    "experiment": _query_experiment_trace_metadata(
+                        query_experiment, linkedin_plan
+                    ),
                     **geography_coverage,
                 },
                 "planned_query_cells": [
@@ -759,12 +824,20 @@ def _collect_vacancies(
         with (performance.span("source_acquisition.headhunter", parent_span_name="source_acquisition_total", source_name="headhunter") if performance else _null_span()) as perf_span:
             hh_query_limit = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_QUERY_LIMIT", "6")))
             hh_per_page = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_PER_PAGE", "10")))
-            hh_query_plan = rotating_source_query_plan("headhunter", limit=hh_query_limit)
+            hh_query_plan = _headhunter_plan_for_collection(
+                limit=hh_query_limit,
+                experiment=query_experiment,
+            )
             hh_hits = 0
             hh_errors: list[str] = []
             hh_trace: dict[str, Any] = {
                 "query_coverage": {
-                    "query_mode": "role_only",
+                    "query_mode": (
+                        "mixed" if query_experiment is not None else "role_only"
+                    ),
+                    "experiment": _query_experiment_trace_metadata(
+                        query_experiment, hh_query_plan
+                    ),
                     "requested_geographies": sorted(
                         {item.requested_geography for item in hh_query_plan}
                     ),
