@@ -60,6 +60,10 @@ from .performance import (
     performance_trigger_reason,
 )
 from .models import Evaluation, Vacancy
+from .selection_boundaries import (
+    assess_selection_boundaries,
+    boundary_rejection_evaluation,
+)
 from .runtime import (
     assert_runtime_contract,
     build_runtime_contract,
@@ -2257,6 +2261,7 @@ def run_daily() -> str:
                 return (url or "").strip().rstrip("/")
 
         seen_urls: dict[str, str] = {}
+        blacklisted_company_keys = store.fetch_company_blacklist()
         dual_score_enabled = _dual_score_rollout_enabled(store, run_id)
         dual_scores_by_url: dict[str, dict[str, object]] = {} if dual_score_enabled else {}
         scoring_model_version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
@@ -2296,12 +2301,26 @@ def run_daily() -> str:
             vacancy_key = canonical_vacancy_key(vacancy)
             vacancy_id = store.upsert_vacancy(vacancy, vacancy_key)
             classification = classify_vacancy(vacancy)
+            boundary_assessment = assess_selection_boundaries(
+                vacancy,
+                blacklisted_company_keys=blacklisted_company_keys,
+            )
+            classification["selection_boundary_reasons"] = list(
+                boundary_assessment.rejection_reasons
+            )
+            classification["selection_boundary_unknowns"] = list(
+                boundary_assessment.unknown_reasons
+            )
             normalization_ms += (perf_counter() - started) * 1000.0
 
             started = perf_counter()
             advertising_placement = _is_hh_advertising_vacancy(vacancy)
             detail_unavailable = _is_hh_detail_unavailable(vacancy)
-            if advertising_placement or detail_unavailable:
+            if boundary_assessment.rejection_reasons:
+                evaluation = boundary_rejection_evaluation(
+                    vacancy, boundary_assessment.rejection_reasons
+                )
+            elif advertising_placement or detail_unavailable:
                 evaluation = Evaluation(
                     score=0,
                     tier="reject",

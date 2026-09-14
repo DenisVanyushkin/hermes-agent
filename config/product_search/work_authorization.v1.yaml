@@ -1,0 +1,6 @@
+schema_version: 1.0.0
+authority_id: work-authorization-v1
+eligibility_semantics: explicit_job_evidence_required
+authorized_without_sponsorship_countries:
+  - Kazakhstan
+all_other_countries_without_explicit_sponsorship: no

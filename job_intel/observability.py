@@ -56,6 +56,17 @@ REJECTION_REASONS = (
     "onsite_requirement_mismatch",
     "weak_company_signal",
     "insufficient_data",
+    "gaming_experience_mismatch",
+    "adtech_ctv_experience_mismatch",
+    "technical_product_scope_mismatch",
+    "crypto_industry_mismatch",
+    "russia_employer_country",
+    "below_minimum_executive_scope",
+    "company_blacklist",
+    "work_authorization_mismatch",
+    "industry_context_unknown",
+    "work_authorization_unknown",
+    "executive_scope_unknown",
 )
 
 SOURCE_ALIASES = {
@@ -82,12 +93,23 @@ _REASON_TYPES: dict[str, tuple[str, str]] = {
     "business_development_role":    ("blocker", "medium"),
     "analyst_role":                 ("blocker", "medium"),
     "low_company_tier":             ("blocker", "medium"),
+    "gaming_experience_mismatch":   ("blocker", "high"),
+    "adtech_ctv_experience_mismatch": ("blocker", "high"),
+    "technical_product_scope_mismatch": ("blocker", "high"),
+    "crypto_industry_mismatch":     ("blocker", "high"),
+    "russia_employer_country":      ("blocker", "high"),
+    "below_minimum_executive_scope": ("blocker", "high"),
+    "company_blacklist":             ("blocker", "high"),
+    "work_authorization_mismatch":  ("blocker", "high"),
     # unknown — low
     "salary_unknown":               ("unknown", "low"),
     "pnl_unknown":                  ("unknown", "low"),
     "company_score_unknown":        ("unknown", "low"),
     "hiring_likelihood_unknown":    ("unknown", "low"),
     "location_unknown":             ("unknown", "low"),
+    "industry_context_unknown":     ("unknown", "low"),
+    "work_authorization_unknown":   ("unknown", "low"),
+    "executive_scope_unknown":      ("unknown", "low"),
     # warning — low
     "weak_company_signal":          ("warning", "low"),
     "low_confidence":               ("warning", "low"),
@@ -353,12 +375,27 @@ def rejection_reasons_for(
     *,
     duplicate: bool,
 ) -> list[str]:
-    if evaluation.recommendation not in {"near_miss", "reject"} and not duplicate:
+    boundary_reasons = [
+        str(reason)
+        for reason in classification.get("selection_boundary_reasons", ())
+        if str(reason)
+    ]
+    boundary_unknowns = [
+        str(reason)
+        for reason in classification.get("selection_boundary_unknowns", ())
+        if str(reason)
+    ]
+    if (
+        evaluation.recommendation not in {"near_miss", "reject"}
+        and not duplicate
+        and not boundary_reasons
+        and not boundary_unknowns
+    ):
         return []
 
     text = _text(vacancy)
     title = (vacancy.title or "").lower()
-    reasons: list[str] = []
+    reasons: list[str] = boundary_reasons + boundary_unknowns
 
     if duplicate:
         reasons.append("duplicate")
@@ -1005,6 +1042,12 @@ def record_daily_observability(
             canonical_url=canonical_url,
             active_scoring_version=active_scoring_version,
             active_recommendation_version=active_recommendation_version,
+            selection_boundary_reasons=list(
+                classification.get("selection_boundary_reasons", ())
+            ),
+            selection_boundary_unknowns=list(
+                classification.get("selection_boundary_unknowns", ())
+            ),
         )
         reasons = rejection_reasons_for(vacancy, evaluation, classification, duplicate=duplicate)
         top_reason = reasons[0] if reasons else None

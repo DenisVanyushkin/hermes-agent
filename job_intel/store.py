@@ -225,6 +225,8 @@ CREATE TABLE IF NOT EXISTS vacancy_observability (
     recommendation TEXT,
     active_recommendation_version TEXT,
     canonical_url TEXT,
+    selection_boundary_reasons_json TEXT,
+    selection_boundary_unknowns_json TEXT,
     UNIQUE(run_id, vacancy_key, url),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
@@ -809,6 +811,8 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_observability", "canonical_company_key", "TEXT")
             self._ensure_column(conn, "vacancy_observability", "active_scoring_version", "TEXT")
             self._ensure_column(conn, "vacancy_observability", "active_recommendation_version", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "selection_boundary_reasons_json", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "selection_boundary_unknowns_json", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "reason_type", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "severity", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_summary", "recommendation", "TEXT")
@@ -1298,6 +1302,8 @@ PRAGMA foreign_keys=ON;
         canonical_url: str | None = None,
         active_scoring_version: str | None = None,
         active_recommendation_version: str | None = None,
+        selection_boundary_reasons: list[str] | None = None,
+        selection_boundary_unknowns: list[str] | None = None,
     ) -> None:
         source_key = canonical_source_key(source)
         company_key = canonical_company_key(company)
@@ -1308,8 +1314,9 @@ PRAGMA foreign_keys=ON;
                     run_id, vacancy_key, source, source_key, role_bucket, geo_bucket, industry_bucket,
                     executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at,
                     company, canonical_company_key, title, location, url,
-                    score_v1, score_v2, active_score, active_scoring_version, recommendation, active_recommendation_version, canonical_url
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    score_v1, score_v2, active_score, active_scoring_version, recommendation, active_recommendation_version, canonical_url,
+                    selection_boundary_reasons_json, selection_boundary_unknowns_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key, url) DO UPDATE SET
                     source=excluded.source,
                     source_key=excluded.source_key,
@@ -1335,7 +1342,9 @@ PRAGMA foreign_keys=ON;
                     active_scoring_version=excluded.active_scoring_version,
                     recommendation=excluded.recommendation,
                     active_recommendation_version=excluded.active_recommendation_version,
-                    canonical_url=excluded.canonical_url
+                    canonical_url=excluded.canonical_url,
+                    selection_boundary_reasons_json=excluded.selection_boundary_reasons_json,
+                    selection_boundary_unknowns_json=excluded.selection_boundary_unknowns_json
                 """,
                 (
                     run_id,
@@ -1365,6 +1374,8 @@ PRAGMA foreign_keys=ON;
                     recommendation,
                     active_recommendation_version,
                     canonical_url,
+                    json.dumps(selection_boundary_reasons or [], ensure_ascii=False),
+                    json.dumps(selection_boundary_unknowns or [], ensure_ascii=False),
                 ),
             )
 
@@ -3012,6 +3023,30 @@ PRAGMA foreign_keys=ON;
         with self.connect(read_only=True) as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._feedback_event_row_to_dict(row) for row in rows]
+
+    def fetch_company_blacklist(self) -> set[str]:
+        """Return normalized companies from classified negative feedback.
+
+        ``applies_to_company`` is the feedback classifier's explicit scope;
+        no free-text or role-level feedback is promoted to a company gate.
+        """
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT company
+                FROM feedback_events
+                WHERE polarity = 'negative'
+                  AND status = 'classified'
+                  AND applies_to_company = 1
+                  AND company IS NOT NULL
+                  AND trim(company) <> ''
+                """
+            ).fetchall()
+        return {
+            canonical_company_key(str(row[0]))
+            for row in rows
+            if canonical_company_key(str(row[0]))
+        }
 
     # --- Scoring calibration proposals ------------------------------------
 
