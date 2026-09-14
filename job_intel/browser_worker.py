@@ -336,6 +336,7 @@ def _run_linkedin(
     allow_unauthenticated: bool = False,
     detail_page_budget: int | None = None,
     detail_skip_urls: set[str] | None = None,
+    detail_first_seen_at: dict[str, str] | None = None,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -352,6 +353,7 @@ def _run_linkedin(
             allow_unauthenticated=allow_unauthenticated,
             detail_page_budget=detail_page_budget,
             detail_skip_urls=detail_skip_urls,
+            detail_first_seen_at=detail_first_seen_at,
         )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
@@ -390,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--allow-unauthenticated", action="store_true")
     linkedin.add_argument("--detail-page-budget", type=int)
     linkedin.add_argument("--detail-skip-urls-json")
+    linkedin.add_argument("--detail-first-seen-at-json")
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -433,6 +436,15 @@ def main(argv: list[str] | None = None) -> int:
                         if isinstance(url, str)
                     }
                     if args.detail_skip_urls_json
+                    else None
+                ),
+                detail_first_seen_at=(
+                    {
+                        str(url): str(timestamp)
+                        for url, timestamp in json.loads(args.detail_first_seen_at_json).items()
+                        if isinstance(url, str) and isinstance(timestamp, str)
+                    }
+                    if args.detail_first_seen_at_json
                     else None
                 ),
             )

@@ -20,6 +20,7 @@ monkeypatched `fetch_linkedin_vacancies` and then called it itself, so deleting
 from __future__ import annotations
 
 from datetime import date
+import json
 
 import pytest
 
@@ -368,3 +369,106 @@ def test_daily_linkedin_passes_persisted_enrichment_urls_to_worker(
     assert seen[0]["detail_skip_urls"] == {
         "https://www.linkedin.com/jobs/view/42"
     }
+
+
+def test_daily_linkedin_passes_persisted_first_seen_times_to_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    seen: list[dict[str, object]] = []
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="uk_gm",
+            location="United Kingdom",
+            geo_id=None,
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+    monkeypatch.setattr(
+        cli.JobIntelStore,
+        "fetch_linkedin_first_seen_at",
+        lambda _store: {
+            "https://www.linkedin.com/jobs/view/42": "2026-09-13T10:00:00+00:00"
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "fetch_linkedin_vacancies",
+        lambda query, **kwargs: seen.append({"query": query, **kwargs}) or [],
+    )
+
+    cli._collect_vacancies(store=_store(tmp_path))
+
+    assert seen[0]["detail_first_seen_at"] == {
+        "https://www.linkedin.com/jobs/view/42": "2026-09-13T10:00:00+00:00"
+    }
+
+
+def test_linkedin_detail_trace_reaches_kpi_health_and_performance_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="uk_gm",
+            location="United Kingdom",
+            geo_id=None,
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    def fake_fetch(query, **_kwargs):
+        cli.fetch_linkedin_vacancies.last_trace = {
+            "detail_pages_planned": 19,
+            "detail_pages_opened": 20,
+            "detail_pages_filled": 19,
+            "detail_pages_blocked": 0,
+            "detail_pages_errors": 1,
+            "detail_description_lengths": [6_000, 6_500],
+            "pages_fetched": 1,
+            "vacancies_extracted": 2,
+        }
+        cli.fetch_linkedin_vacancies.last_health = {
+            "pages_fetched": 1,
+            "detail_pages_opened": 20,
+        }
+        return []
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fake_fetch)
+    from job_intel.performance import RunPerformanceRecorder
+
+    performance = RunPerformanceRecorder(1)
+    result = cli._collect_vacancies(store=_store(tmp_path), performance=performance)
+    status = result.source_statuses["linkedin"]
+    health = status["session_health"]
+    assert {
+        key: health[key]
+        for key in (
+            "detail_pages_planned",
+            "detail_pages_opened",
+            "detail_pages_filled",
+            "detail_pages_blocked",
+            "detail_pages_errors",
+            "detail_description_median_chars",
+        )
+    } == {
+        "detail_pages_planned": 19,
+        "detail_pages_opened": 20,
+        "detail_pages_filled": 19,
+        "detail_pages_blocked": 0,
+        "detail_pages_errors": 1,
+        "detail_description_median_chars": 6_250,
+    }
+
+    span = next(
+        item for item in performance.spans() if item.span_name == "linkedin.search_pages"
+    )
+    metadata = json.loads(span.metadata_json or "{}")
+    assert metadata["detail_pages_planned"] == 19
+    assert metadata["detail_pages_opened"] == 20
+    assert metadata["detail_pages_filled"] == 19
+    assert metadata["detail_pages_blocked"] == 0
+    assert metadata["detail_pages_errors"] == 1
+    assert metadata["detail_description_median_chars"] == 6_250

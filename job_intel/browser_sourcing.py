@@ -2301,6 +2301,7 @@ class BrowserSourceClient:
         *,
         observed_at: str | None = None,
         detail_page_budget: int | None = None,
+        first_seen_at_by_url: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fill title-qualified rows from public detail pages under a hard budget."""
         if detail_page_budget is not None:
@@ -2322,6 +2323,29 @@ class BrowserSourceClient:
             and _linkedin_detail_identity(vacancy.url)
             not in self._linkedin_detail_enriched_urls
         ]
+
+        first_seen = first_seen_at_by_url or {}
+
+        def detail_priority(vacancy: Vacancy) -> tuple[int, float, str]:
+            identity = _linkedin_detail_identity(vacancy.url)
+            if identity not in first_seen:
+                # The caller loaded the map immediately before this run. A
+                # missing identity is therefore a candidate first seen in the
+                # current run and must win over persisted candidates.
+                return (0, 0.0, identity)
+            raw_timestamp = str(first_seen.get(identity) or "").replace("Z", "+00:00")
+            try:
+                timestamp = datetime.fromisoformat(raw_timestamp)
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                timestamp_value = timestamp.timestamp()
+            except ValueError:
+                # A malformed persisted timestamp is still known old data; it
+                # must not be promoted to current-run priority.
+                timestamp_value = float("-inf")
+            return (1, -timestamp_value, identity)
+
+        eligible.sort(key=detail_priority)
         planned = min(len(eligible), budget)
         stats: dict[str, Any] = {
             "planned": planned,
@@ -2444,6 +2468,7 @@ class BrowserSourceClient:
         allow_unauthenticated: bool = False,
         detail_page_budget: int | None = None,
         detail_skip_urls: set[str] | None = None,
+        detail_first_seen_at: Mapping[str, str] | None = None,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -2749,7 +2774,8 @@ class BrowserSourceClient:
                 {"planned": 0, "opened": 0, "filled": 0, "blocked": 0, "errors": 0, "description_lengths": [], "stop_reason": ""}
                 if plan is not None
                 else self._enrich_linkedin_vacancies(
-                    page_vacancies
+                    page_vacancies,
+                    first_seen_at_by_url=detail_first_seen_at,
                 )
             )
             trace["detail_pages_planned"] += int(detail_stats["planned"])

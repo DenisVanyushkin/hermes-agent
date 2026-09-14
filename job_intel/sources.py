@@ -510,6 +510,7 @@ def fetch_linkedin_vacancies(
     allow_unauthenticated: bool = False,
     detail_page_budget: int | None = None,
     detail_skip_urls: set[str] | None = None,
+    detail_first_seen_at: Mapping[str, str] | None = None,
 ) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
@@ -537,6 +538,13 @@ def fetch_linkedin_vacancies(
         if detail_skip_urls:
             worker_args.extend(
                 ["--detail-skip-urls-json", json.dumps(sorted(detail_skip_urls))]
+            )
+        if detail_first_seen_at:
+            worker_args.extend(
+                [
+                    "--detail-first-seen-at-json",
+                    json.dumps(dict(sorted(detail_first_seen_at.items())), sort_keys=True),
+                ]
             )
         if execution_plan is not None:
             worker_args.extend(

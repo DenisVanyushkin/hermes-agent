@@ -1207,6 +1207,20 @@ PRAGMA foreign_keys=ON;
                 enriched.add(canonical_url)
         return enriched
 
+    def fetch_linkedin_first_seen_at(self) -> dict[str, str]:
+        """Return persisted first-seen times keyed by canonical LinkedIn URL."""
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT url, first_seen_at FROM vacancies WHERE source = 'linkedin'"
+            ).fetchall()
+        first_seen: dict[str, str] = {}
+        for row in rows:
+            canonical_url = canonical_job_url(row[0], "linkedin")
+            timestamp = row[1]
+            if canonical_url and isinstance(timestamp, str) and timestamp:
+                first_seen[canonical_url] = timestamp
+        return first_seen
+
     def set_vacancy_status(self, vacancy_id: int, status: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE vacancies SET status = ? WHERE id = ?", (status, vacancy_id))

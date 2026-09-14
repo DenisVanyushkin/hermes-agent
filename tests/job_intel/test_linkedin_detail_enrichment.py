@@ -163,6 +163,19 @@ def test_upsert_preserves_linkedin_enrichment_when_plain_listing_repeats(tmp_pat
     }
 
 
+def test_store_returns_persisted_linkedin_first_seen_times(tmp_path) -> None:
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    vacancy = _vacancy("VP Product", number=81).model_copy(
+        update={"scraped_at": "2026-09-13T10:00:00+00:00"}
+    )
+    store.upsert_vacancy(vacancy, "linkedin:https://www.linkedin.com/jobs/view/81")
+
+    assert store.fetch_linkedin_first_seen_at() == {
+        "https://www.linkedin.com/jobs/view/81": "2026-09-13T10:00:00+00:00"
+    }
+
+
 def test_fresh_linkedin_enrichment_replaces_previous_text_and_provenance(tmp_path) -> None:
     store = JobIntelStore(tmp_path / "job-intel.sqlite3")
     store.bootstrap()
@@ -241,6 +254,38 @@ def test_detail_enrichment_honours_budget_and_delay(monkeypatch) -> None:
     assert stats["filled"] == 2
     assert len(urls) == 2
     assert sleeps == [0.017]
+
+
+def test_detail_enrichment_prioritizes_current_run_then_newest_existing(
+    monkeypatch,
+) -> None:
+    html = (FIXTURES / "detail-cybertrend.html").read_text(encoding="utf-8")
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    fresh = _vacancy("VP Product", 11)
+    old_new = _vacancy("Chief Growth Officer", 12)
+    old_old = _vacancy("GM Market", 13)
+    requested: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        requested.append(url)
+        client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
+        return html
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr("job_intel.browser_sourcing.time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_DELAY_MS", "0")
+
+    stats = client._enrich_linkedin_vacancies(
+        [old_old, fresh, old_new],
+        detail_page_budget=2,
+        first_seen_at_by_url={
+            old_new.url: "2026-09-13T10:00:00+00:00",
+            old_old.url: "2026-09-10T10:00:00+00:00",
+        },
+    )
+
+    assert stats["opened"] == 2
+    assert requested == [fresh.url, old_new.url]
 
 
 @pytest.mark.parametrize(

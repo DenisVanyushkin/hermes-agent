@@ -218,6 +218,11 @@ def _emit_browser_trace_spans(
     shared_metadata = {
         "pages_fetched": trace.get("pages_fetched"),
         "detail_pages_opened": trace.get("detail_pages_opened"),
+        "detail_pages_planned": trace.get("detail_pages_planned"),
+        "detail_pages_filled": trace.get("detail_pages_filled"),
+        "detail_pages_blocked": trace.get("detail_pages_blocked"),
+        "detail_pages_errors": trace.get("detail_pages_errors"),
+        "detail_description_median_chars": trace.get("detail_description_median_chars"),
         "vacancies_extracted": trace.get("vacancies_extracted"),
         "login_wall_hits": trace.get("login_wall_hits"),
         "auth_redirects": trace.get("auth_redirects"),
@@ -561,6 +566,7 @@ def _collect_vacancies(
             )
             linkedin_detail_budget_remaining = _linkedin_detail_page_budget_from_env()
             linkedin_detail_skip_urls = store.fetch_linkedin_enriched_urls()
+            linkedin_detail_first_seen_at = store.fetch_linkedin_first_seen_at()
             linkedin_plan = rotating_linkedin_queries(limit=18)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
@@ -587,6 +593,7 @@ def _collect_vacancies(
                         allow_unauthenticated=linkedin_allow_unauthenticated,
                         detail_page_budget=linkedin_detail_budget_remaining,
                         detail_skip_urls=linkedin_detail_skip_urls,
+                        detail_first_seen_at=linkedin_detail_first_seen_at,
                     )
                     linkedin_hits += len(results)
                     vacancies.extend(results)
@@ -620,15 +627,6 @@ def _collect_vacancies(
                 linkedin_health = dict(linkedin_health)
             else:
                 linkedin_health = {}
-            for key in (
-                "detail_pages_planned",
-                "detail_pages_filled",
-                "detail_pages_blocked",
-                "detail_pages_errors",
-                "detail_description_median_chars",
-            ):
-                if key in linkedin_trace:
-                    linkedin_health[key] = linkedin_trace[key]
             lengths = sorted(
                 int(item)
                 for item in linkedin_trace.get("detail_description_lengths", [])
@@ -643,9 +641,16 @@ def _collect_vacancies(
                 )
             else:
                 linkedin_trace["detail_description_median_chars"] = 0
-            linkedin_health["detail_description_median_chars"] = linkedin_trace[
-                "detail_description_median_chars"
-            ]
+            for key in (
+                "detail_pages_planned",
+                "detail_pages_opened",
+                "detail_pages_filled",
+                "detail_pages_blocked",
+                "detail_pages_errors",
+                "detail_description_median_chars",
+            ):
+                if key in linkedin_trace:
+                    linkedin_health[key] = linkedin_trace[key]
             if linkedin_trace:
                 linkedin_source_status["search_trace"] = linkedin_trace
             if linkedin_health:
