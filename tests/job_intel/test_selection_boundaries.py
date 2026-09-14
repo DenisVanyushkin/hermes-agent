@@ -14,6 +14,7 @@ from job_intel.selection_boundaries import (
     REASON_TECHNICAL_PRODUCT,
     REASON_WORK_AUTHORIZATION,
     assess_selection_boundaries,
+    has_real_job_text,
 )
 from job_intel.store import JobIntelStore
 
@@ -32,15 +33,19 @@ def vacancy(**overrides: object) -> Vacancy:
     return Vacancy(**values)
 
 
+def evidence(prefix: str) -> str:
+    return prefix + " " + ("The role works with stakeholders and supports delivery. " * 5)
+
+
 def test_each_owner_boundary_is_named_and_independent() -> None:
     cases = (
-        ("gaming", {"company": "Tripledot Studios", "description": "A mobile games studio building live game products."}, REASON_GAMING),
-        ("adtech", {"company": "Ogury", "description": "Build a scalable CTV adtech business for advertisers and publishers."}, REASON_ADTECH_CTV),
-        ("technical", {"company": "CHAMP Cargosystems", "description": "Own an IT product organisation, APIs, platform architecture, and technical service delivery."}, REASON_TECHNICAL_PRODUCT),
-        ("crypto", {"company": "OKX", "description": "Lead product strategy for a crypto exchange and digital assets business."}, REASON_CRYPTO),
+        ("gaming", {"company": "Tripledot Studios", "description": evidence("A mobile games studio building live game products.")}, REASON_GAMING),
+        ("adtech", {"company": "Ogury", "description": evidence("Build a scalable CTV adtech business for advertisers and publishers.")}, REASON_ADTECH_CTV),
+        ("technical", {"company": "CHAMP Cargosystems", "description": evidence("Own an IT product organisation, APIs, platform architecture, and technical service delivery.")}, REASON_TECHNICAL_PRODUCT),
+        ("crypto", {"company": "OKX", "description": evidence("Lead product strategy for a crypto exchange and digital assets business.")}, REASON_CRYPTO),
         ("russia", {"company": "Panda Gifts", "location": "Moscow, Russia"}, REASON_RUSSIA),
-        ("scope", {"title": "Product Lead", "description": "Own a single product backlog and coordinate delivery."}, REASON_BELOW_EXECUTIVE_SCOPE),
-        ("authorization", {"company": "Hive", "location": "Canada (Remote); USA (Remote)", "description": "You must have legal work authorization in the country where you reside and work; we cannot hire in Quebec."}, REASON_WORK_AUTHORIZATION),
+        ("scope", {"title": "Product Lead", "description": evidence("Own a single product backlog and coordinate delivery.")}, REASON_BELOW_EXECUTIVE_SCOPE),
+        ("authorization", {"company": "Hive", "location": "Canada (Remote); USA (Remote)", "description": evidence("You must have legal work authorization in the country where you reside and work; we cannot hire in Quebec.")}, REASON_WORK_AUTHORIZATION),
     )
     for label, fields, expected in cases:
         assessment = assess_selection_boundaries(vacancy(**fields))
@@ -191,3 +196,44 @@ def test_boundary_reasons_are_persisted_as_rejection_events(tmp_path) -> None:
         ]
     assert REASON_CRYPTO in reasons
     assert json.loads(observability[0]) == [REASON_CRYPTO]
+
+
+def test_title_only_description_is_unknown_for_scope_and_industry() -> None:
+    listing = vacancy(
+        company="Example",
+        title="Product Lead - Adtech",
+        description="Product Lead - Adtech",
+    )
+    assessment = assess_selection_boundaries(listing)
+    assert REASON_BELOW_EXECUTIVE_SCOPE not in assessment.rejection_reasons
+    assert REASON_ADTECH_CTV not in assessment.rejection_reasons
+    assert "executive_scope_unknown" in assessment.unknown_reasons
+    assert "industry_context_unknown" in assessment.unknown_reasons
+
+    game_listing = vacancy(
+        company="Voodoo",
+        title="Product Lead - Portfolio Midcore Games",
+        description="Product Lead - Portfolio Midcore Games",
+    )
+    game_assessment = assess_selection_boundaries(game_listing)
+    assert REASON_BELOW_EXECUTIVE_SCOPE not in game_assessment.rejection_reasons
+    assert REASON_GAMING not in game_assessment.rejection_reasons
+    assert "executive_scope_unknown" in game_assessment.unknown_reasons
+    assert "industry_context_unknown" in game_assessment.unknown_reasons
+
+
+def test_detail_enrichment_makes_short_listing_text_real() -> None:
+    item = vacancy(
+        company="Example",
+        title="Product Lead",
+        description="Product Lead",
+        metadata={
+            "linkedin_detail_enrichment": {
+                "source": "public_linkedin_job_detail",
+                "observed_at": "2026-09-14T10:00:00+00:00",
+            }
+        },
+    )
+    assert has_real_job_text(item)
+    assessment = assess_selection_boundaries(item)
+    assert "executive_scope_unknown" not in assessment.unknown_reasons

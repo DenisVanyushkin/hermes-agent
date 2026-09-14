@@ -34,6 +34,7 @@ AUTHORITY_PATH = (
     Path(__file__).resolve().parents[1]
     / "config/product_search/work_authorization.v1.yaml"
 )
+MIN_REAL_DESCRIPTION_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -61,8 +62,29 @@ def _industry_context(vacancy: Vacancy) -> str:
     return _normalized(" ".join((vacancy.company or "", vacancy.description or "")))
 
 
+def has_real_job_text(vacancy: Vacancy) -> bool:
+    """Return whether description evidence is more than a listing title.
+
+    Source adapters commonly use the title as a placeholder when detail text
+    was not fetched.  A conservative length floor separates that placeholder
+    from a usable description; persisted LinkedIn detail provenance is an
+    explicit exception because it records a successful detail observation.
+    Short or title-derived text is therefore insufficient evidence, not a
+    rejection signal.
+    """
+    metadata = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
+    if isinstance(metadata.get("linkedin_detail_enrichment"), dict):
+        return True
+    description = _normalized(vacancy.description)
+    title = _normalized(vacancy.title)
+    return bool(
+        len(description) >= MIN_REAL_DESCRIPTION_CHARS
+        and description not in title
+    )
+
+
 def _industry_context_is_available(vacancy: Vacancy) -> bool:
-    if (vacancy.description or "").strip():
+    if has_real_job_text(vacancy):
         return True
     # A company identity can itself be evidence for a narrow industry, but an
     # arbitrary company name must not turn title-only text into a rejection.
@@ -189,7 +211,7 @@ def _is_below_minimum_scope(vacancy: Vacancy) -> bool | None:
         return False
     if not re.search(r"\b(?:growth )?product lead\b|\blead product manager\b", title):
         return False
-    if not (vacancy.description or "").strip():
+    if not has_real_job_text(vacancy):
         return None
     return not _has_material_executive_scope(vacancy)
 
@@ -230,6 +252,8 @@ def _work_authorization_state(vacancy: Vacancy) -> str:
     authorized = _authorized_without_sponsorship(str(AUTHORITY_PATH))
     if country in authorized:
         return "authorized"
+    if not has_real_job_text(vacancy):
+        return "unknown"
     text = _normalized(" ".join((vacancy.location or "", vacancy.description or "")))
     explicit_local_rights = bool(
         re.search(
