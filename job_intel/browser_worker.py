@@ -335,6 +335,7 @@ def _run_linkedin(
     cell_id: str | None = None,
     allow_unauthenticated: bool = False,
     detail_page_budget: int | None = None,
+    detail_skip_urls: set[str] | None = None,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -350,6 +351,7 @@ def _run_linkedin(
             cell_id=cell_id,
             allow_unauthenticated=allow_unauthenticated,
             detail_page_budget=detail_page_budget,
+            detail_skip_urls=detail_skip_urls,
         )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
@@ -387,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--cell-id")
     linkedin.add_argument("--allow-unauthenticated", action="store_true")
     linkedin.add_argument("--detail-page-budget", type=int)
+    linkedin.add_argument("--detail-skip-urls-json")
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -423,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
                 cell_id=args.cell_id,
                 allow_unauthenticated=args.allow_unauthenticated,
                 detail_page_budget=args.detail_page_budget,
+                detail_skip_urls=(
+                    {
+                        str(url)
+                        for url in json.loads(args.detail_skip_urls_json)
+                        if isinstance(url, str)
+                    }
+                    if args.detail_skip_urls_json
+                    else None
+                ),
             )
         else:
             vacancies, session_health, search_trace = _probe(args.source)

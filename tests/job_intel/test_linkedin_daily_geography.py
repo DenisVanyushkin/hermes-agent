@@ -336,3 +336,35 @@ def test_daily_linkedin_detail_budget_is_shared_across_queries(
     cli._collect_vacancies(store=_store(tmp_path))
 
     assert [call["detail_page_budget"] for call in seen] == [3, 2]
+
+
+def test_daily_linkedin_passes_persisted_enrichment_urls_to_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    seen: list[dict[str, object]] = []
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="uk_gm",
+            location="United Kingdom",
+            geo_id=None,
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+    monkeypatch.setattr(
+        cli.JobIntelStore,
+        "fetch_linkedin_enriched_urls",
+        lambda _store: {"https://www.linkedin.com/jobs/view/42"},
+    )
+    monkeypatch.setattr(
+        cli,
+        "fetch_linkedin_vacancies",
+        lambda query, **kwargs: seen.append({"query": query, **kwargs}) or [],
+    )
+
+    cli._collect_vacancies(store=_store(tmp_path))
+
+    assert seen[0]["detail_skip_urls"] == {
+        "https://www.linkedin.com/jobs/view/42"
+    }

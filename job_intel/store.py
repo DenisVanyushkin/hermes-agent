@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .dedup import canonical_job_url
 from .models import Evaluation, Vacancy
 from .runtime import capture_runtime_provenance, parse_iso_datetime
 
@@ -1078,7 +1079,11 @@ PRAGMA foreign_keys=ON;
     def upsert_vacancy(self, vacancy: Vacancy, vacancy_key: str) -> int:
         now = vacancy.scraped_at or datetime.now(timezone.utc).isoformat()
         with self.connect() as conn:
-            row = conn.execute("SELECT id, repost_count, description FROM vacancies WHERE vacancy_key = ?", (vacancy_key,)).fetchone()
+            row = conn.execute(
+                "SELECT id, repost_count, description, metadata_json FROM vacancies "
+                "WHERE vacancy_key = ?",
+                (vacancy_key,),
+            ).fetchone()
             if row:
                 repost_count = int(row[1]) + 1
                 # A listing that carries no description must not erase text we
@@ -1099,11 +1104,33 @@ PRAGMA foreign_keys=ON;
                 # so an absent description is still *stored* as absent.
                 incoming_description = vacancy.description or ""
                 stored_description = row[2] or ""
+                try:
+                    stored_metadata = json.loads(row[3] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    stored_metadata = {}
+                if not isinstance(stored_metadata, dict):
+                    stored_metadata = {}
+                incoming_metadata = dict(vacancy.metadata or {})
+                stored_detail = stored_metadata.get("linkedin_detail_enrichment")
+                incoming_detail = incoming_metadata.get("linkedin_detail_enrichment")
+                preserve_linkedin_detail = (
+                    (vacancy.source or "").strip().lower() == "linkedin"
+                    and isinstance(stored_detail, dict)
+                    and not isinstance(incoming_detail, dict)
+                )
                 description = (
                     stored_description
                     if not incoming_description.strip() and stored_description.strip()
                     else incoming_description
                 )
+                metadata = incoming_metadata
+                if preserve_linkedin_detail:
+                    description = stored_description
+                    metadata = {
+                        **stored_metadata,
+                        **incoming_metadata,
+                        "linkedin_detail_enrichment": stored_detail,
+                    }
                 conn.execute(
                     """
                     UPDATE vacancies
@@ -1124,7 +1151,7 @@ PRAGMA foreign_keys=ON;
                         vacancy.scraped_at,
                         vacancy.salary,
                         vacancy.company_url,
-                        json.dumps(vacancy.metadata, ensure_ascii=False),
+                        json.dumps(metadata, ensure_ascii=False),
                         now,
                         repost_count,
                         vacancy_key,
@@ -1157,6 +1184,28 @@ PRAGMA foreign_keys=ON;
                 ),
             )
             return int(cur.lastrowid)
+
+    def fetch_linkedin_enriched_urls(self) -> set[str]:
+        """Return canonical LinkedIn URLs with persisted detail provenance."""
+        with self.connect(read_only=True) as conn:
+            rows = conn.execute(
+                "SELECT url, metadata_json FROM vacancies WHERE source = 'linkedin' "
+                "AND metadata_json LIKE '%linkedin_detail_enrichment%'"
+            ).fetchall()
+        enriched: set[str] = set()
+        for row in rows:
+            try:
+                metadata = json.loads(row[1] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(metadata, dict) or not isinstance(
+                metadata.get("linkedin_detail_enrichment"), dict
+            ):
+                continue
+            canonical_url = canonical_job_url(row[0], "linkedin")
+            if canonical_url:
+                enriched.add(canonical_url)
+        return enriched
 
     def set_vacancy_status(self, vacancy_id: int, status: str) -> None:
         with self.connect() as conn:

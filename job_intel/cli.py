@@ -560,6 +560,7 @@ def _collect_vacancies(
                 in {"1", "true", "yes", "on"}
             )
             linkedin_detail_budget_remaining = _linkedin_detail_page_budget_from_env()
+            linkedin_detail_skip_urls = store.fetch_linkedin_enriched_urls()
             linkedin_plan = rotating_linkedin_queries(limit=18)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
@@ -585,6 +586,7 @@ def _collect_vacancies(
                         cell_id=item.cell_id,
                         allow_unauthenticated=linkedin_allow_unauthenticated,
                         detail_page_budget=linkedin_detail_budget_remaining,
+                        detail_skip_urls=linkedin_detail_skip_urls,
                     )
                     linkedin_hits += len(results)
                     vacancies.extend(results)

@@ -59,6 +59,7 @@ from typing import Any, Literal, Mapping, get_args
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import urlopen
 
+from .dedup import canonical_job_url
 from .models import Vacancy
 from .runtime import resolve_browser_profile_base, sha256_text
 
@@ -790,6 +791,10 @@ def linkedin_detail_title_matches(title: str) -> bool:
         for tokens in LINKEDIN_DETAIL_TITLE_FAMILY_TOKENS.values()
         for token in tokens
     )
+
+
+def _linkedin_detail_identity(url: str) -> str:
+    return canonical_job_url(url, "linkedin") or (url or "").strip()
 
 
 def _looks_like_login_wall(url: str, html: str) -> bool:
@@ -2248,7 +2253,8 @@ class BrowserSourceClient:
             candidates = [
                 candidate
                 for candidate in candidates
-                if candidate not in self._linkedin_detail_enriched_urls
+                if _linkedin_detail_identity(candidate)
+                not in self._linkedin_detail_enriched_urls
             ]
         if not candidates:
             return []
@@ -2256,7 +2262,9 @@ class BrowserSourceClient:
         if source == "linkedin":
             if not self._reserve_linkedin_detail_page():
                 return []
-            self._linkedin_detail_enriched_urls.add(detail_url)
+            self._linkedin_detail_enriched_urls.add(
+                _linkedin_detail_identity(detail_url)
+            )
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
@@ -2274,11 +2282,12 @@ class BrowserSourceClient:
         candidate = random.choice(candidates)
         detail_url = candidate.url
         if source == "linkedin":
-            if detail_url in self._linkedin_detail_enriched_urls:
+            detail_identity = _linkedin_detail_identity(detail_url)
+            if detail_identity in self._linkedin_detail_enriched_urls:
                 return []
             if not self._reserve_linkedin_detail_page():
                 return []
-            self._linkedin_detail_enriched_urls.add(detail_url)
+            self._linkedin_detail_enriched_urls.add(detail_identity)
         detail_html = self.fetch_html(detail_url, scrolls=0)
         detail_vacancies = {
             "linkedin": extract_linkedin_vacancies_from_html,
@@ -2308,7 +2317,10 @@ class BrowserSourceClient:
         eligible = [
             vacancy
             for vacancy in vacancies
-            if vacancy.url and linkedin_detail_title_matches(vacancy.title)
+            if vacancy.url
+            and linkedin_detail_title_matches(vacancy.title)
+            and _linkedin_detail_identity(vacancy.url)
+            not in self._linkedin_detail_enriched_urls
         ]
         planned = min(len(eligible), budget)
         stats: dict[str, Any] = {
@@ -2327,7 +2339,9 @@ class BrowserSourceClient:
             detail_url = vacancy.url
             if not self._reserve_linkedin_detail_page():
                 break
-            self._linkedin_detail_enriched_urls.add(detail_url)
+            self._linkedin_detail_enriched_urls.add(
+                _linkedin_detail_identity(detail_url)
+            )
             stats["opened"] += 1
             try:
                 detail_html = self.fetch_html(detail_url, scrolls=0)
@@ -2429,6 +2443,7 @@ class BrowserSourceClient:
         execution_plan: Mapping[str, Any] | Any | None = None,
         allow_unauthenticated: bool = False,
         detail_page_budget: int | None = None,
+        detail_skip_urls: set[str] | None = None,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -2445,6 +2460,10 @@ class BrowserSourceClient:
             if detail_page_budget is not None
             else _linkedin_detail_page_budget_from_env()
         )
+        if detail_skip_urls:
+            self._linkedin_detail_enriched_urls.update(
+                _linkedin_detail_identity(url) for url in detail_skip_urls if url
+            )
         vacancies: list[Vacancy] = []
         self._health.source = "linkedin"
         trace: dict[str, Any] = {
