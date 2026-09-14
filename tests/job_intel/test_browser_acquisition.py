@@ -2624,3 +2624,58 @@ def test_supervisor_rejects_profile_path_outside_bootstrap_profile_root(
         == 1
     )
     assert "profile path" in capsys.readouterr().err
+
+def test_linkedin_fetch_keeps_a_service_page_after_search_page_closes(monkeypatch) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin", min_delay_ms=0, max_delay_ms=0)
+    )
+
+    class _Page:
+        def __init__(self, context, url: str) -> None:
+            self.context = context
+            self.url = url
+            self.closed = False
+            self.mouse = types.SimpleNamespace(wheel=lambda *_args: None)
+
+        def goto(self, url: str, **_kwargs: object) -> None:
+            self.url = url
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+        def content(self) -> str:
+            return "<html><body>results</body></html>"
+
+        def close(self) -> None:
+            self.closed = True
+            self.context.pages.remove(self)
+
+    class _Context:
+        def __init__(self) -> None:
+            self.pages: list[_Page] = []
+
+        def new_page(self) -> _Page:
+            page = _Page(self, "about:blank")
+            self.pages.append(page)
+            return page
+
+    context = _Context()
+    context.pages.append(_Page(context, "about:blank"))
+    client._context = context  # type: ignore[attr-defined]
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(client, "_humanize_page", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, "_linkedin_dom_unique_job_ids", lambda _page: frozenset())
+    monkeypatch.setattr(client, "_capture_page_diagnostics", lambda **_kwargs: "artifact-ref")
+
+    client._ensure_linkedin_service_page()  # type: ignore[attr-defined]
+    service_page = client._linkedin_service_page  # type: ignore[attr-defined]
+    client.fetch_page(
+        "https://www.linkedin.com/jobs/search/?keywords=product",
+        scrolls=0,
+        capture_label="linkedin-search-0",
+    )
+
+    assert service_page is not None
+    assert service_page.closed is False
+    assert service_page in context.pages
+    assert len(context.pages) >= 1

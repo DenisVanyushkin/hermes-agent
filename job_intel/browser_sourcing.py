@@ -1350,6 +1350,7 @@ class BrowserSourceClient:
         self._browser = None
         self._context = None
         self._cdp_attached = False
+        self._linkedin_service_page = None
         self._cdp_url = ""
         self._health = BrowserSessionHealth(source="browser")
         self._health.browser_profile = str(self.config.user_data_dir)
@@ -1380,6 +1381,7 @@ class BrowserSourceClient:
                     raise BrowserNativeUnavailable(f"Playwright CDP attach at {cdp_url} did not expose a persistent browser context.")
                 self._context = contexts[0]
                 self._write_attach_diagnostics(label="cdp-after-context-selected", extra={"cdp_url": cdp_url})
+                self._ensure_linkedin_service_page()
                 self._cdp_attached = True
                 return self
 
@@ -1397,6 +1399,7 @@ class BrowserSourceClient:
             if browser_channel:
                 launch_kwargs["channel"] = browser_channel
             self._context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
+            self._ensure_linkedin_service_page()
         except Exception as exc:
             try:
                 if self._playwright is not None:
@@ -1419,7 +1422,27 @@ class BrowserSourceClient:
         self._browser = None
         self._context = None
         self._playwright = None
+        self._linkedin_service_page = None
         self._cdp_attached = False
+
+    def _ensure_linkedin_service_page(self) -> None:
+        if self.config.source_name.strip().lower() != "linkedin" or self._context is None:
+            return
+        if self._linkedin_service_page is not None:
+            with suppress(Exception):
+                if self._linkedin_service_page in list(getattr(self._context, "pages", []) or []):
+                    return
+            self._linkedin_service_page = None
+        try:
+            self._linkedin_service_page = self._context.new_page()
+        except Exception as exc:
+            raise BrowserNativeUnavailable(
+                f"LinkedIn service page could not be created: {exc}"
+            ) from exc
+        self._write_attach_diagnostics(
+            label="linkedin-service-page-created",
+            extra={"service_page_url": getattr(self._linkedin_service_page, "url", "")},
+        )
 
     def _page_contains_any(self, html: str, markers: tuple[str, ...]) -> bool:
         lowered = html.lower()
@@ -1674,6 +1697,8 @@ class BrowserSourceClient:
         closed = 0
         page_urls: list[str] = []
         for page in pages:
+            if page is self._linkedin_service_page:
+                continue
             url = ""
             with suppress(Exception):
                 url = getattr(page, "url", "") or ""
