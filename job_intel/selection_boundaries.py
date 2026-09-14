@@ -36,6 +36,25 @@ AUTHORITY_PATH = (
 )
 MIN_REAL_DESCRIPTION_CHARS = 200
 
+# Independently supported identity evidence comes from retained control
+# captures for the four control companies and from domain-level identity for
+# major crypto exchanges.  This set is not populated from run-489 replay
+# candidates; other title-only companies remain industry-unknown.
+_INDEPENDENT_GAMING_COMPANY_KEYS = frozenset(
+    {"tripledotstudios", "sonyinteractiveentertainment"}
+)
+_INDEPENDENT_ADTECH_COMPANY_KEYS = frozenset({"ogury"})
+_INDEPENDENT_CRYPTO_COMPANY_KEYS = frozenset(
+    {"okx", "coinbase", "binance", "kraken", "bybit", "cryptocom"}
+)
+_INDEPENDENT_INDUSTRY_COMPANY_KEYS = frozenset(
+    {
+        *_INDEPENDENT_GAMING_COMPANY_KEYS,
+        *_INDEPENDENT_ADTECH_COMPANY_KEYS,
+        *_INDEPENDENT_CRYPTO_COMPANY_KEYS,
+    }
+)
+
 
 @dataclass(frozen=True)
 class BoundaryAssessment:
@@ -89,37 +108,13 @@ def _industry_context_is_available(vacancy: Vacancy) -> bool:
     # A company identity can itself be evidence for a narrow industry, but an
     # arbitrary company name must not turn title-only text into a rejection.
     company = canonical_company_key(vacancy.company)
-    return company in {
-        "tripledotstudios",
-        "sonyinteractiveentertainment",
-        "scopely",
-        "amanotes",
-        "brawlstars",
-        "supercell",
-        "ogury",
-        "almedia",
-        "vondel",
-        "publicismedia",
-        "okx",
-        "coinbase",
-        "binance",
-        "kraken",
-        "bybit",
-        "cryptocom",
-    }
+    return company in _INDEPENDENT_INDUSTRY_COMPANY_KEYS
 
 
 def _has_gaming_context(vacancy: Vacancy) -> bool:
     context = _industry_context(vacancy)
     company = canonical_company_key(vacancy.company)
-    if company in {
-        "tripledotstudios",
-        "sonyinteractiveentertainment",
-        "scopely",
-        "amanotes",
-        "brawlstars",
-        "supercell",
-    }:
+    if company in _INDEPENDENT_GAMING_COMPANY_KEYS:
         return True
     if not _contains_any(
         context,
@@ -153,7 +148,7 @@ def _has_gaming_context(vacancy: Vacancy) -> bool:
 def _has_adtech_or_ctv_context(vacancy: Vacancy) -> bool:
     context = _industry_context(vacancy)
     company = canonical_company_key(vacancy.company)
-    if company in {"ogury", "almedia", "vondel", "publicismedia"}:
+    if company in _INDEPENDENT_ADTECH_COMPANY_KEYS:
         return True
     return bool(
         re.search(
@@ -167,7 +162,7 @@ def _has_adtech_or_ctv_context(vacancy: Vacancy) -> bool:
 def _has_crypto_context(vacancy: Vacancy) -> bool:
     context = _industry_context(vacancy)
     company = canonical_company_key(vacancy.company)
-    return company in {"okx", "coinbase", "binance", "kraken", "bybit", "cryptocom"} or bool(
+    return company in _INDEPENDENT_CRYPTO_COMPANY_KEYS or bool(
         re.search(r"\bcrypto(?:currency)?\b|\bblockchain\b|\bweb3\b|\bdigital assets?\b|\bdefi\b", context)
     )
 

@@ -237,3 +237,19 @@ def test_detail_enrichment_makes_short_listing_text_real() -> None:
     assert has_real_job_text(item)
     assessment = assess_selection_boundaries(item)
     assert "executive_scope_unknown" not in assessment.unknown_reasons
+
+
+def test_title_only_industry_outcome_does_not_depend_on_replay_company_name() -> None:
+    assessments = [
+        assess_selection_boundaries(
+            vacancy(
+                company=company,
+                title="Product Lead - Portfolio Midcore Games",
+                description="Product Lead - Portfolio Midcore Games",
+            )
+        )
+        for company in ("Scopely", "Voodoo")
+    ]
+    assert [assessment.rejection_reasons for assessment in assessments] == [(), ()]
+    assert all("gaming_experience_mismatch" not in assessment.rejection_reasons for assessment in assessments)
+    assert all("industry_context_unknown" in assessment.unknown_reasons for assessment in assessments)
