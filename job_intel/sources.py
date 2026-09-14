@@ -786,11 +786,14 @@ def hh_item_to_vacancy_filtered(items: list[dict[str, Any]]) -> list[Vacancy]:
 
 
 ROLE_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
-    ("core_executive_product", ("VP Product", "Head of Product", "Product Director", "Director of Product", "Chief Product Officer")),
-    ("gm_and_digital", ("GM Product", "Head of Digital Products", "Regional Product Lead", "Product Operations Director")),
-    ("platform_ecosystem", ("Head of Platform", "Head of Ecosystem", "Marketplace Product Lead", "Consumer Product Lead")),
-    ("growth_monetization", ("Head of Monetization", "Head of Growth Product", "Growth Product Lead", "Product Strategy Lead")),
-    ("payments_specialist", ("Payments Product Lead", "Platform Product Lead", "Digital Products Lead", "Product Lead")),
+    ("executive_product", ("CPO", "VP Product", "Head of Product", "VP Consumer Product")),
+    ("digital_business", ("Chief Digital Officer", "VP/Director Digital Business", "Digital Business Director")),
+    ("customer_growth_commercial_hybrid", ("Chief Growth Officer", "Chief Customer Officer", "Chief Commercial Officer", "Consumer Business Director")),
+    ("product_business_unit", ("Product Director", "Digital Products Director", "Business Unit Director", "Platform Director")),
+    ("general_management", ("GM Digital", "GM Product", "GM Market", "Regional GM")),
+    ("growth_monetization", ("VP/Head of Growth Product", "Monetization Director", "Lifecycle Director")),
+    ("transformation_builder", ("Digital Transformation and Growth Director", "Product Transformation Director", "Product Organization Lead")),
+    ("hybrid_executive_exploration", ("COO-adjacent digital role", "Strategy and Product leader", "Chief Commercial/Product hybrid")),
 ]
 
 CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
@@ -867,6 +870,31 @@ def _query_rng(source: str) -> random.Random:
     return random.Random(source_seed ^ date_seed ^ entropy)
 
 
+QUERY_MODE_ROLE_ONLY = "role_only"
+QUERY_MODE_ROLE_PLUS_CONTEXT = "role_plus_context"
+QUERY_MODES = frozenset({QUERY_MODE_ROLE_ONLY, QUERY_MODE_ROLE_PLUS_CONTEXT})
+
+
+def _validate_query_mode(query_mode: str) -> str:
+    if query_mode not in QUERY_MODES:
+        raise ValueError(
+            f"unsupported query mode {query_mode!r}; expected one of {sorted(QUERY_MODES)}"
+        )
+    return query_mode
+
+
+def _rotation_slot(
+    *, as_of: date | None, rotation_slot: int | None
+) -> int:
+    if rotation_slot is not None:
+        return max(0, int(rotation_slot))
+    if as_of is not None:
+        # Pinned dates are used by tests and evidence; do not let the wall clock
+        # make a named date non-reproducible.
+        return 0
+    return datetime.now(timezone.utc).hour // 12
+
+
 def _join_group(terms: tuple[str, ...]) -> str:
     if len(terms) == 1:
         return terms[0]
@@ -886,12 +914,64 @@ class LinkedInQueryPlanItem:
     cell_id: str
     location: str | None
     geo_id: str | None
+    role_family: str = ""
+    context_family: str | None = None
+    query_mode: str = QUERY_MODE_ROLE_ONLY
+    requested_geography: str | None = None
+    resolved_geography: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceQueryPlanItem:
+    """One query plan item for sources whose geography is query text.
+
+    HeadHunter exposes no structured Search Contract cell, so its requested
+    geography is the legacy keyword family and its resolved geography remains
+    unknown. This is deliberately different from LinkedIn's verified target.
+    """
+
+    query: str
+    role_family: str
+    context_family: str | None
+    geo_family: str
+    query_mode: str
+    requested_geography: str
+    resolved_geography: str | None = None
+
+
+def linkedin_geography_coverage() -> dict[str, Any]:
+    """Return the contract cells that are resolved versus unsupported."""
+
+    from .product_search.acquisition_probe import load_linkedin_geography_mapping
+
+    mapping = load_linkedin_geography_mapping()
+    requested_cells = sorted(
+        cell
+        for cell, target in mapping.items()
+        if target.status == "verified" and (target.location or target.geo_id)
+    )
+    return {
+        "requested_cells": requested_cells,
+        "unsupported_cells": sorted(set(mapping) - set(requested_cells)),
+        "resolved_geographies": {
+            cell: mapping[cell].location or mapping[cell].geo_id
+            for cell in requested_cells
+        },
+    }
 
 
 def rotating_linkedin_queries(
-    *, limit: int = 18, as_of: date | None = None
+    *,
+    limit: int = 18,
+    as_of: date | None = None,
+    rotation_slot: int | None = None,
+    query_mode: str = QUERY_MODE_ROLE_ONLY,
 ) -> list[LinkedInQueryPlanItem]:
-    """Role and context in the text; the place as a target beside it.
+    """Build a bounded LinkedIn plan over role families and target cells.
+
+    ``role_only`` is the live default: context is optional vocabulary, not a
+    mandatory industry gate. ``role_plus_context`` is retained for the bounded
+    comparison experiment and uses the measured LinkedIn-safe substitutions.
 
     The geography axis is the verified mapping rather than ``GEO_FAMILIES``.
     Those families are a mixed keyword vocabulary with no verified target
@@ -927,14 +1007,11 @@ def rotating_linkedin_queries(
     path is exercised by tests rather than by production data.
 
     Order is deterministic and exhaustive, not shuffled. The geography axis
-    advances one cell per query, so no place is asked twice until every
-    eligible place has been asked once; the calendar day picks the starting
-    offset, so consecutive days do not open on the same cell. That last claim
-    is why the offset counts *days* via ``toordinal`` and not the decimal
-    ``YYYYMMDD``: the decimal form jumps 72 across a leap-year February, which
-    is a whole number of cycles at 24 cells, and 2028-02-29 and 2028-03-01
-    would open on the same place. The query text advances only after a full
-    pass over the geographies, which keeps one text comparable across places.
+    advances one cell per query and the role axis advances on every query;
+    therefore the default 18-query plan represents all eight role families
+    without increasing the request budget. The two UTC half-day slots use
+    distinct role/cell pairs on the same date. Calendar days move the
+    geographic starting offset via ``toordinal``.
 
     Three separate claims, and it is worth keeping them apart because the
     tests assert the first two and nothing can assert the third. Within one
@@ -946,8 +1023,9 @@ def rotating_linkedin_queries(
     that the query-by-cell pairs they were meant to ask were ever asked. This
     orders a plan; it does not witness an outcome.
 
-    ``as_of`` exists so a caller -- in practice a test -- can name the day
-    instead of reading the clock.
+    ``as_of`` and ``rotation_slot`` exist so tests and bounded experiments can
+    name both rotation axes instead of reading the clock. Production derives
+    the slot from UTC half-days, matching the two daily timer windows.
     """
 
     from .product_search.acquisition_probe import load_linkedin_geography_mapping
@@ -961,43 +1039,111 @@ def rotating_linkedin_queries(
     if not cells:
         return []
 
-    combos = [
-        (role, context) for role in ROLE_FAMILIES for context in CONTEXT_FAMILIES
-    ]
+    query_mode = _validate_query_mode(query_mode)
     offset = (as_of or datetime.now(timezone.utc).date()).toordinal()
+    slot = _rotation_slot(as_of=as_of, rotation_slot=rotation_slot)
+    role_offset = offset + slot * max(1, limit)
 
     plan: list[LinkedInQueryPlanItem] = []
     for step in range(max(0, limit)):
         cell = cells[(offset + step) % len(cells)]
-        role, context = combos[(offset + step // len(cells)) % len(combos)]
+        pass_offset = step // len(cells)
+        role = ROLE_FAMILIES[(role_offset + step + pass_offset) % len(ROLE_FAMILIES)]
+        context = CONTEXT_FAMILIES[(role_offset + step + pass_offset) % len(CONTEXT_FAMILIES)]
         target = mapping[cell]
+        parts = [f"({_join_group(_linkedin_terms(role[1]))})"]
+        if query_mode == QUERY_MODE_ROLE_PLUS_CONTEXT:
+            parts.append(f"({_join_group(_linkedin_terms(context[1]))})")
         plan.append(
             LinkedInQueryPlanItem(
-                query=f"({_join_group(_linkedin_terms(role[1]))}) "
-                f"({_join_group(_linkedin_terms(context[1]))})".strip(),
+                query=" ".join(parts),
                 cell_id=cell,
                 location=target.location,
                 geo_id=target.geo_id,
+                role_family=role[0],
+                context_family=(
+                    context[0]
+                    if query_mode == QUERY_MODE_ROLE_PLUS_CONTEXT
+                    else None
+                ),
+                query_mode=query_mode,
+                requested_geography=cell,
+                resolved_geography=target.location or target.geo_id,
             )
         )
     return plan
 
 
-def rotating_source_queries(source: str, *, limit: int = 6) -> list[str]:
-    rng = _query_rng(source)
-    combos = [(role, context, geo) for role in ROLE_FAMILIES for context in CONTEXT_FAMILIES for geo in GEO_FAMILIES]
-    rng.shuffle(combos)
-    queries: list[str] = []
-    for role, context, geo in combos:
-        role_expr = f"({_join_group(role[1])})"
-        context_expr = f"({_join_group(context[1])})"
-        geo_expr = f"({_join_group(geo[1])})"
-        query = f"{role_expr} {context_expr} {geo_expr}".strip()
-        if query not in queries:
-            queries.append(query)
-        if len(queries) >= limit:
-            break
-    return queries
+def rotating_source_query_plan(
+    source: str,
+    *,
+    limit: int = 6,
+    as_of: date | None = None,
+    rotation_slot: int | None = None,
+    query_mode: str | None = None,
+) -> list[SourceQueryPlanItem]:
+    """Build deterministic role/geography queries for text-query sources.
+
+    HeadHunter uses role-only by default; a role-plus-context plan is retained
+    for the bounded comparison. Other callers retain the legacy context-bearing
+    default because this M2-Q slice changes only LinkedIn and HeadHunter.
+    """
+
+    if query_mode is None:
+        query_mode = (
+            QUERY_MODE_ROLE_ONLY
+            if source.lower() == "headhunter"
+            else QUERY_MODE_ROLE_PLUS_CONTEXT
+        )
+    query_mode = _validate_query_mode(query_mode)
+    offset = (as_of or datetime.now(timezone.utc).date()).toordinal()
+    slot = _rotation_slot(as_of=as_of, rotation_slot=rotation_slot)
+    seed = offset + slot * max(1, limit)
+    plan: list[SourceQueryPlanItem] = []
+    for step in range(max(0, limit)):
+        role = ROLE_FAMILIES[(seed + step) % len(ROLE_FAMILIES)]
+        context = CONTEXT_FAMILIES[(seed + step) % len(CONTEXT_FAMILIES)]
+        geo = GEO_FAMILIES[(seed + step) % len(GEO_FAMILIES)]
+        parts = [f"({_join_group(role[1])})"]
+        if query_mode == QUERY_MODE_ROLE_PLUS_CONTEXT:
+            parts.append(f"({_join_group(context[1])})")
+        parts.append(f"({_join_group(geo[1])})")
+        plan.append(
+            SourceQueryPlanItem(
+                query=" ".join(parts),
+                role_family=role[0],
+                context_family=(
+                    context[0]
+                    if query_mode == QUERY_MODE_ROLE_PLUS_CONTEXT
+                    else None
+                ),
+                geo_family=geo[0],
+                query_mode=query_mode,
+                requested_geography=geo[0],
+                resolved_geography=None,
+            )
+        )
+    return plan
+
+
+def rotating_source_queries(
+    source: str,
+    *,
+    limit: int = 6,
+    as_of: date | None = None,
+    rotation_slot: int | None = None,
+    query_mode: str | None = None,
+) -> list[str]:
+    return [
+        item.query
+        for item in rotating_source_query_plan(
+            source,
+            limit=limit,
+            as_of=as_of,
+            rotation_slot=rotation_slot,
+            query_mode=query_mode,
+        )
+    ]
 
 
 def discovery_queries() -> list[tuple[str, str]]:

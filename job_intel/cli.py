@@ -86,8 +86,10 @@ from .sources import (
     fetch_company_career_vacancies,
     fetch_headhunter_vacancies,
     fetch_linkedin_vacancies,
+    linkedin_geography_coverage,
     normalize_search_hit,
     rotating_linkedin_queries,
+    rotating_source_query_plan,
     rotating_source_queries,
     search_duckduckgo,
     search_remoteok_jobs,
@@ -166,6 +168,44 @@ def _null_span() -> _NullSpanContext:
     return _NullSpanContext()
 
 
+def _query_attempt_event(
+    source: str,
+    plan_item: Any,
+    *,
+    outcome: str,
+    found_count: int,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Make the durable-in-trace unit: query, cell, family, and outcome."""
+
+    fields = (
+        source,
+        getattr(plan_item, "query", ""),
+        getattr(plan_item, "cell_id", "") or "",
+        getattr(plan_item, "role_family", "") or "",
+        getattr(plan_item, "context_family", "") or "",
+        getattr(plan_item, "requested_geography", "") or "",
+        getattr(plan_item, "resolved_geography", "") or "",
+        getattr(plan_item, "query_mode", "") or "",
+    )
+    event: dict[str, Any] = {
+        "query_id": sha256_text("|".join(fields))[:16],
+        "source": source,
+        "query": getattr(plan_item, "query", ""),
+        "cell_id": getattr(plan_item, "cell_id", None),
+        "role_family": getattr(plan_item, "role_family", None),
+        "context_family": getattr(plan_item, "context_family", None),
+        "query_mode": getattr(plan_item, "query_mode", None),
+        "requested_geography": getattr(plan_item, "requested_geography", None),
+        "resolved_geography": getattr(plan_item, "resolved_geography", None),
+        "outcome": outcome,
+        "found_count": max(0, int(found_count)),
+    }
+    if error:
+        event["error"] = error
+    return event
+
+
 def _aggregate_browser_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
     if not trace:
         return
@@ -174,6 +214,9 @@ def _aggregate_browser_trace(target: dict[str, Any], trace: dict[str, Any] | Non
             target.setdefault(key, []).extend(
                 int(item) for item in value if isinstance(item, (int, float))
             )
+            continue
+        if key == "executed_query_cells" and isinstance(value, list):
+            target.setdefault(key, []).extend(value)
             continue
         if isinstance(value, (int, float)):
             target[key] = int(target.get(key) or 0) + int(value)
@@ -194,6 +237,9 @@ def _merge_hh_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> Non
     if not trace:
         return
     for key, value in trace.items():
+        if key == "executed_query_cells" and isinstance(value, list):
+            target.setdefault(key, []).extend(value)
+            continue
         if isinstance(value, bool):
             target[key] = bool(target.get(key)) or value
         elif isinstance(value, (int, float)):
@@ -234,6 +280,9 @@ def _emit_browser_trace_spans(
         "zero_result_reasons": trace.get("zero_result_reasons"),
         "browser_attach_retry_count": trace.get("browser_attach_retry_count"),
         "planned_search_pages": trace.get("planned_search_pages"),
+        "query_coverage": trace.get("query_coverage"),
+        "planned_query_cells": trace.get("planned_query_cells"),
+        "executed_query_cells": trace.get("executed_query_cells"),
     }
     for span_name, field in mappings:
         performance.record_completed(
@@ -574,7 +623,20 @@ def _collect_vacancies(
             linkedin_plan = rotating_linkedin_queries(limit=18)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
-            linkedin_trace: dict[str, Any] = {}
+            geography_coverage = linkedin_geography_coverage()
+            linkedin_trace: dict[str, Any] = {
+                "query_coverage": {
+                    "query_mode": "role_only",
+                    **geography_coverage,
+                },
+                "planned_query_cells": [
+                    _query_attempt_event(
+                        "linkedin", item, outcome="planned", found_count=0
+                    )
+                    for item in linkedin_plan
+                ],
+                "executed_query_cells": [],
+            }
             linkedin_started = perf_counter()
             if not linkedin_plan:
                 # No eligible geography is a gap in our configuration, not a
@@ -608,8 +670,26 @@ def _collect_vacancies(
                             0, linkedin_detail_budget_remaining - opened
                         )
                     _aggregate_browser_trace(linkedin_trace, query_trace)
+                    linkedin_trace["executed_query_cells"].append(
+                        _query_attempt_event(
+                            "linkedin",
+                            item,
+                            outcome="productive" if results else "empty",
+                            found_count=len(results),
+                        )
+                    )
                 except Exception as exc:
-                    linkedin_errors.append(str(exc))
+                    error_text = str(exc)
+                    linkedin_errors.append(error_text)
+                    linkedin_trace["executed_query_cells"].append(
+                        _query_attempt_event(
+                            "linkedin",
+                            item,
+                            outcome="error",
+                            found_count=0,
+                            error=error_text,
+                        )
+                    )
             if linkedin_hits:
                 linkedin_status = "ok"
             elif linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
@@ -666,6 +746,11 @@ def _collect_vacancies(
                 error_count=len(linkedin_errors),
                 timeout_count=sum(1 for err in linkedin_errors if "timeout" in err.lower()),
             )
+            perf_span.add_metadata(
+                query_coverage=linkedin_trace.get("query_coverage"),
+                planned_query_cells=linkedin_trace.get("planned_query_cells"),
+                executed_query_cells=linkedin_trace.get("executed_query_cells"),
+            )
             _emit_browser_trace_spans(performance, source="linkedin", parent_span_name="source_acquisition.linkedin", trace=linkedin_trace)
 
     if not _source_enabled(enabled_sources, "headhunter"):
@@ -674,20 +759,60 @@ def _collect_vacancies(
         with (performance.span("source_acquisition.headhunter", parent_span_name="source_acquisition_total", source_name="headhunter") if performance else _null_span()) as perf_span:
             hh_query_limit = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_QUERY_LIMIT", "6")))
             hh_per_page = max(1, int(os.getenv("JOB_INTEL_HEADHUNTER_PER_PAGE", "10")))
-            hh_queries = rotating_source_queries("headhunter", limit=hh_query_limit)
+            hh_query_plan = rotating_source_query_plan("headhunter", limit=hh_query_limit)
             hh_hits = 0
             hh_errors: list[str] = []
-            hh_trace: dict[str, Any] = {}
+            hh_trace: dict[str, Any] = {
+                "query_coverage": {
+                    "query_mode": "role_only",
+                    "requested_geographies": sorted(
+                        {item.requested_geography for item in hh_query_plan}
+                    ),
+                    "resolved_geographies": {},
+                    "unsupported_cells": [],
+                    "geography_resolution": (
+                        "unknown: HeadHunter exposes legacy geography keywords, "
+                        "not verified Search Contract cells"
+                    ),
+                },
+                "planned_query_cells": [
+                    _query_attempt_event(
+                        "headhunter", item, outcome="planned", found_count=0
+                    )
+                    for item in hh_query_plan
+                ],
+                "executed_query_cells": [],
+            }
             hh_started = perf_counter()
-            for query in hh_queries:
+            for plan_item in hh_query_plan:
                 try:
-                    results = fetch_headhunter_vacancies(query, per_page=hh_per_page)
+                    results = fetch_headhunter_vacancies(
+                        plan_item.query, per_page=hh_per_page
+                    )
                     hh_hits += len(results)
                     vacancies.extend(results)
                     trace = getattr(fetch_headhunter_vacancies, "last_trace", None) or {}
                     _merge_hh_trace(hh_trace, trace)
+                    hh_trace["executed_query_cells"].append(
+                        _query_attempt_event(
+                            "headhunter",
+                            plan_item,
+                            outcome="productive" if results else "empty",
+                            found_count=len(results),
+                        )
+                    )
                 except Exception as exc:
-                    hh_errors.append(str(exc))
+                    error_text = str(exc)
+                    hh_errors.append(error_text)
+                    hh_trace["executed_query_cells"].append(
+                        _query_attempt_event(
+                            "headhunter",
+                            plan_item,
+                            outcome="error",
+                            found_count=0,
+                            error=error_text,
+                        )
+                    )
             if hh_hits:
                 hh_status = "ok"
             elif hh_errors and any("403" in error for error in hh_errors):
@@ -716,6 +841,11 @@ def _collect_vacancies(
                 normalized_count=hh_hits,
                 error_count=len(hh_errors),
                 timeout_count=sum(1 for err in hh_errors if "timeout" in err.lower()),
+            )
+            perf_span.add_metadata(
+                query_coverage=hh_trace.get("query_coverage"),
+                planned_query_cells=hh_trace.get("planned_query_cells"),
+                executed_query_cells=hh_trace.get("executed_query_cells"),
             )
 
     # ATS Wave 1 (production sources). These must not fail the whole run.

@@ -73,7 +73,11 @@ def test_the_linkedin_plan_asks_for_the_replacement_instead() -> None:
     # and fails tomorrow for a reason unrelated to the property.
     queries = " ".join(
         item.query
-        for item in sources.rotating_linkedin_queries(limit=18, as_of=date(2026, 9, 4))
+        for item in sources.rotating_linkedin_queries(
+            limit=18,
+            as_of=date(2026, 9, 4),
+            query_mode="role_plus_context",
+        )
     )
 
     assert "artificial intelligence products" in queries
@@ -104,7 +108,11 @@ def test_other_sources_still_ask_what_they_asked_before() -> None:
     # cannot decide the outcome. Sixty would have left a chance of missing the
     # term and calling that a pass.
     combos = len(sources.ROLE_FAMILIES) * len(sources.CONTEXT_FAMILIES) * len(sources.GEO_FAMILIES)
-    joined = " ".join(sources.rotating_source_queries("headhunter", limit=combos))
+    joined = " ".join(
+        sources.rotating_source_queries(
+            "headhunter", limit=combos, query_mode="role_plus_context"
+        )
+    )
 
     assert "AI products" in joined
 
