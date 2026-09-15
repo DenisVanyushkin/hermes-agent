@@ -217,7 +217,7 @@ class BrowserSessionHealth:
         login_wall = _looks_like_login_wall(url, html)
         terminal_empty_search = (
             self.source == "linkedin"
-            and linkedin_search_matched_nothing(html, page_url=url)
+            and linkedin_search_is_terminal_empty(html, page_url=url)
         )
         # Not "and vacancies_found > 0": that count is taken after the role
         # filter, so a page of real vacancies the filter happened to reject
@@ -264,7 +264,7 @@ class BrowserSessionHealth:
             if not terminal_empty_search and _looks_like_extraction_failure(url, html):
                 self.failed_extractions += 1
                 self.extraction_failures += 1
-            elif _looks_like_degradation(url, html):
+            elif not terminal_empty_search and _looks_like_degradation(url, html):
                 self.failed_extractions += 1
                 self.extraction_degradation += 1
         self.status = _session_status(self)
@@ -1009,6 +1009,27 @@ def linkedin_search_matched_nothing(html: str, *, page_url: str) -> bool:
     )
 
 
+def linkedin_search_is_terminal_empty(html: str, *, page_url: str) -> bool:
+    """Whether LinkedIn rendered a benign empty search surface.
+
+    LinkedIn has two empty-search dialects: the authenticated paragraph and
+    the logged-out heading. Keep both consumers on this predicate so health
+    telemetry and page classification cannot disagree about the same page.
+    """
+
+    if linkedin_search_matched_nothing(html, page_url=page_url):
+        return True
+    if _linkedin_public_card_count(page_url, html) > 0:
+        return False
+    return _is_linkedin_search_url(page_url) and any(
+        heading == _LINKEDIN_EMPTY_STATE_HEADING
+        or heading.startswith(_LINKEDIN_EMPTY_STATE_HEADING + " ")
+        for heading in (
+            _normalize_linkedin_heading(value) for value in _linkedin_headings(html)
+        )
+    )
+
+
 def classify_linkedin_page(
     *, final_url: str, html: str, status: int | None = None
 ) -> LinkedInPageClassification:
@@ -1032,18 +1053,10 @@ def classify_linkedin_page(
     on each axis; that is two measurements, not a contradiction.
     """
 
-    if linkedin_search_matched_nothing(html, page_url=final_url):
+    if linkedin_search_is_terminal_empty(html, page_url=final_url):
         return "terminal_empty_surface"
     if _linkedin_public_card_count(final_url, html) > 0:
         return "usable_result_surface"
-    if _is_linkedin_search_url(final_url) and any(
-        heading == _LINKEDIN_EMPTY_STATE_HEADING
-        or heading.startswith(_LINKEDIN_EMPTY_STATE_HEADING + " ")
-        for heading in (
-            _normalize_linkedin_heading(value) for value in _linkedin_headings(html)
-        )
-    ):
-        return "terminal_empty_surface"
     path = (urlparse(final_url or "").path or "").lower()
     if any(token in path for token in _LINKEDIN_AUTH_WALL_PATHS):
         return "auth_wall_surface"

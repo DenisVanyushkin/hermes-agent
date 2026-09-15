@@ -119,6 +119,34 @@ def test_public_results_page_is_not_counted_as_a_login_wall() -> None:
     assert health.login_walls == 0
 
 
+def test_logged_out_empty_search_does_not_count_sign_in_markers_as_failures() -> None:
+    html = """
+    <main id="main-content" class="two-pane-serp-page__results">
+      <section class="core-section-container my-3 no-results">
+        <h1>We couldn’t find a match for <strong>
+          (Product Director OR Digital Products Director OR Business Unit Director
+          OR Platform Director) jobs in Tajikistan
+        </strong></h1>
+        <p>Please make sure your keywords are spelled correctly</p>
+      </section>
+      <a href="/login">Sign in</a><a href="/login">Sign in</a>
+      <a href="/login">Sign in</a><a href="/login">Sign in</a>
+      <a href="/login">Sign in</a><a href="/login">Sign in</a>
+      <a href="/login">Sign in</a><a href="/login">Sign in</a>
+      <a href="/login">Sign in</a>
+    </main>
+    """
+    health = bs.BrowserSessionHealth(source="linkedin")
+
+    health.update(url=PUBLIC_SEARCH_URL, html=html, vacancies_found=0)
+
+    assert health.login_walls == 0
+    assert health.auth_redirects == 0
+    assert health.extraction_failures == 0
+    assert health.extraction_degradation == 0
+    assert health.snapshot()["anti_bot_events"] == 0
+
+
 def test_a_page_with_no_cards_and_a_sign_in_wall_still_counts_as_a_wall() -> None:
     """The repair must not blind the wall counter to an actual wall.
 
