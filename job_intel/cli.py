@@ -292,20 +292,14 @@ def _linkedin_detail_page_budget_from_env() -> int:
         return 3
 
 
-def _linkedin_detail_budget_for_round_robin(
-    total_budget: int, query_index: int, query_count: int
+def _linkedin_detail_budget_for_next_cell(
+    remaining_budget: int, remaining_cells: int
 ) -> int:
-    """Assign a fixed, balanced detail quota to each ordered search cell.
-
-    The first cells receive the remainder when the budget is not divisible by
-    the number of cells.  Quotas are decided before collection starts, so a
-    cell cannot consume another cell's allocation and their sum never exceeds
-    the run budget.
-    """
-    if total_budget <= 0 or query_count <= 0 or not 0 <= query_index < query_count:
+    """Assign this cell its share, carrying unused quota to later cells."""
+    if remaining_budget <= 0 or remaining_cells <= 0:
         return 0
-    base, remainder = divmod(total_budget, query_count)
-    return base + int(query_index < remainder)
+    base, remainder = divmod(remaining_budget, remaining_cells)
+    return base + int(remainder > 0)
 
 
 def _merge_hh_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
@@ -343,6 +337,7 @@ def _emit_browser_trace_spans(
     shared_metadata = {
         "pages_fetched": trace.get("pages_fetched"),
         "detail_pages_opened": trace.get("detail_pages_opened"),
+        "detail_pages_budget_opened": trace.get("detail_pages_budget_opened"),
         "detail_pages_planned": trace.get("detail_pages_planned"),
         "detail_pages_filled": trace.get("detail_pages_filled"),
         "detail_pages_blocked": trace.get("detail_pages_blocked"),
@@ -732,6 +727,7 @@ def _collect_vacancies(
                 )
             for query_index, item in enumerate(linkedin_plan):
                 try:
+                    remaining_cells = len(linkedin_plan) - query_index
                     results = fetch_linkedin_vacancies(
                         item.query,
                         max_pages=2,
@@ -739,10 +735,8 @@ def _collect_vacancies(
                         geo_id=item.geo_id,
                         cell_id=item.cell_id,
                         allow_unauthenticated=linkedin_allow_unauthenticated,
-                        detail_page_budget=_linkedin_detail_budget_for_round_robin(
-                            linkedin_detail_budget,
-                            query_index,
-                            len(linkedin_plan),
+                        detail_page_budget=_linkedin_detail_budget_for_next_cell(
+                            linkedin_detail_budget, remaining_cells
                         ),
                         detail_skip_urls=linkedin_detail_skip_urls,
                         detail_first_seen_at=linkedin_detail_first_seen_at,
@@ -750,6 +744,15 @@ def _collect_vacancies(
                     linkedin_hits += len(results)
                     vacancies.extend(results)
                     query_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
+                    if isinstance(query_trace, dict):
+                        budget_opened = query_trace.get("detail_pages_budget_opened")
+                        if budget_opened is None:
+                            budget_opened = query_trace.get("detail_pages_planned")
+                        linkedin_detail_budget = max(
+                            0,
+                            linkedin_detail_budget
+                            - max(0, int(budget_opened or 0)),
+                        )
                     _aggregate_browser_trace(linkedin_trace, query_trace)
                     linkedin_trace["executed_query_cells"].append(
                         _query_attempt_event(
@@ -812,6 +815,7 @@ def _collect_vacancies(
                 "auth_redirects": "auth_redirects",
                 "anti_bot_events": "anti_bot_events",
                 "extraction_failures": "extraction_failures",
+                "detail_pages_budget_opened": "detail_pages_budget_opened",
                 "detail_pages_planned": "detail_pages_planned",
                 "detail_pages_opened": "detail_pages_opened",
                 "detail_pages_filled": "detail_pages_filled",

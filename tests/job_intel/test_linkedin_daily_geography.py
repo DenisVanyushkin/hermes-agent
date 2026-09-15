@@ -334,6 +334,7 @@ def test_daily_linkedin_detail_budget_is_round_robin_across_queries(
         seen.append({"query": query, **kwargs})
         budget = int(kwargs["detail_page_budget"])
         cli.fetch_linkedin_vacancies.last_trace = {
+            "detail_pages_budget_opened": min(1, budget),
             "detail_pages_opened": min(1, budget),
             "detail_description_lengths": [4_000] if budget else [],
         }
@@ -345,6 +346,50 @@ def test_daily_linkedin_detail_budget_is_round_robin_across_queries(
 
     assert [call["detail_page_budget"] for call in seen] == [1, 1, 0]
     assert sum(int(call["detail_page_budget"]) for call in seen) <= 2
+
+
+def test_daily_linkedin_detail_budget_carries_unused_quota_forward(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "6")
+    seen: list[dict[str, object]] = []
+    opened_counts: list[int] = []
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="early",
+            location="United Kingdom",
+            geo_id=None,
+        ),
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="late",
+            location="Canada",
+            geo_id=None,
+        ),
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    def fake_fetch(query, **kwargs):
+        budget = int(kwargs["detail_page_budget"])
+        eligible = 1 if kwargs["cell_id"] == "early" else 20
+        opened = min(eligible, budget)
+        seen.append({"query": query, **kwargs})
+        opened_counts.append(opened)
+        cli.fetch_linkedin_vacancies.last_trace = {
+            "detail_pages_budget_opened": opened,
+            "detail_pages_opened": opened,
+        }
+        return []
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fake_fetch)
+
+    cli._collect_vacancies(store=_store(tmp_path))
+
+    assert [call["detail_page_budget"] for call in seen] == [3, 5]
+    assert opened_counts == [1, 5]
+    assert sum(opened_counts) <= 6
 
 
 def test_daily_linkedin_passes_persisted_enrichment_urls_to_worker(

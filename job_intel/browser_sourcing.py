@@ -2531,6 +2531,7 @@ class BrowserSourceClient:
             "login_wall_check_ms": 0,
             "pages_fetched": 0,
             "detail_pages_opened": 0,
+            "detail_pages_budget_opened": 0,
             "detail_pages_planned": 0,
             "detail_pages_filled": 0,
             "detail_pages_blocked": 0,
@@ -2808,6 +2809,7 @@ class BrowserSourceClient:
                 )
             )
             trace["detail_pages_planned"] += int(detail_stats["planned"])
+            trace["detail_pages_budget_opened"] += int(detail_stats["opened"])
             trace["detail_pages_filled"] += int(detail_stats["filled"])
             trace["detail_pages_blocked"] += int(detail_stats["blocked"])
             trace["detail_pages_errors"] += int(detail_stats["errors"])

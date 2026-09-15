@@ -425,6 +425,7 @@ def test_search_linkedin_persists_detail_text_and_trace(monkeypatch) -> None:
     assert len(vacancies) == 1
     assert len(vacancies[0].description) > 1_000
     assert client._last_search_trace["detail_pages_planned"] == 1
+    assert client._last_search_trace["detail_pages_budget_opened"] == 1
     assert client._last_search_trace["detail_pages_opened"] == 1
     assert client._last_search_trace["detail_pages_filled"] == 1
     assert client._last_search_trace["detail_description_median_chars"] > 1_000
@@ -463,6 +464,7 @@ def test_search_linkedin_counts_legacy_detail_open_as_planned(monkeypatch) -> No
     )
 
     assert client._last_search_trace["detail_pages_planned"] == 1
+    assert client._last_search_trace["detail_pages_budget_opened"] == 0
     assert client._last_search_trace["detail_pages_opened"] == 1
 
 
