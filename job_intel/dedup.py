@@ -41,11 +41,13 @@ def canonical_job_url(url: str | None, source: str | None = None) -> str:
     path = parsed.path or ""
 
     if "linkedin.com" in host:
-        m = re.search(r"/jobs/view/([0-9]+)", path)
+        job_path = path.rstrip("/")
+        job_slug = job_path.rsplit("/", 1)[-1]
+        m = re.search(r"(?<![0-9])([0-9]+)$", job_slug)
         if not m:
             return ""
         path = f"/jobs/view/{m.group(1)}"
-        return urlunsplit((scheme, host, path, "", ""))
+        return urlunsplit(("https", "www.linkedin.com", path, "", ""))
 
     if "hh.ru" in host:
         m = re.search(r"/vacancy/([0-9]+)", path)

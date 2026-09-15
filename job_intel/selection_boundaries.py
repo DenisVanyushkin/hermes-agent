@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from html import unescape
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import yaml
 
@@ -66,6 +67,18 @@ def _normalized(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").casefold()).strip()
 
 
+def _decoded_job_text(value: str | None) -> str:
+    """Normalize stored HTML-escaped descriptions for matching only."""
+    decoded = value or ""
+    for _ in range(3):
+        unescaped = unescape(decoded)
+        if unescaped == decoded:
+            break
+        decoded = unescaped
+    decoded = re.sub(r"<[^>]+>", " ", decoded)
+    return _normalized(decoded)
+
+
 def canonical_company_key(value: str | None) -> str:
     """Match the store's company identity rule without importing store.py."""
     return "".join(char for char in _normalized(value) if char.isalnum())
@@ -78,7 +91,7 @@ def _contains_any(text: str, needles: Iterable[str]) -> bool:
 def _industry_context(vacancy: Vacancy) -> str:
     # Title is intentionally excluded.  A title such as "VP Product, Sports"
     # cannot make an industry boundary fire without page/company context.
-    return _normalized(" ".join((vacancy.company or "", vacancy.description or "")))
+    return _normalized(" ".join((vacancy.company or "", _decoded_job_text(vacancy.description))))
 
 
 def has_real_job_text(vacancy: Vacancy) -> bool:
@@ -94,7 +107,7 @@ def has_real_job_text(vacancy: Vacancy) -> bool:
     metadata = vacancy.metadata if isinstance(vacancy.metadata, dict) else {}
     if isinstance(metadata.get("linkedin_detail_enrichment"), dict):
         return True
-    description = _normalized(vacancy.description)
+    description = _decoded_job_text(vacancy.description)
     title = _normalized(vacancy.title)
     return bool(
         len(description) >= MIN_REAL_DESCRIPTION_CHARS
@@ -189,7 +202,7 @@ def _has_technical_product_context(vacancy: Vacancy) -> bool:
 
 
 def _has_material_executive_scope(vacancy: Vacancy) -> bool:
-    description = _normalized(vacancy.description)
+    description = _decoded_job_text(vacancy.description)
     return bool(
         re.search(
             r"\b(?:p&l|profit and loss|business line|business unit|portfolio|multi-team|"
@@ -249,7 +262,7 @@ def _work_authorization_state(vacancy: Vacancy) -> str:
         return "authorized"
     if not has_real_job_text(vacancy):
         return "unknown"
-    text = _normalized(" ".join((vacancy.location or "", vacancy.description or "")))
+    text = _normalized(" ".join((vacancy.location or "", _decoded_job_text(vacancy.description))))
     explicit_local_rights = bool(
         re.search(
             r"\b(?:must|required|requirement|requires)\b.{0,90}\b(?:legal )?(?:right|rights|work authorization|work authorisation|authorized to work|authorised to work)\b"
@@ -283,9 +296,24 @@ def assess_selection_boundaries(
     reasons: list[str] = []
     unknowns: list[str] = []
     company_key = canonical_company_key(vacancy.company)
-    blacklist = {canonical_company_key(item) for item in blacklisted_company_keys}
+    blacklist = {
+        canonical_company_key(item)
+        for item in blacklisted_company_keys
+    }
     if company_key and company_key in blacklist:
         reasons.append(REASON_COMPANY_BLACKLIST)
+        entry = (
+            blacklisted_company_keys.get(company_key)
+            if isinstance(blacklisted_company_keys, Mapping)
+            else None
+        )
+        if isinstance(entry, Mapping):
+            origin = str(entry.get("origin") or "").strip()
+            if origin == "auto_threshold":
+                count = entry.get("negative_event_count")
+                reasons.append(f"{REASON_COMPANY_BLACKLIST}:auto_threshold:{count}")
+            elif origin == "explicit":
+                reasons.append(f"{REASON_COMPANY_BLACKLIST}:explicit")
 
     scope = _is_below_minimum_scope(vacancy)
     if scope is True:

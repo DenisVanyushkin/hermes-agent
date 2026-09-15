@@ -785,7 +785,13 @@ def linkedin_detail_title_matches(title: str) -> bool:
     This is deliberately title-only and uses the eight-family vocabulary from
     the accepted M0 review pool.  Mandate interpretation remains downstream.
     """
-    text = _normalize_whitespace(title).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", (title or "").casefold())
+    text = _normalize_whitespace(text)
+    text = re.sub(r"\bproduct management\b", "product", text)
+    if re.search(r"\b(?:vp|vice president|director|head)\b", text) and re.search(
+        r"\bproduct\b", text
+    ):
+        return True
     return any(
         re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text)
         for tokens in LINKEDIN_DETAIL_TITLE_FAMILY_TOKENS.values()

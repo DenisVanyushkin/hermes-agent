@@ -43,6 +43,23 @@ def test_detail_title_filter_uses_the_accepted_eight_family_vocabulary(title, ex
     assert linkedin_detail_title_matches(title) is expected
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Vice President, Product Management, Enterprise Loyalty Consumer",
+        "Director, Product Management",
+        "Director – Consumer Acquisition and Engagement, Product",
+    ],
+)
+def test_detail_title_filter_normalizes_executive_product_title_variants(title) -> None:
+    assert linkedin_detail_title_matches(title)
+
+
+@pytest.mark.parametrize("title", ["Head of eCommerce", "Product Lead"])
+def test_detail_title_filter_does_not_expand_to_non_dictionary_titles(title) -> None:
+    assert not linkedin_detail_title_matches(title)
+
+
 def test_detail_parser_reads_both_real_public_fixtures() -> None:
     for name in ("detail-cybertrend.html", "detail-transunion.html"):
         content = extract_linkedin_detail_content_from_html(

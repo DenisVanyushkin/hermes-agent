@@ -15,6 +15,7 @@ from job_intel.selection_boundaries import (
     REASON_TECHNICAL_PRODUCT,
     REASON_WORK_AUTHORIZATION,
     assess_selection_boundaries,
+    boundary_rejection_evaluation,
     has_real_job_text,
 )
 from job_intel.store import JobIntelStore
@@ -58,6 +59,23 @@ def test_company_blacklist_is_a_separate_boundary() -> None:
         vacancy(company="OKX"), blacklisted_company_keys={"okx"}
     )
     assert REASON_COMPANY_BLACKLIST in assessment.rejection_reasons
+
+
+def test_company_blacklist_rejection_preserves_origin_and_count() -> None:
+    explicit = assess_selection_boundaries(
+        vacancy(company="OKX"),
+        blacklisted_company_keys={
+            "okx": {"origin": "explicit", "negative_event_count": 0}
+        },
+    )
+    threshold = assess_selection_boundaries(
+        vacancy(company="Coinbase"),
+        blacklisted_company_keys={
+            "coinbase": {"origin": "auto_threshold", "negative_event_count": 3}
+        },
+    )
+    assert "company_blacklist:explicit" in explicit.rejection_reasons
+    assert "company_blacklist:auto_threshold:3" in threshold.rejection_reasons
 
 
 def test_industry_is_not_rejected_from_title_without_context() -> None:
@@ -163,6 +181,34 @@ def test_feedback_company_blacklist_is_consumed_read_only(tmp_path) -> None:
     assert "okx" in store.fetch_company_blacklist()
 
 
+def test_company_blacklist_uses_explicit_list_and_threshold_three(tmp_path) -> None:
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    for company in ("Coinbase", "Coinbase", "Coinbase", "Brex", "Maree"):
+        store.create_feedback_event(
+            slack_channel_id=None,
+            slack_message_ts=None,
+            user_id="owner",
+            reaction_type="thumbsdown",
+            company=company,
+            polarity="negative",
+            status="classified",
+            applies_to_company=True,
+        )
+
+    effective = store.fetch_company_blacklist()
+    assert effective["okx"] == {
+        "origin": "explicit",
+        "negative_event_count": 0,
+    }
+    assert effective["coinbase"] == {
+        "origin": "auto_threshold",
+        "negative_event_count": 3,
+    }
+    assert "brex" not in effective
+    assert "maree" not in effective
+
+
 def test_boundary_reasons_are_persisted_as_rejection_events(tmp_path) -> None:
     store = JobIntelStore(tmp_path / "job-intel.sqlite3")
     store.bootstrap()
@@ -199,6 +245,30 @@ def test_boundary_reasons_are_persisted_as_rejection_events(tmp_path) -> None:
     assert json.loads(observability[0]) == [REASON_CRYPTO]
 
 
+def test_company_blacklist_origin_is_persisted_in_run_data(tmp_path) -> None:
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    item = vacancy(company="OKX", description="crypto exchange product")
+    assessment = assess_selection_boundaries(
+        item,
+        blacklisted_company_keys=store.fetch_company_blacklist(),
+    )
+    classification = {
+        "classification": "vp_product",
+        "executive_detected": True,
+        "selection_boundary_reasons": list(assessment.rejection_reasons),
+        "selection_boundary_unknowns": list(assessment.unknown_reasons),
+    }
+    evaluation = boundary_rejection_evaluation(item, assessment.rejection_reasons)
+    run_id = store.start_run("test")
+    record_daily_observability(store, run_id, [(item, evaluation, classification, 1, False)])
+    with store.connect(read_only=True) as conn:
+        stored = conn.execute(
+            "SELECT selection_boundary_reasons_json FROM vacancy_observability"
+        ).fetchone()[0]
+    assert "company_blacklist:explicit" in json.loads(stored)
+
+
 def test_title_only_description_is_unknown_for_scope_and_industry() -> None:
     listing = vacancy(
         company="Example",
@@ -221,6 +291,53 @@ def test_title_only_description_is_unknown_for_scope_and_industry() -> None:
     assert REASON_GAMING not in game_assessment.rejection_reasons
     assert "executive_scope_unknown" in game_assessment.unknown_reasons
     assert "industry_context_unknown" in game_assessment.unknown_reasons
+
+
+def test_html_entities_are_decoded_for_boundary_matching_without_rewriting_storage() -> None:
+    encoded = "&lt;p&gt;" + ("P&amp;amp;L ownership accountability. " * 8) + "&lt;/p&gt;"
+    listing = vacancy(title="Product Lead", description=encoded)
+    assessment = assess_selection_boundaries(listing)
+    assert REASON_BELOW_EXECUTIVE_SCOPE not in assessment.rejection_reasons
+    assert has_real_job_text(listing)
+    assert listing.description == encoded
+
+
+def test_html_tags_do_not_inflate_real_text_threshold() -> None:
+    encoded = "".join("&lt;span&gt;x&lt;/span&gt;" for _ in range(60))
+    listing = vacancy(title="Product Lead", description=encoded)
+    assessment = assess_selection_boundaries(listing)
+    assert not has_real_job_text(listing)
+    assert REASON_BELOW_EXECUTIVE_SCOPE not in assessment.rejection_reasons
+    assert "executive_scope_unknown" in assessment.unknown_reasons
+
+
+def test_n26_core_banking_control_is_technical_product() -> None:
+    # Public text captured from the live read-only vacancy row
+    # https://n26.com/en-eu/careers/positions/8111591.
+    description = (
+        "&lt;p&gt;&lt;strong&gt;N26 is looking for a Head of Product - Core Banking Systems "
+        "to partner with our Engineering, Treasury, Risk, and Banking Operations teams. "
+        "You will own the Core Banking Systems product roadmap and lead a team of product "
+        "&amp;amp; business managers delivering foundational capabilities that power N26 — "
+        "from rapid product configuration to balance sheet infrastructure and regulatory reporting.&lt;/strong&gt;&lt;/p&gt; "
+        "&lt;p&gt;You will work at the intersection of Core Banking architecture, financial data integrity, "
+        "and compliance. Your mission is to transform Core Banking Systems into a composable platform "
+        "that enables product managers to configure and launch products in days.&lt;/p&gt; "
+        "&lt;li&gt;5-7+ years of product management experience focused on core banking systems, ledger infrastructure, "
+        "payments, or core platform products.&lt;/li&gt; "
+        "&lt;li&gt;Proven experience partnering with Core Banking and Platform Engineering experts.&lt;/li&gt; "
+        "&lt;li&gt;Strong technical literacy, backend platform trade-offs, multi-currency ledgers, and data pipelines.&lt;/li&gt;"
+    )
+    assessment = assess_selection_boundaries(
+        vacancy(
+            company="n26",
+            title="Head of Product, Core Banking Systems",
+            location="Berlin",
+            url="https://n26.com/en-eu/careers/positions/8111591",
+            description=description,
+        )
+    )
+    assert REASON_TECHNICAL_PRODUCT in assessment.rejection_reasons
 
 
 def test_detail_enrichment_makes_short_listing_text_real() -> None:

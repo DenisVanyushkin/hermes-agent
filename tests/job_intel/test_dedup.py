@@ -1,5 +1,5 @@
 import job_intel.dedup as dedup
-from job_intel.dedup import canonical_vacancy_key, is_duplicate
+from job_intel.dedup import canonical_job_url, canonical_vacancy_key, is_duplicate
 from job_intel.models import Vacancy
 
 
@@ -13,11 +13,24 @@ def test_canonical_key_normalizes_company_title_and_location() -> None:
         url="https://example.com/1",
         description="Lead monetization and product strategy.",
     )
-
     assert canonical_vacancy_key(vacancy) == canonical_vacancy_key(
         vacancy.model_copy(update={"title": "Vice President Product"})
     )
 
+
+def test_canonical_job_url_normalizes_live_linkedin_slug_and_query_forms() -> None:
+    assert canonical_job_url(
+        "https://nl.linkedin.com/jobs/view/head-of-product-at-px-com-4463092105",
+        "linkedin",
+    ) == "https://www.linkedin.com/jobs/view/4463092105"
+    assert canonical_job_url(
+        "https://nl.linkedin.com/jobs/view/chief-product-officer-at-travix-4460457845?position=1&pageNum=0",
+        "linkedin",
+    ) == "https://www.linkedin.com/jobs/view/4460457845"
+    assert canonical_job_url(
+        "https://www.linkedin.com/jobs/view/4413685216?trk=public_jobs",
+        "linkedin",
+    ) == "https://www.linkedin.com/jobs/view/4413685216"
 
 def test_duplicate_detection_uses_similarity_and_repost_window() -> None:
     canonical = Vacancy(

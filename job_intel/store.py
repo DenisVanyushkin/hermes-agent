@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, is_dataclass
+from collections import defaultdict
 import logging
 import os
 import re
@@ -10,11 +11,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .dedup import canonical_job_url
 from .models import Evaluation, Vacancy
 from .runtime import capture_runtime_provenance, parse_iso_datetime
 
 logger = logging.getLogger(__name__)
+
+COMPANY_BLACKLIST_CONFIG_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "config/product_search/company_blacklist.v1.yaml"
+)
 
 
 def _json_safe_default(value: Any) -> Any:
@@ -3024,29 +3032,57 @@ PRAGMA foreign_keys=ON;
             rows = conn.execute(query, params).fetchall()
         return [self._feedback_event_row_to_dict(row) for row in rows]
 
-    def fetch_company_blacklist(self) -> set[str]:
-        """Return normalized companies from classified negative feedback.
+    def fetch_company_blacklist(self) -> dict[str, dict[str, Any]]:
+        """Return the effective company blacklist with decision provenance.
 
-        ``applies_to_company`` is the feedback classifier's explicit scope;
-        no free-text or role-level feedback is promoted to a company gate.
+        Explicit entries come from the checked-in owner config.  Automatic
+        entries require at least the configured number of classified,
+        company-level negative feedback events.  The mapping shape preserves
+        set-like membership for existing callers while making the reason and
+        event count available to the selection-boundary gate.
         """
+        payload = yaml.safe_load(COMPANY_BLACKLIST_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        explicit = payload.get("explicit_companies")
+        threshold = payload.get("auto_threshold")
+        if not isinstance(explicit, list) or not all(isinstance(item, str) for item in explicit):
+            raise ValueError("company blacklist explicit_companies must be a list of strings")
+        if not isinstance(threshold, int) or threshold < 1:
+            raise ValueError("company blacklist auto_threshold must be a positive integer")
+        explicit_keys = {
+            canonical_company_key(item)
+            for item in explicit
+            if canonical_company_key(item)
+        }
         with self.connect(read_only=True) as conn:
             rows = conn.execute(
                 """
-                SELECT DISTINCT company
+                SELECT company, COUNT(*)
                 FROM feedback_events
                 WHERE polarity = 'negative'
                   AND status = 'classified'
                   AND applies_to_company = 1
                   AND company IS NOT NULL
                   AND trim(company) <> ''
+                GROUP BY company
                 """
             ).fetchall()
-        return {
-            canonical_company_key(str(row[0]))
-            for row in rows
-            if canonical_company_key(str(row[0]))
+        counts: dict[str, int] = defaultdict(int)
+        for company, count in rows:
+            key = canonical_company_key(str(company))
+            if key:
+                counts[key] += int(count)
+
+        effective: dict[str, dict[str, Any]] = {
+            key: {"origin": "explicit", "negative_event_count": counts.get(key, 0)}
+            for key in explicit_keys
         }
+        for key, count in counts.items():
+            if count >= threshold and key not in effective:
+                effective[key] = {
+                    "origin": "auto_threshold",
+                    "negative_event_count": count,
+                }
+        return effective
 
     # --- Scoring calibration proposals ------------------------------------
 

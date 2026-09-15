@@ -1,0 +1,5 @@
+schema_version: 1
+authority_id: company-blacklist-v1
+auto_threshold: 3
+explicit_companies:
+  - OKX
