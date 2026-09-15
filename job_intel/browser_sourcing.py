@@ -215,10 +215,21 @@ class BrowserSessionHealth:
             self.pagination_depth_reached = max(self.pagination_depth_reached, self.pages_fetched)
         auth_redirect = _looks_like_auth_redirect(url, html)
         login_wall = _looks_like_login_wall(url, html)
+        terminal_empty_search = (
+            self.source == "linkedin"
+            and linkedin_search_matched_nothing(html, page_url=url)
+        )
         # Not "and vacancies_found > 0": that count is taken after the role
         # filter, so a page of real vacancies the filter happened to reject
         # would have been recorded as a wall -- the same defect one step on.
         if _page_has_source_results(self.source, url, html):
+            auth_redirect = False
+            login_wall = False
+        if terminal_empty_search:
+            # An empty public search can contain a generic sign-in CTA and a
+            # recommendation block.  The explicit no-match statement is
+            # benign source evidence, not an auth wall or an extraction
+            # failure.
             auth_redirect = False
             login_wall = False
         if detail_page and self.source == "linkedin":
@@ -250,7 +261,7 @@ class BrowserSessionHealth:
             if not login_wall and not auth_redirect:
                 self.last_successful_authenticated_request = url
         else:
-            if _looks_like_extraction_failure(url, html):
+            if not terminal_empty_search and _looks_like_extraction_failure(url, html):
                 self.failed_extractions += 1
                 self.extraction_failures += 1
             elif _looks_like_degradation(url, html):
@@ -796,6 +807,17 @@ def linkedin_detail_title_matches(title: str) -> bool:
         re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", text)
         for tokens in LINKEDIN_DETAIL_TITLE_FAMILY_TOKENS.values()
         for token in tokens
+    )
+
+
+def _linkedin_detail_title_is_executive(title: str) -> bool:
+    text = re.sub(r"[^a-z0-9]+", " ", (title or "").casefold())
+    text = _normalize_whitespace(text)
+    return bool(
+        re.search(
+            r"\b(?:cpo|chief|vp|vice president|director|head|gm|general manager|coo)\b",
+            text,
+        )
     )
 
 
@@ -2332,13 +2354,14 @@ class BrowserSourceClient:
 
         first_seen = first_seen_at_by_url or {}
 
-        def detail_priority(vacancy: Vacancy) -> tuple[int, float, str]:
+        def detail_priority(vacancy: Vacancy) -> tuple[int, int, float, str]:
             identity = _linkedin_detail_identity(vacancy.url)
+            executive_rank = 0 if _linkedin_detail_title_is_executive(vacancy.title) else 1
             if identity not in first_seen:
                 # The caller loaded the map immediately before this run. A
                 # missing identity is therefore a candidate first seen in the
                 # current run and must win over persisted candidates.
-                return (0, 0.0, identity)
+                return (0, executive_rank, 0.0, identity)
             raw_timestamp = str(first_seen.get(identity) or "").replace("Z", "+00:00")
             try:
                 timestamp = datetime.fromisoformat(raw_timestamp)
@@ -2349,7 +2372,7 @@ class BrowserSourceClient:
                 # A malformed persisted timestamp is still known old data; it
                 # must not be promoted to current-run priority.
                 timestamp_value = float("-inf")
-            return (1, -timestamp_value, identity)
+            return (1, executive_rank, -timestamp_value, identity)
 
         eligible.sort(key=detail_priority)
         planned = min(len(eligible), budget)
@@ -2792,6 +2815,7 @@ class BrowserSourceClient:
             if detail_stats["stop_reason"]:
                 trace["detail_stop_reason"] = detail_stats["stop_reason"]
             vacancies.extend(page_vacancies)
+            auxiliary_detail_opened_before = self._health.detail_pages_opened
             detail_rows = (
                 []
                 if plan is not None
@@ -2807,6 +2831,11 @@ class BrowserSourceClient:
                     self._mark_critical_degradation(reason)
                     trace["failure_reason"] = reason
                     trace["stop_reason"] = "critical_degradation"
+                trace["detail_pages_planned"] += max(
+                    0,
+                    self._health.detail_pages_opened
+                    - auxiliary_detail_opened_before,
+                )
                 trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
                 break
             noise_rows = (
@@ -2815,6 +2844,10 @@ class BrowserSourceClient:
                 else self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
             )
             vacancies.extend(noise_rows)
+            trace["detail_pages_planned"] += max(
+                0,
+                self._health.detail_pages_opened - auxiliary_detail_opened_before,
+            )
             trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
         if plan is not None and trace["completed_page_offsets"] != trace["planned_page_offsets"]:
             reason = "planned page offsets were not all completed"

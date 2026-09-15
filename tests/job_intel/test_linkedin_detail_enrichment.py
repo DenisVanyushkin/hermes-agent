@@ -91,6 +91,31 @@ def test_public_detail_fixture_does_not_create_a_false_login_wall() -> None:
     assert health["anti_bot_events"] == 0
 
 
+def test_public_empty_search_does_not_count_benign_auth_markers_as_failures() -> None:
+    html = """
+    <html><body>
+      <p>No matching jobs found.</p>
+      <p>No results found</p>
+      <a href="/login">Sign in</a>
+    </body></html>
+    """
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    client._health.source = "linkedin"
+
+    client._observe_page(
+        "https://www.linkedin.com/jobs/search/?keywords=product",
+        html,
+        0,
+        http_status=200,
+    )
+
+    health = client.session_health_snapshot()
+    assert health["login_walls"] == 0
+    assert health["auth_redirects"] == 0
+    assert health["anti_bot_events"] == 0
+    assert health["extraction_failures"] == 0
+
+
 def test_detail_enrichment_updates_candidate_and_records_public_provenance(monkeypatch) -> None:
     html = (FIXTURES / "detail-transunion.html").read_text(encoding="utf-8")
     client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
@@ -305,6 +330,34 @@ def test_detail_enrichment_prioritizes_current_run_then_newest_existing(
     assert requested == [fresh.url, old_new.url]
 
 
+def test_detail_enrichment_prioritizes_fresh_executive_titles_before_other_fresh(
+    monkeypatch,
+) -> None:
+    html = (FIXTURES / "detail-cybertrend.html").read_text(encoding="utf-8")
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    old_executive = _vacancy("VP Product", 21)
+    fresh_other = _vacancy("Product Organization Lead", 22)
+    fresh_executive = _vacancy("Chief Growth Officer", 23)
+    requested: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        requested.append(url)
+        client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
+        return html
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr("job_intel.browser_sourcing.time.sleep", lambda _seconds: None)
+
+    stats = client._enrich_linkedin_vacancies(
+        [old_executive, fresh_other, fresh_executive],
+        detail_page_budget=2,
+        first_seen_at_by_url={old_executive.url: "2026-09-10T10:00:00+00:00"},
+    )
+
+    assert stats["opened"] == 2
+    assert requested == [fresh_executive.url, fresh_other.url]
+
+
 @pytest.mark.parametrize(
     ("html", "status", "url"),
     [
@@ -375,6 +428,42 @@ def test_search_linkedin_persists_detail_text_and_trace(monkeypatch) -> None:
     assert client._last_search_trace["detail_pages_opened"] == 1
     assert client._last_search_trace["detail_pages_filled"] == 1
     assert client._last_search_trace["detail_description_median_chars"] > 1_000
+
+
+def test_search_linkedin_counts_legacy_detail_open_as_planned(monkeypatch) -> None:
+    search_html = """
+    <script type="application/ld+json">
+    {"@type":"JobPosting","title":"Random Role","description":"Random Role","url":"https://www.linkedin.com/jobs/view/101","hiringOrganization":{"name":"Example"}}
+    </script>
+    """
+    detail_html = (FIXTURES / "detail-transunion.html").read_text(encoding="utf-8")
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+            noise_probability=1.0,
+        )
+    )
+
+    def fake_fetch(url, **_kwargs):
+        client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
+        return detail_html if "/jobs/view/" in url else search_html
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda **_kwargs: "without_session")
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+
+    client.search_linkedin(
+        "Random Role",
+        max_pages=1,
+        geography_location="United Kingdom",
+        detail_page_budget=1,
+    )
+
+    assert client._last_search_trace["detail_pages_planned"] == 1
+    assert client._last_search_trace["detail_pages_opened"] == 1
 
 
 def test_search_linkedin_respects_persisted_detail_skip_urls(monkeypatch) -> None:

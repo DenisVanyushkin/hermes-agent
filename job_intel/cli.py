@@ -292,6 +292,22 @@ def _linkedin_detail_page_budget_from_env() -> int:
         return 3
 
 
+def _linkedin_detail_budget_for_round_robin(
+    total_budget: int, query_index: int, query_count: int
+) -> int:
+    """Assign a fixed, balanced detail quota to each ordered search cell.
+
+    The first cells receive the remainder when the budget is not divisible by
+    the number of cells.  Quotas are decided before collection starts, so a
+    cell cannot consume another cell's allocation and their sum never exceeds
+    the run budget.
+    """
+    if total_budget <= 0 or query_count <= 0 or not 0 <= query_index < query_count:
+        return 0
+    base, remainder = divmod(total_budget, query_count)
+    return base + int(query_index < remainder)
+
+
 def _merge_hh_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
     if not trace:
         return
@@ -336,6 +352,7 @@ def _emit_browser_trace_spans(
         "login_wall_hits": trace.get("login_wall_hits"),
         "auth_redirects": trace.get("auth_redirects"),
         "anti_bot_events": trace.get("anti_bot_events"),
+        "extraction_failures": trace.get("extraction_failures"),
         "zero_result_reasons": trace.get("zero_result_reasons"),
         "browser_attach_retry_count": trace.get("browser_attach_retry_count"),
         "planned_search_pages": trace.get("planned_search_pages"),
@@ -677,7 +694,7 @@ def _collect_vacancies(
                 .lower()
                 in {"1", "true", "yes", "on"}
             )
-            linkedin_detail_budget_remaining = _linkedin_detail_page_budget_from_env()
+            linkedin_detail_budget = _linkedin_detail_page_budget_from_env()
             linkedin_detail_skip_urls = store.fetch_linkedin_enriched_urls()
             linkedin_detail_first_seen_at = store.fetch_linkedin_first_seen_at()
             linkedin_plan = _linkedin_plan_for_collection(query_experiment)
@@ -713,7 +730,7 @@ def _collect_vacancies(
                     "blocked_no_eligible_geography: the verified mapping offers no "
                     "cell with a location or a geoId, so no search was attempted"
                 )
-            for item in linkedin_plan:
+            for query_index, item in enumerate(linkedin_plan):
                 try:
                     results = fetch_linkedin_vacancies(
                         item.query,
@@ -722,18 +739,17 @@ def _collect_vacancies(
                         geo_id=item.geo_id,
                         cell_id=item.cell_id,
                         allow_unauthenticated=linkedin_allow_unauthenticated,
-                        detail_page_budget=linkedin_detail_budget_remaining,
+                        detail_page_budget=_linkedin_detail_budget_for_round_robin(
+                            linkedin_detail_budget,
+                            query_index,
+                            len(linkedin_plan),
+                        ),
                         detail_skip_urls=linkedin_detail_skip_urls,
                         detail_first_seen_at=linkedin_detail_first_seen_at,
                     )
                     linkedin_hits += len(results)
                     vacancies.extend(results)
                     query_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
-                    if isinstance(query_trace, dict):
-                        opened = max(0, int(query_trace.get("detail_pages_opened") or 0))
-                        linkedin_detail_budget_remaining = max(
-                            0, linkedin_detail_budget_remaining - opened
-                        )
                     _aggregate_browser_trace(linkedin_trace, query_trace)
                     linkedin_trace["executed_query_cells"].append(
                         _query_attempt_event(
@@ -790,16 +806,22 @@ def _collect_vacancies(
                 )
             else:
                 linkedin_trace["detail_description_median_chars"] = 0
-            for key in (
-                "detail_pages_planned",
-                "detail_pages_opened",
-                "detail_pages_filled",
-                "detail_pages_blocked",
-                "detail_pages_errors",
-                "detail_description_median_chars",
-            ):
-                if key in linkedin_trace:
-                    linkedin_health[key] = linkedin_trace[key]
+            health_trace_fields = {
+                "pages_fetched": "pages_fetched",
+                "login_walls": "login_wall_hits",
+                "auth_redirects": "auth_redirects",
+                "anti_bot_events": "anti_bot_events",
+                "extraction_failures": "extraction_failures",
+                "detail_pages_planned": "detail_pages_planned",
+                "detail_pages_opened": "detail_pages_opened",
+                "detail_pages_filled": "detail_pages_filled",
+                "detail_pages_blocked": "detail_pages_blocked",
+                "detail_pages_errors": "detail_pages_errors",
+                "detail_description_median_chars": "detail_description_median_chars",
+            }
+            for health_key, trace_key in health_trace_fields.items():
+                if trace_key in linkedin_trace:
+                    linkedin_health[health_key] = linkedin_trace[trace_key]
             if linkedin_trace:
                 linkedin_source_status["search_trace"] = linkedin_trace
             if linkedin_health:

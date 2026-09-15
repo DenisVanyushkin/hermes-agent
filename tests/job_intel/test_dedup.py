@@ -32,6 +32,11 @@ def test_canonical_job_url_normalizes_live_linkedin_slug_and_query_forms() -> No
         "linkedin",
     ) == "https://www.linkedin.com/jobs/view/4413685216"
 
+
+def test_canonical_job_url_rejects_non_job_linkedin_paths() -> None:
+    assert canonical_job_url("https://www.linkedin.com/company/example-4413685216", "linkedin") == ""
+    assert canonical_job_url("https://www.linkedin.com/jobs/search/?keywords=product", "linkedin") == ""
+
 def test_duplicate_detection_uses_similarity_and_repost_window() -> None:
     canonical = Vacancy(
         source="greenhouse",

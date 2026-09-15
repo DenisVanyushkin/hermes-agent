@@ -302,11 +302,11 @@ def test_daily_linkedin_public_mode_is_explicitly_env_gated(
     assert seen[-1]["allow_unauthenticated"] is True
 
 
-def test_daily_linkedin_detail_budget_is_shared_across_queries(
+def test_daily_linkedin_detail_budget_is_round_robin_across_queries(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     _only_linkedin(monkeypatch)
-    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "3")
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "2")
     seen: list[dict[str, object]] = []
     plan = [
         sources.LinkedInQueryPlanItem(
@@ -321,14 +321,21 @@ def test_daily_linkedin_detail_budget_is_shared_across_queries(
             location="Canada",
             geo_id=None,
         ),
+        sources.LinkedInQueryPlanItem(
+            query="(head of product) (fintech)",
+            cell_id="kz_gm",
+            location="Kazakhstan",
+            geo_id=None,
+        ),
     ]
     monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
 
     def fake_fetch(query, **kwargs):
         seen.append({"query": query, **kwargs})
+        budget = int(kwargs["detail_page_budget"])
         cli.fetch_linkedin_vacancies.last_trace = {
-            "detail_pages_opened": 1,
-            "detail_description_lengths": [4_000],
+            "detail_pages_opened": min(1, budget),
+            "detail_description_lengths": [4_000] if budget else [],
         }
         return []
 
@@ -336,7 +343,8 @@ def test_daily_linkedin_detail_budget_is_shared_across_queries(
 
     cli._collect_vacancies(store=_store(tmp_path))
 
-    assert [call["detail_page_budget"] for call in seen] == [3, 2]
+    assert [call["detail_page_budget"] for call in seen] == [1, 1, 0]
+    assert sum(int(call["detail_page_budget"]) for call in seen) <= 2
 
 
 def test_daily_linkedin_passes_persisted_enrichment_urls_to_worker(
@@ -421,17 +429,25 @@ def test_linkedin_detail_trace_reaches_kpi_health_and_performance_metadata(
 
     def fake_fetch(query, **_kwargs):
         cli.fetch_linkedin_vacancies.last_trace = {
-            "detail_pages_planned": 19,
+            "detail_pages_planned": 20,
             "detail_pages_opened": 20,
             "detail_pages_filled": 19,
             "detail_pages_blocked": 0,
             "detail_pages_errors": 1,
             "detail_description_lengths": [6_000, 6_500],
             "pages_fetched": 1,
+            "login_wall_hits": 4,
+            "auth_redirects": 3,
+            "anti_bot_events": 4,
+            "extraction_failures": 2,
             "vacancies_extracted": 2,
         }
         cli.fetch_linkedin_vacancies.last_health = {
             "pages_fetched": 1,
+            "login_walls": 1,
+            "auth_redirects": 1,
+            "anti_bot_events": 1,
+            "extraction_failures": 1,
             "detail_pages_opened": 20,
         }
         return []
@@ -452,23 +468,35 @@ def test_linkedin_detail_trace_reaches_kpi_health_and_performance_metadata(
             "detail_pages_blocked",
             "detail_pages_errors",
             "detail_description_median_chars",
+            "login_walls",
+            "auth_redirects",
+            "anti_bot_events",
+            "extraction_failures",
         )
     } == {
-        "detail_pages_planned": 19,
+        "detail_pages_planned": 20,
         "detail_pages_opened": 20,
         "detail_pages_filled": 19,
         "detail_pages_blocked": 0,
         "detail_pages_errors": 1,
         "detail_description_median_chars": 6_250,
+        "login_walls": 4,
+        "auth_redirects": 3,
+        "anti_bot_events": 4,
+        "extraction_failures": 2,
     }
 
     span = next(
         item for item in performance.spans() if item.span_name == "linkedin.search_pages"
     )
     metadata = json.loads(span.metadata_json or "{}")
-    assert metadata["detail_pages_planned"] == 19
+    assert metadata["detail_pages_planned"] == 20
     assert metadata["detail_pages_opened"] == 20
     assert metadata["detail_pages_filled"] == 19
     assert metadata["detail_pages_blocked"] == 0
     assert metadata["detail_pages_errors"] == 1
     assert metadata["detail_description_median_chars"] == 6_250
+    assert metadata["login_wall_hits"] == 4
+    assert metadata["auth_redirects"] == 3
+    assert metadata["anti_bot_events"] == 4
+    assert metadata["extraction_failures"] == 2

@@ -42,7 +42,10 @@ def canonical_job_url(url: str | None, source: str | None = None) -> str:
 
     if "linkedin.com" in host:
         job_path = path.rstrip("/")
-        job_slug = job_path.rsplit("/", 1)[-1]
+        job_match = re.fullmatch(r"/jobs/view/([^/]+)", job_path, flags=re.I)
+        if not job_match:
+            return ""
+        job_slug = job_match.group(1)
         m = re.search(r"(?<![0-9])([0-9]+)$", job_slug)
         if not m:
             return ""
