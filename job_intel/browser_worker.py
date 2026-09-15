@@ -24,6 +24,17 @@ from .browser_sourcing import (
 from .models import Vacancy
 
 
+def _linkedin_owned_url(url: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (
+        hostname == "linkedin.com" or hostname.endswith(".linkedin.com")
+    )
+
+
 _CDP_TARGETS = {
     "linkedin": {
         "profile": "linkedin",
@@ -110,6 +121,8 @@ def _allowed_page_url(source: str, url: str) -> bool:
     target = _CDP_TARGETS.get(source)
     if not target:
         return True
+    if source == "linkedin" and _linkedin_owned_url(url):
+        return True
     return any(url.startswith(prefix) for prefix in target.get("allowed_prefixes", ()))
 
 
@@ -118,7 +131,7 @@ def _page_cleanup_key(source: str, url: str) -> str:
         return "empty"
     if url == "about:blank":
         return "about:blank"
-    if source == "linkedin" and url.startswith("https://www.linkedin.com/"):
+    if source == "linkedin" and _linkedin_owned_url(url):
         return "linkedin-main"
     return url
 
@@ -235,6 +248,7 @@ def _should_retry_attach(exc: Exception) -> bool:
         "browser attach failed",
         "ECONNREFUSED",
         "BrowserContext.new_page",
+        "browser CDP endpoint is dirty or stale",
         "Target page, context or browser has been closed",
         "Target closed",
     )
@@ -294,14 +308,23 @@ def _with_browser_source(source: str, fn):
     cdp_override = os.getenv("JOB_INTEL_BROWSER_CDP_URL", "").strip() or None
     last_exc: Exception | None = None
     browser_start_ms = 0
+    browser_attach_retry_count = 0
     for attempt in range(2):
         started = perf_counter()
-        cdp_url = _ensure_browser_desktop(
-            source,
-            cdp_url=cdp_override,
-            profile=config.user_data_dir,
-            force_recycle=attempt > 0,
-        )
+        try:
+            cdp_url = _ensure_browser_desktop(
+                source,
+                cdp_url=cdp_override,
+                profile=config.user_data_dir,
+                force_recycle=attempt > 0,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
+                browser_attach_retry_count += 1
+                time.sleep(2.0)
+                continue
+            raise
         browser_start_ms += int(round((perf_counter() - started) * 1000))
         if cdp_url:
             os.environ["JOB_INTEL_BROWSER_CDP_URL"] = cdp_url
@@ -310,7 +333,7 @@ def _with_browser_source(source: str, fn):
                 vacancies, session_health = fn(client)
                 search_trace = client.last_search_trace_snapshot()
                 search_trace["browser_start_ms"] = int(search_trace.get("browser_start_ms") or 0) + browser_start_ms
-                search_trace["browser_attach_retry_count"] = attempt
+                search_trace["browser_attach_retry_count"] = max(attempt, browser_attach_retry_count)
                 return vacancies, session_health, search_trace
         except Exception as exc:
             last_exc = exc

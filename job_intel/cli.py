@@ -302,6 +302,20 @@ def _linkedin_detail_budget_for_next_cell(
     return base + int(remainder > 0)
 
 
+def _linkedin_cell_retryable(error: Exception) -> bool:
+    return "browser cdp endpoint is dirty or stale" in str(error).lower()
+
+
+def _fetch_linkedin_cell_with_retry(fetcher, query: str, **kwargs):
+    for attempt in range(2):
+        try:
+            return fetcher(query, **kwargs)
+        except Exception as exc:
+            if attempt == 0 and _linkedin_cell_retryable(exc):
+                continue
+            raise
+
+
 def _merge_hh_trace(target: dict[str, Any], trace: dict[str, Any] | None) -> None:
     if not trace:
         return
@@ -728,7 +742,8 @@ def _collect_vacancies(
             for query_index, item in enumerate(linkedin_plan):
                 try:
                     remaining_cells = len(linkedin_plan) - query_index
-                    results = fetch_linkedin_vacancies(
+                    results = _fetch_linkedin_cell_with_retry(
+                        fetch_linkedin_vacancies,
                         item.query,
                         max_pages=2,
                         location=item.location,
@@ -774,12 +789,12 @@ def _collect_vacancies(
                             error=error_text,
                         )
                     )
-            if linkedin_hits:
-                linkedin_status = "ok"
-            elif linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
+            if linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
                 linkedin_status = "blocked"
             elif linkedin_errors:
                 linkedin_status = "error"
+            elif linkedin_hits:
+                linkedin_status = "ok"
             else:
                 linkedin_status = "empty"
             linkedin_source_status = _source_status_template(

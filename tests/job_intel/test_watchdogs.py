@@ -203,3 +203,23 @@ def test_production_watchdog_units_declare_scoped_recovery_guards() -> None:
     alert_text = alert_unit.read_text()
     assert "executive_search_report" in alert_text
     assert "JOB_INTEL_SOURCE_ALERT_STATE" in alert_text
+
+
+def test_source_alert_treats_linkedin_error_with_hits_as_bad(tmp_path: Path) -> None:
+    watchdog = _load_script("job_intel_source_alert.py")
+    db_path = tmp_path / "state.sqlite3"
+    state_path = tmp_path / "alert-state.json"
+    _create_source_db(db_path, [("error", 7)])
+
+    result = watchdog.scan_and_alert(
+        db_path=db_path,
+        state_path=state_path,
+        threshold=1,
+        channel="executive_search_report",
+        deliver=lambda _message, _channel: type(
+            "Delivery", (), {"success": True, "status": "sent", "error": None}
+        )(),
+    )
+
+    assert result["consecutive_bad_runs"] == 1
+    assert result["alert_sent"] is True

@@ -25,6 +25,7 @@ import json
 import pytest
 
 from job_intel import cli, sources
+from job_intel.models import Vacancy
 from job_intel.product_search.acquisition_probe import load_linkedin_geography_mapping
 
 
@@ -545,3 +546,82 @@ def test_linkedin_detail_trace_reaches_kpi_health_and_performance_metadata(
     assert metadata["auth_redirects"] == 3
     assert metadata["anti_bot_events"] == 4
     assert metadata["extraction_failures"] == 2
+
+
+def test_daily_linkedin_retries_a_dirty_cell_once_after_browser_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="first", cell_id="first", location="Canada", geo_id=None
+        ),
+        sources.LinkedInQueryPlanItem(
+            query="second", cell_id="second", location="India", geo_id=None
+        ),
+    ]
+    calls: list[str] = []
+
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    def fetch(_query: str, **kwargs):
+        cell_id = str(kwargs["cell_id"])
+        calls.append(cell_id)
+        if cell_id == "first" and calls.count(cell_id) == 1:
+            raise RuntimeError(
+                "browser CDP endpoint is dirty or stale; bootstrap must recycle it for linkedin"
+            )
+        return []
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fetch)
+
+    result = cli._collect_vacancies(store=_store(tmp_path))
+
+    assert calls == ["first", "first", "second"]
+    assert [
+        (event["cell_id"], event["outcome"])
+        for event in result.source_statuses["linkedin"]["search_trace"][
+            "executed_query_cells"
+        ]
+    ] == [("first", "empty"), ("second", "empty")]
+
+
+def test_daily_linkedin_error_cell_makes_source_status_non_ok_with_other_hits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="productive", cell_id="productive", location="Canada", geo_id=None
+        ),
+        sources.LinkedInQueryPlanItem(
+            query="lost", cell_id="lost", location="India", geo_id=None
+        ),
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    vacancy = Vacancy(
+        source="linkedin",
+        source_id="1",
+        company="Example",
+        title="VP Product",
+        location="Canada",
+        url="https://www.linkedin.com/jobs/view/1",
+        description="Product leadership",
+    )
+
+    def fetch(_query: str, **kwargs):
+        if kwargs["cell_id"] == "lost":
+            raise RuntimeError(
+                "browser CDP endpoint is dirty or stale; bootstrap must recycle it for linkedin"
+            )
+        return [vacancy]
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fetch)
+
+    result = cli._collect_vacancies(store=_store(tmp_path))
+
+    status = result.source_statuses["linkedin"]
+    assert status["status"] == "error"
+    assert status["hits"] == 1
+    assert status["search_trace"]["executed_query_cells"][-1]["outcome"] == "error"

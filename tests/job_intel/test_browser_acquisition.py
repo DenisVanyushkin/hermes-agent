@@ -2679,3 +2679,55 @@ def test_linkedin_fetch_keeps_a_service_page_after_search_page_closes(monkeypatc
     assert service_page.closed is False
     assert service_page in context.pages
     assert len(context.pages) >= 1
+
+
+def test_linkedin_regional_detail_pages_belong_to_the_owned_endpoint() -> None:
+    assert browser_worker._allowed_page_url(
+        "linkedin", "https://kz.linkedin.com/jobs/view/123"
+    ) is True
+    assert browser_worker._allowed_page_url(
+        "linkedin", "https://evil-linkedin.example/jobs/view/123"
+    ) is False
+
+
+def test_browser_worker_retries_dirty_endpoint_after_cleanup(monkeypatch, tmp_path: Path) -> None:
+    attempts: list[int] = []
+
+    def ensure(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise BrowserNativeUnavailable(
+                "browser CDP endpoint is dirty or stale; bootstrap must recycle it for linkedin"
+            )
+        return "http://169.254.77.2:19222"
+
+    class FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def last_search_trace_snapshot(self):
+            return {}
+
+    monkeypatch.setattr(browser_worker, "_ensure_browser_desktop", ensure)
+    monkeypatch.setattr(browser_worker, "_prepare_browser_runtime_env", lambda: None)
+    monkeypatch.setattr(
+        browser_worker,
+        "resolve_browser_config",
+        lambda _source: types.SimpleNamespace(user_data_dir=tmp_path),
+    )
+    monkeypatch.setattr(
+        browser_worker, "_ensure_required_browser_profile", lambda *_args: None
+    )
+    monkeypatch.setattr(browser_worker, "BrowserSourceClient", lambda _config: FakeClient())
+    monkeypatch.setattr(browser_worker.time, "sleep", lambda _seconds: None)
+
+    vacancies, _health, trace = browser_worker._with_browser_source(
+        "linkedin", lambda _client: ([], {})
+    )
+
+    assert vacancies == []
+    assert attempts == [1, 1]
+    assert trace["browser_attach_retry_count"] == 1
