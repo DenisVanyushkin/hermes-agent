@@ -431,7 +431,7 @@ def test_search_linkedin_persists_detail_text_and_trace(monkeypatch) -> None:
     assert client._last_search_trace["detail_description_median_chars"] > 1_000
 
 
-def test_search_linkedin_counts_legacy_detail_open_as_planned(monkeypatch) -> None:
+def test_search_linkedin_skips_legacy_auxiliary_detail_open(monkeypatch) -> None:
     search_html = """
     <script type="application/ld+json">
     {"@type":"JobPosting","title":"Random Role","description":"Random Role","url":"https://www.linkedin.com/jobs/view/101","hiringOrganization":{"name":"Example"}}
@@ -448,7 +448,11 @@ def test_search_linkedin_counts_legacy_detail_open_as_planned(monkeypatch) -> No
         )
     )
 
+    detail_urls: list[str] = []
+
     def fake_fetch(url, **_kwargs):
+        if "/jobs/view/" in url:
+            detail_urls.append(url)
         client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
         return detail_html if "/jobs/view/" in url else search_html
 
@@ -463,9 +467,97 @@ def test_search_linkedin_counts_legacy_detail_open_as_planned(monkeypatch) -> No
         detail_page_budget=1,
     )
 
-    assert client._last_search_trace["detail_pages_planned"] == 1
+    assert detail_urls == []
+    assert client._last_search_trace["detail_pages_planned"] == 0
     assert client._last_search_trace["detail_pages_budget_opened"] == 0
-    assert client._last_search_trace["detail_pages_opened"] == 1
+    assert client._last_search_trace["detail_pages_opened"] == 0
+    assert client._last_search_trace["detail_pages_opened"] <= 1
+
+
+def test_detail_enrichment_accounts_for_an_unfilled_detail_page(monkeypatch) -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    vacancy = _vacancy("VP Product", number=14)
+    requested: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        requested.append(url)
+        client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
+        return "<html><body><p>Details are unavailable.</p></body></html>"
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr("job_intel.browser_sourcing.time.sleep", lambda _seconds: None)
+
+    stats = client._enrich_linkedin_vacancies([vacancy], detail_page_budget=1)
+
+    assert requested == [vacancy.url]
+    assert stats["opened"] == 1
+    assert stats["filled"] == 0
+    assert stats["blocked"] == 0
+    assert stats["errors"] == 0
+    assert stats["unfilled"] == 1
+    assert stats["opened"] == sum(
+        stats[key] for key in ("filled", "blocked", "errors", "unfilled")
+    )
+    assert client.session_health_snapshot()["detail_pages_unfilled"] == 1
+
+
+def test_search_trace_and_session_health_account_for_unfilled_detail_page(monkeypatch) -> None:
+    search_html = """
+    <script type="application/ld+json">
+    {"@type":"JobPosting","title":"VP Product","description":"VP Product","url":"https://www.linkedin.com/jobs/view/15","hiringOrganization":{"name":"Example"}}
+    </script>
+    """
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            noise_probability=1.0,
+        )
+    )
+    detail_urls: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        if "/jobs/view/" in url:
+            detail_urls.append(url)
+            html = "<html><body><p>Details are unavailable.</p></body></html>"
+        else:
+            html = search_html
+        client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
+        return html
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda **_kwargs: "without_session")
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+
+    vacancies = client.search_linkedin(
+        "VP Product",
+        max_pages=1,
+        geography_location="United Kingdom",
+        detail_page_budget=1,
+    )
+
+    assert len(vacancies) == 1
+    assert detail_urls == [vacancies[0].url]
+    trace = client._last_search_trace
+    assert trace["detail_pages_planned"] == 1
+    assert trace["detail_pages_budget_opened"] == 1
+    assert trace["detail_pages_opened"] == 1
+    assert trace["detail_pages_filled"] == 0
+    assert trace["detail_pages_blocked"] == 0
+    assert trace["detail_pages_errors"] == 0
+    assert trace["detail_pages_unfilled"] == 1
+    assert trace["detail_pages_opened"] == sum(
+        trace[key]
+        for key in (
+            "detail_pages_filled",
+            "detail_pages_blocked",
+            "detail_pages_errors",
+            "detail_pages_unfilled",
+        )
+    )
+    assert trace["detail_pages_opened"] <= 1
+    assert client.session_health_snapshot()["detail_pages_unfilled"] == 1
 
 
 def test_search_linkedin_respects_persisted_detail_skip_urls(monkeypatch) -> None:

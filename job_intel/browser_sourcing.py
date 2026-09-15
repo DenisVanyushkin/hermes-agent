@@ -163,6 +163,7 @@ class BrowserSessionHealth:
     successful_extractions: int = 0
     failed_extractions: int = 0
     detail_pages_opened: int = 0
+    detail_pages_unfilled: int = 0
     pagination_depth_reached: int = 0
     total_page_load_seconds: float = 0.0
     last_url: str = ""
@@ -2395,6 +2396,7 @@ class BrowserSourceClient:
             "filled": 0,
             "blocked": 0,
             "errors": 0,
+            "unfilled": 0,
             "description_lengths": [],
             "stop_reason": "",
         }
@@ -2433,6 +2435,8 @@ class BrowserSourceClient:
                     stats["stop_reason"] = reason
                     break
                 if content is None or not content.description:
+                    stats["unfilled"] += 1
+                    self._health.detail_pages_unfilled += 1
                     continue
                 criteria_lines = [
                     f"{label}: {value}" for label, value in content.criteria.items()
@@ -2549,6 +2553,7 @@ class BrowserSourceClient:
             "detail_pages_filled": 0,
             "detail_pages_blocked": 0,
             "detail_pages_errors": 0,
+            "detail_pages_unfilled": 0,
             "detail_description_lengths": [],
             "detail_description_median_chars": 0,
             "detail_stop_reason": "",
@@ -2814,7 +2819,7 @@ class BrowserSourceClient:
             trace["vacancies_extracted"] += len(page_vacancies)
             started = time.perf_counter()
             detail_stats = (
-                {"planned": 0, "opened": 0, "filled": 0, "blocked": 0, "errors": 0, "description_lengths": [], "stop_reason": ""}
+                {"planned": 0, "opened": 0, "filled": 0, "blocked": 0, "errors": 0, "unfilled": 0, "description_lengths": [], "stop_reason": ""}
                 if plan is not None
                 else self._enrich_linkedin_vacancies(
                     page_vacancies,
@@ -2826,16 +2831,12 @@ class BrowserSourceClient:
             trace["detail_pages_filled"] += int(detail_stats["filled"])
             trace["detail_pages_blocked"] += int(detail_stats["blocked"])
             trace["detail_pages_errors"] += int(detail_stats["errors"])
+            trace["detail_pages_unfilled"] += int(detail_stats["unfilled"])
             trace["detail_description_lengths"].extend(detail_stats["description_lengths"])
             if detail_stats["stop_reason"]:
                 trace["detail_stop_reason"] = detail_stats["stop_reason"]
             vacancies.extend(page_vacancies)
-            auxiliary_detail_opened_before = self._health.detail_pages_opened
-            detail_rows = (
-                []
-                if plan is not None
-                else self._maybe_open_detail_vacancy(source="linkedin", vacancies=page_vacancies)
-            )
+            detail_rows = []
             vacancies.extend(detail_rows)
             if self._health.page_requires_abort():
                 if plan is not None:
@@ -2846,23 +2847,10 @@ class BrowserSourceClient:
                     self._mark_critical_degradation(reason)
                     trace["failure_reason"] = reason
                     trace["stop_reason"] = "critical_degradation"
-                trace["detail_pages_planned"] += max(
-                    0,
-                    self._health.detail_pages_opened
-                    - auxiliary_detail_opened_before,
-                )
                 trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
                 break
-            noise_rows = (
-                []
-                if plan is not None
-                else self._maybe_open_noise_page(page_url=page_url, html=html, source="linkedin")
-            )
+            noise_rows = []
             vacancies.extend(noise_rows)
-            trace["detail_pages_planned"] += max(
-                0,
-                self._health.detail_pages_opened - auxiliary_detail_opened_before,
-            )
             trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
         if plan is not None and trace["completed_page_offsets"] != trace["planned_page_offsets"]:
             reason = "planned page offsets were not all completed"
