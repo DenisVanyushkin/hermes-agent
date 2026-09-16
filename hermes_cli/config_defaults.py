@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
                 # model and fail closed unless an operator explicitly chooses
                 # a deterministic fallback policy.
                 "provider": "openai-codex",
-                "model": "gpt-5.4-mini",
+                "model": "gpt-5.6-luna",
                 "timeout_seconds": 10,
                 "fallback_strategy": "fail_closed",
                 "min_confidence": 0.70,

@@ -20,7 +20,7 @@ def test_router_llm_defaults_are_present():
 
     assert router_cfg["strategy"] == "llm"
     assert router_cfg["llm"]["provider"] == "openai-codex"
-    assert router_cfg["llm"]["model"] == "gpt-5.4-mini"
+    assert router_cfg["llm"]["model"] == "gpt-5.6-luna"
     assert router_cfg["llm"]["timeout_seconds"] == 10
     assert router_cfg["llm"]["fallback_strategy"] == "fail_closed"
     assert router_cfg["llm"]["min_confidence"] == 0.70

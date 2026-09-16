@@ -144,7 +144,7 @@ CONFIG_DEFAULTS = {
     # separate from gate_model -- offline batch review, not the interactive
     # path. Defaults to a cheap model; tune live.
     "brevity_window_days": 7,
-    "brevity_model": "gpt-5.4-mini",
+    "brevity_model": "gpt-5.6-luna",
     "brevity_provider": "openai-codex",
     "brevity_soul_path": "/home/denis/.hermes/SOUL.md",   # persona fed to the brevity reviewer
     # Phase 7 Task 6: an upcoming event (tomorrow..now+N days) with
