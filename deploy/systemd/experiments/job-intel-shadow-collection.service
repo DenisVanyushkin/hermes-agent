@@ -2,6 +2,8 @@
 Description=Job Intel shadow collection (no user delivery)
 After=network-online.target
 Wants=network-online.target
+OnFailure=job-intel-shadow-notify@failure.service
+OnSuccess=job-intel-shadow-notify@success.service
 
 [Service]
 Type=oneshot

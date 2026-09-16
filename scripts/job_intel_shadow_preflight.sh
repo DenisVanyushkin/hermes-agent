@@ -11,7 +11,11 @@
 # worse than no shadow run.
 set -euo pipefail
 
-fail() { echo "shadow preflight FAILED: $1" >&2; exit 1; }
+failure_file=/var/lib/job-intel/state/shadow-preflight-failure.json
+record_failure() { /usr/bin/python3.12 /home/hermes/.hermes/hermes-agent/scripts/job_intel_shadow_failure_record.py write --path "$failure_file" --reason "$1" --tree-rc "${2:-0}" --checkout "${workdir:-/home/hermes/.hermes/hermes-agent}" 2>/dev/null || true; }
+clear_failure() { /usr/bin/python3.12 /home/hermes/.hermes/hermes-agent/scripts/job_intel_shadow_failure_record.py clear --path "$failure_file" 2>/dev/null || true; }
+
+fail() { local r="$1"; record_failure "$r" "${2:-0}"; echo "shadow preflight FAILED: $r" >&2; exit 1; }
 
 [[ "${JOB_INTEL_DELIVERY_DISABLED:-}" == "1" ]] \
   || fail "JOB_INTEL_DELIVERY_DISABLED must be exactly 1, got '${JOB_INTEL_DELIVERY_DISABLED:-<unset>}'"
@@ -77,9 +81,12 @@ workdir="${JOB_INTEL_WORKDIR:-$expected_workdir}"
 # nowhere is it settable from the environment.
 tree_state_script="$workdir/scripts/job_intel_tree_state.sh"
 [[ -x "$tree_state_script" ]] || fail "tree-state checker missing at $tree_state_script"
-if ! tree_reason="$(bash "$tree_state_script" "$workdir" 2>&1)"; then
-  fail "checkout is not safe to run from: $tree_reason"
+tree_rc=0
+tree_reason="$(bash "$tree_state_script" "$workdir" 2>&1)" || tree_rc=$?
+if (( tree_rc != 0 )); then
+  fail "checkout is not safe to run from: $tree_reason" "$tree_rc"
 fi
+clear_failure
 
 # Code that runs before any import. Every .pth in the target venv executes at
 # interpreter startup, and those .pth files import real modules; bin/python is

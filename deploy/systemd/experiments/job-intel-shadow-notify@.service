@@ -1,0 +1,8 @@
+[Unit]
+Description=Notify Job Intel shadow collection
+[Service]
+Type=oneshot
+User=hermes
+Group=hermes
+ExecStart=/usr/bin/python3.12 /home/hermes/.hermes/hermes-agent/scripts/job_intel_shadow_notifier.py %i
+ReadWritePaths=/var/lib/job-intel/state
