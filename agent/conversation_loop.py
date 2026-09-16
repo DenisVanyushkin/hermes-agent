@@ -8003,10 +8003,24 @@ def run_conversation(
                     decision = agent._tool_guardrail_halt_decision
                     _turn_exit_reason = "guardrail_halt"
                     final_response = agent._toolguard_controlled_halt_response(decision)
+                    summary_appended = False
+                    if decision.code.startswith("loop_"):
+                        try:
+                            agent._handle_max_iterations(messages, api_call_count)
+                        except Exception:
+                            pass
+                        if (
+                            messages
+                            and messages[-1].get("role") == "assistant"
+                            and messages[-1].get("content")
+                        ):
+                            final_response = messages[-1]["content"]
+                            summary_appended = True
                     agent._emit_status(
                         f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                     )
-                    append_message(messages, {"role": "assistant", "content": final_response})
+                    if not summary_appended:
+                        append_message(messages, {"role": "assistant", "content": final_response})
                     # Emit the halt message to the client so it's not
                     # indistinguishable from a crash.  The stream display
                     # was flushed (callback(None)) before tool execution,

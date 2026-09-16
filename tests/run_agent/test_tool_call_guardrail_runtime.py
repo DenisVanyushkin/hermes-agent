@@ -423,3 +423,15 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
     assert halt_text in text_deltas, (
         f"halt message was never streamed; callback only saw {deltas!r}"
     )
+
+def test_loop_cap_uses_one_summary_assistant_message():
+    agent = _make_agent("web_search", max_iterations=10, config=_hard_stop_config(hard_stop_after={"exact_failure": 2, "same_tool_failure": 20, "idempotent_no_progress": 5}, loop_caps={"max_web_searches": 3}))
+    responses = [_mock_response(content="", finish_reason="tool_calls", tool_calls=[_mock_tool_call("web_search", json.dumps({"query": f"q-{i}"}), f"c{i}")]) for i in range(4)]
+    responses.append(_mock_response(content="Summary from gathered results", finish_reason="stop", tool_calls=None))
+    agent.client.chat.completions.create.side_effect = responses
+    agent._disable_streaming = True
+    with (patch("run_agent.handle_function_call", return_value=json.dumps({"ok": True})), patch.object(agent, "_persist_session"), patch.object(agent, "_save_trajectory"), patch.object(agent, "_cleanup_task_resources")):
+        result = agent.run_conversation("search")
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["final_response"] == "Summary from gathered results"
+    assert sum(1 for m in result["messages"] if m.get("role") == "assistant" and m.get("content") == result["final_response"]) == 1
