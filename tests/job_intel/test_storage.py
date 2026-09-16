@@ -34,10 +34,41 @@ def test_store_start_run_persists_runtime_provenance(monkeypatch, tmp_path) -> N
         "sys_path": ["/workspace/live-hermes"],
     }
     monkeypatch.setattr("job_intel.store.capture_runtime_provenance", lambda **kwargs: provenance)
+    monkeypatch.delenv("JOB_INTEL_ACTUAL_GIT_COMMIT", raising=False)
 
     run_id = store.start_run("daily", metadata={"source_statuses": {"linkedin": {"status": "ok"}}})
     row = store.latest_run()
 
     assert run_id == row["id"]
     assert json.loads(row["provenance_json"]) == provenance
-    assert json.loads(row["metadata_json"]) == {"source_statuses": {"linkedin": {"status": "ok"}}, "scoring_model_version": "v1"}
+    assert json.loads(row["metadata_json"]) == {
+        "source_statuses": {"linkedin": {"status": "ok"}},
+        "scoring_model_version": "v1",
+        "code_commit": None,
+        "code_commit_reason": "JOB_INTEL_ACTUAL_GIT_COMMIT is unset or empty",
+    }
+
+
+def test_store_start_run_records_the_actual_code_commit(monkeypatch, tmp_path) -> None:
+    store = JobIntelStore(tmp_path / "job_intel.sqlite3")
+    store.bootstrap()
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setenv("JOB_INTEL_ACTUAL_GIT_COMMIT", commit)
+
+    run_id = store.start_run("daily")
+    metadata = json.loads(store.get_run(run_id)["metadata_json"])
+
+    assert metadata["code_commit"] == commit
+    assert "code_commit_reason" not in metadata
+
+
+def test_store_start_run_records_missing_code_commit_explicitly(monkeypatch, tmp_path) -> None:
+    store = JobIntelStore(tmp_path / "job_intel.sqlite3")
+    store.bootstrap()
+    monkeypatch.delenv("JOB_INTEL_ACTUAL_GIT_COMMIT", raising=False)
+
+    run_id = store.start_run("daily")
+    metadata = json.loads(store.get_run(run_id)["metadata_json"])
+
+    assert metadata["code_commit"] is None
+    assert metadata["code_commit_reason"] == "JOB_INTEL_ACTUAL_GIT_COMMIT is unset or empty"

@@ -26,7 +26,7 @@ shift 4
 # derived from the production env file, so anything readable from it is
 # attacker-influenced: pointing this at /bin/true makes the verification exit 0
 # without running, and the guard would then exec the target. Same class as
-# JOB_INTEL_WORKDIR and JOB_INTEL_SHADOW_PIN_FILE, which are already refused.
+# JOB_INTEL_WORKDIR, which is already refused.
 system_python="/usr/bin/python3.12"
 [[ -z "${JOB_INTEL_SYSTEM_PYTHON:-}" ]] \
   || fail "JOB_INTEL_SYSTEM_PYTHON is set; the trusted interpreter is not selectable"

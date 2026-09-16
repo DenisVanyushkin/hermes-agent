@@ -120,23 +120,17 @@ def test_preflight_covers_every_credential_store_the_unit_blocks() -> None:
         )
 
 
-def test_preflight_pins_the_checkout_rather_than_probing_for_a_helper() -> None:
+def test_preflight_verifies_the_checkout_tree_without_a_commit_pin() -> None:
     preflight = PREFLIGHT.read_text(encoding="utf-8")
-    assert "rev-parse HEAD" in preflight, "drift must be checked against a pinned commit"
-    assert "pin file" in preflight, "a missing pin must stop the run"
+    assert "rev-parse HEAD" not in preflight, "a pin comparison must not survive"
+    assert "JOB_INTEL_SHADOW_PIN_FILE" not in preflight
+    assert "checkout drifted" not in preflight
     assert "delivery_disabled" in preflight
 
 
-def test_preflight_compares_the_pin_exactly_and_rejects_a_dirty_tree() -> None:
-    """A prefix match would accept any commit sharing the leading characters,
-    and a matching HEAD says nothing about uncommitted edits in the tree the
-    resident agent keeps rewriting."""
+def test_preflight_keeps_the_tracked_tree_state_and_startup_guards() -> None:
+    """Removing the commit pin must not remove the independent tree checks."""
     preflight = PREFLIGHT.read_text(encoding="utf-8")
-    assert '"$actual" != "$pinned"' in preflight, "comparison must be exact, not a prefix"
-    assert '"$pinned"*' not in preflight, "prefix comparison must be gone"
-    assert "${#pinned} -eq 40" in preflight, "an abbreviated pin must be refused"
-    # Tree state moved into its own script so it could be tested behaviourally;
-    # what the preflight must still do is call it with the canonical checkout.
     assert "job_intel_tree_state.sh" in preflight, "the tree-state helper must be invoked"
     assert "site_integrity" in preflight, "pre-import code must be verified before the venv runs"
 

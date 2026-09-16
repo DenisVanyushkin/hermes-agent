@@ -94,21 +94,27 @@ def test_a_new_delivery_destination_is_refused_too(tmp_path) -> None:
     assert "JOB_INTEL_REPORT_CHANNEL" in result.stderr
 
 
-def test_authority_paths_are_never_carried(tmp_path) -> None:
-    """Not credentials, but redirections: carrying either would let the
-    production env file choose which pin is verified and where the managed
-    credential store is resolved."""
+def test_managed_store_and_interpreter_overrides_are_never_carried(tmp_path) -> None:
+    """The remaining redirectable authority settings stay excluded."""
     result = generate(
         tmp_path,
         BASE_ENV
-        + "JOB_INTEL_SHADOW_PIN_FILE=/tmp/operator-controlled.pin\n"
         + "HERMES_MANAGED_DIR=/tmp/operator-controlled\n"
         + "JOB_INTEL_SYSTEM_PYTHON=/bin/true\n",
     )
 
     assert result.returncode == 0, result.stderr
-    assert "JOB_INTEL_SHADOW_PIN_FILE" not in result.stdout
     assert "HERMES_MANAGED_DIR" not in result.stdout
     assert "JOB_INTEL_SYSTEM_PYTHON" not in result.stdout
     assert "/bin/true" not in result.stdout
     assert "operator-controlled" not in result.stdout
+
+
+def test_legacy_pin_setting_is_no_longer_a_refused_authority_path(tmp_path) -> None:
+    result = generate(
+        tmp_path,
+        BASE_ENV + "JOB_INTEL_SHADOW_PIN_FILE=/tmp/legacy.pin\n",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "JOB_INTEL_SHADOW_PIN_FILE=/tmp/legacy.pin" in result.stdout

@@ -33,6 +33,17 @@ def _json_safe_default(value: Any) -> Any:
     return str(value)
 
 
+def _code_commit_metadata() -> dict[str, Any]:
+    """Return only the commit supplied by the host wrapper, never a guess."""
+    code_commit = (os.getenv("JOB_INTEL_ACTUAL_GIT_COMMIT") or "").strip()
+    if code_commit:
+        return {"code_commit": code_commit}
+    return {
+        "code_commit": None,
+        "code_commit_reason": "JOB_INTEL_ACTUAL_GIT_COMMIT is unset or empty",
+    }
+
+
 def canonical_source_key(value: str | None) -> str:
     raw = (value or "").strip().lower()
     return "".join(ch for ch in raw if ch.isalnum() or ch == "_")
@@ -1022,6 +1033,9 @@ PRAGMA foreign_keys=ON;
         run_type = os.getenv("JOB_INTEL_RUN_TYPE", "production")
         scoring_model_version = (os.getenv("SCORING_MODEL_VERSION", "v1") or "v1").strip().lower()
         merged_metadata = dict(metadata or {})
+        merged_metadata.pop("code_commit", None)
+        merged_metadata.pop("code_commit_reason", None)
+        merged_metadata.update(_code_commit_metadata())
         merged_metadata.setdefault("scoring_model_version", scoring_model_version)
         merged_notes = notes
         # Also include in notes for stable SQL filtering without JSON parsing extensions.
@@ -1058,7 +1072,10 @@ PRAGMA foreign_keys=ON;
             existing_metadata = json.loads(row[0]) if row and row[0] else {}
             existing_provenance = json.loads(row[1]) if row and row[1] else {}
             if metadata is not None:
-                existing_metadata.update(metadata)
+                incoming_metadata = dict(metadata)
+                incoming_metadata.pop("code_commit", None)
+                incoming_metadata.pop("code_commit_reason", None)
+                existing_metadata.update(incoming_metadata)
             if provenance is not None:
                 existing_provenance.update(provenance)
             conn.execute(

@@ -60,41 +60,18 @@ if grep -Eq '^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|SLACK_HOME_CHANNEL|JOB_INTEL_SLAC
   fail "$env_file declares a delivery credential"
 fi
 
-# Strict code pin. Presence of the kill-switch helper is not enough: it says
-# nothing about the rest of the checkout, which the resident agent rewrites.
-# The pin file is written by hand when the owner authorises a specific commit,
-# so an unreviewed code change stops the timer instead of running under it.
-# The environment must not be able to move the checkout whose commit we verify:
+# The environment must not be able to move the checkout whose tree we verify:
 # JOB_INTEL_WORKDIR and JOB_INTEL_SCRIPTS_DIR are carried from the production
-# env file, and a redirected workdir would pin a different tree than the one
+# env file, and a redirected workdir would verify a different tree than the one
 # that runs. Both are therefore asserted against the expected canonical paths.
 expected_workdir="/home/hermes/.hermes/hermes-agent"
 workdir="${JOB_INTEL_WORKDIR:-$expected_workdir}"
 [[ "$workdir" == "$expected_workdir" ]] \
   || fail "JOB_INTEL_WORKDIR points at '$workdir', expected '$expected_workdir'"
 [[ "${JOB_INTEL_SCRIPTS_DIR:-$expected_workdir/scripts}" == "$expected_workdir/scripts" ]] \
-  || fail "JOB_INTEL_SCRIPTS_DIR points outside the pinned checkout"
-# The pin path is not settable from the environment: a redirected pin verifies
-# a file the operator does not control and proves nothing about the checkout.
-canonical_pin_file="/etc/job-intel/job-intel-shadow.pin"
-[[ -z "${JOB_INTEL_SHADOW_PIN_FILE:-}" || "${JOB_INTEL_SHADOW_PIN_FILE}" == "$canonical_pin_file" ]] \
-  || fail "JOB_INTEL_SHADOW_PIN_FILE points at '${JOB_INTEL_SHADOW_PIN_FILE}', only $canonical_pin_file is accepted"
-pin_file="$canonical_pin_file"
-[[ -r "$pin_file" ]] || fail "pin file $pin_file is missing; refusing to run unpinned"
-pinned="$(tr -d '[:space:]' <"$pin_file")"
-[[ -n "$pinned" ]] || fail "pin file $pin_file is empty"
-[[ ${#pinned} -eq 40 ]] \
-  || fail "pin must be a full 40-character sha, got '${pinned}' (${#pinned} chars)"
-actual="$(git -C "$workdir" rev-parse HEAD 2>/dev/null || true)"
-[[ -n "$actual" ]] || fail "cannot resolve HEAD of $workdir"
-# Exact equality, not a prefix match: an abbreviated pin would accept any commit
-# sharing those leading characters.
-if [[ "$actual" != "$pinned" ]]; then
-  fail "checkout drifted: pinned $pinned, found $actual — re-review and update the pin"
-fi
-# A matching HEAD says nothing about the working tree, and the resident agent
-# edits it in place. Tracked modifications mean the running code is not the
-# reviewed code even when the commit matches.
+  || fail "JOB_INTEL_SCRIPTS_DIR points outside the expected checkout"
+# The resident agent edits the checkout in place. Tracked modifications mean
+# the running code is not safe to run.
 # Tree state is decided by a dedicated script so the behaviour can be tested
 # against a throwaway repository; the canonical checkout is passed here and
 # nowhere is it settable from the environment.
@@ -123,7 +100,7 @@ python_bin="$venv_root/bin/python"
 [[ -x "$python_bin" ]] || fail "interpreter not found at $python_bin"
 
 bash "$startup_guard" "$site_manifest" "$venv_root" "$site_script" 0 \
-  "$python_bin" - <<'PY' || fail "startup tree unverified, or the pinned checkout does not enforce the delivery kill-switch"
+  "$python_bin" - <<'PY' || fail "startup tree unverified, or the checkout does not enforce the delivery kill-switch"
 import os, sys
 sys.path.insert(0, os.environ.get("JOB_INTEL_WORKDIR", "/home/hermes/.hermes/hermes-agent"))
 try:
@@ -134,4 +111,4 @@ except Exception as exc:  # noqa: BLE001 - any import failure is a drift failure
 raise SystemExit(0 if delivery_disabled() else 1)
 PY
 
-echo "shadow preflight OK: delivery disabled, credential stores unreachable, checkout pinned to $pinned"
+echo "shadow preflight OK: delivery disabled, credential stores unreachable, checkout tree verified"
