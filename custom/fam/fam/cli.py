@@ -2,7 +2,7 @@
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
 from urllib.parse import urljoin
-from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, series, shopping, tick, whereami
+from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, resolve, series, shopping, tick, whereami
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -298,6 +298,37 @@ def _log_mail_result(conn, event_id, result, to=None):
     else:
         audit.log(conn, "mail.error", {"event_id": event_id, "error": result.get("error")})
 
+
+def _refresh_pending_acks(conn):
+    """Refresh the durable gateway projection after a mutating command."""
+    try:
+        cfg = gate.load_config()
+    except Exception:
+        return None
+    acks.write(conn, cfg=cfg)
+
+
+def cmd_resolve_turn(args):
+    """Resolve one gateway turn from strict JSON on stdin."""
+    try:
+        request = json.load(sys.stdin)
+    except (TypeError, json.JSONDecodeError):
+        print(json.dumps({"status": "unresolved", "residual": True,
+                          "reason": "malformed_request"}, ensure_ascii=False))
+        return 2
+    if not isinstance(request, dict):
+        print(json.dumps({"status": "unresolved", "residual": True,
+                          "reason": "malformed_request"}, ensure_ascii=False))
+        return 2
+    conn = famdb.connect()
+    try:
+        famdb.migrate_resolve_receipts(conn)
+        result = resolve.resolve_turn(conn, request, cfg=gate.load_config())
+    finally:
+        conn.close()
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
 def _maybe_email_event(conn, e, material_changed=True):
     """After a successful `cal add`/`cal update` whose participants
     include the person with slug=="denis", send an .ics email via
@@ -440,9 +471,16 @@ def cmd_cal_add(args):
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
     conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
-    e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
-                participants=args.with_, transport=args.transport, notes=args.notes,
-                travel_min=args.travel_min, prep_min=args.prep_min)
+    try:
+        subject_id = (cal.resolve_subject(conn, args.for_person)
+                      if args.for_person is not None else None)
+        e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
+                    participants=args.with_, transport=args.transport, notes=args.notes,
+                    travel_min=args.travel_min, prep_min=args.prep_min,
+                    subject_person_id=subject_id)
+    except (ValueError, cal.UnknownRefError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     _audit_overlap_ack(conn, "add", conflicts, event_id=e["id"])
     conn.commit()
     _maybe_email_event(conn, e)
@@ -478,6 +516,8 @@ def _cmd_cal_add_series(args):
     try:
         cal._resolve_place(conn, args.place)
         cal._resolve_participants(conn, args.with_)
+        if args.for_person is not None:
+            cal.resolve_subject(conn, args.for_person)
         series._validate_hhmm(args.start_time)
         if args.end_time is not None:
             series._validate_hhmm(args.end_time)
@@ -518,7 +558,9 @@ def _cmd_cal_add_series(args):
                        end_time=args.end_time, place=args.place,
                        participants=args.with_, transport=args.transport,
                        notes=args.notes, until_local=args.until,
-                       prep_min=args.prep_min)
+                       prep_min=args.prep_min,
+                       subject_person_id=(cal.resolve_subject(conn, args.for_person)
+                                          if args.for_person is not None else None))
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -559,14 +601,20 @@ def cmd_cal_series_cancel(args):
         print(f"error: {e}", file=sys.stderr)
         return 2
     conn.commit()
-    print(f"cancelled series {args.id}; removed {removed} upcoming occurrence(s)")
+    print(f"cancelled series {args.id}; processed {removed} upcoming occurrence(s)")
     return 0
 
 def cmd_cal_series_update(args):
     conn = famdb.connect()
     try:
+        subject = series._UNSET
+        if args.for_person is not None:
+            subject = cal.resolve_subject(conn, args.for_person)
+        elif args.clear_for_person:
+            subject = None
         result = series.update_participants(
-            conn, args.id, add=args.add_person, remove=args.rm_person)
+            conn, args.id, add=args.add_person, remove=args.rm_person,
+            subject_person_id=subject)
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -626,6 +674,10 @@ def cmd_cal_update(args):
     if args.prep_min is not None: fields["prep_min"] = args.prep_min
     if args.add_person: fields["add_person"] = args.add_person
     if args.rm_person: fields["rm_person"] = args.rm_person
+    if args.for_person is not None:
+        fields["subject_person_id"] = cal.resolve_subject(conn, args.for_person)
+    elif args.clear_for_person:
+        fields["subject_person_id"] = None
     e = cal.update(conn, args.id, **fields)
     _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
@@ -653,6 +705,7 @@ def cmd_cal_cancel(args):
     conn = famdb.connect()
     e = cal.cancel(conn, args.id)
     conn.commit()
+    _refresh_pending_acks(conn)
     # cal.cancel()'s "dropped_prep_plans" is transient (not persisted --
     # see cal.py's docstring), surfaced here so a human/LLM caller sees
     # which prep-plans got dropped as a side effect of the cancellation.
@@ -672,6 +725,7 @@ def cmd_cal_done(args):
     conn = famdb.connect()
     e = cal.done(conn, args.id)
     conn.commit()
+    _refresh_pending_acks(conn)
     if args.json:
         print(json.dumps(e, ensure_ascii=False))
     else:
@@ -1010,7 +1064,8 @@ def cmd_cal_detours(args):
 
 def cmd_cal_day(args):
     conn = famdb.connect()
-    rows = cal.day(conn, args.date)
+    subject = cal.resolve_subject(conn, args.for_person) if args.for_person is not None else None
+    rows = cal.day(conn, args.date, subject_person_id=subject)
     if args.json:
         print(json.dumps(rows, ensure_ascii=False))
     else:
@@ -1022,7 +1077,8 @@ def cmd_cal_range(args):
     conn = famdb.connect()
     from_utc = cal._to_utc_iso(args.from_iso)
     to_utc = cal._to_utc_iso(args.to_iso)
-    rows = cal.list_range(conn, from_utc, to_utc)
+    subject = cal.resolve_subject(conn, args.for_person) if args.for_person is not None else None
+    rows = cal.list_range(conn, from_utc, to_utc, subject_person_id=subject)
     if args.json:
         print(json.dumps(rows, ensure_ascii=False))
     else:
@@ -1056,13 +1112,14 @@ def _date_arg(value):
 
 def cmd_cal_grid(args):
     conn = famdb.connect()
+    subject = cal.resolve_subject(conn, args.for_person) if args.for_person is not None else None
     if args.month is not None:
         year, month = args.month
-        out = grid.render_month(conn, year, month, args.out)
+        out = grid.render_month(conn, year, month, args.out, subject)
     elif args.week is not None:
-        out = grid.render_week(conn, args.week, args.out)
+        out = grid.render_week(conn, args.week, args.out, subject)
     else:
-        out = grid.render_day(conn, args.day, args.out)
+        out = grid.render_day(conn, args.day, args.out, subject)
     if args.json:
         print(json.dumps({"ok": True, "path": out}, ensure_ascii=False))
     else:
@@ -1088,6 +1145,7 @@ def cmd_rem_ack(args):
         raise ValueError(f"unknown event: {args.event_id}")
     count = rem.ack_chain(conn, args.event_id, scope=args.scope)
     conn.commit()
+    _refresh_pending_acks(conn)
     out = {"event_id": args.event_id, "acked": count, "scope": args.scope}
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
@@ -1101,6 +1159,7 @@ def cmd_rem_cancel(args):
         raise ValueError(f"unknown event: {args.event_id}")
     count = rem.cancel_chain(conn, args.event_id)
     conn.commit()
+    _refresh_pending_acks(conn)
     out = {"event_id": args.event_id, "cancelled": count}
     if args.json:
         print(json.dumps(out, ensure_ascii=False))
@@ -1526,13 +1585,17 @@ def _extcal_eligible_calendars(cfg, calendars):
     AND the read-filter check -- fix-round finding m1: the first cut only
     normalized the write-URL side) OR by display name, since Denis will
     actually populate the config with calendar names, not URLs."""
-    write_url = cfg.get("extcal_write_calendar") or ""
+    write_urls = [
+        cfg.get("extcal_write_calendar") or "",
+        cfg.get("extcal_taya_calendar") or "",
+    ]
     read_filter = set(cfg.get("extcal_read_calendars") or [])
     out = []
     for c in (calendars or []):
         url = c.get("url") or ""
         name = c.get("name")
-        if write_url and extcal._same_calendar(url, write_url):
+        if any(write and extcal._same_calendar(url, write)
+               for write in write_urls):
             continue
         if read_filter and not (
                 any(extcal._same_calendar(url, rf) for rf in read_filter)
@@ -1626,6 +1689,34 @@ def _dry_run_summary(changeset):
             "plans_update": len(pl_upd), "plans_drop": len(pl_drp),
         },
     }
+
+
+def _dry_run_export_summary(plan):
+    """Redacted reverse-write preview for ``cal-ext --dry-run``.
+
+    The planner entries carry local event rows and export metadata for the
+    real executor.  Dry-run output exposes only event IDs, actions, reasons,
+    and counts, so titles, hrefs, and ICS never reach the operator surface.
+    """
+    entries = [
+        {"event_id": entry.get("event_id"), "target": entry.get("target"),
+         "action": entry.get("action"), "reason": entry.get("reason")}
+        for entry in (plan or [])
+    ]
+    counts = {"exported": 0, "updated": 0, "unchanged": 0,
+              "deleted": 0, "retained": 0, "errors": []}
+    for entry in entries:
+        action = entry["action"]
+        if action == "insert":
+            counts["exported"] += 1
+        elif action in ("update", "unchanged", "delete", "retain"):
+            counts[action if action != "retain" else "retained"] += 1
+    by_target = {
+        target: sorted(entry["event_id"] for entry in entries
+                       if entry.get("target") == target)
+        for target in ("hermes", "taya")
+    }
+    return {"counts": counts, "plan": entries, "target_event_ids": by_target}
 
 
 _HREF_IN_TEXT_RE = re.compile(r"https?://\S+")
@@ -1823,12 +1914,13 @@ _EXTCAL_FAIL_STREAK_THRESHOLD_MAX = 50
 # configured but 0 calendars matched (discover() degrades to `[]` on ANY
 # failure -- missing credentials, timeout, 5xx, or a genuinely renamed
 # calendar, see `_cal_ext_sync`'s own comment), and `apply_changes`/
-# `export_own` per-row errors (no single calendar to blame -- these are
+# `export_routes` per-row errors (no single calendar to blame -- these are
 # keyed by branch/id or event_id, not calendar URL). Both share the
 # double-underscore shape specifically so neither can ever collide with a
 # real CalDAV URL (which always contains "://").
 _EXTCAL_STREAK_DISCOVERY_KEY = "__discovery__"
-_EXTCAL_STREAK_APPLY_KEY = "__apply__"
+_EXTCAL_STREAK_IMPORT_APPLY_KEY = "__import_apply__"
+_EXTCAL_STREAK_EXPORT_KEY = "__export__"
 
 # Cap on how many bodies ONE tick may re-fetch one-by-one after a delta
 # entry arrived without <C:calendar-data> (see `_cal_ext_sync`). A
@@ -2408,10 +2500,12 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
             entry["external_etag"] = meta["etag"]
 
     if dry_run:
+        export_plan = extcal._export_route_plan(conn, cfg, now)
         return {
             "counts": None, "calendars": per_calendar,
             "changeset": changeset, "sync_errors": sync_errors, "tokens": {},
             "export_counts": None, "full_mode_urls": set(),
+            "export_plan": export_plan,
             "calendar_had_error": calendar_had_error,
             "calendar_error_msgs": calendar_error_msgs,
             "discovery_error": discovery_error,
@@ -2425,11 +2519,10 @@ def _cal_ext_sync(conn, cfg, now, dry_run):
     # regardless of whether apply_changes itself hit any errors: import and
     # export are independent directions over independent row sets
     # (owner='iphone' vs owner='hermes'), so a problem in one must not
-    # withhold the other. `extcal.export_own` is itself a hard no-op (zero
-    # DB reads, zero network calls) whenever `extcal_write_calendar` is
-    # unset -- which it is on every VM until T10 (a separate, later task)
-    # actually creates the "Гермес" collection and fills in the config key.
-    export_counts = extcal.export_own(conn, cfg, now_utc=now)
+    # withhold the other. `extcal.export_routes` still inspects the local
+    # events and journal rows when no write calendar is configured, but it
+    # performs no network writes and reports configuration errors safely.
+    export_counts = extcal.export_routes(conn, cfg, now_utc=now)
     return {
         "counts": counts, "calendars": per_calendar,
         "changeset": changeset, "sync_errors": sync_errors,
@@ -2539,8 +2632,8 @@ def cmd_tick_cal_ext(args):
     change is still one of the triggers for writing `audit cal.ext.sync`
     at all (fix-round finding I5: that audit is no longer unconditional --
     a perfectly healthy, zero-change, steady-state tick would otherwise
-    write 96 near-identical rows a day forever; `meta["extcal_last_ok"]`
-    already covers the heartbeat).
+    write 96 near-identical rows a day forever; `meta["extcal_last_run"]`
+    records liveness separately).
     """
     cfg = gate.load_config()
     if not cfg.get("extcal_enabled"):
@@ -2585,7 +2678,8 @@ def cmd_tick_cal_ext(args):
     if dry_run:
         out = {"ok": True, "dry_run": True, "calendars": result["calendars"],
                "sync_errors": _redact_sync_errors(result["sync_errors"]),
-               "changeset": _dry_run_summary(result["changeset"])}
+               "changeset": _dry_run_summary(result["changeset"]),
+               "export": _dry_run_export_summary(result.get("export_plan"))}
         print(json.dumps(out, ensure_ascii=False))
         # Fix-round 2, minor #4: --dry-run ALWAYS returns 0 here,
         # deliberately, even when sync_errors is non-empty -- it is a
@@ -2599,7 +2693,7 @@ def cmd_tick_cal_ext(args):
     export_counts = result.get("export_counts") or {}
     calendar_errors = [c for c in result["calendars"] if c["mode"] == "error"]
     apply_errors = counts.get("errors") or []
-    # Task 7: export_own's own errors (`{event_id, action, error}` --
+    # Task 7: export_routes's own errors (`{event_id, action, error}` --
     # shaped like apply_errors' entries but keyed by event_id instead of
     # branch/id/external_uid, since export has no branch of its own and no
     # remote identity to report) fold into the SAME has_error/tick.error
@@ -2607,8 +2701,12 @@ def cmd_tick_cal_ext(args):
     # must reach the nightly problem_summary exactly like an import
     # failure does, not silently only via journald).
     export_errors = export_counts.get("errors") or []
+    active_issue_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM extcal_export_issues").fetchone()
+    active_issue_count = active_issue_row["n"] if active_issue_row else 0
     has_error = (bool(calendar_errors) or bool(result["sync_errors"])
-                 or bool(apply_errors) or bool(export_errors))
+                 or bool(apply_errors) or bool(export_errors)
+                 or active_issue_count > 0)
 
     # extcal_last_mode: pure telemetry, but (fix-round 2, minor #6) only
     # WRITTEN when it actually changes -- this key lands in the SAME WAL
@@ -2625,7 +2723,7 @@ def cmd_tick_cal_ext(args):
 
     nonzero_counts = (any(v for k, v in counts.items() if k != "errors")
                        or any(v for k, v in export_counts.items()
-                              if k not in ("errors", "unchanged")))
+                              if k not in ("errors", "unchanged", "retained")))
     if has_error or nonzero_counts or mode_changed:
         audit_payload = dict(counts)
         audit_payload["calendars"] = result["calendars"]
@@ -2665,9 +2763,8 @@ def cmd_tick_cal_ext(args):
             if url in result["tokens"]:
                 famdb.meta_set(conn, f"extcal_last_full:{url}", now.isoformat())
 
-    # extcal_last_ok: only a FULLY clean tick counts (matches the exit
-    # code -- "last_ok" means "last full success", not "last time SOME
-    # calendar happened to sync").
+    # extcal_last_ok: only a FULLY clean tick counts.  Run liveness is
+    # recorded separately in extcal_last_run below.
     if not has_error:
         famdb.meta_set(conn, "extcal_last_ok", now.isoformat())
 
@@ -2695,9 +2792,9 @@ def cmd_tick_cal_ext(args):
     #     configured but 0 matched" class -- there is no calendar to
     #     blame, so it gets its own counter, not folded into any real
     #     calendar's;
-    #   - `_EXTCAL_STREAK_APPLY_KEY` for `apply_changes`/`export_own`
-    #     per-row errors. These are folded into the SAME streak-gated
-    #     path (not escalated immediately) deliberately: they already
+    #   - _EXTCAL_STREAK_IMPORT_APPLY_KEY covers apply_changes errors.
+    #     _EXTCAL_STREAK_EXPORT_KEY covers export_routes errors; both use one
+    #     streak-gated path (not escalated immediately) deliberately: they
     #     freeze every calendar's sync-token progress this tick (the
     #     blanket gate below, untouched by this change) and the design
     #     doc's own recorded live case is `database is locked` from the
@@ -2729,22 +2826,36 @@ def cmd_tick_cal_ext(args):
     else:
         _extcal_record_success(conn, _EXTCAL_STREAK_DISCOVERY_KEY)
 
-    if apply_errors or export_errors:
-        if _extcal_record_failure(conn, _EXTCAL_STREAK_APPLY_KEY, threshold):
+    if apply_errors:
+        if _extcal_record_failure(
+                conn, _EXTCAL_STREAK_IMPORT_APPLY_KEY, threshold):
             escalate_messages += [
                 f"{e.get('branch')}.{e.get('action')} id={e.get('id')}: {e.get('error')}"
                 for e in apply_errors]
-            # Task 7: export_own's errors have no "branch" (there is only
-            # one kind of row on this side, events) -- reported as
-            # "export.<action> event_id=<id>: <error>" instead, same
-            # overall shape.
+    else:
+        _extcal_record_success(conn, _EXTCAL_STREAK_IMPORT_APPLY_KEY)
+
+    if export_errors:
+        if _extcal_record_failure(conn, _EXTCAL_STREAK_EXPORT_KEY, threshold):
             escalate_messages += [
                 f"export.{e.get('action')} event_id={e.get('event_id')}: {e.get('error')}"
                 for e in export_errors]
     else:
-        _extcal_record_success(conn, _EXTCAL_STREAK_APPLY_KEY)
+        _extcal_record_success(conn, _EXTCAL_STREAK_EXPORT_KEY)
 
     conn.commit()
+
+    # Heartbeat is written only after all terminal accounting decisions above.
+    # Keep it in the same final transaction boundary: a failed write/commit
+    # must not make a marker visible to a separate reader.
+    try:
+        famdb.meta_set(conn, "extcal_last_run", now.isoformat())
+        conn.commit()
+    except Exception as e:                         # noqa: BLE001
+        conn.rollback()
+        _audit_tick_error("cal-ext heartbeat", e)
+        print(f"cal-ext failed: heartbeat marker: {e}")
+        return 1
 
     if escalate_messages:
         # Blocker 3: redacted -- this string is what maint.problem_summary
@@ -2872,6 +2983,53 @@ def cmd_cal_ext_probe(args):
         for e in result["errors"]:
             print(f"  - {e}")
     return 0
+
+
+def cmd_cal_ext_conflicts(args):
+    """List safe, operator-resolvable export conflicts."""
+    conn = famdb.connect()
+    rows = conn.execute(
+        "SELECT event_id, target, action, reason_code, first_seen_utc, "
+        "last_seen_utc FROM extcal_export_issues WHERE kind='conflict' "
+        "ORDER BY event_id, target"
+    ).fetchall()
+    out = [dict(row) for row in rows]
+    audit.log(conn, "cal.ext.conflicts", {"count": len(out)})
+    conn.commit()
+    if getattr(args, "json", False):
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        for row in out:
+            print(f"{row['event_id']}	{row['target']}	{row['action']}	"
+                  f"{row['reason_code']}	{row['first_seen_utc']}	"
+                  f"{row['last_seen_utc']}")
+    return 0
+
+
+def cmd_cal_ext_resolve(args):
+    """Apply one explicit conflict choice through extcal's transaction."""
+    conn = famdb.connect()
+    try:
+        result = extcal.resolve_conflict(
+            conn, args.event_id, target=args.target,
+            decision="force-push" if args.force_push else "keep-remote",
+            cfg=gate.load_config(),
+        )
+    except Exception as exc:
+        conn.rollback()
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "reason": getattr(
+                exc, "reason_code", "export_error")}, ensure_ascii=False))
+        else:
+            print(f"cal-ext resolve failed: {getattr(exc, 'reason_code', 'export_error')}")
+        return 1
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+    else:
+        print(f"cal-ext conflict resolved: event_id={result['event_id']} "
+              f"target={result['target']} decision={result['decision']}")
+    return 0
+
 
 def _fmt_plan(p):
     line = f"{p['id']}\t{p['title']}\t[{p['status']}]"
@@ -3408,6 +3566,13 @@ def build_parser():
     sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                      help="machine-readable output")
 
+    sp = sub.add_parser("resolve")
+    resolve_sub = sp.add_subparsers(dest="resolve_cmd", required=True)
+    sprt = resolve_sub.add_parser("turn")
+    sprt.set_defaults(func=cmd_resolve_turn)
+    sprt.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
+
     sp = sub.add_parser("react-hook",
                         help="apply a WhatsApp reaction event read from stdin")
     sp.set_defaults(func=cmd_react_hook)
@@ -3562,6 +3727,8 @@ def build_parser():
     spa.add_argument("--notes", default="")
     spa.add_argument("--travel-min", dest="travel_min", type=int,
                       help="override place travel minutes for leave_at (default: take from place)")
+    spa.add_argument("--for-person", dest="for_person",
+                      help="subject person ref (groups are rejected)")
     spa.add_argument("--prep-min", dest="prep_min", type=int,
                       help="minutes needed to get ready before leave_at; "
                            "overrides the default/slug reminder rules with "
@@ -3589,6 +3756,9 @@ def build_parser():
                       help="minutes needed to get ready before leave_at; "
                            "overrides the default/slug reminder rules with "
                            "this event's own escalation chain")
+    subject_group = spu.add_mutually_exclusive_group()
+    subject_group.add_argument("--for-person", dest="for_person")
+    subject_group.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
     spu.add_argument("--add-person", dest="add_person", action="append", default=[],
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -3606,6 +3776,8 @@ def build_parser():
 
     spc = cal_sub.add_parser("cancel"); spc.set_defaults(func=cmd_cal_cancel)
     spc.add_argument("id", type=int)
+    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
 
     spser = cal_sub.add_parser("series")
     series_sub = spser.add_subparsers(dest="series_cmd", required=True)
@@ -3616,15 +3788,15 @@ def build_parser():
     spsc.add_argument("id", type=int)
     spsu = series_sub.add_parser("update"); spsu.set_defaults(func=cmd_cal_series_update)
     spsu.add_argument("id", type=int)
+    series_subject = spsu.add_mutually_exclusive_group()
+    series_subject.add_argument("--for-person", dest="for_person")
+    series_subject.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
     spsu.add_argument("--add-person", dest="add_person", action="append", default=[],
                        help="participant ref to add to the series and its future untouched occurrences (repeatable)")
     spsu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
                        help="participant ref to remove from the series and its future untouched occurrences (repeatable)")
     spsu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
-    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
-                      help="machine-readable output")
-
     spd = cal_sub.add_parser("done"); spd.set_defaults(func=cmd_cal_done)
     spd.add_argument("id", type=int)
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
@@ -3652,12 +3824,14 @@ def build_parser():
 
     spday = cal_sub.add_parser("day"); spday.set_defaults(func=cmd_cal_day)
     spday.add_argument("date", help="YYYY-MM-DD in Asia/Almaty")
+    spday.add_argument("--for-person", dest="for_person")
     spday.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                         help="machine-readable output")
 
     sprange = cal_sub.add_parser("range"); sprange.set_defaults(func=cmd_cal_range)
     sprange.add_argument("from_iso")
     sprange.add_argument("to_iso")
+    sprange.add_argument("--for-person", dest="for_person")
     sprange.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                           help="machine-readable output")
 
@@ -3668,6 +3842,7 @@ def build_parser():
                              help="YYYY-MM-DD, any day within the target Mon-Sun week")
     grid_group.add_argument("--month", type=_month_arg, help="YYYY-MM")
     spg.add_argument("-o", "--out", dest="out", required=True, help="output PNG path")
+    spg.add_argument("--for-person", dest="for_person")
     spg.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
@@ -3894,6 +4069,23 @@ def build_parser():
     spp = cal_ext_sub.add_parser("probe"); spp.set_defaults(func=cmd_cal_ext_probe)
     spp.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    spc = cal_ext_sub.add_parser("conflicts")
+    spc.set_defaults(func=cmd_cal_ext_conflicts)
+    spc.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
+
+    spr = cal_ext_sub.add_parser("resolve")
+    spr.set_defaults(func=cmd_cal_ext_resolve)
+    spr.add_argument("event_id", type=int)
+    spr.add_argument("--target", choices=("hermes", "taya"), default=None)
+    choice = spr.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--keep-remote", action="store_true",
+                        help="accept the verified iCloud fields")
+    choice.add_argument("--force-push", action="store_true",
+                        help="explicitly overwrite iCloud with Hermes fields")
+    spr.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                     help="machine-readable output")
 
     sp = sub.add_parser("meds")
     meds_sub = sp.add_subparsers(dest="meds_cmd", required=True)

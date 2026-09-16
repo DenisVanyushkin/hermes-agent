@@ -1161,7 +1161,7 @@ def test_med_defer_unknown_intake_exits_2(db, capsys):
 # --- Task 9 (extcal): `fam cal adopt` / `fam cal disown` --------------------
 # Only `extcal._request` is monkeypatched in this section (the seam the task
 # 9 brief names explicitly) -- these tests exercise the real
-# `extcal.drop_valarm`/`_strip_valarm_ics`/`_export_put`/`_export_reread_etag`
+# `extcal.drop_valarm`/`_strip_valarm_ics`/`_export_put`
 # code (including the host-guard-adjacent header building and the 412-retry
 # logic), never the real network.
 
@@ -1201,7 +1201,7 @@ def _ok_valarm_response(*a, **kw):
     return extcal.Response(
         200,
         "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
-        {},
+        {"ETag": '"adopt"'},
     )
 
 def test_cal_adopt_flips_owner_and_builds_chain(db, capsys, monkeypatch):
@@ -1384,7 +1384,7 @@ def test_cal_adopt_without_external_href_skips_network_entirely(db, capsys, monk
 # refused -- flipping such an event to owner='iphone' would silently drop
 # its ONLY reminder source (nothing on her iPhone could ever ring for it).
 # I2 (Important): `drop_valarm` must never PUT into her collection without
-# a real If-Match etag (unlike export_own's own write-target, this
+# a real If-Match etag (unlike export_routes's own write-target, this
 # collection can hold HER concurrent edits).
 # I3 (Important): `_strip_valarm_ics` must refuse (not silently truncate)
 # an unclosed VALARM or an otherwise unbalanced/incomplete resource.
@@ -1979,3 +1979,18 @@ def test_extcal_full_resync_days_falls_back_to_default_on_non_numeric(raw):
 
 def test_extcal_full_resync_days_defaults_when_key_missing():
     assert cli._extcal_full_resync_days({}) == 1
+
+
+def test_refresh_pending_acks_does_not_overwrite_projection_on_config_error(
+    db, monkeypatch
+):
+    writes = []
+
+    def fail_config():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(cli.gate, "load_config", fail_config)
+    monkeypatch.setattr(cli.acks, "write", lambda *args, **kwargs: writes.append(1))
+
+    assert cli._refresh_pending_acks(db) is None
+    assert writes == []

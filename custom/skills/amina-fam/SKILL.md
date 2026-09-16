@@ -1,6 +1,6 @@
 ---
 name: amina-fam
-description: "fam CLI: calendar/people/places + reminders ('уже выходим/едем/собираемся/готовимся/на месте/знаю', 'не напоминай про это', 'какие напоминания' are reactions to a reminder/digest the agent itself already sent — use fam here too). Also for recording/checking events, 'who is X', 'where is Y', day/week/month views, or any household schedule/contacts/locations request."
+description: "fam CLI: calendar/people/places + reminders ('уже выходим/едем/собираемся/готовимся/на месте/знаю', 'не напоминай про это', 'какие напоминания', 'пропущу', 'не пойду', 'тренировки не будет', 'отмени тренировку/занятие' are reactions to a reminder/digest the agent itself already sent — use fam here too). Also for recording/checking events, 'who is X', 'where is Y', day/week/month views, or any household schedule/contacts/locations request."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v23 (rules 23–24: a taken slot must be confirmed with `--allow-overlap`; a foreign timezone is passed as its own offset and confirmed in both times)._
+_Body version: v24 (rules 23–24: a taken slot must be confirmed with `--allow-overlap`; a foreign timezone is passed as its own offset and confirmed in both times; reminder reactions and cancellation verbs are explicit)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -88,6 +88,11 @@ way to read or change family data.
   ISO-8601 with an explicit offset, e.g. `2026-07-15T10:00:00+05:00`.
   If she names a DIFFERENT timezone ("по Москве", "мск"), see rule 24 —
   you pass that zone's offset, not Almaty's.
+
+## Event ownership
+
+`--for-person` answers whose event it is; `--with` answers who participates.
+For «запиши Тае математику», pass `--for-person Тая` and add `--with Тая` only if she also participates. For «моя тренировка вместе с Таей», pass `--for-person Амина --with Тая`. The subject is never inferred from participants or title. After a successful write, require exit 0 and verify the returned JSON `subject` before confirming the event.
 
 ## Rules
 
@@ -199,7 +204,7 @@ show after cancel), make a second, separate terminal call.
     memory.** "каждую неделю по понедельникам/средам/пятницам", "по будням",
     "каждый вторник" + a time ⇒ `fam cal add --title <T> --repeat weekly
     --days mon,wed,fri --start-time 10:00 [--end-time 12:00] [--place <P>]
-    [--with <who>]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
+    [--for-person <person>] [--with <who>]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
     sat,sun; `--start-time`/`--end-time` are local `HH:MM` (no date). fam
     materializes the concrete occurrences itself — do NOT add each week by
     hand with separate `cal add --start` calls. To stop a whole series:
@@ -484,8 +489,8 @@ show after cancel), make a second, separate terminal call.
 
 | Goal | Command |
 | --- | --- |
-| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--with NAME]... [--notes N] [--allow-overlap]` |
-| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
+| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--for-person NAME] [--with NAME]... [--notes N] [--allow-overlap]` |
+| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--for-person N] [--clear-for-person] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
 | Take over reminding her about an iPhone-owned event | `fam cal adopt <event_id>` |
@@ -635,6 +640,20 @@ Cancel always applies to the whole remaining chain:
 - **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
   → `fam rem cancel EVENT_ID`. Cancel is ALWAYS whole-chain — it has no
   `--scope` option; never pass one.
+
+### Три разных действия: это не синонимы
+
+These commands have different targets and postconditions; never substitute one
+for another:
+
+| Фраза | Команда | Состояние события |
+| --- | --- | --- |
+| «уже выхожу», «едем» | `fam rem ack EVENT_ID` (scope по стадии) | остаётся `active` |
+| «не напоминай про это» | `fam rem cancel EVENT_ID` | остаётся `active` |
+| «не пойду», «пропущу», «тренировки не будет» | `fam cal cancel EVENT_ID` | `cancelled`; каскадит отмену напоминаний и prep-планов |
+
+`fam cal cancel` применим к нативному событию Hermes (`owner='hermes'`),
+но никогда к `owner='iphone'`: такое событие меняют на телефоне.
 - **"какие напоминания" (what's pending)** → `fam rem list --due --json`
   for what's about to fire, or `fam rem list --json` for everything.
 
@@ -659,6 +678,12 @@ silenced; state that no preparation stages remained and preserve any
 still-pending departure reminder. If the user then says they are leaving,
 acknowledge the full chain with `rem ack EVENT_ID` and confirm that remaining
 reminders were stopped.
+
+### Проверка `cancelled: 0`
+
+`cancelled: 0` from `fam rem cancel` only describes pending reminder rows; it
+does not prove that the event is irrelevant. For cancellation intent, inspect
+`fam cal show EVENT_ID` and check `events.status` before deciding what happened.
 
 ## Plan Verbs
 

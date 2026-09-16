@@ -41,6 +41,40 @@ def test_note_names_the_dose_and_both_commands():
     assert "fam med skip 3" in note
 
 
+def test_note_reaches_the_lid_addressed_turn(tmp_path, monkeypatch):
+    """A phone-addressed snapshot must match the inbound WhatsApp LID."""
+    mapping_dir = tmp_path / "whatsapp" / "session"
+    mapping_dir.mkdir(parents=True)
+    (mapping_dir / "lid-mapping-244882006364348_reverse.json").write_text(
+        json.dumps("77011102626"), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        "gateway.whatsapp_identity.get_hermes_dir",
+        lambda *_args: mapping_dir,
+    )
+
+    note = _pending_acks_note(
+        SNAPSHOT, "whatsapp", "244882006364348@lid", now_utc=NOW
+    )
+
+    assert note is not None
+    assert "мисол" in note
+
+
+def test_no_note_for_an_unresolved_lid(tmp_path, monkeypatch):
+    """An unknown LID must not broaden into another WhatsApp identity."""
+    mapping_dir = tmp_path / "whatsapp" / "session"
+    mapping_dir.mkdir(parents=True)
+    monkeypatch.setattr(
+        "gateway.whatsapp_identity.get_hermes_dir",
+        lambda *_args: mapping_dir,
+    )
+
+    assert _pending_acks_note(
+        SNAPSHOT, "whatsapp", "999999999999999@lid", now_utc=NOW
+    ) is None
+
+
 def test_no_note_for_a_different_channel():
     """Denis's admin channel must not receive Amina's open questions."""
     assert _pending_acks_note(SNAPSHOT, "telegram", "79564752", now_utc=NOW) is None

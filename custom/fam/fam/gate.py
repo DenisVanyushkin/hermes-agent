@@ -36,6 +36,9 @@ CONFIG_EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "fam-config.examp
 
 
 def _resolve_config_path():
+    configured = os.environ.get("FAM_CONFIG")
+    if configured:
+        return Path(configured)
     for p in (CONFIG_PATH, SANDBOX_CONFIG_PATH):
         if p.exists():
             return p
@@ -213,6 +216,7 @@ CONFIG_DEFAULTS = {
     "extcal_username": "",
     "extcal_read_calendars": [],
     "extcal_write_calendar": "",
+    "extcal_taya_calendar": "",
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
     "extcal_full_resync_days": 1,

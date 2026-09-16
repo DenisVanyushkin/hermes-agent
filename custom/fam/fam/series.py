@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 
 from fam import audit, cal, rem
 
+_UNSET = object()
+
 _WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 _WD_INDEX = {w: i for i, w in enumerate(_WEEKDAYS)}
 
@@ -51,7 +53,7 @@ def _validate_hhmm(t):
 
 def add(conn, title, weekdays, start_time, end_time=None, place=None,
         participants=(), transport="unknown", notes="", until_local=None,
-        prep_min=None):
+        prep_min=None, subject_person_id=None):
     """Create an active event_series. Validates refs/weekdays/times before any
     insert (mirrors cal.add). Groups in participants expand to members. Does
     NOT generate occurrences -- the caller runs generate() next. prep_min
@@ -61,6 +63,7 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
     """
     pl = cal._resolve_place(conn, place)
     resolved = cal._resolve_participants(conn, participants)
+    subject_person_id = cal._validate_subject_id(conn, subject_person_id)
     wd = canon_weekdays(weekdays)
     _validate_hhmm(start_time)
     if end_time is not None:
@@ -71,9 +74,10 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
     cur = conn.execute(
         "INSERT INTO event_series(title, place_id, weekdays, start_time, "
         "end_time, transport, notes, until_local, prep_min, status, "
-        "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)",
+        "created_at, updated_at, subject_person_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?)",
         (title, pl["id"] if pl else None, wd, start_time, end_time,
-         transport, notes, until_local, prep_min, now, now),
+         transport, notes, until_local, prep_min, now, now, subject_person_id),
     )
     sid = cur.lastrowid
     for m in resolved:
@@ -84,7 +88,8 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
         "id": sid, "title": title, "weekdays": wd, "start_time": start_time,
         "end_time": end_time, "place": place,
         "participants": list(participants), "until_local": until_local,
-        "prep_min": prep_min})
+        "prep_min": prep_min, "subject": cal.subject_for_event(
+            conn, {"subject_person_id": subject_person_id})})
     return get(conn, sid)
 
 
@@ -98,6 +103,7 @@ def get(conn, sid):
         r["person_id"] for r in conn.execute(
             "SELECT person_id FROM event_series_participants WHERE series_id=?",
             (sid,))]
+    d["subject"] = cal.subject_for_event(conn, d)
     return d
 
 
@@ -108,6 +114,7 @@ def list_active(conn):
     for row in conn.execute(
             "SELECT * FROM event_series WHERE status='active' ORDER BY id"):
         d = dict(row)
+        d["subject"] = cal.subject_for_event(conn, d)
         d["future_count"] = conn.execute(
             "SELECT COUNT(*) AS c FROM events WHERE series_id=? AND "
             "status='active' AND start_utc > ?", (d["id"], now)).fetchone()["c"]
@@ -125,11 +132,13 @@ def _to_utc_iso(now_utc):
 
 
 def cancel(conn, sid, now_utc=None):
-    """Cancel a series: mark it cancelled and delete FUTURE untouched
-    occurrences (status='active', start_utc > now). Past, done and
-    individually-cancelled occurrences are left intact. Returns the number of
-    future occurrences removed. A cancelled series is never regenerated.
-    now_utc is a test seam (defaults to wall-clock now).
+    """Cancel a series and process its future occurrences.
+
+    Managed occurrences are tombstoned so their export journal or issue can
+    drive the later external-calendar cleanup; their plan links stay intact.
+    Unmanaged occurrences are physically deleted after their plan references
+    are cleared. Returns the number of future occurrences processed.
+    ``now_utc`` is a test seam (defaults to wall-clock now).
     """
     s = get(conn, sid)
     if s is None:
@@ -141,18 +150,28 @@ def cancel(conn, sid, now_utc=None):
     future = conn.execute(
         "SELECT id FROM events WHERE series_id=? AND status='active' AND "
         "start_utc > ?", (sid, now)).fetchall()
+    physically_deleted = 0
     for r in future:
         event_id = r["id"]
-        # plans.prep_for_event_id and plans.attached_event_id both
-        # REFERENCE events(id) with foreign_keys=ON, so deleting the
-        # event out from under a plan that still points at it raises
-        # IntegrityError. Drop any open prep-plan first (same cascade
-        # cal.cancel() uses), then null out the dangling reference on
-        # every OTHER plan still pointing at this event (a done/dropped
-        # prep-plan, or a plan merely attached via plans.attach()) --
-        # the plan row itself is kept, only the FK is cleared, so
-        # history isn't lost.
+        managed = conn.execute(
+            "SELECT 1 FROM ext_exports WHERE event_id=? "
+            "UNION SELECT 1 FROM ext_exports_taya WHERE event_id=? "
+            "UNION SELECT 1 FROM extcal_export_issues WHERE event_id=?",
+            (event_id, event_id, event_id),
+        ).fetchone()
+        # Both physical deletion and managed tombstoning cancel open prep
+        # work. Only the physical-delete branch below clears the event FKs.
         cal._prep_cascade_cancel(conn, event_id)
+        if managed:
+            conn.execute(
+                "UPDATE events SET status='cancelled', updated_at=? WHERE id=?",
+                (now, event_id))
+            rem.cancel_chain(conn, event_id)
+            continue
+
+        # A physical delete must clear every plan FK first. Managed
+        # tombstones retain these links so later cleanup can still identify
+        # and report the cancelled occurrence without losing plan history.
         conn.execute(
             "UPDATE plans SET prep_for_event_id=NULL "
             "WHERE prep_for_event_id=?", (event_id,))
@@ -160,8 +179,10 @@ def cancel(conn, sid, now_utc=None):
             "UPDATE plans SET attached_event_id=NULL "
             "WHERE attached_event_id=?", (event_id,))
         conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+        physically_deleted += 1
     audit.log(conn, "cal.series.cancel",
-              {"id": sid, "deleted_future": len(future)})
+              {"id": sid, "processed_future": len(future),
+               "physically_deleted": physically_deleted})
     return len(future)
 
 
@@ -241,71 +262,73 @@ def generate(conn, now_utc=None, horizon_weeks=HORIZON_WEEKS):
             cal.add(conn, s["title"], start_utc, end_utc,
                     place=s["place_id"], participants=participants,
                     transport=s["transport"], notes=s["notes"],
-                    series_id=s["id"], prep_min=s["prep_min"])
+                    series_id=s["id"], prep_min=s["prep_min"],
+                    subject_person_id=s["subject_person_id"])
             created += 1
     return created
 
 
-def update_participants(conn, sid, add=(), remove=(), now_utc=None):
-    """Change the series' participant set and propagate it to every future
-    UNTOUCHED occurrence (status='active', start_utc>now, local start time
-    still matching the series' own start_time slot -- a rescheduled
-    occurrence has drifted off the grid and is left alone, same as
-    cancel()'s "future untouched" semantics). Past, done, cancelled/
-    tombstone and rescheduled occurrences are never touched.
+def update_participants(conn, sid, add=(), remove=(), now_utc=None,
+                       subject_person_id=_UNSET):
+    """Update participants and/or the series subject atomically.
 
-    add/remove are participant refs (name/alias/slug/group -- groups
-    expand to members), resolved via cal._resolve_participants BEFORE any
-    write (UnknownRefError on the first bad ref). For each affected
-    occurrence, the same add/remove is applied to event_participants and
-    rem.regenerate(conn, event_id) runs in the same transaction, so a
-    newly-added participant's slug-scoped reminder rule (e.g. Тая's
-    lead-60 chain) takes effect immediately.
-
-    now_utc is a test seam (defaults to wall-clock now), mirroring
-    cancel()'s now_utc parameter.
-
-    Returns {"series_id": sid, "updated_events": [event_id, ...]}.
+    Subject propagation is limited to active future occurrences that remain
+    on the series' local grid and still carry the previous series subject.
+    An occurrence explicitly changed through ``cal.update`` is therefore an
+    individual override and is preserved.
     """
     s = get(conn, sid)
     if s is None:
         raise ValueError(f"unknown series: {sid}")
-
     to_add = cal._resolve_participants(conn, add) if add else []
     to_remove = cal._resolve_participants(conn, remove) if remove else []
-
-    for person in to_add:
-        conn.execute(
-            "INSERT OR IGNORE INTO event_series_participants"
-            "(series_id, person_id) VALUES (?,?)", (sid, person["id"]))
-    for person in to_remove:
-        conn.execute(
-            "DELETE FROM event_series_participants WHERE series_id=? "
-            "AND person_id=?", (sid, person["id"]))
-
+    subject_given = subject_person_id is not _UNSET
+    new_subject = (cal._validate_subject_id(conn, subject_person_id)
+                   if subject_given else s["subject_person_id"])
+    old_subject = s["subject_person_id"]
     now = _to_utc_iso(now_utc) if now_utc else _now()
-    candidates = conn.execute(
-        "SELECT id, start_utc FROM events WHERE series_id=? AND "
-        "status='active' AND start_utc > ?", (sid, now)).fetchall()
 
-    updated_events = []
-    for row in candidates:
-        local_hm = cal._to_local_iso(row["start_utc"])[11:16]
-        if local_hm != s["start_time"]:
-            continue  # rescheduled off the series grid -- leave alone
-        event_id = row["id"]
+    if to_add or to_remove:
         for person in to_add:
             conn.execute(
-                "INSERT OR IGNORE INTO event_participants"
-                "(event_id, person_id) VALUES (?,?)", (event_id, person["id"]))
+                "INSERT OR IGNORE INTO event_series_participants"
+                "(series_id, person_id) VALUES (?,?)", (sid, person["id"]))
         for person in to_remove:
             conn.execute(
-                "DELETE FROM event_participants WHERE event_id=? AND "
-                "person_id=?", (event_id, person["id"]))
-        rem.regenerate(conn, event_id)
-        updated_events.append(event_id)
+                "DELETE FROM event_series_participants WHERE series_id=? "
+                "AND person_id=?", (sid, person["id"]))
+    if subject_given:
+        conn.execute(
+            "UPDATE event_series SET subject_person_id=?, updated_at=? WHERE id=?",
+            (new_subject, now, sid))
+
+    candidates = conn.execute(
+        "SELECT id, start_utc, subject_person_id FROM events WHERE series_id=? "
+        "AND status='active' AND start_utc > ?", (sid, now)).fetchall()
+    updated_events = []
+    for row in candidates:
+        if cal._to_local_iso(row["start_utc"])[11:16] != s["start_time"]:
+            continue
+        if subject_given and row["subject_person_id"] == old_subject:
+            conn.execute("UPDATE events SET subject_person_id=?, updated_at=? WHERE id=?",
+                         (new_subject, now, row["id"]))
+        if to_add or to_remove:
+            for person in to_add:
+                conn.execute(
+                    "INSERT OR IGNORE INTO event_participants"
+                    "(event_id, person_id) VALUES (?,?)", (row["id"], person["id"]))
+            for person in to_remove:
+                conn.execute(
+                    "DELETE FROM event_participants WHERE event_id=? AND person_id=?",
+                    (row["id"], person["id"]))
+            rem.regenerate(conn, row["id"])
+        if (to_add or to_remove
+                or (subject_given and row["subject_person_id"] == old_subject)):
+            updated_events.append(row["id"])
 
     audit.log(conn, "cal.series.update", {
         "id": sid, "add": list(add), "remove": list(remove),
+        "subject": cal.subject_for_event(conn, {"subject_person_id": new_subject}),
         "updated_events": updated_events})
-    return {"series_id": sid, "updated_events": updated_events}
+    return {"series_id": sid, "updated_events": updated_events,
+            "subject": cal.subject_for_event(conn, {"subject_person_id": new_subject})}

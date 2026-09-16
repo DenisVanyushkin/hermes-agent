@@ -10,8 +10,13 @@ from datetime import datetime, timedelta, timezone
 from . import car
 from . import db as famdb, gate
 
-def _result(name, status, detail="", last_ok_ts=None):
-    return {"name": name, "status": status, "detail": detail, "last_ok_ts": last_ok_ts}
+def _result(name, status, detail="", last_ok_ts=None, **extra):
+    result = {
+        "name": name, "status": status, "detail": detail,
+        "last_ok_ts": last_ok_ts,
+    }
+    result.update(extra)
+    return result
 
 def bridge_readiness(conn, cfg, now=None):
     """ok/down from the last connect/disconnect marker seen in the current
@@ -53,7 +58,7 @@ def starline_staleness(conn, cfg, now=None):
                    last_ok_ts=last)
 
 def extcal_staleness(conn, cfg, now_utc=None):
-    """Calque of car.check_staleness, but reading `meta.extcal_last_ok`
+    """Calque of car.check_staleness, but reading `meta.extcal_last_run`
     instead of a car_metrics row -- Task 6's cal-ext tick is a 15-minute
     silent timer that never messages Amina on its own (invariant), so a
     dead timer (unit disabled, VM rebooted, Apple ID password rotated)
@@ -61,24 +66,26 @@ def extcal_staleness(conn, cfg, now_utc=None):
     *failed run*, never the absence of any run at all.
 
     Three-way read, pure (never writes conn or meta):
+    The shared result field last_ok_ts carries the
+    extcal_last_run timestamp for this probe.
     - `extcal_enabled` falsy -> "ok", silent: sync is deliberately off,
       that is not a degradation. Must be checked BEFORE looking at
-      `extcal_last_ok` -- a prod box with the sync never turned on has no
+      `extcal_last_run` -- a prod box with the sync never turned on has no
       such key either, and that is the *other*, non-degraded, reason for
       it being absent.
-    - enabled but `meta.extcal_last_ok` missing entirely -> "degraded":
-      the sync has never once completed successfully, distinct from
+    - enabled but `meta.extcal_last_run` missing entirely -> "degraded":
+      the sync has never run, distinct from
       merely being stale.
     - enabled and present but older than `extcal_stale_hours` -> "degraded"
-      with the human-readable age.
+      with the human-readable age since the last run.
     - enabled and fresh -> "ok".
     """
     if not cfg.get("extcal_enabled"):
         return _result("extcal_staleness", "ok", "extcal выключен")
-    last = famdb.meta_get(conn, "extcal_last_ok")
+    last = famdb.meta_get(conn, "extcal_last_run")
     if not last:
         return _result("extcal_staleness", "degraded",
-                        "extcal включён, но синк ни разу не отработал успешно")
+                        "extcal включён, но синк ни разу не запускался")
     now_dt = datetime.now(timezone.utc) if now_utc is None else now_utc
     if isinstance(now_dt, str):
         now_dt = datetime.fromisoformat(now_dt)
@@ -89,10 +96,72 @@ def extcal_staleness(conn, cfg, now_utc=None):
         age_hours = age.total_seconds() / 3600
         return _result(
             "extcal_staleness", "degraded",
-            f"синк iCloud не отвечал успехом {age_hours:.1f}ч "
+            f"Синк iCloud не запускался {age_hours:.1f}ч "
             f"(порог {stale_hours}ч)",
             last_ok_ts=last)
     return _result("extcal_staleness", "ok", "свежо", last_ok_ts=last)
+
+def extcal_failures(conn, cfg, now_utc=None):
+    """Pure read of active export issues and split terminal streaks.
+
+    The probe exposes only event IDs and bounded enum/status fields.  It
+    deliberately never reads event titles, hrefs, or ICS bodies, and never
+    changes the database or sends a message.  Its streak view is separate
+    from extcal_staleness: it does not use a timestamp or extcal_last_ok.
+    """
+    rows = conn.execute(
+        "SELECT target, event_id, action, kind, http_status, reason_code, "
+        "first_seen_utc, last_seen_utc "
+        "FROM extcal_export_issues ORDER BY target, event_id",
+    ).fetchall()
+    issues = [dict(row) for row in rows]
+    streaks = {}
+    for label, key in (
+        ("import_apply", "__import_apply__"),
+        ("export", "__export__"),
+    ):
+        raw = famdb.meta_get(conn, f"extcal_fail_streak:{key}", "0")
+        try:
+            streaks[label] = max(0, int(raw))
+        except (TypeError, ValueError):
+            streaks[label] = 0
+
+    if issues:
+        ids = ", ".join(str(row["event_id"]) for row in issues)
+        actions = "; ".join(
+            (f"{str(row['target']).upper()} " if row["target"] != "hermes" else "")
+            + f"{str(row['action']).upper()} {row['http_status'] or ''}".strip()
+            for row in issues)
+        count = len(issues)
+        if 10 < count % 100 < 20:
+            word = "событий"
+        elif count % 10 == 1:
+            word = "событие"
+        elif count % 10 in (2, 3, 4):
+            word = "события"
+        else:
+            word = "событий"
+        detail = (
+            f"экспорт iCloud "
+            f"залип: {count} {word} "
+            f"({ids}), {actions}")
+        return _result("extcal_failures", "degraded", detail,
+                       issues=issues, streaks=streaks)
+    active_streaks = ", ".join(
+        f"{label}={value}" for label, value in streaks.items() if value)
+    if active_streaks:
+        return _result(
+            "extcal_failures", "degraded",
+            "ошибки cal-ext: "
+            f"{active_streaks}",
+            issues=issues, streaks=streaks)
+    return _result("extcal_failures", "ok",
+                   "ошибок "
+                   "экспорта "
+                   "нет",
+                   issues=issues, streaks=streaks)
+
+
 
 def degradation_flags(conn, cfg, now=None):
     """Informational: surface known fallback state (road on straight-line
@@ -134,7 +203,7 @@ def all_probes(conn, cfg, now=None):
     rather than `now`."""
     out = []
     for fn in (bridge_readiness, starline_staleness, degradation_flags,
-               extcal_staleness):
+               extcal_staleness, extcal_failures):
         try:
             out.append(fn(conn, cfg, now))
         except Exception as e:                        # noqa: BLE001 -- isolate

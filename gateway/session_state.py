@@ -106,6 +106,8 @@ class ConversationState:
     # Per-turn must-deliver sidecar notes (one-shot).
     sidecar_notes: List[str] = field(default_factory=list)
     # Pinned session-context bytes: (change_key, text).
+    # Candidate/window keys already given one pending-ack residual.
+    pending_ack_residuals: Dict[str, str] = field(default_factory=dict)
     ephemeral_pin: Optional[Tuple[Any, ...]] = None
     # Last voice-channel context delivered (None = never delivered).
     vc_last: Optional[str] = None
@@ -124,6 +126,7 @@ class ConversationState:
         self.last_resolved_model = ""
         self.queued_events = []
         self.sidecar_notes = []
+        self.pending_ack_residuals = {}
         self.ephemeral_pin = None
         self.vc_last = None
 

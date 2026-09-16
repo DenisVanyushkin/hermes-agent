@@ -22,7 +22,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fam import meds
+from fam import meds, rem
 from fam.cal import ALMATY
 
 
@@ -47,6 +47,22 @@ SANDBOX_PATH = Path("/root/.hermes/private/amina/pending-acks.json")
 # history, not something to re-raise on every turn -- the nightly sweep
 # owns it from there.
 DUE_WINDOW_HOURS = 12
+
+
+
+
+def _message_ids(conn, kind, ref_id):
+    ids = [row[0] for row in conn.execute(
+        "SELECT wa_message_id FROM sent_messages WHERE kind=? AND ref_id=?",
+        (kind, ref_id),
+    ).fetchall()]
+    ids.extend(row[0] for row in conn.execute(
+        "SELECT sm.wa_message_id FROM sent_message_refs smr "
+        "JOIN sent_messages sm ON sm.id=smr.sent_message_id "
+        "WHERE smr.kind=? AND smr.ref_id=?",
+        (kind, ref_id),
+    ).fetchall())
+    return list(dict.fromkeys(ids))
 
 
 def resolve_path():
@@ -89,6 +105,9 @@ def build(conn, cfg=None, now_utc=None):
         item = {
             "kind": "med_intake",
             "id": row["intake_id"],
+            "ref_id": row["intake_id"],
+            "current_state": "pending",
+            "wa_message_ids": _message_ids(conn, "med", row["intake_id"]),
             "name": row["name"],
             "dose": med.get("dose") or "",
             "plan_ts_utc": row["plan_ts_utc"],
@@ -99,6 +118,12 @@ def build(conn, cfg=None, now_utc=None):
         if deferred:
             item["deferred"] = True
         items.append(item)
+
+    items.extend(rem.open_resolution_candidates(
+        conn,
+        now_utc=now_raw,
+        max_age_min=(cfg or {}).get("reminder_max_age_min", 120),
+    ))
 
     return {
         "generated_at": now_raw if isinstance(now_raw, str) else now.isoformat(),
@@ -114,7 +139,8 @@ def write(conn, cfg=None, path=None, now_utc=None):
     tells the gateway to stop injecting an already-answered question, so
     "nothing pending" must overwrite, not skip.
     """
-    target = Path(path) if path is not None else resolve_path()
+    target = Path(path) if path is not None else Path(
+        (cfg or {}).get("pending_acks_path") or resolve_path())
     try:
         snapshot = build(conn, cfg=cfg, now_utc=now_utc)
         tmp = target.with_name(target.name + ".tmp")

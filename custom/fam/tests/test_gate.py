@@ -79,6 +79,7 @@ CFG = {
     "extcal_username": "",
     "extcal_read_calendars": [],
     "extcal_write_calendar": "",
+    "extcal_taya_calendar": "",
     "extcal_horizon_weeks": 8,
     "extcal_stale_hours": 6,
     "extcal_full_resync_days": 1,

@@ -37,7 +37,11 @@ def _problem_lines(digest):
         lines.append(f"календарь: {collisions} совпадающих записей, разобрать вручную")
     for probe in sections.get("probes", []):
         if probe["status"] != "ok":
-            lines.append(f"{probe['name']}: {probe['detail'] or probe['status']}")
+            detail = probe["detail"] or probe["status"]
+            if probe["name"] == "extcal_failures":
+                lines.append(detail)
+            else:
+                lines.append(f"{probe['name']}: {detail}")
     for rejected in sections.get("backups", {}).get("rejected") or []:
         # Not only through the LLM report: a foreign or corrupt file sitting
         # in the backup directory is exactly the finding that must not

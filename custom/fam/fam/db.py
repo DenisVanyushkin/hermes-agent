@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS events (
   travel_min_road INTEGER,                -- computed road minutes with traffic; beats manual (3a)
   road_checked_at TEXT,                   -- UTC ISO of last road computation (3a)
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL);
+  updated_at TEXT NOT NULL,
+  subject_person_id INTEGER REFERENCES people(id));
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(start_utc);
 CREATE TABLE IF NOT EXISTS event_participants (
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -70,7 +71,8 @@ CREATE TABLE IF NOT EXISTS event_series (
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active','cancelled')),
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL);
+  updated_at TEXT NOT NULL,
+  subject_person_id INTEGER REFERENCES people(id));
 CREATE TABLE IF NOT EXISTS event_series_participants (
   series_id INTEGER NOT NULL REFERENCES event_series(id) ON DELETE CASCADE,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -82,6 +84,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
   actor TEXT NOT NULL DEFAULT 'agent',    -- agent|tick|admin
   payload TEXT NOT NULL DEFAULT '{}');    -- JSON
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts_utc);
+CREATE INDEX IF NOT EXISTS idx_audit_resolve_key
+  ON audit_log(kind, CASE WHEN json_valid(payload)
+                          THEN json_extract(payload, '$.idempotency_key') END);
+CREATE TABLE IF NOT EXISTS resolve_receipts (
+  idempotency_key TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  ref_id INTEGER NOT NULL,
+  receipt TEXT NOT NULL,
+  created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reminder_rules (
   id INTEGER PRIMARY KEY,
   scope TEXT NOT NULL,                    -- 'default' | 'slug:<slug>'
@@ -214,6 +225,23 @@ CREATE TABLE IF NOT EXISTS ext_exports (
   etag TEXT,
   body_hash TEXT,
   synced_at TEXT);
+CREATE TABLE IF NOT EXISTS ext_exports_taya (
+  event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+  href TEXT,
+  etag TEXT,
+  body_hash TEXT,
+  synced_at TEXT);
+CREATE TABLE IF NOT EXISTS extcal_export_issues (
+  target TEXT NOT NULL CHECK (target IN ('hermes','taya')),
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
+  action TEXT NOT NULL CHECK (action IN ('put','delete')),
+  kind TEXT NOT NULL CHECK (kind IN ('error','conflict')),
+  http_status INTEGER,
+  reason_code TEXT NOT NULL CHECK (
+    reason_code IN ('export_error','conflict','not_found','invalid_response')),
+  first_seen_utc TEXT NOT NULL,
+  last_seen_utc TEXT NOT NULL,
+  PRIMARY KEY(target, event_id));
 """
 
 def resolve_db_path():
@@ -254,6 +282,25 @@ def _ensure_column(conn, table, column, add_ddl):
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {add_ddl}")
 
+
+def migrate_resolve_receipts(conn):
+    """Install the resolve receipt store on an existing FAM database.
+
+    ``connect()`` intentionally only opens SQLite, so the resolve CLI calls
+    this migration before reading or writing a resolution receipt.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS resolve_receipts ("
+        "idempotency_key TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+        "ref_id INTEGER NOT NULL, receipt TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_resolve_key "
+        "ON audit_log(kind, CASE WHEN json_valid(payload) "
+        "THEN json_extract(payload, '$.idempotency_key') END)"
+    )
+    conn.commit()
 def init_db(conn):
     conn.executescript(SCHEMA)
     # schema 2b: migrate pre-2b tables that predate these columns
@@ -442,10 +489,30 @@ def init_db(conn):
     # audit_log already carries 22k+ tick.reminders rows and a
     # per-recheck audit row per dose would swamp it.
     _ensure_column(conn, "med_intakes", "gate_reason", "gate_reason TEXT")
+    # v14 (S5): subject is nullable and deliberately has no backfill.
+    # Existing rows remain unowned; all four calendar writers reject group
+    # subjects before their first INSERT/UPDATE.
+    _ensure_column(conn, "events", "subject_person_id",
+                   "subject_person_id INTEGER REFERENCES people(id)")
+    _ensure_column(conn, "event_series", "subject_person_id",
+                   "subject_person_id INTEGER REFERENCES people(id)")
+    # S2 data cleanup: the old aggregate apply streak is not a
+    # meaningful value after the split.  This is deliberately DML only:
+    # schema_version remains unchanged by the cleanup itself; v13 owns the new table.
     conn.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','12')")
+        "DELETE FROM meta WHERE key IN (?, ?)",
+        ("extcal_fail_streak:__apply__", "extcal_fail_alerted:__apply__"))
     conn.execute(
-        "UPDATE meta SET value='12' WHERE key='schema_version'")
+        "INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','13')")
+    conn.execute(
+        "UPDATE meta SET value='14' WHERE key='schema_version'")
+    # v15 (S6): same-shape journal for the Taya write-only collection.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ext_exports_taya ("
+        "event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, "
+        "href TEXT, etag TEXT, body_hash TEXT, synced_at TEXT)")
+    conn.execute(
+        "UPDATE meta SET value='15' WHERE key='schema_version'")
     conn.commit()
 
 
