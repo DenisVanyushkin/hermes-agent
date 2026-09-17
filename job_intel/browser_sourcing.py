@@ -875,6 +875,15 @@ _LINKEDIN_CHALLENGE_NODE = re.compile(
 _LINKEDIN_RATE_LIMIT_TEXT = re.compile(
     r"\b(too many requests|rate[- ]limit(?:ed|ing)?)\b", flags=re.I
 )
+_LINKEDIN_PUBLIC_SEARCH_AUTH_LINK = re.compile(
+    r"href=[\"'][^\"']*(?:linkedin\.com/(?:login|signup)|/(?:uas/login|login|signup))",
+    flags=re.I,
+)
+_LINKEDIN_AUTHENTICATED_SEARCH_MARKERS = (
+    'data-testid="mainfeed"',
+    'data-testid="primary-nav"',
+)
+_LINKEDIN_AUTHENTICATED_SEARCH_NAV = ("/mynetwork", "/messaging", "/notifications")
 
 
 def _normalize_linkedin_heading(value: str) -> str:
@@ -963,6 +972,35 @@ def linkedin_safety_reason(
     if status in {401, 403} and cards == 0 and not benign_authwall:
         return f"http_{status}_antibot_or_auth"
     return None
+
+
+def classify_linkedin_public_search_session(*, url: str, html: str) -> str:
+    """Classify the session from a fetched public search page.
+
+    ``classify_auth_page`` is deliberately scoped to the authenticated feed:
+    public search markup uses absolute login/signup links and also carries a
+    reCAPTCHA configuration attribute on ordinary guest pages.  Treating that
+    attribute as a challenge kills every public search before extraction.
+    Safety evidence still wins, and authenticated navigation still fails
+    closed before the page can be used as a logged-out result.
+    """
+
+    from job_intel.linkedin_session import SESSION_MISSING, SESSION_OK
+
+    lowered_html = (html or "").lower()
+    if any(marker in lowered_html for marker in _LINKEDIN_AUTHENTICATED_SEARCH_MARKERS):
+        return SESSION_OK
+    if (
+        sum(item in lowered_html for item in _LINKEDIN_AUTHENTICATED_SEARCH_NAV)
+        >= 2
+    ):
+        return SESSION_OK
+    safety_reason = linkedin_safety_reason(final_url=url, html=html)
+    if safety_reason:
+        return safety_reason
+    if _LINKEDIN_PUBLIC_SEARCH_AUTH_LINK.search(html or ""):
+        return SESSION_MISSING
+    return "unknown_public_search_session"
 
 
 _LINKEDIN_SCRIPTED_BLOCK = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.I | re.S)
@@ -1872,11 +1910,10 @@ class BrowserSourceClient:
         from job_intel.linkedin_session import (
             SESSION_MISSING,
             SESSION_OK,
-            classify_auth_page,
         )
 
         self._health.auth_attempted = True
-        page_state = classify_auth_page(url, html)
+        page_state = classify_linkedin_public_search_session(url=url, html=html)
         self._health.session_state = page_state
         if page_state == SESSION_MISSING:
             return "without_session"

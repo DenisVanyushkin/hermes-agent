@@ -640,6 +640,28 @@ def test_allow_unauthenticated_stops_on_an_authenticated_search_page(
         )
 
 
+def test_real_public_search_markup_is_logged_out_despite_recaptcha_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "linkedin-public-search-real-markup.html"
+    )
+    html = fixture.read_text(encoding="utf-8")
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(source_name="linkedin")
+    )
+    monkeypatch.setattr(client, "_write_attach_diagnostics", lambda **_kwargs: None)
+
+    assert 'data-recaptcha-v3-integration-lix-value' in html
+    assert 'href="https://www.linkedin.com/login?' in html
+    assert client._validate_linkedin_public_search_page(
+        url="https://www.linkedin.com/jobs/search/?keywords=product",
+        html=html,
+    ) == "without_session"
+
+
 
 
 def test_public_linkedin_fixture_parses_named_lost_job_ids() -> None:
