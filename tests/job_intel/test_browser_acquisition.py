@@ -554,6 +554,92 @@ def test_unauthenticated_search_trace_keeps_auth_state_and_a1_counts(monkeypatch
     }
 
 
+def test_allow_unauthenticated_uses_the_search_page_as_the_auth_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+        )
+    )
+    html = '<html><body><a href="/uas/login">Sign in</a></body></html>'
+
+    def fail_feed_probe(**_kwargs: object) -> str:
+        raise AssertionError("allow_unauthenticated must not probe /feed/")
+
+    monkeypatch.setattr(client, "_validate_linkedin_auth", fail_feed_probe)
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        client,
+        "fetch_page",
+        lambda url, **_kwargs: BrowserFetchResult(
+            requested_url=url,
+            final_url=url,
+            html=html,
+            html_sha256="a" * 64,
+            page_offset=0,
+            planned_scroll_steps=0,
+            completed_scroll_steps=0,
+            scroll_trace=(),
+            dom_unique_job_ids=frozenset(),
+            artifact_ref=None,
+        ),
+    )
+
+    vacancies = client.search_linkedin(
+        "product",
+        geography_location="United Kingdom",
+        allow_unauthenticated=True,
+        execution_plan=LinkedInExecutionPlan(page_offsets=(0,)),
+    )
+
+    assert vacancies == []
+    assert client.last_search_trace_snapshot()["session_observation"] == "without_session"
+    assert client.session_health_snapshot()["session_state"] == linkedin_session.SESSION_MISSING
+
+
+def test_allow_unauthenticated_stops_on_an_authenticated_search_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            scroll_pause_ms=0,
+        )
+    )
+    html = '<html><body><div data-testid="mainfeed"></div></body></html>'
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        client,
+        "fetch_page",
+        lambda url, **_kwargs: BrowserFetchResult(
+            requested_url=url,
+            final_url=url,
+            html=html,
+            html_sha256="b" * 64,
+            page_offset=0,
+            planned_scroll_steps=0,
+            completed_scroll_steps=0,
+            scroll_trace=(),
+            dom_unique_job_ids=frozenset(),
+            artifact_ref=None,
+        ),
+    )
+
+    with pytest.raises(BrowserNativeUnavailable, match="unexpected authenticated"):
+        client.search_linkedin(
+            "product",
+            geography_location="United Kingdom",
+            allow_unauthenticated=True,
+            execution_plan=LinkedInExecutionPlan(page_offsets=(0,)),
+        )
+
+
 
 
 def test_public_linkedin_fixture_parses_named_lost_job_ids() -> None:

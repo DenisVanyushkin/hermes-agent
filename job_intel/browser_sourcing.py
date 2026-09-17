@@ -1859,6 +1859,36 @@ class BrowserSourceClient:
             f"linkedin authentication validation: {verdict.state} at {url}"
         )
 
+    def _validate_linkedin_public_search_page(self, *, url: str, html: str) -> str:
+        from job_intel.linkedin_session import (
+            SESSION_MISSING,
+            SESSION_OK,
+            classify_auth_page,
+        )
+
+        self._health.auth_attempted = True
+        page_state = classify_auth_page(url, html)
+        self._health.session_state = page_state
+        if page_state == SESSION_MISSING:
+            return "without_session"
+
+        label = (
+            "linkedin-auth-unexpected-session"
+            if page_state == SESSION_OK
+            else f"linkedin-auth-{page_state}"
+        )
+        self._write_attach_diagnostics(
+            label=label,
+            extra={"requested_url": url, "page_state": page_state},
+        )
+        if page_state == SESSION_OK:
+            detail = "unexpected authenticated session"
+        else:
+            detail = f"could not prove logged-out session: {page_state}"
+        raise BrowserNativeUnavailable(
+            f"linkedin authentication validation: {detail} at {url}"
+        )
+
     def session_health_snapshot(self) -> dict[str, Any]:
         return self._health.snapshot()
 
@@ -2584,21 +2614,19 @@ class BrowserSourceClient:
             "execution_plan_version": plan.version if plan is not None else None,
             "session_observation": "not_observed",
         }
-        started = time.perf_counter()
-        try:
-            if allow_unauthenticated:
-                observation = self._validate_linkedin_auth(allow_unauthenticated=True)
-            else:
+        if not allow_unauthenticated:
+            started = time.perf_counter()
+            try:
                 observation = self._validate_linkedin_auth()
-            trace["session_observation"] = observation or "with_session"
-        except Exception as exc:
-            if plan is not None:
-                self._mark_critical_degradation(f"linkedin authentication failed: {exc}")
-                trace["failure_reason"] = str(exc)
-                trace["stop_reason"] = "critical_degradation"
-                self._last_search_trace = trace
-            raise
-        trace["login_wall_check_ms"] = int(round((time.perf_counter() - started) * 1000))
+                trace["session_observation"] = observation or "with_session"
+            except Exception as exc:
+                if plan is not None:
+                    self._mark_critical_degradation(f"linkedin authentication failed: {exc}")
+                    trace["failure_reason"] = str(exc)
+                    trace["stop_reason"] = "critical_degradation"
+                    self._last_search_trace = trace
+                raise
+            trace["login_wall_check_ms"] = int(round((time.perf_counter() - started) * 1000))
         page_plan = self._linkedin_page_plan(max_pages, execution_plan=plan)
         trace["planned_page_offsets"] = list(page_plan)
         for page_index in page_plan:
@@ -2647,6 +2675,25 @@ class BrowserSourceClient:
                     scroll_trace=(),
                     dom_unique_job_ids=frozenset(),
                     artifact_ref=None,
+                )
+            if allow_unauthenticated:
+                started = time.perf_counter()
+                try:
+                    trace["session_observation"] = self._validate_linkedin_public_search_page(
+                        url=page_result.final_url,
+                        html=fetched,
+                    )
+                except Exception as exc:
+                    if plan is not None:
+                        self._mark_critical_degradation(
+                            f"linkedin authentication failed: {exc}"
+                        )
+                        trace["failure_reason"] = str(exc)
+                        trace["stop_reason"] = "critical_degradation"
+                        self._last_search_trace = trace
+                    raise
+                trace["login_wall_check_ms"] += int(
+                    round((time.perf_counter() - started) * 1000)
                 )
             trace["completed_page_offsets"].append(page_index)
             trace["scroll_checkpoints"].extend(page_result.scroll_checkpoints)
