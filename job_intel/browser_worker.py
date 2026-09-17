@@ -301,7 +301,7 @@ def _payload(
     }
 
 
-def _with_browser_source(source: str, fn):
+def _with_browser_source(source: str, fn, *, retry_on_attach: bool = True):
     _prepare_browser_runtime_env()
     config = resolve_browser_config(source)
     _ensure_required_browser_profile(source, config)
@@ -309,7 +309,7 @@ def _with_browser_source(source: str, fn):
     last_exc: Exception | None = None
     browser_start_ms = 0
     browser_attach_retry_count = 0
-    for attempt in range(2):
+    for attempt in range(2 if retry_on_attach else 1):
         started = perf_counter()
         try:
             cdp_url = _ensure_browser_desktop(
@@ -320,7 +320,7 @@ def _with_browser_source(source: str, fn):
             )
         except Exception as exc:
             last_exc = exc
-            if source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
+            if retry_on_attach and source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
                 browser_attach_retry_count += 1
                 time.sleep(2.0)
                 continue
@@ -337,7 +337,7 @@ def _with_browser_source(source: str, fn):
                 return vacancies, session_health, search_trace
         except Exception as exc:
             last_exc = exc
-            if source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
+            if retry_on_attach and source in _CDP_TARGETS and attempt == 0 and _should_retry_attach(exc):
                 time.sleep(2.0)
                 continue
             raise
@@ -361,6 +361,9 @@ def _run_linkedin(
     detail_skip_urls: set[str] | None = None,
     detail_first_seen_at: dict[str, str] | None = None,
     detail_deadline_monotonic: float | None = None,
+    url_variant: str = "default",
+    experiment_branch: str = "default",
+    no_retries: bool = False,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -379,9 +382,12 @@ def _run_linkedin(
             detail_skip_urls=detail_skip_urls,
             detail_first_seen_at=detail_first_seen_at,
             detail_deadline_monotonic=detail_deadline_monotonic,
+            url_variant=url_variant,
+            experiment_branch=experiment_branch,
+            no_retries=no_retries,
         )
         return vacancies, client.session_health_snapshot()
-    return _with_browser_source("linkedin", _run)
+    return _with_browser_source("linkedin", _run, retry_on_attach=not no_retries)
 
 
 def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
@@ -414,6 +420,9 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--run-id")
     linkedin.add_argument("--query-id")
     linkedin.add_argument("--cell-id")
+    linkedin.add_argument("--url-variant", default="default")
+    linkedin.add_argument("--experiment-branch", default="default")
+    linkedin.add_argument("--no-retries", action="store_true")
     linkedin.add_argument("--allow-unauthenticated", action="store_true")
     linkedin.add_argument("--detail-page-budget", type=int)
     linkedin.add_argument("--detail-skip-urls-json")
@@ -474,6 +483,9 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 detail_deadline_monotonic=args.detail_deadline_monotonic,
+                url_variant=args.url_variant,
+                experiment_branch=args.experiment_branch,
+                no_retries=args.no_retries,
             )
         else:
             vacancies, session_health, search_trace = _probe(args.source)

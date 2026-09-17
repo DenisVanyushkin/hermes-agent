@@ -91,6 +91,7 @@ from .sources import (
     query_experiment_from_env,
     rotating_linkedin_queries,
     rotating_linkedin_experiment_queries,
+    rotating_linkedin_recency_experiment_queries,
     rotating_source_query_plan,
     rotating_source_experiment_query_plan,
     rotating_source_queries,
@@ -297,6 +298,12 @@ def _linkedin_plan_for_collection(experiment: Any) -> list[Any]:
     if experiment is None:
         # Keep the disabled path exactly on the established production builder.
         return rotating_linkedin_queries(limit=18)
+    if experiment.name == "linkedin_recency_ab":
+        return rotating_linkedin_recency_experiment_queries(
+            limit=18,
+            as_of=experiment.as_of,
+            rotation_slot=experiment.rotation_slot,
+        )
     return rotating_linkedin_experiment_queries(
         limit=18,
         as_of=experiment.as_of,
@@ -312,6 +319,13 @@ def _headhunter_plan_for_collection(
     if experiment is None:
         # Keep the disabled path exactly on the established production builder.
         return rotating_source_query_plan("headhunter", limit=limit)
+    if experiment.name == "linkedin_recency_ab":
+        return rotating_source_query_plan(
+            "headhunter",
+            limit=limit,
+            as_of=experiment.as_of,
+            rotation_slot=experiment.rotation_slot,
+        )
     return rotating_source_experiment_query_plan(
         "headhunter",
         limit=limit,
@@ -821,6 +835,8 @@ def _collect_vacancies(
                         location=item.location,
                         geo_id=item.geo_id,
                         cell_id=item.cell_id,
+                        url_variant=getattr(item, "url_variant", "default"),
+                        experiment_branch=getattr(item, "experiment_branch", "default"),
                         allow_unauthenticated=linkedin_allow_unauthenticated,
                         detail_page_budget=cell_detail_budget,
                         detail_skip_urls=linkedin_detail_skip_urls,

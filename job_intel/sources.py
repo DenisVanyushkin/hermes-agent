@@ -509,6 +509,8 @@ def fetch_linkedin_vacancies(
     *,
     location: str | None = None,
     geo_id: str | None = None,
+    url_variant: str = "default",
+    experiment_branch: str = "default",
     execution_plan: Mapping[str, Any] | None = None,
     max_pages: int = 1,
     run_id: str | None = None,
@@ -518,6 +520,7 @@ def fetch_linkedin_vacancies(
     detail_page_budget: int | None = None,
     detail_skip_urls: set[str] | None = None,
     detail_first_seen_at: Mapping[str, str] | None = None,
+    no_retries: bool = False,
 ) -> list[Vacancy]:
     fetch_linkedin_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_linkedin_vacancies.last_trace = None  # type: ignore[attr-defined]
@@ -532,6 +535,10 @@ def fetch_linkedin_vacancies(
             worker_args.extend(["--location", location])
         if geo_id:
             worker_args.extend(["--geo-id", geo_id])
+        if url_variant != "default":
+            worker_args.extend(["--url-variant", url_variant])
+        if experiment_branch != "default":
+            worker_args.extend(["--experiment-branch", experiment_branch])
         if run_id:
             worker_args.extend(["--run-id", run_id])
         if query_id:
@@ -553,6 +560,8 @@ def fetch_linkedin_vacancies(
                     json.dumps(dict(sorted(detail_first_seen_at.items())), sort_keys=True),
                 ]
             )
+        if no_retries:
+            worker_args.append("--no-retries")
         detail_deadline = (
             monotonic()
             + LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS
@@ -889,9 +898,14 @@ QUERY_MODE_ROLE_ONLY = "role_only"
 QUERY_MODE_ROLE_PLUS_CONTEXT = "role_plus_context"
 QUERY_MODES = frozenset({QUERY_MODE_ROLE_ONLY, QUERY_MODE_ROLE_PLUS_CONTEXT})
 QUERY_EXPERIMENT_ROLE_CONTEXT_AB = "role_context_ab"
+QUERY_EXPERIMENT_LINKEDIN_RECENCY_AB = "linkedin_recency_ab"
 QUERY_EXPERIMENT_BRANCH_DEFAULT = "default"
 QUERY_EXPERIMENT_BRANCH_ROLE_ONLY = "role_only"
 QUERY_EXPERIMENT_BRANCH_ROLE_CONTEXT = "role_context"
+QUERY_EXPERIMENT_BRANCH_CONTROL = "control"
+QUERY_EXPERIMENT_BRANCH_TREATMENT = "treatment"
+LINKEDIN_URL_VARIANT_DEFAULT = "default"
+LINKEDIN_URL_VARIANT_RECENCY_24H = "recency_24h"
 
 
 @dataclass(frozen=True)
@@ -911,9 +925,13 @@ def query_experiment_from_env(
     name = str(values.get("JOB_INTEL_QUERY_EXPERIMENT", "") or "").strip().lower()
     if not name:
         return None
-    if name != QUERY_EXPERIMENT_ROLE_CONTEXT_AB:
+    if name not in {
+        QUERY_EXPERIMENT_ROLE_CONTEXT_AB,
+        QUERY_EXPERIMENT_LINKEDIN_RECENCY_AB,
+    }:
         raise ValueError(
-            "JOB_INTEL_QUERY_EXPERIMENT must be role_context_ab when enabled"
+            "JOB_INTEL_QUERY_EXPERIMENT must be role_context_ab or "
+            "linkedin_recency_ab when enabled"
         )
 
     date_text = str(
@@ -996,6 +1014,7 @@ class LinkedInQueryPlanItem:
     requested_geography: str | None = None
     resolved_geography: str | None = None
     experiment_branch: str = QUERY_EXPERIMENT_BRANCH_DEFAULT
+    url_variant: str = LINKEDIN_URL_VARIANT_DEFAULT
 
 
 @dataclass(frozen=True)
@@ -1276,6 +1295,48 @@ def rotating_linkedin_experiment_queries(
     return plan
 
 
+def rotating_linkedin_recency_experiment_queries(
+    *,
+    limit: int = 18,
+    as_of: date,
+    rotation_slot: int,
+) -> list[LinkedInQueryPlanItem]:
+    """Interleave the current LinkedIn URL with the 24-hour filter."""
+
+    half = _validate_experiment_limit(limit)
+    control_plan = rotating_linkedin_queries(
+        limit=half,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_ONLY,
+    )
+    treatment_plan = rotating_linkedin_queries(
+        limit=half,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_ONLY,
+    )
+    plan: list[LinkedInQueryPlanItem] = []
+    for control, treatment in zip(control_plan, treatment_plan):
+        if not _same_linkedin_pair(control, treatment):
+            raise RuntimeError("recency experiment arms are not aligned")
+        plan.extend(
+            (
+                replace(
+                    control,
+                    experiment_branch=QUERY_EXPERIMENT_BRANCH_CONTROL,
+                    url_variant=LINKEDIN_URL_VARIANT_DEFAULT,
+                ),
+                replace(
+                    treatment,
+                    experiment_branch=QUERY_EXPERIMENT_BRANCH_TREATMENT,
+                    url_variant=LINKEDIN_URL_VARIANT_RECENCY_24H,
+                ),
+            )
+        )
+    return plan
+
+
 def _same_source_pair(
     left: SourceQueryPlanItem, right: SourceQueryPlanItem
 ) -> bool:
@@ -1350,6 +1411,12 @@ def linkedin_query_plan_for_run(
         return rotating_linkedin_queries(
             limit=limit, as_of=as_of, rotation_slot=rotation_slot
         )
+    if experiment.name == QUERY_EXPERIMENT_LINKEDIN_RECENCY_AB:
+        return rotating_linkedin_recency_experiment_queries(
+            limit=limit,
+            as_of=experiment.as_of,
+            rotation_slot=experiment.rotation_slot,
+        )
     return rotating_linkedin_experiment_queries(
         limit=limit,
         as_of=experiment.as_of,
@@ -1371,6 +1438,13 @@ def source_query_plan_for_run(
             limit=limit,
             as_of=as_of,
             rotation_slot=rotation_slot,
+        )
+    if experiment.name == QUERY_EXPERIMENT_LINKEDIN_RECENCY_AB:
+        return rotating_source_query_plan(
+            source,
+            limit=limit,
+            as_of=experiment.as_of,
+            rotation_slot=experiment.rotation_slot,
         )
     return rotating_source_experiment_query_plan(
         source,

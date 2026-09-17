@@ -127,7 +127,10 @@ def build_linkedin_search_url(
     location: str | None = None,
     geo_id: str | None = None,
     start: int | None = None,
+    url_variant: str = "default",
 ) -> str:
+    if url_variant not in {"default", "recency_24h"}:
+        raise ValueError(f"unsupported LinkedIn URL variant: {url_variant!r}")
     params: list[tuple[str, str]] = [("keywords", keywords)]
     if location:
         params.append(("location", location))
@@ -135,6 +138,8 @@ def build_linkedin_search_url(
         params.append(("geoId", geo_id))
     if start:
         params.append(("start", str(start)))
+    if url_variant == "recency_24h":
+        params.append(("f_TPR", "r86400"))
     return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
 
 
@@ -2163,6 +2168,9 @@ class BrowserSourceClient:
         page_offset: int = 0,
         capture_label: str | None = None,
         execution_plan: Mapping[str, Any] | Any | None = None,
+        retry_transient_navigation: bool = True,
+        experiment_branch: str = "default",
+        url_variant: str = "default",
     ) -> BrowserFetchResult:
         if self._context is None:
             raise BrowserNativeUnavailable("BrowserSourceClient must be entered as a context manager first.")
@@ -2217,7 +2225,7 @@ class BrowserSourceClient:
                 except Exception as exc:
                     msg = str(exc)
                     transient = source_key == "linkedin" and ("ERR_NETWORK_CHANGED" in msg or "ERR_ABORTED" in msg or "frame was detached" in msg)
-                    if not transient:
+                    if not transient or not retry_transient_navigation:
                         raise
                     self._write_attach_diagnostics(label=f"{fetch_label}-goto-retry", extra={"requested_url": url, "error": msg[:300]})
                     page.wait_for_timeout(1200)
@@ -2254,6 +2262,8 @@ class BrowserSourceClient:
                                 "requested_url": url,
                                 "final_url": final_url,
                                 "page_offset": page_offset,
+                                "experiment_branch": experiment_branch,
+                                "url_variant": url_variant,
                                 "planned_scroll_steps": (
                                     plan.max_scroll_checkpoints if plan is not None else scroll_count
                                 ),
@@ -2637,6 +2647,9 @@ class BrowserSourceClient:
         detail_skip_urls: set[str] | None = None,
         detail_first_seen_at: Mapping[str, str] | None = None,
         detail_deadline_monotonic: float | None = None,
+        url_variant: str = "default",
+        experiment_branch: str = "default",
+        no_retries: bool = False,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
@@ -2647,6 +2660,7 @@ class BrowserSourceClient:
             keywords=query,
             location=geography_location,
             geo_id=geography_geo_id,
+            url_variant=url_variant,
         )
         plan = self._coerce_linkedin_execution_plan(execution_plan)
         detail_budget = (
@@ -2709,6 +2723,8 @@ class BrowserSourceClient:
             "failure_reason": None,
             "execution_plan_version": plan.version if plan is not None else None,
             "session_observation": "not_observed",
+            "experiment_branch": experiment_branch,
+            "url_variant": url_variant,
         }
         if not allow_unauthenticated:
             started = time.perf_counter()
@@ -2743,6 +2759,7 @@ class BrowserSourceClient:
                     location=geography_location,
                     geo_id=geography_geo_id,
                     start=page_index if plan is not None else page_index * 25,
+                    url_variant=url_variant,
                 )
                 if page_index
                 else url
@@ -2756,6 +2773,9 @@ class BrowserSourceClient:
                         page_offset=page_index,
                         capture_label=capture_label,
                         execution_plan=plan,
+                        retry_transient_navigation=not no_retries,
+                        experiment_branch=experiment_branch,
+                        url_variant=url_variant,
                     )
                     fetched = page_result.html
                     self._last_fetch_result = page_result
@@ -2931,6 +2951,8 @@ class BrowserSourceClient:
                 {
                     "requested_url": page_result.requested_url,
                     "final_url": page_result.final_url,
+                    "experiment_branch": experiment_branch,
+                    "url_variant": url_variant,
                     "http_status": page_result.http_status,
                     "page_classification": classify_linkedin_page(
                         final_url=page_result.final_url,
