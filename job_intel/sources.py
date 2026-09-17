@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
+from time import monotonic
 from typing import Any, Mapping
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
@@ -27,6 +28,8 @@ from .browser_sourcing import (
     resolve_browser_config,
     _ensure_required_browser_profile,
     _looks_executive,
+    LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS,
+    LINKEDIN_DETAIL_DEADLINE_SAFETY_MARGIN_SECONDS,
 )
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
@@ -459,7 +462,11 @@ def _capture_browser_worker_timeout(command: str, browser_python: Path, *, timeo
         base.with_suffix('.json').write_text(json.dumps(payload, ensure_ascii=True, indent=2))
 
 
-def _browser_worker_payload(command: str, *args: str, timeout: int = 240) -> dict[str, Any]:
+def _browser_worker_payload(
+    command: str,
+    *args: str,
+    timeout: int = LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     browser_python = Path(os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or "/var/lib/browser-desktop/playwright-venv/bin/python").expanduser()
     if not browser_python.exists():
         raise SourceFetchError(f"browser worker python missing: {browser_python}")
@@ -546,6 +553,14 @@ def fetch_linkedin_vacancies(
                     json.dumps(dict(sorted(detail_first_seen_at.items())), sort_keys=True),
                 ]
             )
+        detail_deadline = (
+            monotonic()
+            + LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS
+            - LINKEDIN_DETAIL_DEADLINE_SAFETY_MARGIN_SECONDS
+        )
+        worker_args.extend(
+            ["--detail-deadline-monotonic", f"{detail_deadline:.6f}"]
+        )
         if execution_plan is not None:
             worker_args.extend(
                 [

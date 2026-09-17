@@ -55,7 +55,7 @@ from html import unescape
 from html.parser import HTMLParser
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, Literal, Mapping, get_args
+from typing import Any, Callable, Literal, Mapping, get_args
 from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import urlopen
 
@@ -65,6 +65,8 @@ from .runtime import resolve_browser_profile_base, sha256_text
 
 
 _BROWSER_PROFILE_DEFAULT = resolve_browser_profile_base() / "company-career"
+LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS = 240
+LINKEDIN_DETAIL_DEADLINE_SAFETY_MARGIN_SECONDS = 45
 _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
     "linkedin": resolve_browser_profile_base() / "linkedin",
     "company_career": _BROWSER_PROFILE_DEFAULT,
@@ -2420,6 +2422,8 @@ class BrowserSourceClient:
         observed_at: str | None = None,
         detail_page_budget: int | None = None,
         first_seen_at_by_url: Mapping[str, str] | None = None,
+        detail_deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> dict[str, Any]:
         """Fill title-qualified rows from public detail pages under a hard budget."""
         if detail_page_budget is not None:
@@ -2433,6 +2437,7 @@ class BrowserSourceClient:
             delay_ms = max(0, int(raw_delay))
         except ValueError:
             delay_ms = 1500
+        delay_seconds = delay_ms / 1000.0
         eligible = [
             vacancy
             for vacancy in vacancies
@@ -2477,10 +2482,26 @@ class BrowserSourceClient:
             "stop_reason": "",
         }
         observed = observed_at or datetime.now(timezone.utc).isoformat()
+
+        def deadline_reached(*, reserve_delay: bool = False) -> bool:
+            if detail_deadline_monotonic is None:
+                return False
+            required_time = delay_seconds if reserve_delay else 0.0
+            return monotonic() + required_time >= detail_deadline_monotonic
+
         for index, vacancy in enumerate(eligible[:budget]):
+            if deadline_reached(reserve_delay=bool(index)):
+                stats["stop_reason"] = "cell_deadline"
+                break
             if index:
-                time.sleep(delay_ms / 1000.0)
+                time.sleep(delay_seconds)
+                if deadline_reached():
+                    stats["stop_reason"] = "cell_deadline"
+                    break
             detail_url = vacancy.url
+            if deadline_reached():
+                stats["stop_reason"] = "cell_deadline"
+                break
             if not self._reserve_linkedin_detail_page():
                 break
             self._linkedin_detail_enriched_urls.add(
@@ -2591,6 +2612,7 @@ class BrowserSourceClient:
         detail_page_budget: int | None = None,
         detail_skip_urls: set[str] | None = None,
         detail_first_seen_at: Mapping[str, str] | None = None,
+        detail_deadline_monotonic: float | None = None,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -2917,6 +2939,7 @@ class BrowserSourceClient:
                 else self._enrich_linkedin_vacancies(
                     page_vacancies,
                     first_seen_at_by_url=detail_first_seen_at,
+                    detail_deadline_monotonic=detail_deadline_monotonic,
                 )
             )
             trace["detail_pages_planned"] += int(detail_stats["planned"])

@@ -360,6 +360,7 @@ def _run_linkedin(
     detail_page_budget: int | None = None,
     detail_skip_urls: set[str] | None = None,
     detail_first_seen_at: dict[str, str] | None = None,
+    detail_deadline_monotonic: float | None = None,
 ) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     _DISPATCH_COUNTERS.market_query_dispatch_count += 1
 
@@ -377,6 +378,7 @@ def _run_linkedin(
             detail_page_budget=detail_page_budget,
             detail_skip_urls=detail_skip_urls,
             detail_first_seen_at=detail_first_seen_at,
+            detail_deadline_monotonic=detail_deadline_monotonic,
         )
         return vacancies, client.session_health_snapshot()
     return _with_browser_source("linkedin", _run)
@@ -416,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--detail-page-budget", type=int)
     linkedin.add_argument("--detail-skip-urls-json")
     linkedin.add_argument("--detail-first-seen-at-json")
+    linkedin.add_argument("--detail-deadline-monotonic", type=float)
 
     probe = sub.add_parser("probe")
     probe.add_argument("source", choices=("linkedin",))
@@ -470,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.detail_first_seen_at_json
                     else None
                 ),
+                detail_deadline_monotonic=args.detail_deadline_monotonic,
             )
         else:
             vacancies, session_health, search_trace = _probe(args.source)
