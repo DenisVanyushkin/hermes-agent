@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import types
 
@@ -333,6 +333,7 @@ def test_probe_live_uses_real_source_wrapper_and_serializable_execution_plan(
     calls: list[tuple[str, ...]] = []
 
     monkeypatch.setattr(probe, "fetch_linkedin_vacancies", sources.fetch_linkedin_vacancies)
+    monkeypatch.setattr(probe, "_preflight_services", lambda: None)
     monkeypatch.setattr(sources, "browser_native_available", lambda: True)
     monkeypatch.setattr(sources, "_browser_config", lambda *_args: types.SimpleNamespace())
     monkeypatch.setattr(sources, "_ensure_required_browser_profile", lambda *_args: None)
@@ -423,6 +424,7 @@ def test_probe_live_stops_after_safety_signal_without_retrying(
     calls: list[tuple[str, ...]] = []
 
     monkeypatch.setattr(probe, "fetch_linkedin_vacancies", sources.fetch_linkedin_vacancies)
+    monkeypatch.setattr(probe, "_preflight_services", lambda: None)
     monkeypatch.setattr(sources, "browser_native_available", lambda: True)
     monkeypatch.setattr(sources, "_browser_config", lambda *_args: types.SimpleNamespace())
     monkeypatch.setattr(sources, "_ensure_required_browser_profile", lambda *_args: None)
@@ -517,6 +519,131 @@ def test_probe_stops_on_first_error_without_retry_or_detail_pages(
     assert not list(tmp_path.glob("*.db"))
 
 
+def _patch_systemctl_show(
+    probe: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    responses: dict[str, str],
+    *,
+    error: Exception | None = None,
+) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> types.SimpleNamespace:
+        calls.append(command)
+        if error is not None:
+            raise error
+        if command[1] != "show":
+            return types.SimpleNamespace(returncode=0, stdout="inactive\n", stderr="")
+        unit = command[-1]
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=responses[unit],
+            stderr="",
+        )
+
+    monkeypatch.setattr(probe.subprocess, "run", fake_run)
+    return calls
+
+
+def _next_elapse_after(minutes: int) -> str:
+    next_elapse = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    return next_elapse.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+
+
+def test_preflight_rejects_nonexistent_shadow_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls = _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=not-found\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(120) + "\n",
+        },
+    )
+
+    with pytest.raises(probe.ProbeSafetyError, match="shadow-collection.service.*LoadState"):
+        probe._preflight_services()
+    assert calls == [[
+        "systemctl", "show", "-p", "LoadState", "-p", "ActiveState",
+        "job-intel-shadow-collection.service",
+    ]]
+
+
+def test_preflight_rejects_active_shadow_collection_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls = _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=active\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(120) + "\n",
+        },
+    )
+
+    with pytest.raises(probe.ProbeSafetyError, match="shadow-collection.service is active"):
+        probe._preflight_services()
+    assert len(calls) == 1
+
+
+def test_preflight_rejects_shadow_timer_with_less_than_twenty_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls = _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(5) + "\n",
+        },
+    )
+
+    with pytest.raises(probe.ProbeSafetyError, match="timer.*20 minutes"):
+        probe._preflight_services()
+    assert len(calls) == 3
+
+
+def test_preflight_allows_masked_daily_and_distant_shadow_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls = _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(120) + "\n",
+        },
+    )
+
+    probe._preflight_services()
+    assert [call[-1] for call in calls] == [
+        "job-intel-shadow-collection.service",
+        "job-intel-daily.service",
+        "job-intel-shadow-collection.timer",
+    ]
+
+
+def test_preflight_rejects_systemctl_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    _patch_systemctl_show(
+        probe, monkeypatch, {}, error=RuntimeError("systemctl unavailable")
+    )
+
+    with pytest.raises(probe.ProbeSafetyError, match="systemctl"):
+        probe._preflight_services()
+
+
 def test_probe_live_preflight_rejects_active_service_before_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -529,10 +656,14 @@ def test_probe_live_preflight_rejects_active_service_before_worker(
         return []
 
     monkeypatch.setattr(probe, "fetch_linkedin_vacancies", fake_fetch)
-    monkeypatch.setattr(
+    _patch_systemctl_show(
         probe,
-        "_service_state",
-        lambda name: "active" if name == "job-intel-daily.service" else "inactive",
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=loaded\nActiveState=active\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(120) + "\n",
+        },
     )
 
     with pytest.raises(probe.ProbeSafetyError, match="job-intel-daily.service"):

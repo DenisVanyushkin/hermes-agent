@@ -45,27 +45,95 @@ class ProbeSafetyError(RuntimeError):
     pass
 
 
-def _service_state(name: str) -> str:
+_SERVICE_ACTIVE_STATES = frozenset(
+    {"active", "activating", "deactivating", "reloading"}
+)
+_DAILY_SAFE_LOAD_STATES = frozenset({"loaded", "masked", "not-found"})
+_SHADOW_SERVICE = "job-intel-shadow-collection.service"
+_DAILY_SERVICE = "job-intel-daily.service"
+_SHADOW_TIMER = "job-intel-shadow-collection.timer"
+_MIN_TIMER_LEAD_SECONDS = 20 * 60
+
+
+def _systemctl_show(name: str, *properties: str) -> dict[str, str]:
+    command = ["systemctl", "show"]
+    for prop in properties:
+        command.extend(["-p", prop])
+    command.append(name)
     try:
         result = subprocess.run(
-            ["systemctl", "is-active", name],
+            command,
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
         )
     except Exception as exc:  # pragma: no cover - platform failure
-        raise ProbeSafetyError(f"cannot inspect {name}: {exc}") from exc
-    return (result.stdout or result.stderr or "unknown").strip() or "unknown"
+        raise ProbeSafetyError(f"systemctl show failed for {name}: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise ProbeSafetyError(f"systemctl show failed for {name}: {detail}")
+    values: dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key] = value
+    missing = [prop for prop in properties if prop not in values]
+    if missing:
+        raise ProbeSafetyError(
+            f"systemctl show returned no {', '.join(missing)} for {name}"
+        )
+    return values
+
+
+def _check_service_load_and_activity(
+    name: str,
+    *,
+    safe_load_states: frozenset[str],
+) -> None:
+    values = _systemctl_show(name, "LoadState", "ActiveState")
+    load_state = values["LoadState"]
+    active_state = values["ActiveState"]
+    if load_state not in safe_load_states:
+        raise ProbeSafetyError(
+            f"{name} has unsafe LoadState={load_state or '<empty>'}"
+        )
+    if load_state == "loaded" and active_state in _SERVICE_ACTIVE_STATES:
+        raise ProbeSafetyError(f"{name} is {active_state}; refusing live probe")
+
+
+def _check_shadow_timer() -> None:
+    values = _systemctl_show(_SHADOW_TIMER, "NextElapseUSecRealtime")
+    raw_next_elapse = values["NextElapseUSecRealtime"]
+    try:
+        next_elapse_us = int(raw_next_elapse)
+    except (TypeError, ValueError):
+        try:
+            next_elapse = datetime.strptime(
+                raw_next_elapse, "%a %Y-%m-%d %H:%M:%S %Z"
+            ).replace(tzinfo=timezone.utc)
+            next_elapse_us = int(next_elapse.timestamp() * 1_000_000)
+        except (TypeError, ValueError) as exc:
+            raise ProbeSafetyError(
+                f"cannot parse {_SHADOW_TIMER} NextElapseUSecRealtime={raw_next_elapse!r}"
+            ) from exc
+    now_us = int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+    if next_elapse_us - now_us < _MIN_TIMER_LEAD_SECONDS * 1_000_000:
+        raise ProbeSafetyError(
+            f"{_SHADOW_TIMER} fires in less than 20 minutes; refusing live probe"
+        )
 
 
 def _preflight_services() -> None:
-    for service in ("job-intel-shadow.service", "job-intel-daily.service"):
-        state = _service_state(service)
-        if state in {"active", "activating"}:
-            raise ProbeSafetyError(f"{service} is {state}; refusing live probe")
-        if state not in {"inactive", "failed", "deactivating", "unknown"}:
-            raise ProbeSafetyError(f"unexpected state for {service}: {state}")
+    _check_service_load_and_activity(
+        _SHADOW_SERVICE,
+        safe_load_states=frozenset({"loaded"}),
+    )
+    _check_service_load_and_activity(
+        _DAILY_SERVICE,
+        safe_load_states=_DAILY_SAFE_LOAD_STATES,
+    )
+    _check_shadow_timer()
 
 
 def _probe_plan(
