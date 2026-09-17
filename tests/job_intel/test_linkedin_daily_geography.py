@@ -625,3 +625,57 @@ def test_daily_linkedin_error_cell_makes_source_status_non_ok_with_other_hits(
     assert status["status"] == "error"
     assert status["hits"] == 1
     assert status["search_trace"]["executed_query_cells"][-1]["outcome"] == "error"
+
+
+def test_linkedin_navigation_timeout_is_error_with_class_and_no_antibot_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="timed out", cell_id="timeout", location="Canada", geo_id=None
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    def fetch(_query: str, **_kwargs):
+        raise RuntimeError(
+            "Playwright browser fetch failed: Page.goto: Timeout 45000ms exceeded"
+        )
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fetch)
+
+    result = cli._collect_vacancies(store=_store(tmp_path))
+
+    status = result.source_statuses["linkedin"]
+    event = status["search_trace"]["executed_query_cells"][0]
+    assert status["status"] == "error"
+    assert status["error_class"] == "navigation_timeout"
+    assert event["error_class"] == "navigation_timeout"
+    assert cli._anti_bot_failures_for_source(status) == 0
+
+
+def test_linkedin_safety_signal_stays_blocked_and_counts_as_antibot_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="challenge", cell_id="challenge", location="Canada", geo_id=None
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    def fetch(_query: str, **_kwargs):
+        raise RuntimeError("LinkedIn safety signal: rendered_challenge")
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fetch)
+
+    result = cli._collect_vacancies(store=_store(tmp_path))
+
+    status = result.source_statuses["linkedin"]
+    event = status["search_trace"]["executed_query_cells"][0]
+    assert status["status"] == "blocked"
+    assert status["error_class"] == "linkedin_safety"
+    assert event["error_class"] == "linkedin_safety"
+    assert cli._anti_bot_failures_for_source(status) == 1

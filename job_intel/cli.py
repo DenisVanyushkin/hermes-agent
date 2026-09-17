@@ -178,6 +178,7 @@ def _query_attempt_event(
     outcome: str,
     found_count: int,
     error: str | None = None,
+    error_class: str | None = None,
 ) -> dict[str, Any]:
     """Make the durable-in-trace unit: query, cell, family, and outcome."""
 
@@ -212,7 +213,61 @@ def _query_attempt_event(
     }
     if error:
         event["error"] = error
+    if error_class:
+        event["error_class"] = error_class
     return event
+
+
+def _linkedin_trace_safety_reason(trace: dict[str, Any] | None) -> str | None:
+    if not isinstance(trace, dict):
+        return None
+    for page in trace.get("pages", []):
+        if not isinstance(page, dict):
+            continue
+        reason = str(page.get("safety_reason") or "").strip()
+        if reason:
+            return reason
+    return None
+
+
+def _linkedin_error_is_safety(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "linkedin safety signal",
+            "unexpected authenticated",
+            "unexpected_linkedin_auth_cookie",
+            "login wall",
+            "auth wall",
+            "challenge",
+            "rate limit",
+            "rate-limited",
+            "http_429",
+            "anti-bot",
+        )
+    )
+
+
+def _linkedin_error_class(message: str) -> str:
+    lowered = (message or "").lower()
+    if _linkedin_error_is_safety(message):
+        return "linkedin_safety"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "navigation_timeout"
+    if any(
+        marker in lowered
+        for marker in (
+            "playwright",
+            "browser-native",
+            "browser cdp",
+            "cdp endpoint",
+            "browser unavailable",
+            "browser attach",
+        )
+    ):
+        return "browser_unavailable"
+    return "collection_error"
 
 
 def _query_experiment_trace_metadata(
@@ -432,6 +487,10 @@ def _source_status_template(source: str, *, status: str, **details: Any) -> dict
 def _is_timeout_only_error(message: str) -> bool:
     lowered = (message or "").lower()
     return "connecttimeout" in lowered or "timed out" in lowered or "read timed out" in lowered
+
+
+def _anti_bot_failures_for_source(source_status: dict[str, Any]) -> int:
+    return 1 if source_status.get("status") == "blocked" else 0
 
 
 _SOURCE_FILTER_ALIASES = {
@@ -709,6 +768,7 @@ def _collect_vacancies(
             linkedin_plan = _linkedin_plan_for_collection(query_experiment)
             linkedin_hits = 0
             linkedin_errors: list[str] = []
+            linkedin_error_classes: list[str] = []
             geography_coverage = linkedin_geography_coverage()
             linkedin_trace: dict[str, Any] = {
                 "query_coverage": {
@@ -769,17 +829,36 @@ def _collect_vacancies(
                             - max(0, int(budget_opened or 0)),
                         )
                     _aggregate_browser_trace(linkedin_trace, query_trace)
-                    linkedin_trace["executed_query_cells"].append(
-                        _query_attempt_event(
-                            "linkedin",
-                            item,
-                            outcome="productive" if results else "empty",
-                            found_count=len(results),
+                    safety_reason = _linkedin_trace_safety_reason(query_trace)
+                    if safety_reason:
+                        error_text = f"LinkedIn safety signal: {safety_reason}"
+                        error_class = "linkedin_safety"
+                        linkedin_errors.append(error_text)
+                        linkedin_error_classes.append(error_class)
+                        linkedin_trace["executed_query_cells"].append(
+                            _query_attempt_event(
+                                "linkedin",
+                                item,
+                                outcome="error",
+                                found_count=len(results),
+                                error=error_text,
+                                error_class=error_class,
+                            )
                         )
-                    )
+                    else:
+                        linkedin_trace["executed_query_cells"].append(
+                            _query_attempt_event(
+                                "linkedin",
+                                item,
+                                outcome="productive" if results else "empty",
+                                found_count=len(results),
+                            )
+                        )
                 except Exception as exc:
                     error_text = str(exc)
+                    error_class = _linkedin_error_class(error_text)
                     linkedin_errors.append(error_text)
+                    linkedin_error_classes.append(error_class)
                     linkedin_trace["executed_query_cells"].append(
                         _query_attempt_event(
                             "linkedin",
@@ -787,9 +866,10 @@ def _collect_vacancies(
                             outcome="error",
                             found_count=0,
                             error=error_text,
+                            error_class=error_class,
                         )
                     )
-            if linkedin_errors and any("Playwright" in error or "browser-native" in error for error in linkedin_errors):
+            if any(error_class == "linkedin_safety" for error_class in linkedin_error_classes):
                 linkedin_status = "blocked"
             elif linkedin_errors:
                 linkedin_status = "error"
@@ -805,6 +885,14 @@ def _collect_vacancies(
                 acquisition="browser-native",
                 runtime_seconds=perf_counter() - linkedin_started,
             )
+            if linkedin_error_classes:
+                distinct_error_classes = sorted(set(linkedin_error_classes))
+                linkedin_source_status["error_class"] = (
+                    distinct_error_classes[0]
+                    if len(distinct_error_classes) == 1
+                    else "mixed"
+                )
+                linkedin_source_status["error_classes"] = distinct_error_classes
             linkedin_health = getattr(fetch_linkedin_vacancies, "last_health", None)
             if linkedin_health:
                 linkedin_health = dict(linkedin_health)
@@ -2765,7 +2853,7 @@ def run_daily() -> str:
             hits = int(existing.get("hits") or stats["found"])
             stats["raw_found_count"] = hits
             errors = list(existing.get("errors") or [])
-            anti_bot_failures = 1 if existing.get("status") == "blocked" else (len(errors) if errors else 0)
+            anti_bot_failures = _anti_bot_failures_for_source(existing)
             metrics = metrics_from_counts(
                 source=source,
                 found=stats["found"],
@@ -3196,7 +3284,7 @@ def run_daily() -> str:
                         "tier1_company_count": None,
                         "tier2_company_count": None,
                         "interview_generated_count": None,
-                        "error_class": None,
+                        "error_class": src_status.get("error_class"),
                         "error_fingerprint": None,
                         "error_message_truncated": None,
                     },
