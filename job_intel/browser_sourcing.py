@@ -2603,6 +2603,13 @@ class BrowserSourceClient:
         self._linkedin_detail_budget_remaining -= 1
         return True
 
+    def _linkedin_navigation_reserve_seconds(self) -> float:
+        """Reserve one configured search navigation and its scroll allowance."""
+        navigation_seconds = max(0, self.config.navigation_timeout_ms) / 1000.0
+        scroll_steps = max(0, self.config.max_scrolls) + 1
+        scroll_seconds = scroll_steps * max(0, self.config.scroll_pause_ms) / 1000.0
+        return navigation_seconds + scroll_seconds
+
     def _linkedin_page_plan(self, max_pages: int, *, execution_plan: Any | None = None) -> list[int]:
         if execution_plan is not None:
             return list(execution_plan.page_offsets)
@@ -2630,6 +2637,7 @@ class BrowserSourceClient:
         detail_skip_urls: set[str] | None = None,
         detail_first_seen_at: Mapping[str, str] | None = None,
         detail_deadline_monotonic: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> list[Vacancy]:
         if not (geography_location or geography_geo_id):
             raise BrowserNativeUnavailable(
@@ -2715,6 +2723,16 @@ class BrowserSourceClient:
         page_plan = self._linkedin_page_plan(max_pages, execution_plan=plan)
         trace["planned_page_offsets"] = list(page_plan)
         for page_index in page_plan:
+            if trace["stop_reason"] == "cell_deadline":
+                break
+            if (
+                detail_deadline_monotonic is not None
+                and monotonic() + self._linkedin_navigation_reserve_seconds()
+                >= detail_deadline_monotonic
+            ):
+                trace["stop_reason"] = "cell_deadline"
+                trace["detail_stop_reason"] = "cell_deadline"
+                break
             self._sleep(source="linkedin", extra_bias_ms=(250, 1300))
             page_url = (
                 build_linkedin_search_url(
@@ -2957,6 +2975,7 @@ class BrowserSourceClient:
                     page_vacancies,
                     first_seen_at_by_url=detail_first_seen_at,
                     detail_deadline_monotonic=detail_deadline_monotonic,
+                    monotonic=monotonic,
                 )
             )
             trace["detail_pages_planned"] += int(detail_stats["planned"])
@@ -2968,6 +2987,8 @@ class BrowserSourceClient:
             trace["detail_description_lengths"].extend(detail_stats["description_lengths"])
             if detail_stats["stop_reason"]:
                 trace["detail_stop_reason"] = detail_stats["stop_reason"]
+                if detail_stats["stop_reason"] == "cell_deadline":
+                    trace["stop_reason"] = "cell_deadline"
             vacancies.extend(page_vacancies)
             detail_rows = []
             vacancies.extend(detail_rows)
@@ -2985,7 +3006,11 @@ class BrowserSourceClient:
             noise_rows = []
             vacancies.extend(noise_rows)
             trace["detail_pages_ms"] += int(round((time.perf_counter() - started) * 1000))
-        if plan is not None and trace["completed_page_offsets"] != trace["planned_page_offsets"]:
+        if (
+            plan is not None
+            and trace["completed_page_offsets"] != trace["planned_page_offsets"]
+            and trace["stop_reason"] != "cell_deadline"
+        ):
             reason = "planned page offsets were not all completed"
             self._mark_critical_degradation(reason)
             trace["failure_reason"] = trace["failure_reason"] or reason

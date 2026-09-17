@@ -572,6 +572,70 @@ def test_detail_enrichment_applies_a_configured_per_cell_cap(monkeypatch) -> Non
     )
 
 
+def test_search_linkedin_skips_followup_navigation_at_cell_deadline(
+    monkeypatch,
+) -> None:
+    search_html = """
+    <script type="application/ld+json">
+    {"@type":"JobPosting","title":"VP Product","description":"VP Product","url":"https://www.linkedin.com/jobs/view/100","hiringOrganization":{"name":"Example"}}
+    </script>
+    """
+    detail_html = (FIXTURES / "detail-transunion.html").read_text(encoding="utf-8")
+    client = BrowserSourceClient(
+        BrowserAcquisitionConfig(
+            source_name="linkedin",
+            min_delay_ms=0,
+            max_delay_ms=0,
+            navigation_timeout_ms=10_000,
+            scroll_pause_ms=1_000,
+            max_scrolls=1,
+        )
+    )
+    search_urls: list[str] = []
+
+    class FakeClock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+    clock = FakeClock()
+
+    def fake_fetch(url, **_kwargs):
+        if "/jobs/view/" in url:
+            clock.value = 19.0
+            client._last_fetch_result = SimpleNamespace(
+                final_url=url, http_status=200
+            )
+            return detail_html
+        search_urls.append(url)
+        client._last_fetch_result = SimpleNamespace(
+            final_url=url, http_status=200
+        )
+        return search_html
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr(client, "_validate_linkedin_auth", lambda **_kwargs: "without_session")
+    monkeypatch.setattr(client, "_sleep", lambda **_kwargs: None)
+    monkeypatch.setattr(client, "_linkedin_page_plan", lambda *_args, **_kwargs: [0, 1])
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_DELAY_MS", "0")
+
+    vacancies = client.search_linkedin(
+        "VP Product",
+        max_pages=2,
+        geography_location="United Kingdom",
+        detail_page_budget=10,
+        detail_deadline_monotonic=20.0,
+        monotonic=clock,
+    )
+
+    assert len(search_urls) == 1
+    assert len(vacancies) == 1
+    assert len(vacancies[0].description) > 1_000
+    assert client._last_search_trace["stop_reason"] == "cell_deadline"
+    assert client._last_search_trace["completed_page_offsets"] == [0]
+
+
 def test_search_trace_and_session_health_account_for_unfilled_detail_page(monkeypatch) -> None:
     search_html = """
     <script type="application/ld+json">
