@@ -1073,7 +1073,7 @@ def _looks_like_auth_redirect(url: str, html: str) -> bool:
 
 def _looks_like_extraction_failure(url: str, html: str) -> bool:
     lowered = f"{url} {html}".lower()
-    return any(
+    if any(
         phrase in lowered
         for phrase in (
             "no vacancies found",
@@ -1082,12 +1082,21 @@ def _looks_like_extraction_failure(url: str, html: str) -> bool:
             "something went wrong",
             "access denied",
             "forbidden",
-            "captcha",
             "verify you are human",
             "service unavailable",
             "temporarily unavailable",
         )
-    )
+    ):
+        return True
+    if "captcha" not in lowered:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if host == "linkedin.com" or host.endswith(".linkedin.com"):
+        return linkedin_safety_reason(final_url=url, html=html) in {
+            "challenge_redirect",
+            "rendered_challenge",
+        }
+    return True
 
 
 def _looks_like_degradation(url: str, html: str) -> bool:

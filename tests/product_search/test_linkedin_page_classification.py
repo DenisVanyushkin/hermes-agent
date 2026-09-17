@@ -48,9 +48,47 @@ SOURCE_CAPTURE_SHA256 = (
     "ca42d58e2404fc16a76a914b4ec29539f5fa8ddd870df13f98ac4067b62e62fb"
 )
 
+CAPTCHA_META_FIXTURE = (
+    pathlib.Path(__file__).parent.parent
+    / "job_intel"
+    / "fixtures"
+    / "linkedin-turkmenistan-public-search.html"
+)
+CHALLENGE_FIXTURE = (
+    pathlib.Path(__file__).parent.parent
+    / "job_intel"
+    / "fixtures"
+    / "linkedin-rendered-challenge.html"
+)
+
 
 def public_results_page() -> str:
     return FIXTURE.read_text(encoding="utf-8")
+
+
+def test_recaptcha_configuration_attribute_is_not_an_extraction_failure() -> None:
+    html = CAPTCHA_META_FIXTURE.read_text(encoding="utf-8")
+    url = "https://www.linkedin.com/jobs/search/?keywords=product&location=Turkmenistan"
+
+    assert "data-recaptcha-v3-integration-lix-value" in html
+    assert bs.linkedin_safety_reason(final_url=url, html=html) is None
+    assert bs._looks_like_extraction_failure(url, html) is False
+
+    health = bs.BrowserSessionHealth(source="linkedin")
+    health.update(url=url, html=html, vacancies_found=0)
+    assert health.extraction_failures == 0
+
+
+def test_rendered_challenge_fixture_remains_a_real_extraction_failure() -> None:
+    html = CHALLENGE_FIXTURE.read_text(encoding="utf-8")
+    url = "https://www.linkedin.com/jobs/search/?keywords=product&location=Turkmenistan"
+
+    assert bs.linkedin_safety_reason(final_url=url, html=html) == "rendered_challenge"
+    assert bs._looks_like_extraction_failure(url, html) is True
+
+    health = bs.BrowserSessionHealth(source="linkedin")
+    health.update(url=url, html=html, vacancies_found=0)
+    assert health.extraction_failures == 1
 
 
 def test_fixture_is_derived_from_the_frozen_capture_and_carries_no_identifiers() -> None:
