@@ -2649,10 +2649,13 @@ class BrowserSourceClient:
             geo_id=geography_geo_id,
         )
         plan = self._coerce_linkedin_execution_plan(execution_plan)
-        self._linkedin_detail_budget_remaining = (
+        detail_budget = (
             max(0, int(detail_page_budget))
             if detail_page_budget is not None
             else _linkedin_detail_page_budget_from_env()
+        )
+        self._linkedin_detail_budget_remaining = min(
+            detail_budget, _linkedin_detail_pages_per_cell_max_from_env()
         )
         if detail_skip_urls:
             self._linkedin_detail_enriched_urls.update(
