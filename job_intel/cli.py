@@ -358,7 +358,10 @@ def _linkedin_detail_budget_for_next_cell(
 
 
 def _linkedin_cell_retryable(error: Exception) -> bool:
-    return "browser cdp endpoint is dirty or stale" in str(error).lower()
+    text = str(error).lower()
+    if "timeout" in text or "timed out" in text:
+        return False
+    return "browser cdp endpoint is dirty or stale" in text
 
 
 def _fetch_linkedin_cell_with_retry(fetcher, query: str, **kwargs):
@@ -787,6 +790,12 @@ def _collect_vacancies(
                     for item in linkedin_plan
                 ],
                 "executed_query_cells": [],
+                "detail_pages_budget_opened": 0,
+                "detail_pages_filled": 0,
+                "detail_pages_blocked": 0,
+                "detail_pages_errors": 0,
+                "detail_pages_unfilled": 0,
+                "detail_pages_lost_on_worker_timeout": 0,
             }
             linkedin_started = perf_counter()
             if not linkedin_plan:
@@ -800,8 +809,11 @@ def _collect_vacancies(
                     "cell with a location or a geoId, so no search was attempted"
                 )
             for query_index, item in enumerate(linkedin_plan):
+                remaining_cells = len(linkedin_plan) - query_index
+                cell_detail_budget = _linkedin_detail_budget_for_next_cell(
+                    linkedin_detail_budget, remaining_cells
+                )
                 try:
-                    remaining_cells = len(linkedin_plan) - query_index
                     results = _fetch_linkedin_cell_with_retry(
                         fetch_linkedin_vacancies,
                         item.query,
@@ -810,9 +822,7 @@ def _collect_vacancies(
                         geo_id=item.geo_id,
                         cell_id=item.cell_id,
                         allow_unauthenticated=linkedin_allow_unauthenticated,
-                        detail_page_budget=_linkedin_detail_budget_for_next_cell(
-                            linkedin_detail_budget, remaining_cells
-                        ),
+                        detail_page_budget=cell_detail_budget,
                         detail_skip_urls=linkedin_detail_skip_urls,
                         detail_first_seen_at=linkedin_detail_first_seen_at,
                     )
@@ -859,6 +869,17 @@ def _collect_vacancies(
                     error_class = _linkedin_error_class(error_text)
                     linkedin_errors.append(error_text)
                     linkedin_error_classes.append(error_class)
+                    query_trace = getattr(fetch_linkedin_vacancies, "last_trace", None)
+                    if not isinstance(query_trace, dict):
+                        linkedin_trace["detail_pages_lost_on_worker_timeout"] += (
+                            cell_detail_budget
+                        )
+                        linkedin_trace["detail_pages_budget_opened"] += (
+                            cell_detail_budget
+                        )
+                        linkedin_detail_budget = max(
+                            0, linkedin_detail_budget - cell_detail_budget
+                        )
                     linkedin_trace["executed_query_cells"].append(
                         _query_attempt_event(
                             "linkedin",
@@ -924,6 +945,8 @@ def _collect_vacancies(
                 "detail_pages_filled": "detail_pages_filled",
                 "detail_pages_blocked": "detail_pages_blocked",
                 "detail_pages_errors": "detail_pages_errors",
+                "detail_pages_unfilled": "detail_pages_unfilled",
+                "detail_pages_lost_on_worker_timeout": "detail_pages_lost_on_worker_timeout",
                 "detail_description_median_chars": "detail_description_median_chars",
             }
             for health_key, trace_key in health_trace_fields.items():

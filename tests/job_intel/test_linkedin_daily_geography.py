@@ -393,6 +393,74 @@ def test_daily_linkedin_detail_budget_carries_unused_quota_forward(
     assert sum(opened_counts) <= 6
 
 
+def test_worker_timeout_accounts_for_the_handed_cell_budget_without_exceeding_run_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _only_linkedin(monkeypatch)
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_BUDGET", "10")
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="productive", cell_id="productive", location="Canada", geo_id=None
+        ),
+        sources.LinkedInQueryPlanItem(
+            query="timed out", cell_id="timed_out", location="India", geo_id=None
+        ),
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kw: plan)
+
+    vacancy = Vacancy(
+        source="linkedin",
+        source_id="1",
+        company="Example",
+        title="VP Product",
+        location="Canada",
+        url="https://www.linkedin.com/jobs/view/1",
+        description="Product leadership",
+    )
+
+    def fetch(_query: str, **kwargs):
+        if kwargs["cell_id"] == "timed_out":
+            cli.fetch_linkedin_vacancies.last_trace = None
+            cli.fetch_linkedin_vacancies.last_health = None
+            raise RuntimeError("browser worker timed out after 240 seconds")
+        cli.fetch_linkedin_vacancies.last_trace = {
+            "detail_pages_budget_opened": 1,
+            "detail_pages_filled": 1,
+        }
+        cli.fetch_linkedin_vacancies.last_health = {}
+        return [vacancy]
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fetch)
+
+    result = cli._collect_vacancies(store=_store(tmp_path))
+
+    status = result.source_statuses["linkedin"]
+    trace = status["search_trace"]
+    assert status["status"] == "error"
+    assert trace["detail_pages_lost_on_worker_timeout"] == 9
+    assert trace["detail_pages_budget_opened"] == 10
+    assert trace["detail_pages_budget_opened"] == sum(
+        trace[key]
+        for key in (
+            "detail_pages_filled",
+            "detail_pages_blocked",
+            "detail_pages_errors",
+            "detail_pages_unfilled",
+            "detail_pages_lost_on_worker_timeout",
+        )
+    )
+
+
+def test_timed_out_cells_are_not_retried_by_the_parent(monkeypatch) -> None:
+    del monkeypatch
+    assert not cli._linkedin_cell_retryable(
+        RuntimeError(
+            "browser worker timed out after 240 seconds; "
+            "browser CDP endpoint is dirty or stale"
+        )
+    )
+
+
 def test_daily_linkedin_passes_persisted_enrichment_urls_to_worker(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
