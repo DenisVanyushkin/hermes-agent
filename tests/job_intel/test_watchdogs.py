@@ -28,7 +28,8 @@ def _create_source_db(path: Path, statuses: list[tuple[str, int]]) -> None:
         CREATE TABLE runs (
             id INTEGER PRIMARY KEY,
             mode TEXT NOT NULL,
-            started_at TEXT NOT NULL
+            started_at TEXT NOT NULL,
+            metadata_json TEXT
         );
         CREATE TABLE source_kpi_run (
             run_id INTEGER NOT NULL,
@@ -210,6 +211,94 @@ def test_source_alert_treats_linkedin_error_with_hits_as_bad(tmp_path: Path) -> 
     db_path = tmp_path / "state.sqlite3"
     state_path = tmp_path / "alert-state.json"
     _create_source_db(db_path, [("error", 7)])
+
+    result = watchdog.scan_and_alert(
+        db_path=db_path,
+        state_path=state_path,
+        threshold=1,
+        channel="executive_search_report",
+        deliver=lambda _message, _channel: type(
+            "Delivery", (), {"success": True, "status": "sent", "error": None}
+        )(),
+    )
+
+    assert result["consecutive_bad_runs"] == 1
+    assert result["alert_sent"] is True
+
+
+def test_source_alert_ignores_one_infrastructure_cell_error_with_productive_peer(
+    tmp_path: Path,
+) -> None:
+    watchdog = _load_script("job_intel_source_alert.py")
+    db_path = tmp_path / "state.sqlite3"
+    state_path = tmp_path / "alert-state.json"
+    _create_source_db(db_path, [("error", 7)])
+    metadata = {
+        "source_statuses": {
+            "linkedin": {
+                "status": "error",
+                "search_trace": {
+                    "executed_query_cells": [
+                        {"outcome": "productive", "found_count": 7},
+                        {
+                            "outcome": "error",
+                            "error_class": "navigation_timeout",
+                        },
+                    ]
+                },
+            }
+        }
+    }
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "UPDATE runs SET metadata_json = ? WHERE id = 1",
+        (json.dumps(metadata),),
+    )
+    connection.commit()
+    connection.close()
+
+    result = watchdog.scan_and_alert(
+        db_path=db_path,
+        state_path=state_path,
+        threshold=1,
+        channel="executive_search_report",
+        deliver=lambda *_args: pytest.fail("infrastructure-only partial run alerted"),
+    )
+
+    assert result["consecutive_bad_runs"] == 0
+    assert result["alert_sent"] is False
+
+
+@pytest.mark.parametrize(
+    "error_class",
+    ["linkedin_safety", "navigation_timeout"],
+)
+def test_source_alert_keeps_safety_and_all_cells_outage_bad(
+    tmp_path: Path, error_class: str
+) -> None:
+    watchdog = _load_script("job_intel_source_alert.py")
+    db_path = tmp_path / "state.sqlite3"
+    state_path = tmp_path / "alert-state.json"
+    _create_source_db(db_path, [("error", 7)])
+    metadata = {
+        "source_statuses": {
+            "linkedin": {
+                "status": "error",
+                "search_trace": {
+                    "executed_query_cells": [
+                        {"outcome": "error", "error_class": error_class}
+                    ]
+                },
+            }
+        }
+    }
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "UPDATE runs SET metadata_json = ? WHERE id = 1",
+        (json.dumps(metadata),),
+    )
+    connection.commit()
+    connection.close()
 
     result = watchdog.scan_and_alert(
         db_path=db_path,

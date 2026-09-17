@@ -13,6 +13,9 @@ from typing import Callable, Sequence
 
 
 BAD_STATUSES = frozenset({"blocked", "error"})
+INFRASTRUCTURE_ERROR_CLASSES = frozenset(
+    {"navigation_timeout", "browser_unavailable"}
+)
 DEFAULT_SOURCE = "linkedin"
 DEFAULT_THRESHOLD = 3
 DEFAULT_CHANNEL = "executive_search_report"
@@ -25,10 +28,55 @@ class SourceRun:
     source_status: str
     found_count: int
     started_at: str
+    metadata: dict[str, object]
 
     @property
     def is_bad(self) -> bool:
+        if self._is_infrastructure_only_partial:
+            return False
         return self.source_status in BAD_STATUSES or self.found_count == 0
+
+    @property
+    def _is_infrastructure_only_partial(self) -> bool:
+        if self.source_status != "error" or self.found_count <= 0:
+            return False
+        statuses = self.metadata.get("source_statuses")
+        if not isinstance(statuses, dict):
+            return False
+        status = statuses.get(DEFAULT_SOURCE)
+        if not isinstance(status, dict) or status.get("status") != "error":
+            return False
+        if status.get("error_class") == "linkedin_safety":
+            return False
+        trace = status.get("search_trace")
+        if not isinstance(trace, dict):
+            return False
+        cells = trace.get("executed_query_cells")
+        if not isinstance(cells, list):
+            return False
+        error_cells = [
+            cell
+            for cell in cells
+            if isinstance(cell, dict) and cell.get("outcome") == "error"
+        ]
+        if len(error_cells) != 1:
+            return False
+        error_cell = error_cells[0]
+        if error_cell.get("error_class") not in INFRASTRUCTURE_ERROR_CLASSES:
+            return False
+        if any(
+            isinstance(cell, dict)
+            and (
+                cell.get("outcome") == "blocked"
+                or cell.get("error_class") == "linkedin_safety"
+            )
+            for cell in cells
+        ):
+            return False
+        return any(
+            isinstance(cell, dict) and cell.get("outcome") == "productive"
+            for cell in cells
+        )
 
 
 def _read_recent_runs(db_path: Path, source: str, limit: int) -> list[SourceRun]:
@@ -41,7 +89,8 @@ def _read_recent_runs(db_path: Path, source: str, limit: int) -> list[SourceRun]
             SELECT k.run_id,
                    COALESCE(k.source_status, ''),
                    COALESCE(k.found_count, 0),
-                   COALESCE(r.started_at, '')
+                   COALESCE(r.started_at, ''),
+                   COALESCE(r.metadata_json, '{}')
             FROM source_kpi_run AS k
             JOIN runs AS r ON r.id = k.run_id
             WHERE k.source = ?
@@ -61,9 +110,18 @@ def _read_recent_runs(db_path: Path, source: str, limit: int) -> list[SourceRun]
             source_status=str(source_status),
             found_count=int(found_count),
             started_at=str(started_at),
+            metadata=_decode_metadata(str(metadata_json or "")),
         )
-        for run_id, source_status, found_count, started_at in rows
+        for run_id, source_status, found_count, started_at, metadata_json in rows
     ]
+
+
+def _decode_metadata(raw: str) -> dict[str, object]:
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _load_state(path: Path) -> dict[str, object]:
