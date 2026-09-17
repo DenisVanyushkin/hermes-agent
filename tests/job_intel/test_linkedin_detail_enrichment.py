@@ -545,6 +545,33 @@ def test_detail_enrichment_stops_before_cell_deadline_and_keeps_filled_rows(monk
     assert vacancies[2].description == "VP Product"
 
 
+def test_detail_enrichment_applies_a_configured_per_cell_cap(monkeypatch) -> None:
+    client = BrowserSourceClient(BrowserAcquisitionConfig(source_name="linkedin"))
+    vacancies = [_vacancy("VP Product", number) for number in range(1, 6)]
+    detail_html = (FIXTURES / "detail-transunion.html").read_text(encoding="utf-8")
+    requested: list[str] = []
+
+    def fake_fetch(url, **_kwargs):
+        requested.append(url)
+        client._last_fetch_result = SimpleNamespace(final_url=url, http_status=200)
+        return detail_html
+
+    monkeypatch.setattr(client, "fetch_html", fake_fetch)
+    monkeypatch.setattr("job_intel.browser_sourcing.time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("JOB_INTEL_LINKEDIN_DETAIL_PAGES_PER_CELL_MAX", "2")
+
+    stats = client._enrich_linkedin_vacancies(vacancies, detail_page_budget=100)
+
+    assert len(requested) == 2
+    assert stats["planned"] == 2
+    assert stats["opened"] == 2
+    assert stats["filled"] == 2
+    assert stats["opened"] == sum(
+        stats[key]
+        for key in ("filled", "blocked", "errors", "unfilled")
+    )
+
+
 def test_search_trace_and_session_health_account_for_unfilled_detail_page(monkeypatch) -> None:
     search_html = """
     <script type="application/ld+json">

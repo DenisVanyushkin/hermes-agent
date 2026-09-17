@@ -67,6 +67,7 @@ from .runtime import resolve_browser_profile_base, sha256_text
 _BROWSER_PROFILE_DEFAULT = resolve_browser_profile_base() / "company-career"
 LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS = 240
 LINKEDIN_DETAIL_DEADLINE_SAFETY_MARGIN_SECONDS = 45
+LINKEDIN_DETAIL_PAGES_PER_CELL_DEFAULT = 15
 _BROWSER_PROFILE_DEFAULTS: dict[str, Path] = {
     "linkedin": resolve_browser_profile_base() / "linkedin",
     "company_career": _BROWSER_PROFILE_DEFAULT,
@@ -1572,6 +1573,21 @@ def _linkedin_detail_page_budget_from_env() -> int:
         return 3
 
 
+def _linkedin_detail_pages_per_cell_max_from_env() -> int:
+    try:
+        return max(
+            0,
+            int(
+                os.getenv(
+                    "JOB_INTEL_LINKEDIN_DETAIL_PAGES_PER_CELL_MAX",
+                    str(LINKEDIN_DETAIL_PAGES_PER_CELL_DEFAULT),
+                )
+            ),
+        )
+    except ValueError:
+        return LINKEDIN_DETAIL_PAGES_PER_CELL_DEFAULT
+
+
 
 def extract_jobposting_vacancies_from_html(html: str, *, source: str, page_url: str) -> list[Vacancy]:
     """Extract JSON-LD JobPosting objects into Vacancy rows with a caller-provided source name.
@@ -2432,6 +2448,7 @@ class BrowserSourceClient:
             budget = self._linkedin_detail_budget_remaining
         else:
             budget = _linkedin_detail_page_budget_from_env()
+        budget = min(budget, _linkedin_detail_pages_per_cell_max_from_env())
         raw_delay = os.getenv("JOB_INTEL_LINKEDIN_DETAIL_PAGE_DELAY_MS", "1500")
         try:
             delay_ms = max(0, int(raw_delay))
