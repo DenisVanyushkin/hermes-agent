@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 from datetime import date, datetime, timedelta, timezone
+import os
 from pathlib import Path
+import time
 import types
 
 import pytest
@@ -525,6 +527,7 @@ def _patch_systemctl_show(
     responses: dict[str, str],
     *,
     error: Exception | None = None,
+    expected_tz: str | None = None,
 ) -> list[list[str]]:
     calls: list[list[str]] = []
 
@@ -532,6 +535,8 @@ def _patch_systemctl_show(
         calls.append(command)
         if error is not None:
             raise error
+        if expected_tz is not None:
+            assert _kwargs["env"]["TZ"] == expected_tz
         if command[1] != "show":
             return types.SimpleNamespace(returncode=0, stdout="inactive\n", stderr="")
         unit = command[-1]
@@ -548,6 +553,91 @@ def _patch_systemctl_show(
 def _next_elapse_after(minutes: int) -> str:
     next_elapse = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     return next_elapse.strftime("%a %Y-%m-%d %H:%M:%S UTC")
+
+
+def test_preflight_rejects_non_utc_timer_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(120).replace(" UTC", " CEST") + "\n",
+        },
+    )
+
+    previous_tz = os.environ.get("TZ")
+    try:
+        monkeypatch.setenv("TZ", "Europe/Paris")
+        time.tzset()
+        with pytest.raises(probe.ProbeSafetyError, match="UTC"):
+            probe._preflight_services()
+    finally:
+        if previous_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", previous_tz)
+        time.tzset()
+
+
+def test_preflight_passes_two_hour_utc_timer_and_forces_utc_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    calls = _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(120) + "\n",
+        },
+        expected_tz="UTC",
+    )
+
+    probe._preflight_services()
+    assert len(calls) == 3
+
+
+def test_preflight_rejects_utc_timer_with_less_than_twenty_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe = _load_probe_module()
+    _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + _next_elapse_after(5) + "\n",
+        },
+    )
+
+    with pytest.raises(probe.ProbeSafetyError, match="20 minutes"):
+        probe._preflight_services()
+
+
+@pytest.mark.parametrize("raw_value", ["", "n/a"])
+def test_preflight_rejects_timer_without_next_elapse(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_value: str,
+) -> None:
+    probe = _load_probe_module()
+    _patch_systemctl_show(
+        probe,
+        monkeypatch,
+        {
+            "job-intel-shadow-collection.service": "LoadState=loaded\nActiveState=inactive\n",
+            "job-intel-daily.service": "LoadState=masked\nActiveState=inactive\n",
+            "job-intel-shadow-collection.timer": "NextElapseUSecRealtime=" + raw_value + "\n",
+        },
+    )
+
+    with pytest.raises(probe.ProbeSafetyError, match="parse"):
+        probe._preflight_services()
 
 
 def test_preflight_rejects_nonexistent_shadow_service(

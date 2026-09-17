@@ -67,6 +67,7 @@ def _systemctl_show(name: str, *properties: str) -> dict[str, str]:
             text=True,
             timeout=10,
             check=False,
+            env={**os.environ, "TZ": "UTC"},
         )
     except Exception as exc:  # pragma: no cover - platform failure
         raise ProbeSafetyError(f"systemctl show failed for {name}: {exc}") from exc
@@ -104,13 +105,18 @@ def _check_service_load_and_activity(
 
 def _check_shadow_timer() -> None:
     values = _systemctl_show(_SHADOW_TIMER, "NextElapseUSecRealtime")
-    raw_next_elapse = values["NextElapseUSecRealtime"]
+    raw_next_elapse = values["NextElapseUSecRealtime"].strip()
     try:
         next_elapse_us = int(raw_next_elapse)
     except (TypeError, ValueError):
+        if not raw_next_elapse.endswith(" UTC"):
+            raise ProbeSafetyError(
+                f"cannot parse {_SHADOW_TIMER} NextElapseUSecRealtime={raw_next_elapse!r}; expected UTC"
+            )
+        timestamp_text = raw_next_elapse[:-4]
         try:
             next_elapse = datetime.strptime(
-                raw_next_elapse, "%a %Y-%m-%d %H:%M:%S %Z"
+                timestamp_text, "%a %Y-%m-%d %H:%M:%S"
             ).replace(tzinfo=timezone.utc)
             next_elapse_us = int(next_elapse.timestamp() * 1_000_000)
         except (TypeError, ValueError) as exc:
