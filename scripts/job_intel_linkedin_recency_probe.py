@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -204,10 +205,27 @@ def _utc_now() -> str:
     )
 
 
-def _numeric_ids(values: Any) -> list[str]:
+def _normalize_job_ids(values: Any) -> tuple[list[str], int]:
     if not isinstance(values, (list, tuple, set, frozenset)):
-        return []
-    return sorted({str(value) for value in values if str(value).isdigit()})
+        return [], 0
+    normalized: set[str] = set()
+    unparsed_count = 0
+    for value in values:
+        text = str(value).split("?", 1)[0].split("#", 1)[0]
+        if text.isdigit():
+            normalized.add(text)
+            continue
+        match = re.search(r"(\d{8,})$", text)
+        if match:
+            normalized.add(match.group(1))
+        else:
+            unparsed_count += 1
+    return sorted(normalized), unparsed_count
+
+
+def _numeric_ids(values: Any) -> list[str]:
+    """Return sorted unique numeric IDs while keeping the old local API."""
+    return _normalize_job_ids(values)[0]
 
 
 def _query_record(
@@ -226,6 +244,9 @@ def _query_record(
         "failure_reason": (trace or {}).get("failure_reason"),
         "stop_reason": (trace or {}).get("stop_reason"),
     }
+    job_ids, unparsed_job_id_count = _normalize_job_ids(
+        page.get("dom_unique_job_ids", [])
+    )
     record = {
         "order": spec["order"],
         "pair_index": spec["pair_index"],
@@ -240,7 +261,8 @@ def _query_record(
         "page_classification": page.get("page_classification") or "not_observed",
         "safety_reason": page.get("safety_reason"),
         "safety": safety,
-        "job_ids": _numeric_ids(page.get("dom_unique_job_ids", [])),
+        "job_ids": job_ids,
+        "unparsed_job_id_count": unparsed_job_id_count,
     }
     if error:
         record["error"] = error

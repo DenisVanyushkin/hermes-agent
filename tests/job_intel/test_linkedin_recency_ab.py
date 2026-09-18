@@ -5,8 +5,10 @@ import json
 from datetime import date, datetime, timedelta, timezone
 import os
 from pathlib import Path
+import re
 import time
 import types
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -32,6 +34,105 @@ def _load_probe_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _real_recency_corpus() -> list[Path]:
+    root = Path("/var/lib/job-intel/state/browser-diagnostics")
+    json_paths = sorted(
+        list(root.glob("20260917T1758*-page-0.json"))
+        + list(root.glob("20260917T1759*-page-0.json"))
+    )
+    if len(json_paths) != 6:
+        pytest.skip(
+            "real 2026-09-17 recency corpus unavailable: expected 6 JSON pages, "
+            f"found {len(json_paths)} under {root}"
+        )
+    for json_path in json_paths:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        html_ref = data.get("html_ref")
+        if not isinstance(html_ref, str):
+            pytest.skip(f"real recency corpus unavailable: {json_path.name} has no html_ref")
+        html_path = Path(html_ref)
+        if not html_path.is_absolute():
+            html_path = json_path.parent / html_path
+        if not html_path.is_file():
+            pytest.skip(f"real recency corpus unavailable: missing {html_path}")
+    return json_paths
+
+
+def test_recency_normalization_uses_real_yesterday_corpus() -> None:
+    probe = _load_probe_module()
+    json_paths = _real_recency_corpus()
+    href_pattern = re.compile(r'href=["\']([^"\']*/jobs/view/[^"\']+)', re.I)
+    observed: dict[tuple[str, str], set[str]] = {}
+
+    for json_path in json_paths:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        requested_url = (data.get("extra") or {}).get("requested_url")
+        assert isinstance(requested_url, str)
+        location = parse_qs(urlparse(requested_url).query)["location"][0]
+        branch = "treatment" if "f_TPR" in requested_url else "control"
+        html_ref = data["html_ref"]
+        html_path = Path(html_ref)
+        if not html_path.is_absolute():
+            html_path = json_path.parent / html_path
+        html = html_path.read_text(encoding="utf-8")
+        hrefs = href_pattern.findall(html)
+        slug_ids = [browser_sourcing._linkedin_job_id_from_url(href) for href in hrefs]
+        job_ids = probe._numeric_ids(slug_ids)
+        observed[(location, branch)] = set(job_ids)
+
+    expected_counts = {
+        ("DACH", "control"): 60,
+        ("DACH", "treatment"): 60,
+        ("Kazakhstan", "control"): 37,
+        ("Kazakhstan", "treatment"): 0,
+        ("Singapore", "control"): 60,
+        ("Singapore", "treatment"): 60,
+    }
+    assert {key: len(value) for key, value in observed.items()} == expected_counts
+    assert {
+        location: {
+            "treatment_only": len(observed[(location, "treatment")] - observed[(location, "control")]),
+            "control_only": len(observed[(location, "control")] - observed[(location, "treatment")]),
+            "overlap": len(observed[(location, "control")] & observed[(location, "treatment")]),
+        }
+        for location in ("DACH", "Kazakhstan", "Singapore")
+    } == {
+        "DACH": {"treatment_only": 57, "control_only": 57, "overlap": 3},
+        "Kazakhstan": {"treatment_only": 0, "control_only": 37, "overlap": 0},
+        "Singapore": {"treatment_only": 53, "control_only": 53, "overlap": 7},
+    }
+
+
+def test_query_record_normalizes_slug_ids_and_counts_unparsed_trace_values() -> None:
+    probe = _load_probe_module()
+    spec = {
+        "order": 1,
+        "pair_index": 1,
+        "cell_id": "dach",
+        "query": "(VP Product)",
+        "branch": "control",
+        "url_variant": "default",
+        "requested_url": "https://www.linkedin.com/jobs/search/?location=DACH",
+    }
+    record = probe._query_record(
+        spec,
+        started=time.perf_counter(),
+        trace={
+            "pages": [{
+                "requested_url": spec["requested_url"],
+                "dom_unique_job_ids": [
+                    "head-of-commercialization-at-fynix-4468608024",
+                    "another-role-4468608024?trk=public_jobs#fragment",
+                    "not-a-linkedin-job-id",
+                ],
+            }],
+        },
+    )
+
+    assert record["job_ids"] == ["4468608024"]
+    assert record["unparsed_job_id_count"] == 1
 
 
 def test_query_experiment_accepts_recency_name_with_fixed_axes() -> None:
