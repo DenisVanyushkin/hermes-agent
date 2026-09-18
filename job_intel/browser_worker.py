@@ -390,6 +390,10 @@ def _run_linkedin(
     return _with_browser_source("linkedin", _run, retry_on_attach=not no_retries)
 
 
+def _read_json_file(path: str) -> object:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
 def _probe(source: str) -> tuple[list[Vacancy], dict[str, Any], dict[str, Any]]:
     def _run(client: BrowserSourceClient) -> tuple[list[Vacancy], dict[str, Any]]:
         if os.getenv("JOB_INTEL_BROWSER_CAPTURE_EXISTING_PAGES", "").strip():
@@ -425,6 +429,8 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("--no-retries", action="store_true")
     linkedin.add_argument("--allow-unauthenticated", action="store_true")
     linkedin.add_argument("--detail-page-budget", type=int)
+    linkedin.add_argument("--detail-skip-urls-file")
+    linkedin.add_argument("--detail-first-seen-at-file")
     linkedin.add_argument("--detail-skip-urls-json")
     linkedin.add_argument("--detail-first-seen-at-json")
     linkedin.add_argument("--detail-deadline-monotonic", type=float)
@@ -467,19 +473,27 @@ def main(argv: list[str] | None = None) -> int:
                 detail_skip_urls=(
                     {
                         str(url)
-                        for url in json.loads(args.detail_skip_urls_json)
+                        for url in (
+                            _read_json_file(args.detail_skip_urls_file)
+                            if args.detail_skip_urls_file
+                            else json.loads(args.detail_skip_urls_json)
+                        )
                         if isinstance(url, str)
                     }
-                    if args.detail_skip_urls_json
+                    if args.detail_skip_urls_file or args.detail_skip_urls_json
                     else None
                 ),
                 detail_first_seen_at=(
                     {
                         str(url): str(timestamp)
-                        for url, timestamp in json.loads(args.detail_first_seen_at_json).items()
+                        for url, timestamp in (
+                            _read_json_file(args.detail_first_seen_at_file)
+                            if args.detail_first_seen_at_file
+                            else json.loads(args.detail_first_seen_at_json)
+                        ).items()
                         if isinstance(url, str) and isinstance(timestamp, str)
                     }
-                    if args.detail_first_seen_at_json
+                    if args.detail_first_seen_at_file or args.detail_first_seen_at_json
                     else None
                 ),
                 detail_deadline_monotonic=args.detail_deadline_monotonic,

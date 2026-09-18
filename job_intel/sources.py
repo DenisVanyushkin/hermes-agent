@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import tempfile
 import subprocess
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -45,6 +46,23 @@ class SearchHit:
 
 class SourceFetchError(RuntimeError):
     pass
+
+
+BROWSER_WORKER_MAX_ARG_BYTES = 100_000
+
+
+def _write_browser_worker_json_file(payload: object, directory: Path) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=directory,
+        delete=False,
+    ) as handle:
+        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        handle.write("\n")
+        path = Path(handle.name)
+    path.chmod(0o600)
+    return path
 
 
 class _DuckDuckGoParser(HTMLParser):
@@ -470,9 +488,25 @@ def _browser_worker_payload(
     browser_python = Path(os.getenv("JOB_INTEL_BROWSER_PYTHON", "").strip() or "/var/lib/browser-desktop/playwright-venv/bin/python").expanduser()
     if not browser_python.exists():
         raise SourceFetchError(f"browser worker python missing: {browser_python}")
+    argv = [str(browser_python), "-m", "job_intel.browser_worker", command, *args]
+    for index, argument in enumerate(argv):
+        argument_bytes = len(os.fsencode(argument))
+        if argument_bytes <= BROWSER_WORKER_MAX_ARG_BYTES:
+            continue
+        argument_name = (
+            argument
+            if argument.startswith("--")
+            else argv[index - 1]
+            if index and argv[index - 1].startswith("--")
+            else f"argv[{index}]"
+        )
+        raise SourceFetchError(
+            f"browser worker argument {argument_name!r} exceeds "
+            f"{BROWSER_WORKER_MAX_ARG_BYTES} bytes ({argument_bytes})"
+        )
     try:
         proc = subprocess.run(
-            [str(browser_python), "-m", "job_intel.browser_worker", command, *args],
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -529,6 +563,8 @@ def fetch_linkedin_vacancies(
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
     _ensure_required_browser_profile("linkedin", config)
+    payload_directory: Path | None = None
+    payload_files: list[Path] = []
     try:
         worker_args = ["linkedin", query, str(max_pages)]
         if location:
@@ -549,17 +585,21 @@ def fetch_linkedin_vacancies(
             worker_args.append("--allow-unauthenticated")
         if detail_page_budget is not None:
             worker_args.extend(["--detail-page-budget", str(max(0, detail_page_budget))])
+        if detail_skip_urls or detail_first_seen_at:
+            payload_directory = Path(tempfile.mkdtemp(prefix="job-intel-browser-worker-"))
+            payload_directory.chmod(0o700)
         if detail_skip_urls:
-            worker_args.extend(
-                ["--detail-skip-urls-json", json.dumps(sorted(detail_skip_urls))]
+            skip_urls_file = _write_browser_worker_json_file(
+                sorted(detail_skip_urls), payload_directory
             )
+            payload_files.append(skip_urls_file)
+            worker_args.extend(["--detail-skip-urls-file", str(skip_urls_file)])
         if detail_first_seen_at:
-            worker_args.extend(
-                [
-                    "--detail-first-seen-at-json",
-                    json.dumps(dict(sorted(detail_first_seen_at.items())), sort_keys=True),
-                ]
+            first_seen_file = _write_browser_worker_json_file(
+                dict(sorted(detail_first_seen_at.items())), payload_directory
             )
+            payload_files.append(first_seen_file)
+            worker_args.extend(["--detail-first-seen-at-file", str(first_seen_file)])
         if no_retries:
             worker_args.append("--no-retries")
         detail_deadline = (
@@ -588,6 +628,13 @@ def fetch_linkedin_vacancies(
         return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc
+    finally:
+        for payload_file in payload_files:
+            with suppress(FileNotFoundError):
+                payload_file.unlink()
+        if payload_directory is not None:
+            with suppress(OSError):
+                payload_directory.rmdir()
 
 
 def fetch_company_career_vacancies(url: str) -> list[Vacancy]:
