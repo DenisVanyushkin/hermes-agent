@@ -113,6 +113,7 @@ RECOMMENDATION_ORDER = {
     "strong_fit": 3,
     "exceptional_fit": 4,
 }
+QUERY_ATTEMPT_VACANCY_KEY_LIMIT = 150
 
 
 @dataclass(frozen=True)
@@ -172,12 +173,48 @@ def _null_span() -> _NullSpanContext:
     return _NullSpanContext()
 
 
+def _vacancy_key_for_query_trace(vacancy: Any) -> str | None:
+    try:
+        explicit_key = (
+            vacancy.get("vacancy_key")
+            if isinstance(vacancy, dict)
+            else getattr(vacancy, "vacancy_key", None)
+        )
+        if explicit_key:
+            return str(explicit_key)
+        derived_key = canonical_vacancy_key(vacancy)
+        return derived_key or None
+    except Exception:
+        return None
+
+
+def _query_attempt_vacancy_metadata(
+    vacancies: list[Any] | None,
+) -> dict[str, Any]:
+    keys: set[str] = set()
+    missing = 0
+    for vacancy in vacancies or []:
+        key = _vacancy_key_for_query_trace(vacancy)
+        if key is None:
+            missing += 1
+        else:
+            keys.add(key)
+    sorted_keys = sorted(keys)
+    return {
+        "vacancy_keys": sorted_keys[:QUERY_ATTEMPT_VACANCY_KEY_LIMIT],
+        "vacancy_key_count": len(sorted_keys),
+        "vacancy_keys_truncated": len(sorted_keys) > QUERY_ATTEMPT_VACANCY_KEY_LIMIT,
+        "vacancy_keys_missing": missing,
+    }
+
+
 def _query_attempt_event(
     source: str,
     plan_item: Any,
     *,
     outcome: str,
     found_count: int,
+    vacancies: list[Any] | None = None,
     error: str | None = None,
     error_class: str | None = None,
 ) -> dict[str, Any]:
@@ -211,6 +248,7 @@ def _query_attempt_event(
         "experiment_branch": experiment_branch,
         "outcome": outcome,
         "found_count": max(0, int(found_count)),
+        **_query_attempt_vacancy_metadata(vacancies),
     }
     if error:
         event["error"] = error
@@ -867,6 +905,7 @@ def _collect_vacancies(
                                 item,
                                 outcome="error",
                                 found_count=len(results),
+                                vacancies=results,
                                 error=error_text,
                                 error_class=error_class,
                             )
@@ -878,6 +917,7 @@ def _collect_vacancies(
                                 item,
                                 outcome="productive" if results else "empty",
                                 found_count=len(results),
+                                vacancies=results,
                             )
                         )
                 except Exception as exc:
@@ -1040,6 +1080,7 @@ def _collect_vacancies(
                             plan_item,
                             outcome="productive" if results else "empty",
                             found_count=len(results),
+                            vacancies=results,
                         )
                     )
                 except Exception as exc:

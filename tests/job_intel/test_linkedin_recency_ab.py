@@ -15,6 +15,7 @@ import pytest
 from job_intel import browser_worker, cli, sources
 from job_intel import browser_sourcing
 from job_intel.browser_sourcing import BrowserFetchResult, BrowserSourceClient
+from job_intel.models import Vacancy
 from job_intel.product_search.acquisition_probe import LinkedInExecutionPlan
 
 
@@ -865,3 +866,142 @@ def test_probe_live_preflight_rejects_active_service_before_worker(
             live=True,
         )
     assert called is False
+
+
+def _trace_vacancy(key: str | None) -> Vacancy | types.SimpleNamespace:
+    if key is None:
+        return types.SimpleNamespace()
+    return Vacancy(
+        source="linkedin",
+        source_id=key,
+        company="Example",
+        title="VP Product",
+        location="Canada",
+        url=f"https://www.linkedin.com/jobs/view/{key}",
+        description="Product leadership",
+        vacancy_key=key,
+    )
+
+
+def test_query_attempt_event_records_sorted_unique_vacancy_keys() -> None:
+    plan_item = sources.LinkedInQueryPlanItem(
+        query="VP Product", cell_id="cell", location="Canada", geo_id=None
+    )
+
+    event = cli._query_attempt_event(
+        "linkedin",
+        plan_item,
+        outcome="productive",
+        found_count=3,
+        vacancies=[_trace_vacancy("key-b"), _trace_vacancy("key-a"), _trace_vacancy("key-b")],
+    )
+
+    assert event["vacancy_keys"] == ["key-a", "key-b"]
+    assert event["vacancy_key_count"] == 2
+    assert event["vacancy_keys_truncated"] is False
+    assert event["vacancy_keys_missing"] == 0
+
+
+def test_query_attempt_event_truncates_vacancy_keys_after_sorting() -> None:
+    plan_item = sources.LinkedInQueryPlanItem(
+        query="VP Product", cell_id="cell", location="Canada", geo_id=None
+    )
+
+    event = cli._query_attempt_event(
+        "linkedin",
+        plan_item,
+        outcome="productive",
+        found_count=151,
+        vacancies=[_trace_vacancy(f"key-{index:03d}") for index in range(151)],
+    )
+
+    assert event["vacancy_keys"] == [f"key-{index:03d}" for index in range(150)]
+    assert event["vacancy_key_count"] == 151
+    assert event["vacancy_keys_truncated"] is True
+    assert event["vacancy_keys_missing"] == 0
+
+
+def test_query_attempt_event_counts_vacancies_without_keys() -> None:
+    plan_item = sources.LinkedInQueryPlanItem(
+        query="VP Product", cell_id="cell", location="Canada", geo_id=None
+    )
+
+    event = cli._query_attempt_event(
+        "linkedin",
+        plan_item,
+        outcome="productive",
+        found_count=2,
+        vacancies=[_trace_vacancy("key-a"), _trace_vacancy(None)],
+    )
+
+    assert event["vacancy_keys"] == ["key-a"]
+    assert event["vacancy_key_count"] == 1
+    assert event["vacancy_keys_truncated"] is False
+    assert event["vacancy_keys_missing"] == 1
+
+
+def test_collector_records_vacancy_keys_without_experiment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("JOB_INTEL_ENABLED_SOURCES", "linkedin")
+    for name in (
+        "JOB_INTEL_QUERY_EXPERIMENT",
+        "JOB_INTEL_QUERY_EXPERIMENT_DATE",
+        "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="VP Product", cell_id="cell", location="Canada", geo_id=None
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kwargs: plan)
+    vacancy = _trace_vacancy("known-key")
+    monkeypatch.setattr(
+        cli,
+        "fetch_linkedin_vacancies",
+        lambda *_args, **_kwargs: [vacancy],
+    )
+
+    store = __import__("job_intel.store", fromlist=["JobIntelStore"]).JobIntelStore(
+        tmp_path / "job_intel.sqlite3"
+    )
+    result = cli._collect_vacancies(store=store)
+    event = result.source_statuses["linkedin"]["search_trace"]["executed_query_cells"][0]
+
+    assert event["experiment_branch"] == "default"
+    assert event["vacancy_keys"] == ["known-key"]
+    assert event["vacancy_key_count"] == 1
+
+
+def test_collector_records_vacancy_keys_on_safety_signal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("JOB_INTEL_ENABLED_SOURCES", "linkedin")
+    plan = [
+        sources.LinkedInQueryPlanItem(
+            query="VP Product", cell_id="cell", location="Canada", geo_id=None
+        )
+    ]
+    monkeypatch.setattr(cli, "rotating_linkedin_queries", lambda **_kwargs: plan)
+    vacancy = _trace_vacancy("safety-key")
+
+    def fetch_with_safety(*_args: object, **_kwargs: object) -> list[Vacancy]:
+        fetch_with_safety.last_trace = {
+            "pages": [{"safety_reason": "login_wall"}],
+        }
+        return [vacancy]
+
+    monkeypatch.setattr(cli, "fetch_linkedin_vacancies", fetch_with_safety)
+    store = __import__("job_intel.store", fromlist=["JobIntelStore"]).JobIntelStore(
+        tmp_path / "job_intel.sqlite3"
+    )
+
+    result = cli._collect_vacancies(store=store)
+    status = result.source_statuses["linkedin"]
+    event = status["search_trace"]["executed_query_cells"][0]
+
+    assert status["status"] == "blocked"
+    assert event["error_class"] == "linkedin_safety"
+    assert event["found_count"] == 1
+    assert event["vacancy_keys"] == ["safety-key"]
