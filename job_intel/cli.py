@@ -717,12 +717,13 @@ def _apply_text_backfill(vacancies: list[Vacancy], *, fetchers=None):
     # dedup by canonical URL happens later, after this backfill call) — the
     # fetcher would run twice but only the later vacancy's object would keep
     # the text. Verified needs_text/_blocked/_priority/select/backfill in
-    # text_backfill.py only ever read "source", "title", "description", "url"
-    # off each row, so an extra "_row_index" key is inert to all of them.
+    # text_backfill.py reads the source fields plus metadata needed by detail
+    # fetchers, so an extra "_row_index" key is inert to all of them.
     rows = []
     for index, vacancy in enumerate(vacancies):
         rows.append({"source": vacancy.source, "title": vacancy.title,
                       "description": vacancy.description, "url": vacancy.url,
+                      "metadata": vacancy.metadata,
                       "_row_index": index})
     try:
         report = backfill(rows, budget=budget, fetchers=fetchers)

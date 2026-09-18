@@ -680,12 +680,18 @@ def fetch_smartrecruiters(
                     location = "Unknown"
                     if isinstance(loc, dict):
                         location = str(loc.get("city") or loc.get("region") or loc.get("country") or "Unknown")
-                    url = str(post.get("ref") or "")
-                    if not url:
-                        pid = str(post.get("id") or "")
-                        if pid:
-                            url = f"https://jobs.smartrecruiters.com/{company}/{pid}"
+                    pid = str(post.get("id") or "").strip()
+                    detail_api_url = str(post.get("ref") or "").strip()
+                    if not pid:
+                        errors.append(
+                            f"smartrecruiters company={company}: posting_missing_id"
+                        )
+                        continue
+                    url = f"https://jobs.smartrecruiters.com/{company}/{pid}"
                     posted_at = str(post.get("releasedDate") or "") or None
+                    metadata = {"raw": post, "company": company}
+                    if detail_api_url:
+                        metadata["detail_api_url"] = detail_api_url
                     vacancies.append(
                         _vacancy(
                             "smartrecruiters",
@@ -694,7 +700,7 @@ def fetch_smartrecruiters(
                             company=company,
                             location=location,
                             posted_at=posted_at,
-                            metadata={"raw": post, "company": company},
+                            metadata=metadata,
                         )
                     )
 
@@ -885,8 +891,8 @@ _SMARTRECRUITERS_SECTIONS = ("jobDescription", "qualifications", "additionalInfo
 
 
 #: The only URL shape this fetcher can address. A posting's `ref` field in the
-#: listing API is exactly this, which is what lands in vacancies.url for rows
-#: collected through the API path.
+#: listing API is preserved as `metadata["detail_api_url"]` for this purpose;
+#: the public-facing vacancy URL is kept separate.
 _SMARTRECRUITERS_DETAIL_URL = re.compile(
     r"^https?://api\.smartrecruiters\.com/v\d+/companies/[^/]+/postings/[^/?#]+",
     re.I)

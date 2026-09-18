@@ -172,7 +172,14 @@ def backfill(rows, *, budget: int, fetchers=None) -> BackfillReport:
         report.attempted += 1
         report._bump(source, "attempted")
         try:
-            text = fetchers[source](row.get("url") or "")
+            fetch_url = row.get("url") or ""
+            if source == "smartrecruiters":
+                metadata = row.get("metadata")
+                if isinstance(metadata, Mapping):
+                    detail_api_url = metadata.get("detail_api_url")
+                    if isinstance(detail_api_url, str) and detail_api_url.strip():
+                        fetch_url = detail_api_url
+            text = fetchers[source](fetch_url)
         except Exception:
             # A fetcher is not supposed to raise, but if one does the reason is
             # lost, and an unknown reason is never grounds for terminal state.
