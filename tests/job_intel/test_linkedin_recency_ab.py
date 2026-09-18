@@ -446,8 +446,9 @@ def test_probe_live_uses_real_source_wrapper_and_serializable_execution_plan(
         worker_args = (command, *args)
         calls.append(worker_args)
         assert command == "linkedin"
-        plan_index = args.index("--execution-plan-json")
-        execution_plan = json.loads(args[plan_index + 1])
+        plan_index = args.index("--execution-plan-file")
+        execution_plan = json.loads(Path(args[plan_index + 1]).read_text(encoding="utf-8"))
+        assert "--execution-plan-json" not in args
         assert execution_plan["page_offsets"] == [0]
         assert args[args.index("--detail-page-budget") + 1] == "0"
         assert "--no-retries" in args

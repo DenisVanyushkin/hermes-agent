@@ -420,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
     linkedin.add_argument("max_pages", type=int)
     linkedin.add_argument("--location")
     linkedin.add_argument("--geo-id", dest="geo_id")
+    linkedin.add_argument("--execution-plan-file")
     linkedin.add_argument("--execution-plan-json")
     linkedin.add_argument("--run-id")
     linkedin.add_argument("--query-id")
@@ -455,7 +456,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "linkedin":
             execution_plan = (
-                json.loads(args.execution_plan_json)
+                _read_json_file(args.execution_plan_file)
+                if args.execution_plan_file
+                else json.loads(args.execution_plan_json)
                 if args.execution_plan_json
                 else None
             )

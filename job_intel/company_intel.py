@@ -15,7 +15,7 @@ import requests
 from .config import DEFAULT_CONFIG, load_config_bundle
 from .models import Vacancy
 from .runtime import retry_with_backoff, sha256_text
-from .sources import BOARD_LABELS
+from .sources import BOARD_LABELS, SourceFetchError, _validate_browser_worker_argv
 from .store import JobIntelStore
 
 EXECUTIVE_TITLE_HINTS = (
@@ -261,7 +261,10 @@ def _browser_fetch_html(url: str, *, timeout_seconds: int = 120) -> str:
         "company_career",
     ]
     try:
+        _validate_browser_worker_argv(cmd)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+    except SourceFetchError as exc:
+        raise BrowserFetchUnavailable("browser_worker_failed", str(exc)) from exc
     except subprocess.TimeoutExpired as exc:
         raise BrowserFetchUnavailable("browser_worker_failed", f"worker timeout after {timeout_seconds}s") from exc
     except OSError as exc:

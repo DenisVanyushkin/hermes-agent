@@ -81,6 +81,7 @@ from .runtime import (
 )
 from .sources import (
     SourceFetchError,
+    _validate_browser_worker_argv,
     discovery_queries,
     extract_duckduckgo_destination_url,
     fetch_company_career_vacancies,
@@ -4527,9 +4528,11 @@ def _browser_desktop_health() -> dict[str, Any]:
             mark("playwright_import", False, "Playwright import probe timed out after 45s")
 
     def worker_probe(source: str) -> tuple[bool, str]:
+        command = [str(venv_python), "-m", "job_intel.browser_worker", "probe", source]
         try:
+            _validate_browser_worker_argv(command)
             probe = subprocess.run(
-                [str(venv_python), "-m", "job_intel.browser_worker", "probe", source],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=180,

@@ -6,13 +6,13 @@ import random
 import re
 import tempfile
 import subprocess
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from time import monotonic
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -63,6 +63,49 @@ def _write_browser_worker_json_file(payload: object, directory: Path) -> Path:
         path = Path(handle.name)
     path.chmod(0o600)
     return path
+
+
+@contextmanager
+def _browser_worker_payload_files() -> Iterator[Callable[[object], Path]]:
+    directory: Path | None = None
+    payload_files: list[Path] = []
+
+    def write(payload: object) -> Path:
+        nonlocal directory
+        if directory is None:
+            directory = Path(tempfile.mkdtemp(prefix="job-intel-browser-worker-"))
+            directory.chmod(0o700)
+        path = _write_browser_worker_json_file(payload, directory)
+        payload_files.append(path)
+        return path
+
+    try:
+        yield write
+    finally:
+        for payload_file in payload_files:
+            with suppress(FileNotFoundError):
+                payload_file.unlink()
+        if directory is not None:
+            with suppress(OSError):
+                directory.rmdir()
+
+
+def _validate_browser_worker_argv(argv: Sequence[str]) -> None:
+    for index, argument in enumerate(argv):
+        argument_bytes = len(os.fsencode(argument))
+        if argument_bytes <= BROWSER_WORKER_MAX_ARG_BYTES:
+            continue
+        argument_name = (
+            argument
+            if argument.startswith("--")
+            else argv[index - 1]
+            if index and argv[index - 1].startswith("--")
+            else f"argv[{index}]"
+        )
+        raise SourceFetchError(
+            f"browser worker argument {argument_name!r} exceeds "
+            f"{BROWSER_WORKER_MAX_ARG_BYTES} bytes ({argument_bytes})"
+        )
 
 
 class _DuckDuckGoParser(HTMLParser):
@@ -489,21 +532,7 @@ def _browser_worker_payload(
     if not browser_python.exists():
         raise SourceFetchError(f"browser worker python missing: {browser_python}")
     argv = [str(browser_python), "-m", "job_intel.browser_worker", command, *args]
-    for index, argument in enumerate(argv):
-        argument_bytes = len(os.fsencode(argument))
-        if argument_bytes <= BROWSER_WORKER_MAX_ARG_BYTES:
-            continue
-        argument_name = (
-            argument
-            if argument.startswith("--")
-            else argv[index - 1]
-            if index and argv[index - 1].startswith("--")
-            else f"argv[{index}]"
-        )
-        raise SourceFetchError(
-            f"browser worker argument {argument_name!r} exceeds "
-            f"{BROWSER_WORKER_MAX_ARG_BYTES} bytes ({argument_bytes})"
-        )
+    _validate_browser_worker_argv(argv)
     try:
         proc = subprocess.run(
             argv,
@@ -563,78 +592,57 @@ def fetch_linkedin_vacancies(
         raise SourceFetchError("Playwright is not installed, so LinkedIn browser-native acquisition is unavailable.")
     config = _browser_config("linkedin")
     _ensure_required_browser_profile("linkedin", config)
-    payload_directory: Path | None = None
-    payload_files: list[Path] = []
     try:
-        worker_args = ["linkedin", query, str(max_pages)]
-        if location:
-            worker_args.extend(["--location", location])
-        if geo_id:
-            worker_args.extend(["--geo-id", geo_id])
-        if url_variant != "default":
-            worker_args.extend(["--url-variant", url_variant])
-        if experiment_branch != "default":
-            worker_args.extend(["--experiment-branch", experiment_branch])
-        if run_id:
-            worker_args.extend(["--run-id", run_id])
-        if query_id:
-            worker_args.extend(["--query-id", query_id])
-        if cell_id:
-            worker_args.extend(["--cell-id", cell_id])
-        if allow_unauthenticated:
-            worker_args.append("--allow-unauthenticated")
-        if detail_page_budget is not None:
-            worker_args.extend(["--detail-page-budget", str(max(0, detail_page_budget))])
-        if detail_skip_urls or detail_first_seen_at:
-            payload_directory = Path(tempfile.mkdtemp(prefix="job-intel-browser-worker-"))
-            payload_directory.chmod(0o700)
-        if detail_skip_urls:
-            skip_urls_file = _write_browser_worker_json_file(
-                sorted(detail_skip_urls), payload_directory
+        with _browser_worker_payload_files() as write_payload:
+            worker_args = ["linkedin", query, str(max_pages)]
+            if location:
+                worker_args.extend(["--location", location])
+            if geo_id:
+                worker_args.extend(["--geo-id", geo_id])
+            if url_variant != "default":
+                worker_args.extend(["--url-variant", url_variant])
+            if experiment_branch != "default":
+                worker_args.extend(["--experiment-branch", experiment_branch])
+            if run_id:
+                worker_args.extend(["--run-id", run_id])
+            if query_id:
+                worker_args.extend(["--query-id", query_id])
+            if cell_id:
+                worker_args.extend(["--cell-id", cell_id])
+            if allow_unauthenticated:
+                worker_args.append("--allow-unauthenticated")
+            if detail_page_budget is not None:
+                worker_args.extend(["--detail-page-budget", str(max(0, detail_page_budget))])
+            if detail_skip_urls:
+                skip_urls_file = write_payload(sorted(detail_skip_urls))
+                worker_args.extend(["--detail-skip-urls-file", str(skip_urls_file)])
+            if detail_first_seen_at:
+                first_seen_file = write_payload(dict(sorted(detail_first_seen_at.items())))
+                worker_args.extend(["--detail-first-seen-at-file", str(first_seen_file)])
+            if no_retries:
+                worker_args.append("--no-retries")
+            detail_deadline = (
+                monotonic()
+                + LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS
+                - LINKEDIN_DETAIL_DEADLINE_SAFETY_MARGIN_SECONDS
             )
-            payload_files.append(skip_urls_file)
-            worker_args.extend(["--detail-skip-urls-file", str(skip_urls_file)])
-        if detail_first_seen_at:
-            first_seen_file = _write_browser_worker_json_file(
-                dict(sorted(detail_first_seen_at.items())), payload_directory
-            )
-            payload_files.append(first_seen_file)
-            worker_args.extend(["--detail-first-seen-at-file", str(first_seen_file)])
-        if no_retries:
-            worker_args.append("--no-retries")
-        detail_deadline = (
-            monotonic()
-            + LINKEDIN_BROWSER_WORKER_TIMEOUT_SECONDS
-            - LINKEDIN_DETAIL_DEADLINE_SAFETY_MARGIN_SECONDS
-        )
-        worker_args.extend(
-            ["--detail-deadline-monotonic", f"{detail_deadline:.6f}"]
-        )
-        if execution_plan is not None:
             worker_args.extend(
-                [
-                    "--execution-plan-json",
-                    json.dumps(execution_plan, sort_keys=True, separators=(",", ":")),
-                ]
+                ["--detail-deadline-monotonic", f"{detail_deadline:.6f}"]
             )
-        payload = _browser_worker_payload(*worker_args)
-        fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
-        fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
-        trace = payload.get("search_trace")
-        if isinstance(trace, dict) and trace.get("stop_reason") == "critical_degradation":
-            fetch_linkedin_vacancies.last_errors = (
-                str(trace.get("failure_reason") or "critical degradation"),
-            )  # type: ignore[attr-defined]
-        return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
+            if execution_plan is not None:
+                execution_plan_file = write_payload(execution_plan)
+                worker_args.extend(["--execution-plan-file", str(execution_plan_file)])
+            payload = _browser_worker_payload(*worker_args)
+            fetch_linkedin_vacancies.last_health = payload.get("session_health")  # type: ignore[attr-defined]
+            fetch_linkedin_vacancies.last_trace = payload.get("search_trace")  # type: ignore[attr-defined]
+            trace = payload.get("search_trace")
+            if isinstance(trace, dict) and trace.get("stop_reason") == "critical_degradation":
+                fetch_linkedin_vacancies.last_errors = (
+                    str(trace.get("failure_reason") or "critical degradation"),
+                )  # type: ignore[attr-defined]
+            return [Vacancy.model_validate(item) for item in payload.get("vacancies", [])]
     except BrowserNativeUnavailable as exc:
         raise SourceFetchError(str(exc)) from exc
-    finally:
-        for payload_file in payload_files:
-            with suppress(FileNotFoundError):
-                payload_file.unlink()
-        if payload_directory is not None:
-            with suppress(OSError):
-                payload_directory.rmdir()
 
 
 def fetch_company_career_vacancies(url: str) -> list[Vacancy]:
