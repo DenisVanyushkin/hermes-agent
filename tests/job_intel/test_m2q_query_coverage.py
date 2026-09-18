@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import json
+
+import pytest
 
 from job_intel import cli, sources
 from job_intel.product_search.acquisition_probe import load_linkedin_geography_mapping
@@ -183,12 +185,134 @@ def test_query_experiment_alternates_both_arms_on_identical_pairs() -> None:
 
 
 def test_query_experiment_rejects_missing_fixed_axes() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="requires"):
         sources.query_experiment_from_env(
             {"JOB_INTEL_QUERY_EXPERIMENT": "role_context_ab"}
         )
+
+
+@pytest.mark.parametrize(
+    ("hour", "expected_date", "expected_slot"),
+    [
+        (0, date(2026, 9, 18), 0),
+        (11, date(2026, 9, 18), 0),
+        (12, date(2026, 9, 18), 1),
+        (23, date(2026, 9, 18), 1),
+    ],
+)
+def test_query_experiment_auto_axes_follow_injected_utc_clock(
+    hour: int, expected_date: date, expected_slot: int
+) -> None:
+    settings = sources.query_experiment_from_env(
+        {
+            "JOB_INTEL_QUERY_EXPERIMENT": "role_context_ab",
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE": " AUTO ",
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT": "auto",
+        },
+        now=lambda: datetime(2026, 9, 18, hour, 30, tzinfo=timezone.utc),
+    )
+
+    assert settings is not None
+    assert settings.as_of == expected_date
+    assert settings.rotation_slot == expected_slot
+
+
+def test_query_experiment_auto_axis_can_be_mixed_with_explicit_axis() -> None:
+    auto_date = sources.query_experiment_from_env(
+        {
+            "JOB_INTEL_QUERY_EXPERIMENT": "linkedin_recency_ab",
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE": "auto",
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT": "1",
+        },
+        now=lambda: datetime(2026, 9, 18, 4, tzinfo=timezone.utc),
+    )
+    auto_slot = sources.query_experiment_from_env(
+        {
+            "JOB_INTEL_QUERY_EXPERIMENT": "linkedin_recency_ab",
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE": "2026-09-17",
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT": " AUTO ",
+        },
+        now=lambda: datetime(2026, 9, 18, 20, tzinfo=timezone.utc),
+    )
+
+    assert auto_date is not None
+    assert (auto_date.as_of, auto_date.rotation_slot) == (date(2026, 9, 18), 1)
+    assert auto_slot is not None
+    assert (auto_slot.as_of, auto_slot.rotation_slot) == (date(2026, 9, 17), 1)
+
+
+@pytest.mark.parametrize(
+    ("date_value", "slot_value"),
+    [("", "auto"), ("auto", ""), ("not-a-date", "0"), ("auto", "not-a-slot")],
+)
+def test_query_experiment_rejects_empty_or_invalid_axes(
+    date_value: str, slot_value: str
+) -> None:
+    with pytest.raises(ValueError):
+        sources.query_experiment_from_env(
+            {
+                "JOB_INTEL_QUERY_EXPERIMENT": "role_context_ab",
+                "JOB_INTEL_QUERY_EXPERIMENT_DATE": date_value,
+                "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT": slot_value,
+            },
+            now=lambda: datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+        )
+
+
+def test_query_experiment_auto_resolution_uses_one_clock_snapshot_for_both_arms() -> None:
+    calls: list[int] = []
+
+    def advancing_clock() -> datetime:
+        calls.append(1)
+        return (
+            datetime(2026, 9, 18, 11, 59, 59, tzinfo=timezone.utc)
+            if len(calls) == 1
+            else datetime(2026, 9, 18, 12, 0, 0, tzinfo=timezone.utc)
+        )
+
+    settings = sources.query_experiment_from_env(
+        {
+            "JOB_INTEL_QUERY_EXPERIMENT": "linkedin_recency_ab",
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE": "auto",
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT": "auto",
+        },
+        now=advancing_clock,
+    )
+
+    assert settings is not None
+    assert (settings.as_of, settings.rotation_slot) == (date(2026, 9, 18), 0)
+    assert len(calls) == 1
+
+    plan = sources.linkedin_query_plan_for_run(limit=4, experiment=settings)
+    assert [item.experiment_branch for item in plan] == [
+        "control", "treatment", "control", "treatment"
+    ]
+    assert [
+        (control.cell_id, control.role_family, control.query)
+        for control in plan[::2]
+    ] == [
+        (treatment.cell_id, treatment.role_family, treatment.query)
+        for treatment in plan[1::2]
+    ]
+
+
+def test_query_experiment_auto_axes_are_written_to_trace_metadata() -> None:
+    settings = sources.query_experiment_from_env(
+        {
+            "JOB_INTEL_QUERY_EXPERIMENT": "role_context_ab",
+            "JOB_INTEL_QUERY_EXPERIMENT_DATE": "auto",
+            "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT": "auto",
+        },
+        now=lambda: datetime(2026, 9, 18, 12, tzinfo=timezone.utc),
+    )
+    assert settings is not None
+
+    plan = sources.linkedin_query_plan_for_run(limit=2, experiment=settings)
+    metadata = cli._query_experiment_trace_metadata(settings, plan)
+
+    assert metadata["name"] == "role_context_ab"
+    assert metadata["date"] == "2026-09-18"
+    assert metadata["rotation_slot"] == 1
 
 
 def test_enabled_query_experiment_labels_each_linkedin_trace_event(

@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from time import monotonic
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -918,8 +918,10 @@ class QueryExperimentSettings:
 
 def query_experiment_from_env(
     env: Mapping[str, str] | None = None,
+    *,
+    now: Callable[[], datetime] | None = None,
 ) -> QueryExperimentSettings | None:
-    """Parse the opt-in, fixed-axis query experiment configuration."""
+    """Parse and resolve the opt-in, fixed-axis query experiment configuration."""
 
     values = os.environ if env is None else env
     name = str(values.get("JOB_INTEL_QUERY_EXPERIMENT", "") or "").strip().lower()
@@ -946,14 +948,33 @@ def query_experiment_from_env(
             "JOB_INTEL_QUERY_EXPERIMENT_DATE and "
             "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT"
         )
+
+    date_is_auto = date_text.casefold() == "auto"
+    slot_is_auto = slot_text.casefold() == "auto"
+    current: datetime | None = None
+    if date_is_auto or slot_is_auto:
+        current = (now or (lambda: datetime.now(timezone.utc)))()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+
     try:
-        as_of = date.fromisoformat(date_text)
+        as_of = (
+            current.date()
+            if date_is_auto and current is not None
+            else date.fromisoformat(date_text)
+        )
     except ValueError as exc:
         raise ValueError(
             "JOB_INTEL_QUERY_EXPERIMENT_DATE must be YYYY-MM-DD"
         ) from exc
     try:
-        rotation_slot = int(slot_text)
+        rotation_slot = (
+            current.hour // 12
+            if slot_is_auto and current is not None
+            else int(slot_text)
+        )
     except ValueError as exc:
         raise ValueError(
             "JOB_INTEL_QUERY_EXPERIMENT_ROTATION_SLOT must be 0 or 1"
