@@ -663,7 +663,10 @@ _DOMAIN_EXPERTISE_RULES = (
 )
 
 _OPTIONAL_DOMAIN_CUES = re.compile(
-    r"\b(?:preferred|nice[- ]to[- ]haves?|bonus|plus|advantage|desirable|optional)\b",
+    r"\b(?:preferred|nice[- ]to[- ]haves?|bonus|plus|advantage|desirable|optional)\b"
+    r"|\bstand\s+out\s+by\s+having\b"
+    r"|\b(?:continuous\s+)?opportunities?\s+to\s+(?:learn|grow|expand)\b"
+    r"|\bexpand\s+your\s+expertise\b",
     re.IGNORECASE,
 )
 
@@ -772,43 +775,22 @@ def _domain_sentence_matches(sentence: str, spec: dict[str, Any], title: str) ->
 
 def _staffing_agency_matches(company: str, text: str) -> tuple[RuleMatch, ...]:
     patterns = (
-        r"\bour\s+client\b",
+        r"\bour\s+client\s+(?:is\s+)?(?:seeking|hiring|looking\s+for|recruiting)\b",
+        r"\bour\s+client\s*,\s*[^.!?\n]{0,120}\b(?:is\s+)?(?:seeking|hiring|looking\s+for|recruiting)\b",
         r"\bon\s+behalf\s+of\s+(?:our|a|the)\s+(?:client|partner)\b",
         r"\blisted\s+on\s+behalf\s+of\b",
+        r"\bwe\s+are\s+recruiting\s+for\s+our\s+client\b",
         r"\bpartner\s+company\b[^.!?\n]{0,80}\b(?:applications?|hiring)\b",
-        r"\b(?:recruitment|staffing|executive\s+search)\s+agency\b",
+        r"\b(?:we\s+are|we're)\s+(?:an?\s+)?(?:recruitment|staffing|executive\s+search|talent\s+acquisition)\s+(?:agency|firm|partner)\b",
+        r"\b(?:recruitment|staffing|executive\s+search|talent\s+acquisition)\s+(?:agency|firm|partner)\s+(?:representing|for|that|who)\b",
     )
     company_patterns = (
         r"\bhuman\s+capital\b",
         r"\b(?:staffing|recruit(?:ment|er)|headhunt(?:ing)?|executive\s+search)\b",
-        r"\b(?:talent|hire)\w*\b",
+        r"\btalent\s+acquisition(?:\s+partner)?\b",
     )
     found = _find_patterns(text, patterns)
     found += _find_patterns(company, company_patterns)
-    if not found and re.search(
-        r"\b(?:limited|ltd|consulting|consultancy|solutions|services)\b",
-        company,
-        re.IGNORECASE,
-    ) and re.search(
-        r"\b(?:telco|telecom)\b.{0,240}\bfintech\b",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    ) and re.search(
-        r"\b(?:across|multiple)\s+(?:business\s+units|industr(?:y|ies)|markets)\b",
-        text,
-        re.IGNORECASE,
-    ):
-        found += _find_patterns(
-            company,
-            (r"\b(?:limited|ltd|consulting|consultancy|solutions|services)\b",),
-        )
-        found += _find_patterns(
-            text,
-            (
-                r"\b(?:telco|telecom)\b.{0,240}\bfintech\b",
-                r"\b(?:across|multiple)\s+(?:business\s+units|industr(?:y|ies)|markets)\b",
-            ),
-        )
     if not found:
         return ()
     return (

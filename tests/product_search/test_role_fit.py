@@ -238,6 +238,83 @@ def test_rejects_staffing_agency_role_using_client_placement_language() -> None:
     assert "client" in " ".join(match.fragments).lower()
 
 
+def test_rejects_agency_role_with_client_leading_fintech_phrase() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Search Partners",
+        "Remote",
+        "Our client, a leading fintech, is seeking a Head of Product to lead its platform."
+        " Search Partners is recruiting for our client and will coordinate interviews.",
+    )
+
+    assert decision.verdict == "reject"
+    assert "staffing_agency_or_aggregator" in decision.rule_ids
+
+
+def test_rejects_explicit_executive_search_publisher_name() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "North Star Executive Search",
+        "Remote",
+        "Lead the software product roadmap and product management function.",
+    )
+
+    assert decision.verdict == "reject"
+    assert "staffing_agency_or_aggregator" in decision.rule_ids
+
+
+def test_does_not_reject_canva_like_role_for_product_client_reference() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Canva",
+        "Remote",
+        "Our client base uses the design platform on mobile and web. Lead the software "
+        "platform architecture and product delivery for hundreds of millions of users.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "staffing_agency_or_aggregator" not in decision.rule_ids
+
+
+def test_does_not_reject_red_hat_like_recruitment_disclaimer() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Red Hat",
+        "Remote",
+        "Lead the software product roadmap and product management function. Red Hat "
+        "does not seek or accept unsolicited resumes or CVs from recruitment agencies.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "staffing_agency_or_aggregator" not in decision.rule_ids
+
+
+def test_does_not_reject_legal_company_suffix_or_client_base_language() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme Software Limited",
+        "Remote",
+        "Acme builds a SaaS platform for our client base of 300 enterprises across "
+        "telco and fintech markets. Lead the product organisation and roadmap.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "staffing_agency_or_aggregator" not in decision.rule_ids
+
+
+def test_does_not_reject_hr_tech_product_that_mentions_talent() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Safeguard Global",
+        "Remote",
+        "We build HR technology for workforce and talent management. Lead the software "
+        "product roadmap and product organisation for our customers.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "staffing_agency_or_aggregator" not in decision.rule_ids
+
+
 def test_does_not_reject_company_role_for_mentioning_a_recruiter() -> None:
     decision = evaluate_role_fit(
         "Head of Product",
@@ -376,6 +453,21 @@ def test_does_not_reject_adtech_platform_experience_as_a_preference() -> None:
 
     assert decision.verdict == "accept"
     assert "advertising_platform" not in decision.rule_ids
+
+
+def test_does_not_reject_adform_adtech_preference_in_stand_out_section() -> None:
+    decision = evaluate_role_fit(
+        "Product Director, Shared Services & Settings",
+        "Adform",
+        "Remote",
+        "Own the software platform roadmap and product organisation. Stand out by "
+        "having: Experience within AdTech, MarTech, digital advertising, or other "
+        "complex platform ecosystems. Continuous opportunities to learn, grow, and "
+        "expand your expertise in Product Management, platform strategy, and AdTech.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "domain_expertise_required" not in decision.rule_ids
 
 
 def test_accepts_product_role_in_travel_ecommerce_without_commercial_duties() -> None:
