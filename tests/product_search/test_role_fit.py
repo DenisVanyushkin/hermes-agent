@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import importlib
+from pathlib import Path
+import sqlite3
 from typing import Any
 
 import pytest
@@ -466,3 +469,122 @@ def test_blocks_bilingual_language_code_form_in_title() -> None:
 
     assert decision.verdict == "blocked"
     assert decision.match_for("required_language_unavailable").details["languages"] == ("fr",)
+
+
+def test_rejects_unsupported_french_description_before_other_rules() -> None:
+    decision = evaluate_role_fit(
+        "Directeur Produit | Product Director",
+        "Booxi",
+        "Montreal, Quebec, Canada",
+        "Description du poste en français pour diriger le produit.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.rule_ids == ("description_language_not_supported",)
+    match = decision.match_for("description_language_not_supported")
+    assert "français" in " ".join(match.fragments)
+    assert match.details["detected_languages"] == ("fr",)
+
+
+def test_does_not_drop_full_english_description_with_dutch_tail() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "SaaSCo",
+        "Amsterdam",
+        "We are looking for a Head of Product to lead the software product roadmap "
+        "and manage the product team. Wij werken met klanten in Nederland.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "description_language_not_supported" not in decision.rule_ids
+
+
+def test_russian_description_reaches_industry_rules_without_language_rejection() -> None:
+    decision = evaluate_role_fit(
+        "Руководитель продукта",
+        "TechCo",
+        "Удалённо",
+        "Мы развиваем программную платформу для бизнеса и ищем руководителя продукта.",
+    )
+
+    assert "description_language_not_supported" not in decision.rule_ids
+
+
+def test_short_description_does_not_trigger_unsupported_language() -> None:
+    decision = evaluate_role_fit(
+        "Product Director",
+        "SaaSCo",
+        "Remote",
+        "Bonjour",
+    )
+
+    assert "description_language_not_supported" not in decision.rule_ids
+
+
+def test_supported_language_list_is_configurable() -> None:
+    decision = evaluate_role_fit(
+        "Directeur Produit",
+        "FrenchCo",
+        "Paris",
+        "Description du poste en français pour diriger le produit.",
+        supported_languages=("en", "ru", "fr"),
+    )
+
+    assert "description_language_not_supported" not in decision.rule_ids
+
+
+def test_corpus_bilingual_english_dutch_description_is_not_dropped() -> None:
+    corpus_path = Path(__file__).parents[2] / "scripts" / "gate_b_readiness_corpus.v1.json"
+    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+    candidates = [
+        item["raw"]
+        for item in corpus
+        if "Fluency in Dutch and English is necessary" in item["raw"].get("description", "")
+    ]
+    assert candidates, "the immutable corpus must contain an English/Dutch bilingual example"
+
+    candidate = candidates[0]
+    decision = evaluate_role_fit(
+        candidate.get("title", ""),
+        candidate.get("company", ""),
+        candidate.get("location", ""),
+        candidate.get("description", ""),
+    )
+    assert "description_language_not_supported" not in decision.rule_ids
+
+
+def test_owner_labels_match_live_corpus_13_of_13() -> None:
+    labels_path = Path("/home/hermes/.hermes/job_intel/manual-shortlist/labels/owner-labels-2026-09.json")
+    database = Path("/var/lib/job-intel/state/job_intel.sqlite3")
+    if not labels_path.exists() or not database.exists():
+        pytest.skip("live owner labels or Job Intel database is not available")
+    payload = json.loads(labels_path.read_text(encoding="utf-8"))
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.execute("PRAGMA query_only=ON")
+    expected_verdicts = {
+        "yes": "accept",
+        "no": "reject",
+        "yes_blocked_language": "blocked",
+        "accept": "accept",
+        "reject": "reject",
+        "blocked": "blocked",
+    }
+    mismatches = []
+    for label in payload["labels"]:
+        row = connection.execute(
+            """
+            SELECT title, company, location, description
+            FROM vacancies
+            WHERE vacancy_key = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (label["vacancy_key"],),
+        ).fetchone()
+        assert row is not None, label["vacancy_key"]
+        decision = evaluate_role_fit(*row)
+        if decision.verdict != expected_verdicts[label["verdict"]]:
+            mismatches.append((label["vacancy_key"], label["verdict"], decision.verdict, decision.rule_ids))
+
+    assert len(payload["labels"]) == 13
+    assert mismatches == []

@@ -9,12 +9,19 @@ import re
 import sqlite3
 from typing import Any
 
-from job_intel.product_search.role_fit import RoleFitDecision, evaluate_role_fit
+from job_intel.product_search.role_fit import KNOWN_LANGUAGE_CODES, RoleFitDecision, evaluate_role_fit
 
 
 DEFAULT_LABELS = Path("/home/hermes/.hermes/job_intel/manual-shortlist/labels/owner-labels-2026-09.json")
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
-_LABEL_TO_VERDICT = {"yes": "accept", "no": "reject", "yes_blocked_language": "blocked"}
+_LABEL_TO_VERDICT = {
+    "yes": "accept",
+    "no": "reject",
+    "yes_blocked_language": "blocked",
+    "accept": "accept",
+    "reject": "reject",
+    "blocked": "blocked",
+}
 _ENGINEERING_LIKE_TITLE = re.compile(
     r"\b(?:software|engineering|backend|frontend|full[- ]stack|data|devops|qa|quality)\s+(?:engineer|lead|manager|developer)|\b(?:software engineer|developer|data scientist|devops engineer|qa engineer)\b",
     re.IGNORECASE,
@@ -77,12 +84,18 @@ def _fetch_pool(connection: sqlite3.Connection) -> list[dict[str, Any]]:
     return [_row_from_tuple(row) for row in rows]
 
 
-def _evaluate(row: dict[str, Any]) -> RoleFitDecision:
+def _evaluate(
+    row: dict[str, Any],
+    *,
+    supported_languages: tuple[str, ...] | None = None,
+) -> RoleFitDecision:
+    kwargs = {} if supported_languages is None else {"supported_languages": supported_languages}
     return evaluate_role_fit(
         row.get("title") or "",
         row.get("company") or "",
         row.get("location") or "",
         row.get("description") or "",
+        **kwargs,
     )
 
 
@@ -128,29 +141,65 @@ def _sample_rows(rows: list[dict[str, Any]], seed: int, limit: int) -> list[dict
 
 def _print_pool_report(rows: list[dict[str, Any]], seed: int, example_limit: int) -> None:
     decisions = [(row, _evaluate(row)) for row in rows]
+    legacy_decisions = [
+        (row, _evaluate(row, supported_languages=KNOWN_LANGUAGE_CODES))
+        for row in rows
+    ]
+    decisions_by_key = {row["vacancy_key"]: decision for row, decision in decisions}
     by_verdict: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    legacy_by_verdict: dict[str, list[dict[str, Any]]] = defaultdict(list)
     rule_counts: Counter[str] = Counter()
     for row, decision in decisions:
         by_verdict[decision.verdict].append(row)
         rule_counts.update(decision.rule_ids)
+    for row, decision in legacy_decisions:
+        legacy_by_verdict[decision.verdict].append(row)
 
-    print("POOL DISTRIBUTION (first_seen_at >= datetime('now','-7 day'), length(description) > 800)")
+    print("POOL DISTRIBUTION AFTER LANGUAGE GATE (first_seen_at >= datetime('now','-7 day'), length(description) > 800)")
     print(f"total={len(rows)}")
     for verdict in ("accept", "reject", "blocked"):
         print(f"{verdict}={len(by_verdict[verdict])}")
+    print("POOL DISTRIBUTION BEFORE LANGUAGE GATE")
+    print(f"total={len(rows)}")
+    for verdict in ("accept", "reject", "blocked"):
+        print(f"{verdict}={len(legacy_by_verdict[verdict])}")
+    legacy_blocked = [row for row, decision in legacy_decisions if decision.verdict == "blocked"]
+    legacy_blocked_now = [(row, decisions_by_key[row["vacancy_key"]]) for row in legacy_blocked]
+    print(
+        "PREVIOUS_BLOCKED_FATE "
+        f"baseline={len(legacy_blocked)} "
+        "now_reject_new_language_rule="
+        f"{sum('description_language_not_supported' in decision.rule_ids for _, decision in legacy_blocked_now)} "
+        f"now_blocked={sum(decision.verdict == 'blocked' for _, decision in legacy_blocked_now)} "
+        f"now_other={sum(decision.verdict not in {'reject', 'blocked'} for _, decision in legacy_blocked_now)}"
+    )
+    if legacy_blocked:
+        example_row, example_decision = next(
+            (row, decision)
+            for row, decision in legacy_decisions
+            if decision.verdict == "blocked"
+        )
+        print(
+            "PREVIOUS_BLOCKED_EXAMPLE "
+            f"key={example_row['vacancy_key']} title={_short(example_row['title'])} "
+            f"company={_short(example_row['company'])} "
+            f"legacy_rules={','.join(example_decision.rule_ids) or '-'}"
+        )
     print("RULE MATCH COUNTS")
     for rule_id, count in sorted(rule_counts.items()):
         print(f"{rule_id}={count}")
-    print("RANDOM EXAMPLES (seed={})".format(seed))
-    for verdict in ("accept", "reject", "blocked"):
-        print(f"[{verdict}]")
-        for row in _sample_rows(by_verdict[verdict], seed, example_limit):
-            decision = _evaluate(row)
-            print(
-                f"key={row['vacancy_key']} title={_short(row['title'])} "
-                f"company={_short(row['company'])} location={_short(row['location'])} "
-                f"url={_short(row['url'])} rules={','.join(decision.rule_ids) or '-'}"
-            )
+    new_rule_rows = [
+        row for row, decision in decisions
+        if "description_language_not_supported" in decision.rule_ids
+    ]
+    print("NEW LANGUAGE RULE EXAMPLES (seed={}, count={})".format(seed, example_limit))
+    for row in _sample_rows(new_rule_rows, seed, example_limit):
+        decision = _evaluate(row)
+        print(
+            f"key={row['vacancy_key']} title={_short(row['title'])} "
+            f"company={_short(row['company'])} location={_short(row['location'])} "
+            f"url={_short(row['url'])} rules={','.join(decision.rule_ids) or '-'}"
+        )
 
     suspicious = [
         (row, decision)
@@ -196,10 +245,11 @@ def _print_summary(connection: sqlite3.Connection, labels: list[dict[str, Any]])
         if expected != decision.verdict:
             owner_errors[(expected, decision.verdict, decision.rule_ids)] += 1
     pool = _fetch_pool(connection)
-    verdict_counts = Counter(_evaluate(row).verdict for row in pool)
+    decisions = [(row, _evaluate(row)) for row in pool]
+    verdict_counts = Counter(decision.verdict for _, decision in decisions)
     rule_counts: Counter[str] = Counter()
-    for row in pool:
-        rule_counts.update(_evaluate(row).rule_ids)
+    for _, decision in decisions:
+        rule_counts.update(decision.rule_ids)
     print("OWNER_SUMMARY total={} missing={}".format(len(labels), missing))
     print(
         "OWNER_CONFUSION "
@@ -214,6 +264,18 @@ def _print_summary(connection: sqlite3.Connection, labels: list[dict[str, Any]])
             "OWNER_ERROR_SIGNATURE "
             f"count={count} expected={expected} predicted={predicted} rules={','.join(rules) or '-'}"
         )
+    for label in labels:
+        row = _fetch_one(connection, label["vacancy_key"])
+        if row is None:
+            continue
+        expected = _LABEL_TO_VERDICT[label["verdict"]]
+        decision = _evaluate(row)
+        if expected != decision.verdict:
+            print(
+                "OWNER_ERROR_KEY "
+                f"key={label['vacancy_key']} expected={expected} predicted={decision.verdict} "
+                f"rules={','.join(decision.rule_ids) or '-'}"
+            )
     print(f"POOL_SUMMARY total={len(pool)} " + " ".join(f"{v}={verdict_counts[v]}" for v in ("accept", "reject", "blocked")))
     print("POOL_RULE_COUNTS " + " ".join(f"{rule}={count}" for rule, count in sorted(rule_counts.items())))
 

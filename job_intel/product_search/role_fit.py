@@ -38,7 +38,111 @@ _LANGUAGES = {
 }
 
 _LANGUAGE_CODES = {code: code for code in _LANGUAGES.values()}
+KNOWN_LANGUAGE_CODES = tuple(sorted(set(_LANGUAGE_CODES.values())))
 _LANGUAGE_NAMES = tuple(sorted(_LANGUAGES, key=len, reverse=True))
+_LANGUAGE_SERVICE_WORDS = {
+    "en": frozenset(
+        "a about above after again against an and another any are around as at back be been before being below between both but by can came come company could description did does down during each even every experience few first for from further get give good had has have he her here himself his how however if in into is it its itself join just keep kind know language last later lead leadership less like looking made make manage many may me might more most much must my need never new next no nor not nothing now of off often once only on or our other over own part people perhaps product put really required role right same say see several she should since software so some team than that the their them then these they think this those though through to too under until up use used using very want was way we were what when where which while who will with without work working would year years you your".split()
+    ),
+    "ru": frozenset(
+        "а быть в для и из ищем компания на о по продукт программная роль с команда это мы".split()
+    ),
+    "fr": frozenset(
+        "à avec au dans de des description directeur disponible du en et expérience française français francais french la le les non nous offre poste pour produit rechercher recherchons seulement une un vous".split()
+    ),
+    "nl": frozenset(
+        "aan als bedrijf de dutch een ervaring het in klanten met naar nederland nederlands om ons product vacature van voor wij werken".split()
+    ),
+    "de": frozenset(
+        "als an auf aus das der die ein eine für im in mit produkt rolle und von wir zu".split()
+    ),
+    "es": frozenset(
+        "a al con de del el en empresa equipo experiencia la los para por producto que se un una y".split()
+    ),
+    "it": frozenset(
+        "a al con da del di è e il in la le per prodotto ruolo una un".split()
+    ),
+    "pt": frozenset(
+        "a ao com da de do e em empresa experiência para por produto que uma um".split()
+    ),
+    "pl": frozenset(
+        "a do dla i jest na nie o oraz produkt rola się teamu w z za".split()
+    ),
+    "uk": frozenset(
+        "а в для і з компанія ми на не продукт роль та це".split()
+    ),
+    "kk": frozenset(
+        "біз және үшін компания өнім рөлін бұл мен".split()
+    ),
+    "tr": frozenset(
+        "bir bu için ile şirket deneyim ve ürün rol".split()
+    ),
+    "ar": frozenset(),
+    "zh": frozenset(),
+    "ja": frozenset(),
+    "ko": frozenset(),
+}
+_LANGUAGE_WORD_COUNTS: dict[str, int] = {}
+for _service_words in _LANGUAGE_SERVICE_WORDS.values():
+    for _word in _service_words:
+        _LANGUAGE_WORD_COUNTS[_word] = _LANGUAGE_WORD_COUNTS.get(_word, 0) + 1
+_AMBIGUOUS_LANGUAGE_SERVICE_WORDS = frozenset(
+    word for word, count in _LANGUAGE_WORD_COUNTS.items() if count > 1
+)
+_LANGUAGE_DISTINCTIVE_LETTERS = {
+    "fr": frozenset("àâçéèêëîïôûùüÿœ"),
+    "de": frozenset("äöüß"),
+    "es": frozenset("áéíóúñü"),
+    "pt": frozenset("ãõáâçéêíóôú"),
+    "pl": frozenset("ąćęłńóśźż"),
+    "ru": frozenset("ёыэъ"),
+    "uk": frozenset("іїєґ"),
+    "kk": frozenset("әғқңөұүһі"),
+}
+_LANGUAGE_TITLE_MARKERS = {
+    "fr": frozenset("directeur directrice français francais".split()),
+    "nl": frozenset("dutch nederlands".split()),
+    "de": frozenset("deutsch german".split()),
+    "es": frozenset("español espanol spanish".split()),
+}
+_LANGUAGE_DISTINCTIVE_SERVICE_WORDS = {
+    "fr": frozenset("directeur directrice français francais french française".split()),
+    "nl": frozenset("dutch nederlands nederland werken wij klanten vacature".split()),
+    "de": frozenset("deutsch german deutschkenntnisse".split()),
+    "es": frozenset("español espanol spanish dominio".split()),
+    "it": frozenset("italiano italian".split()),
+    "pt": frozenset("português portugues portuguese".split()),
+    "pl": frozenset("polski polish".split()),
+    "uk": frozenset("український українець".split()),
+    "kk": frozenset("қазақ қазақша".split()),
+}
+_ENGLISH_LOW_SIGNAL_WORDS = frozenset(
+    "a an and are as at be been by but for from had has have he her in is it its me of on or that the their them these they this those to was we were what when which who will with you".split()
+)
+_LANGUAGE_LETTER_RANGES = {
+    "cyrillic": ((0x0400, 0x04FF),),
+    "latin": ((0x0041, 0x005A), (0x0061, 0x007A)),
+    "arabic": ((0x0600, 0x06FF),),
+    "cjk": ((0x3400, 0x9FFF),),
+    "hangul": ((0xAC00, 0xD7AF),),
+}
+_LANGUAGE_SCRIPT_BY_CODE = {
+    "ru": "cyrillic",
+    "uk": "cyrillic",
+    "kk": "cyrillic",
+    "ar": "arabic",
+    "zh": "cjk",
+    "ja": "cjk",
+    "ko": "hangul",
+}
+_MIN_LANGUAGE_TEXT_TOKENS = 2
+_MIN_DESCRIPTION_CHARS_FOR_LANGUAGE_DETECTION = 64
+_MIN_LANGUAGE_SERVICE_RATIO_PERCENT = 15
+_MIN_SUPPORTED_LANGUAGE_FALLBACK_SCORE = 8
+_LANGUAGE_DOMINANCE_MARGIN = 0
+_MIN_SUPPORTED_LANGUAGE_DENSITY_PERCENT = 18
+_MIN_DENSITY_TEXT_TOKENS = 20
+_MIN_LANGUAGE_SERVICE_WORDS = 2
 
 _PRODUCT_LEADERSHIP = (
     r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\b",
@@ -144,6 +248,7 @@ def evaluate_role_fit(
     description: str,
     *,
     owner_languages: Iterable[str] = DEFAULT_OWNER_LANGUAGES,
+    supported_languages: Iterable[str] = DEFAULT_OWNER_LANGUAGES,
     short_contract_months: int = DEFAULT_SHORT_CONTRACT_MONTHS,
 ) -> RoleFitDecision:
     """Evaluate one role without network, database, clock, or model calls.
@@ -155,6 +260,22 @@ def evaluate_role_fit(
         raise ValueError("short_contract_months must be positive")
 
     text = " ".join(part.strip() for part in (title, company, location, description) if part).strip()
+    language_text = description.strip()
+    supported_language_values = tuple(supported_languages)
+    supported_codes = {_normalise_language(language) for language in supported_language_values}
+    if (
+        len(language_text) < _MIN_DESCRIPTION_CHARS_FOR_LANGUAGE_DETECTION
+        and _has_unsupported_language_title_marker(title, supported_codes)
+    ):
+        language_text = " ".join(part.strip() for part in (title, description) if part).strip()
+    language_match = _unsupported_description_language_match(
+        language_text,
+        supported_language_values,
+        dominance_margin=0 if len(description.strip()) < _MIN_DESCRIPTION_CHARS_FOR_LANGUAGE_DETECTION else _LANGUAGE_DOMINANCE_MARGIN,
+    )
+    if language_match is not None:
+        return RoleFitDecision("reject", (language_match,), text, language_match.explanation)
+
     sentences = _sentences(text)
     matches: list[RuleMatch] = []
 
@@ -173,9 +294,9 @@ def evaluate_role_fit(
 
     matches.extend(_industry_matches(sentences))
 
-    language_match = _language_match(sentences, owner_languages)
-    if language_match is not None:
-        matches.append(language_match)
+    required_language_match = _language_match(sentences, owner_languages)
+    if required_language_match is not None:
+        matches.append(required_language_match)
 
     matches.extend(_urgency_matches(sentences, short_contract_months))
 
@@ -183,7 +304,7 @@ def evaluate_role_fit(
     if hard_reject:
         verdict: Verdict = "reject"
         explanation = "A hard exclusion rule was triggered."
-    elif language_match is not None:
+    elif required_language_match is not None:
         verdict = "blocked"
         explanation = "The role otherwise remains eligible, but a required working language is unavailable."
     elif any(match.rule_id == "software_product_leadership" for match in matches):
@@ -228,6 +349,206 @@ def _find_patterns(text: str, patterns: Iterable[str]) -> tuple[str, ...]:
         if fragment not in unique:
             unique.append(fragment)
     return tuple(unique)
+
+
+def _unsupported_description_language_match(
+    description: str,
+    supported_languages: Iterable[str],
+    *,
+    dominance_margin: int = _LANGUAGE_DOMINANCE_MARGIN,
+) -> RuleMatch | None:
+    description = description.strip()
+    tokens = tuple(re.findall(r"[^\W\d_]+", description.lower(), flags=re.UNICODE))
+    if len(tokens) < _MIN_LANGUAGE_TEXT_TOKENS:
+        return None
+
+    allowed = {_normalise_language(language) for language in supported_languages}
+    if set(KNOWN_LANGUAGE_CODES).issubset(allowed):
+        return None
+    cyrillic_letters = _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES["cyrillic"])
+    latin_letters = _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES["latin"])
+    scores: dict[str, int] = {}
+    for code, service_words in _LANGUAGE_SERVICE_WORDS.items():
+        service_score = _base_language_service_score(code, tokens)
+        marker_score = sum(
+            token in _LANGUAGES and _LANGUAGES[token] == code
+            for token in tokens
+        )
+        distinctive_score = sum(char in _LANGUAGE_DISTINCTIVE_LETTERS.get(code, ()) for char in description.lower())
+        script_name = _LANGUAGE_SCRIPT_BY_CODE.get(code)
+        script_letters = (
+            _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES[script_name])
+            if script_name is not None
+            else 0
+        )
+        script_score = min(script_letters // 8, 3)
+        if code == "en" and latin_letters >= 8:
+            script_score += 1
+        scores[code] = service_score + min(marker_score, 2) + min(distinctive_score, 2) + script_score
+
+    best_unsupported = max(
+        (code for code in scores if code not in allowed),
+        key=lambda code: (scores[code], code),
+        default=None,
+    )
+    if best_unsupported is None:
+        return None
+    unsupported_service_score = _base_language_service_score(best_unsupported, tokens)
+    unsupported_service_score += min(
+        sum(
+            token in _LANGUAGES and _LANGUAGES[token] == best_unsupported
+            for token in tokens
+        ),
+        2,
+    )
+    unsupported_service_score += min(
+        sum(char in _LANGUAGE_DISTINCTIVE_LETTERS.get(best_unsupported, ()) for char in description.lower()),
+        2,
+    )
+    unsupported_script = _LANGUAGE_SCRIPT_BY_CODE.get(best_unsupported)
+    unsupported_script_letters = (
+        _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES[unsupported_script])
+        if unsupported_script is not None
+        else 0
+    )
+    unsupported_service_score += min(unsupported_script_letters // 8, 3)
+    distinctive_word_count = sum(
+        token in _LANGUAGE_DISTINCTIVE_SERVICE_WORDS.get(best_unsupported, frozenset())
+        for token in tokens
+    )
+    distinctive_letter_count = sum(
+        char in _LANGUAGE_DISTINCTIVE_LETTERS.get(best_unsupported, frozenset())
+        for char in description.lower()
+    )
+    distinctive_word_evidence = distinctive_word_count > 0
+    distinctive_letter_evidence = distinctive_letter_count > 0
+    script_evidence = unsupported_script_letters >= 8
+    best_supported_score = max(
+        (scores.get(code, 0) for code in allowed),
+        default=0,
+    )
+    if not (distinctive_word_evidence or distinctive_letter_evidence or script_evidence):
+        if (
+            len(tokens) >= _MIN_DENSITY_TEXT_TOKENS
+            and best_supported_score < _MIN_SUPPORTED_LANGUAGE_FALLBACK_SCORE
+            and unsupported_service_score >= _MIN_LANGUAGE_SERVICE_WORDS
+        ):
+            return _unknown_language_match(
+                description,
+                _sentences(description),
+                tuple(sorted(allowed)),
+                scores,
+                len(tokens),
+            )
+        return None
+    if (
+        len(tokens) >= _MIN_DENSITY_TEXT_TOKENS
+        and distinctive_word_count < 2
+        and distinctive_letter_count < 2
+        and not script_evidence
+    ):
+        return None
+    if (
+        len(tokens) >= _MIN_DENSITY_TEXT_TOKENS
+        and best_supported_score * 100 >= len(tokens) * _MIN_SUPPORTED_LANGUAGE_DENSITY_PERCENT
+    ):
+        return None
+    if unsupported_service_score < _MIN_LANGUAGE_SERVICE_WORDS:
+        return None
+    if unsupported_service_score <= best_supported_score + dominance_margin:
+        return None
+    minimum_service_score = max(
+        _MIN_LANGUAGE_SERVICE_WORDS,
+        (len(tokens) * _MIN_LANGUAGE_SERVICE_RATIO_PERCENT + 99) // 100,
+    )
+    if unsupported_service_score < minimum_service_score:
+        return None
+    if best_supported_score >= 1:
+        required_language_match = _language_match(_sentences(description), allowed)
+        if required_language_match is not None:
+            return None
+
+    sentences = _sentences(description)
+    service_words = _LANGUAGE_SERVICE_WORDS[best_unsupported]
+    fragments = tuple(
+        sentence
+        for sentence in sentences
+        if set(re.findall(r"[^\W\d_]+", sentence.lower(), flags=re.UNICODE)) & service_words
+    )
+    if not fragments and sentences:
+        fragments = (sentences[0],)
+    languages = (best_unsupported,)
+    supported = tuple(sorted(allowed))
+    return RuleMatch(
+        "description_language_not_supported",
+        fragments,
+        f"The vacancy description is primarily in unsupported language(s): {', '.join(languages)}; supported languages: {', '.join(supported)}.",
+        {
+            "detected_languages": languages,
+            "supported_languages": supported,
+            "language_service_scores": tuple(sorted(scores.items())),
+            "token_count": len(tokens),
+            "cyrillic_letter_count": cyrillic_letters,
+            "latin_letter_count": latin_letters,
+        },
+    )
+
+
+def _unknown_language_match(
+    description: str,
+    sentences: tuple[str, ...],
+    supported: tuple[str, ...],
+    scores: dict[str, int],
+    token_count: int,
+) -> RuleMatch:
+    return RuleMatch(
+        "description_language_not_supported",
+        sentences[:1] if sentences else (description,),
+        "The vacancy description has no sufficiently supported-language signal and is treated as unsupported.",
+        {
+            "detected_languages": ("unknown",),
+            "supported_languages": supported,
+            "language_service_scores": tuple(sorted(scores.items())),
+            "token_count": token_count,
+        },
+    )
+
+
+def _has_unsupported_language_title_marker(title: str, supported_codes: set[str]) -> bool:
+    tokens = set(re.findall(r"[^\W\d_]+", title.lower(), flags=re.UNICODE))
+    return any(
+        code not in supported_codes and tokens & markers
+        for code, markers in _LANGUAGE_TITLE_MARKERS.items()
+    )
+
+
+def _base_language_service_score(code: str, tokens: tuple[str, ...]) -> int:
+    service_words = _LANGUAGE_SERVICE_WORDS[code]
+    ambiguous_score = sum(
+        token in service_words and token in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
+        for token in tokens
+    )
+    exclusive_score = sum(
+        token in service_words and token not in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
+        for token in tokens
+    )
+    if code != "en":
+        return exclusive_score + min(ambiguous_score, 2)
+    high_signal_score = sum(
+        token in service_words
+        and token not in _ENGLISH_LOW_SIGNAL_WORDS
+        and token not in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
+        for token in tokens
+    )
+    low_signal_score = min(
+        sum(token in _ENGLISH_LOW_SIGNAL_WORDS for token in tokens),
+        4,
+    )
+    return high_signal_score + low_signal_score + min(ambiguous_score, 2)
+
+
+def _count_letters_in_ranges(text: str, ranges: tuple[tuple[int, int], ...]) -> int:
+    return sum(any(start <= ord(char) <= end for start, end in ranges) for char in text)
 
 
 def _industry_matches(sentences: Iterable[str]) -> tuple[RuleMatch, ...]:
