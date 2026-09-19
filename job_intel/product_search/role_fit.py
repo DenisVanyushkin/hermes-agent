@@ -143,6 +143,8 @@ _LANGUAGE_DOMINANCE_MARGIN = 0
 _MIN_SUPPORTED_LANGUAGE_DENSITY_PERCENT = 18
 _MIN_DENSITY_TEXT_TOKENS = 20
 _MIN_LANGUAGE_SERVICE_WORDS = 2
+_MIN_SUPPORTED_SENTENCE_COVERAGE_PERCENT = 35
+_MIN_SUPPORTED_SENTENCE_TOKENS = 8
 
 _PRODUCT_LEADERSHIP = (
     r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\b",
@@ -427,6 +429,22 @@ def _unsupported_description_language_match(
         (scores.get(code, 0) for code in allowed),
         default=0,
     )
+    if len(tokens) >= _MIN_DENSITY_TEXT_TOKENS:
+        supported_sentence_coverage, substantive_sentence_count = _supported_sentence_coverage(
+            description,
+            allowed,
+        )
+        if (
+            substantive_sentence_count >= 3
+            and supported_sentence_coverage < _MIN_SUPPORTED_SENTENCE_COVERAGE_PERCENT
+        ):
+            return _unknown_language_match(
+                description,
+                _sentences(description),
+                tuple(sorted(allowed)),
+                scores,
+                len(tokens),
+            )
     if not (distinctive_word_evidence or distinctive_letter_evidence or script_evidence):
         if (
             len(tokens) >= _MIN_DENSITY_TEXT_TOKENS
@@ -549,6 +567,39 @@ def _base_language_service_score(code: str, tokens: tuple[str, ...]) -> int:
 
 def _count_letters_in_ranges(text: str, ranges: tuple[tuple[int, int], ...]) -> int:
     return sum(any(start <= ord(char) <= end for start, end in ranges) for char in text)
+
+
+def _supported_sentence_coverage(
+    description: str,
+    supported_languages: set[str],
+) -> tuple[int, int]:
+    body = description.split("Job criteria:", 1)[0]
+    substantive_sentences: list[tuple[str, tuple[str, ...]]] = []
+    for sentence in _sentences(body):
+        tokens = tuple(re.findall(r"[^\W\d_]+", sentence.lower(), flags=re.UNICODE))
+        if len(tokens) >= _MIN_SUPPORTED_SENTENCE_TOKENS:
+            substantive_sentences.append((sentence, tokens))
+    if not substantive_sentences:
+        return 100, 0
+
+    supported_count = 0
+    for sentence, tokens in substantive_sentences:
+        sentence_scores = []
+        for code in supported_languages:
+            if code == "ru":
+                letters = _count_letters_in_ranges(sentence, _LANGUAGE_LETTER_RANGES["cyrillic"])
+                if letters >= max(8, _count_letters_in_ranges(sentence, _LANGUAGE_LETTER_RANGES["latin"])):
+                    sentence_scores.append(len(tokens))
+                    continue
+            score = _base_language_service_score(code, tokens)
+            sentence_scores.append(score)
+        sentence_score = max(sentence_scores, default=0)
+        sentence_supported = sentence_score * 100 >= len(tokens) * _MIN_SUPPORTED_LANGUAGE_DENSITY_PERCENT
+        supported_count += sentence_supported
+    return (
+        supported_count * 100 // len(substantive_sentences),
+        len(substantive_sentences),
+    )
 
 
 def _industry_matches(sentences: Iterable[str]) -> tuple[RuleMatch, ...]:

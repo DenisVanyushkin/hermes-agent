@@ -26,6 +26,30 @@ _ENGINEERING_LIKE_TITLE = re.compile(
     r"\b(?:software|engineering|backend|frontend|full[- ]stack|data|devops|qa|quality)\s+(?:engineer|lead|manager|developer)|\b(?:software engineer|developer|data scientist|devops engineer|qa engineer)\b",
     re.IGNORECASE,
 )
+_INDEPENDENT_LANGUAGE_MARKERS = {
+    "fi": frozenset(
+        "etsimme tehtävä tehtävässä suomalaisen sujuvoittaa työskentelet tarjoamme odotamme palkkahaarukka yhteydessä työvoiman".split()
+    ),
+    "da": frozenset(
+        "virksomhed vores hjælper søger rollen kunder arbejde produkt udvikling stilling ledelse".split()
+    ),
+    "es": frozenset(
+        "somos empresa contamos nuestro objetivo buscamos desafíos responsabilidades requisitos beneficios liderazgo".split()
+    ),
+    "nl": frozenset(
+        "bedrijf onze klanten zoeken vacature ervaring werken product ontwikkeling functie leiding".split()
+    ),
+}
+_INDEPENDENT_LANGUAGE_DISTINCTIVE = {
+    "fi": frozenset("äöå"),
+    "da": frozenset("æøå"),
+    "es": frozenset("áéíóúñü"),
+    "nl": frozenset(),
+}
+_STRICT_LANGUAGE_CONFIRMATION_KEYS = (
+    "cc61d78e87248b87337e26a25f29cda9eda82a619b77c858a833087878fd208c",
+    "f6bc71075ac9e73410b967aa34ca7dec669cdeef6ea6c75f1724ac778d1c12d7",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -102,6 +126,18 @@ def _evaluate(
 def _short(value: Any, limit: int = 160) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _independent_language_signal(text: str) -> tuple[str, int] | None:
+    body = text.split("Job criteria:", 1)[0].lower()
+    tokens = set(re.findall(r"[^\W\d_]+", body, flags=re.UNICODE))
+    letters = [char for char in body if char.isalpha()]
+    for language, markers in _INDEPENDENT_LANGUAGE_MARKERS.items():
+        marker_count = len(tokens & markers)
+        distinctive_count = sum(char in _INDEPENDENT_LANGUAGE_DISTINCTIVE[language] for char in body)
+        if marker_count >= 3 or (letters and distinctive_count * 100 >= len(letters)):
+            return language, marker_count
+    return None
 
 
 def _print_owner_matrix(connection: sqlite3.Connection, labels: list[dict[str, Any]]) -> None:
@@ -199,6 +235,40 @@ def _print_pool_report(rows: list[dict[str, Any]], seed: int, example_limit: int
             f"key={row['vacancy_key']} title={_short(row['title'])} "
             f"company={_short(row['company'])} location={_short(row['location'])} "
             f"url={_short(row['url'])} rules={','.join(decision.rule_ids) or '-'}"
+        )
+
+    independent_before = []
+    independent_after = []
+    for row, decision in decisions:
+        signal = _independent_language_signal(row.get("description") or "")
+        if signal is None:
+            continue
+        legacy_decision = next(
+            legacy for legacy_row, legacy in legacy_decisions if legacy_row["vacancy_key"] == row["vacancy_key"]
+        )
+        if legacy_decision.verdict == "accept":
+            independent_before.append((row, signal))
+        if decision.verdict == "accept":
+            independent_after.append((row, signal))
+    print(
+        "INDEPENDENT_LANGUAGE_AUDIT method=marker_words_and_distinctive_letters "
+        f"flagged_accept_before={len(independent_before)} flagged_accept_after={len(independent_after)}"
+    )
+    for label, candidates in (("BEFORE", independent_before), ("AFTER", independent_after)):
+        for row, signal in candidates:
+            print(
+                f"INDEPENDENT_LANGUAGE_CANDIDATE phase={label} key={row['vacancy_key']} "
+                f"title={_short(row['title'])} company={_short(row['company'])} signal={signal}"
+            )
+    for key in _STRICT_LANGUAGE_CONFIRMATION_KEYS:
+        row = next((candidate for candidate in rows if candidate["vacancy_key"] == key), None)
+        if row is None:
+            print(f"STRICT_LANGUAGE_CONFIRMATION key={key} missing=true")
+            continue
+        decision = decisions_by_key[key]
+        print(
+            f"STRICT_LANGUAGE_CONFIRMATION key={key} verdict={decision.verdict} "
+            f"rules={','.join(decision.rule_ids) or '-'}"
         )
 
     suspicious = [

@@ -486,6 +486,97 @@ def test_rejects_unsupported_french_description_before_other_rules() -> None:
     assert match.details["detected_languages"] == ("fr",)
 
 
+UNSUPPORTED_LANGUAGE_POOL_FIXTURES = (
+    pytest.param(
+        "Head of Product, WFM",
+        "Visma",
+        "Helsinki, Uusimaa, Finland",
+        (
+            "Head of Product, WFM Etsimme kokenutta ja ihmisläheistä tuoteammattilaista "
+            "vahvistamaan työvoimahallinnan (WFM) tuotealuettamme sekä toimimaan veturina "
+            "koko HR Tech -yksikkömme tuotehallinnan toimintatapojen ja AI-työkalujen "
+            "kehittämisessä. Tässä roolissa pääset viemään niin suomalaisen julkisen "
+            "sektorin kuin yksityispuolenkin kriittisiä järjestelmiä kohti modernia, "
+            "AI-natiivia aikaa osana Solveon-alustaa. Tavoitteenamme on sujuvoittaa "
+            "satojen tuhansien ihmisten arkea – emme tee työtä suorittamalla pitkiä "
+            "vaatimuslistoja, vaan poistamalla manuaalityötä, ratkomalla asiakkaiden "
+            "todellisia ongelmia ja rakentamalla fiksumpia toimintamalleja."
+        ),
+        id="visma-finnish",
+    ),
+    pytest.param(
+        "Head of Product",
+        "Inact",
+        "Copenhagen, Capital Region of Denmark, Denmark",
+        (
+            "Head of Product Om Inact Inact er en B2B SaaS-virksomhed med ét klart mål: "
+            "at hjælpe virksomheder med at bygge en kundedrevet supply chain — og rent "
+            "faktisk handle på den. Vores platform, Inact Now, omsætter supply chain-data "
+            "til klar indsigt og konkrete handlinger — deraf navnet: Insights + Actions. "
+            "Vi arbejder med virksomheder, der stiller høje krav til leveringspræcision "
+            "og lagerstyring, og vi hjælper dem med at reducere spild, forbedre "
+            "beslutningsgrundlaget og bygge en supply chain, der rent faktisk driver vækst."
+        ),
+        id="inact-danish",
+    ),
+    pytest.param(
+        "Head of Product",
+        "Lemontech",
+        "Santiago, Santiago Metropolitan Region, Chile",
+        (
+            "En LemonTech🍋, somos una empresa SaaS líder en LATAM en Legaltech con más "
+            "de 19 años impulsando procesos legales más eficientes y digitales. Contamos "
+            "con tres softwares, más de 12.000 usuarios activos y una base de 1.700 "
+            "clientes en toda la región. Desde 2019 formamos parte de Accel-KKR, un fondo "
+            "de inversiones de Silicon Valley enfocado en empresas tecnológicas. Nuestro "
+            "objetivo es reducir la burocracia y transformar el sistema judicial para "
+            "hacerlo más moderno y justo. ¿Te apasiona construir productos SaaS B2B que "
+            "transforman industrias completas y escalan sin fronteras? En LemonTech "
+            "buscamos a nuestro/a próximo/a Head of Product: un/a líder estratega, "
+            "analítico/a y profundamente obsesionado/a por resolver problemas reales."
+        ),
+        id="lemontech-spanish",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("title", "company", "location", "description"),
+    UNSUPPORTED_LANGUAGE_POOL_FIXTURES,
+)
+def test_rejects_real_weekly_pool_non_supported_language_fixtures(
+    title: str,
+    company: str,
+    location: str,
+    description: str,
+) -> None:
+    decision = evaluate_role_fit(title, company, location, description)
+
+    assert decision.verdict == "reject"
+    assert "description_language_not_supported" in decision.rule_ids
+
+
+def test_real_german_fixture_is_rejected_by_supported_language_density() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product Management (m/w/d) Finance Software",
+        "Infoniqa Deutschland GmbH",
+        "Germany",
+        (
+            "Infoniqa steht für moderne HR- und Finance-Lösungen und für die Menschen, "
+            "die sie möglich machen. Mit rund 1.200 Mitarbeitenden begleiten wir "
+            "Unternehmen im DACH-Raum dabei, ihre Arbeitswelt einfacher, effizienter "
+            "und verlässlicher zu gestalten. Du möchtest die Zukunft eines umfangreichen "
+            "ERP-Portfolios aktiv gestalten und Produktmanagement neu denken? Als Head "
+            "of Product Management Finance Software verantwortest du die strategische "
+            "und operative Weiterentwicklung unserer ERP-Produkte und führst eine "
+            "Organisation auf dem Weg zu einer vollständig cloudbasierten Produktwelt."
+        ),
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.rule_ids == ("description_language_not_supported",)
+
+
 def test_does_not_drop_full_english_description_with_dutch_tail() -> None:
     decision = evaluate_role_fit(
         "Head of Product",
