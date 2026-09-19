@@ -149,7 +149,8 @@ def test_language_blocked_is_distinct_from_hard_reject() -> None:
         "VP Product",
         "AdTechCo",
         "Remote",
-        "Product leadership for an advertising technology platform.",
+        "Product leadership for an advertising technology platform handling ad "
+        "serving and DSP operations.",
     )
 
     assert blocked.verdict == "blocked"
@@ -248,11 +249,26 @@ def test_rejects_commercial_title_with_ecommerce_signal_in_another_sentence() ->
         "Chief Commercial Officer",
         "MarketCo",
         "Remote",
-        "The company operates an e-commerce marketplace. Own commercial growth.",
+        "The company operates an e-commerce marketplace. Own commercial growth, "
+        "assortment and margin.",
     )
 
     assert decision.verdict == "reject"
     assert "ecommerce_commercial_leadership" in decision.rule_ids
+
+
+def test_does_not_reject_product_commercial_growth_without_commercial_duties() -> None:
+    decision = evaluate_role_fit(
+        "Chief Product Officer",
+        "TravelCo",
+        "Remote",
+        "Lead the product function for a travel e-commerce platform. Own product "
+        "roadmap and commercial growth, without assortment, procurement or margin "
+        "ownership.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "ecommerce_commercial_leadership" not in decision.rule_ids
 
 
 def test_does_not_reject_adtech_platform_experience_as_a_preference() -> None:
@@ -266,3 +282,187 @@ def test_does_not_reject_adtech_platform_experience_as_a_preference() -> None:
 
     assert decision.verdict == "accept"
     assert "advertising_platform" not in decision.rule_ids
+
+
+def test_accepts_product_role_in_travel_ecommerce_without_commercial_duties() -> None:
+    decision = evaluate_role_fit(
+        "Chief Product Officer",
+        "TravelCo",
+        "Remote",
+        "Build the software platform for online travel e-commerce. Own the product "
+        "roadmap, user experience and product management, not assortment, procurement "
+        "or margin.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "ecommerce_commercial_leadership" not in decision.rule_ids
+
+
+def test_accepts_privacy_product_when_advertising_platform_is_only_market_context() -> None:
+    decision = evaluate_role_fit(
+        "Director of Product Management",
+        "PrivacyCo",
+        "Remote",
+        "Lead the privacy product management function for a software platform. "
+        "The market includes advertising platform competitors, but this role owns "
+        "privacy workflows, not ad serving.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "advertising_platform" not in decision.rule_ids
+
+
+@pytest.mark.parametrize(
+    ("language_text", "language_code"),
+    [
+        ("Excellente communication en français et en anglais, à l'oral comme à l'écrit.", "fr"),
+        ("Goede beheersing van het Nederlands, zowel mondeling als schriftelijk.", "nl"),
+        ("Sehr gute Deutschkenntnisse in Wort und Schrift erforderlich.", "de"),
+        ("Se requiere dominio del español, oral y escrito.", "es"),
+    ],
+)
+def test_blocks_required_language_in_localized_wording(language_text: str, language_code: str) -> None:
+    decision = evaluate_role_fit(
+        "Director of Product",
+        "SaaSCo",
+        "Remote",
+        f"SaaS software product leadership. {language_text}",
+    )
+
+    assert decision.verdict == "blocked"
+    assert decision.match_for("required_language_unavailable").details["languages"] == (language_code,)
+
+
+def test_rejects_short_parental_leave_replacement_without_contract_wording() -> None:
+    decision = evaluate_role_fit(
+        "Chief Product Officer",
+        "SaaSCo",
+        "Remote",
+        "Software product leadership while our current Head of Product is on "
+        "parental leave (:12 months).",
+    )
+
+    assert decision.verdict == "reject"
+    assert "short_contract" in decision.rule_ids
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Software Engineer",
+        "Senior Engineering Lead — Business Onboarding",
+        "Product Manager",
+    ],
+)
+def test_does_not_accept_non_executive_or_engineering_product_mentions(title: str) -> None:
+    decision = evaluate_role_fit(
+        title,
+        "SaaSCo",
+        "Remote",
+        "Build software and collaborate with product management on product delivery.",
+    )
+
+    assert decision.verdict == "reject"
+    assert "software_product_leadership" not in decision.rule_ids
+
+
+def test_accepts_explicit_product_lead_title() -> None:
+    decision = evaluate_role_fit(
+        "Product Lead",
+        "SaaSCo",
+        "Remote",
+        "Lead the software product roadmap and product management function.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+def test_accepts_digital_product_company_signal() -> None:
+    decision = evaluate_role_fit(
+        "Director of Product",
+        "DigitalCo",
+        "Remote",
+        "Own the digital product portfolio for a technology business.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+def test_accepts_senior_product_title_with_punctuation() -> None:
+    decision = evaluate_role_fit(
+        "Director, Product Management",
+        "SaaSCo",
+        "Remote",
+        "Own the software product portfolio and product strategy.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+def test_accepts_senior_product_title_with_em_dash() -> None:
+    decision = evaluate_role_fit(
+        "Director — Product Management",
+        "SaaSCo",
+        "Remote",
+        "Own the software product portfolio and product strategy.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+def test_accepts_product_function_title_with_level_after_product() -> None:
+    decision = evaluate_role_fit(
+        "Product Marketing Director",
+        "SaaSCo",
+        "Remote",
+        "Own the software product portfolio and product strategy.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+def test_accepts_ai_technology_product_company_signal() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "AICo",
+        "Remote",
+        "Own the AI product portfolio for an artificial intelligence business.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+def test_rejects_banking_credit_p_and_l_across_sentences() -> None:
+    decision = evaluate_role_fit(
+        "Director of Product",
+        "BankCo",
+        "Remote",
+        "Own the P&L. The banking business includes a consumer credit product.",
+    )
+
+    assert decision.verdict == "reject"
+    assert "banking_credit_p_and_l" in decision.rule_ids
+
+
+def test_blocks_short_bilingual_language_code_form() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "SaaSCo",
+        "Remote",
+        "Bilingual FR/EN communication required.",
+    )
+
+    assert decision.verdict == "blocked"
+    assert decision.match_for("required_language_unavailable").details["languages"] == ("fr",)
+
+
+def test_blocks_bilingual_language_code_form_in_title() -> None:
+    decision = evaluate_role_fit(
+        "Product Director | FR/EN",
+        "SaaSCo",
+        "Remote",
+        "Bilingual communication required.",
+    )
+
+    assert decision.verdict == "blocked"
+    assert decision.match_for("required_language_unavailable").details["languages"] == ("fr",)

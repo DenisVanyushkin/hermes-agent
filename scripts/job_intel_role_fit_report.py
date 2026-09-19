@@ -5,6 +5,7 @@ from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import random
+import re
 import sqlite3
 from typing import Any
 
@@ -14,6 +15,10 @@ from job_intel.product_search.role_fit import RoleFitDecision, evaluate_role_fit
 DEFAULT_LABELS = Path("/home/hermes/.hermes/job_intel/manual-shortlist/labels/owner-labels-2026-09.json")
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 _LABEL_TO_VERDICT = {"yes": "accept", "no": "reject", "yes_blocked_language": "blocked"}
+_ENGINEERING_LIKE_TITLE = re.compile(
+    r"\b(?:software|engineering|backend|frontend|full[- ]stack|data|devops|qa|quality)\s+(?:engineer|lead|manager|developer)|\b(?:software engineer|developer|data scientist|devops engineer|qa engineer)\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -101,10 +106,11 @@ def _print_owner_matrix(connection: sqlite3.Connection, labels: list[dict[str, A
         counts[(expected, decision.verdict)] += 1
         outcome = "OK" if expected == decision.verdict else "ERROR"
         rules = ",".join(decision.rule_ids) or "-"
+        note = "insufficient_input_language_evidence" if expected == "blocked" and not decision.rule_ids else ""
         print(
             f"{outcome} expected={expected:<7} predicted={decision.verdict:<7} "
             f"key={label['vacancy_key']} title={_short(row['title'])} "
-            f"company={_short(row['company'])} rules={rules}"
+            f"company={_short(row['company'])} rules={rules} note={note or '-'}"
         )
     print("CONFUSION expected\\predicted accept reject blocked")
     for expected in ("accept", "reject", "blocked"):
@@ -145,6 +151,19 @@ def _print_pool_report(rows: list[dict[str, Any]], seed: int, example_limit: int
                 f"company={_short(row['company'])} location={_short(row['location'])} "
                 f"url={_short(row['url'])} rules={','.join(decision.rule_ids) or '-'}"
             )
+
+    suspicious = [
+        (row, decision)
+        for row, decision in decisions
+        if decision.verdict == "accept" and _ENGINEERING_LIKE_TITLE.search(row.get("title") or "")
+    ]
+    print("SUSPICIOUS ACCEPTS (engineering-like title check)")
+    print(f"count={len(suspicious)}")
+    for row, decision in suspicious[:10]:
+        print(
+            f"title={_short(row['title'])} company={_short(row['company'])} "
+            f"rules={','.join(decision.rule_ids) or '-'}"
+        )
 
     low_support = sorted(rule_id for rule_id, count in rule_counts.items() if count <= 3)
     print("OVERFITTING REVIEW")
