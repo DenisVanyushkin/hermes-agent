@@ -294,7 +294,8 @@ def evaluate_role_fit(
             )
         )
 
-    matches.extend(_industry_matches(sentences))
+    matches.extend(_industry_matches(sentences, title))
+    matches.extend(_staffing_agency_matches(company, text))
 
     required_language_match = _language_match(sentences, owner_languages)
     if required_language_match is not None:
@@ -321,12 +322,11 @@ def evaluate_role_fit(
 
 _HARD_REJECT_RULES = frozenset(
     {
-        "advertising_platform",
-        "banking_software_portfolio",
-        "banking_credit_p_and_l",
+        "domain_expertise_required",
         "ecommerce_commercial_leadership",
         "interim_or_cover",
         "short_contract",
+        "staffing_agency_or_aggregator",
     }
 )
 
@@ -602,45 +602,88 @@ def _supported_sentence_coverage(
     )
 
 
-def _industry_matches(sentences: Iterable[str]) -> tuple[RuleMatch, ...]:
+_DOMAIN_EXPERTISE_RULES = (
+    {
+        "domain": "banking_core_and_payment_infrastructure",
+        "legacy_rule_id": "banking_software_portfolio",
+        "label": "banking core and payment infrastructure",
+        "patterns": (
+            r"\bcore\s+banking\b",
+            r"\bbanking\s+(?:software|platform|solutions?|product\s+portfolio)\b",
+            r"\bsoftware\s+products?\s+for\s+(?:banks|banking)\b",
+            r"\bpayment\s+infrastructure\b",
+        ),
+        "mandatory_patterns": (r"\bpayment\s+infrastructure\b",),
+    },
+    {
+        "domain": "credit_p_and_l",
+        "legacy_rule_id": "banking_credit_p_and_l",
+        "label": "credit P&L",
+        "patterns": (
+            r"\b(?:bank\w*|banking)\b.*\b(?:credit|lending|loan|mortgage)\b.*(?:\bp\s*&\s*l\b|\bprofit\s+and\s+loss\b|\bp&l\b)",
+            r"(?:\bp\s*&\s*l\b|\bprofit\s+and\s+loss\b|\bp&l\b).*\b(?:bank\w*|banking)\b.*\b(?:credit|lending|loan|mortgage)\b",
+        ),
+        "all_of": (
+            r"\b(?:bank\w*|banking)\b",
+            r"\b(?:credit|lending|loan|mortgage)\b",
+            r"\b(?:p\s*&\s*l|p&l|profit\s+and\s+loss)\b",
+        ),
+    },
+    {
+        "domain": "adtech_and_advertising_platforms",
+        "legacy_rule_id": "advertising_platform",
+        "label": "adtech and advertising platforms",
+        "patterns": (
+            r"\b(?:must\s+have|required|deeply?\s+speciali[sz]ed|experience|background|expertise|knowledge)\b[^.!?\n]{0,140}\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?)\b",
+            r"\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?)\b[^.!?\n]{0,140}\b(?:must\s+have|required|experience|background|expertise|knowledge)\b",
+        ),
+        "subject_predicate": "_is_advertising_platform",
+    },
+    {
+        "domain": "fraud_and_anti_fraud",
+        "legacy_rule_id": "fraud_and_anti_fraud",
+        "label": "fraud and anti-fraud",
+        "patterns": (
+            r"\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b[^.!?\n]{0,140}\b(?:fraud|anti[- ]fraud)\b",
+            r"\b(?:fraud|anti[- ]fraud)\b[^.!?\n]{0,140}\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
+            r"\b(?:fraud\s+(?:prevention|detection|risk)|anti[- ]fraud\s+(?:systems?|products?))\b",
+            r"\b(?:fraud|financial\s+crime)\s+(?:systems?|products?|team|platform|risk)\b",
+        ),
+    },
+    {
+        "domain": "erp_and_manufacturing_systems",
+        "legacy_rule_id": "erp_and_manufacturing_systems",
+        "label": "ERP and manufacturing systems",
+        "patterns": (
+            r"\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b[^.!?\n]{0,160}\b(?:erp|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b",
+            r"\b(?:erp|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b[^.!?\n]{0,160}\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
+            r"\b(?:erp|enterprise\s+resource\s+planning)\b[^.!?\n]{0,120}\bmanufactur\w*\b",
+        ),
+    },
+)
+
+_OPTIONAL_DOMAIN_CUES = re.compile(
+    r"\b(?:preferred|nice[- ]to[- ]haves?|bonus|plus|advantage|desirable|optional)\b",
+    re.IGNORECASE,
+)
+
+
+def _industry_matches(sentences: Iterable[str], title: str) -> tuple[RuleMatch, ...]:
     sentence_list = tuple(sentences)
     matches: list[RuleMatch] = []
-    for rule_id, predicate, explanation in (
-        (
-            "advertising_platform",
-            _is_advertising_platform,
-            "The text identifies an advertising/adtech platform, which is outside the target industry.",
-        ),
-        (
-            "banking_software_portfolio",
-            lambda sentence: re.search(
-                r"\b(?:core\s+banking|banking\s+(?:software|platform|solutions?)|software\s+products?\s+for\s+(?:banks|banking)|banking\s+product\s+portfolio)\b",
-                sentence,
-                re.IGNORECASE,
-            ),
-            "The text identifies an industry-specific banking-software portfolio, which is outside the target industry.",
-        ),
-        (
-            "banking_credit_p_and_l",
-            lambda sentence: re.search(
-                r"\b(?:bank\w*|banking)\b.*\b(?:credit|lending|loan|mortgage)\b.*(?:\bp\s*&\s*l\b|\bprofit\s+and\s+loss\b|\bp&l\b)|(?:\bp\s*&\s*l\b|\bprofit\s+and\s+loss\b|\bp&l\b).*\b(?:bank\w*|banking)\b.*\b(?:credit|lending|loan|mortgage)\b",
-                sentence,
-                re.IGNORECASE,
-            ),
-            "The text assigns P&L ownership for a banking credit/lending product, which is outside the target role fit.",
-        ),
-        (
-            "ecommerce_commercial_leadership",
-            _is_ecommerce_commercial_leadership,
-            "The text identifies commercial/e-commerce or assortment leadership, which is outside the target role fit.",
-        ),
-    ):
-        fragments = tuple(sentence for sentence in sentence_list if predicate(sentence))
-        if fragments:
-            matches.append(RuleMatch(rule_id, fragments, explanation, {}))
-    if not any(match.rule_id == "banking_credit_p_and_l" for match in matches):
-        combined = " ".join(sentence_list)
-        if _has_banking_credit_p_and_l(combined):
+    combined = " ".join(sentence_list)
+    product_title = bool(_find_patterns(title, _PRODUCT_LEADERSHIP))
+    for spec in _DOMAIN_EXPERTISE_RULES:
+        if not product_title:
+            continue
+        fragments = tuple(
+            sentence
+            for sentence in sentence_list
+            if _domain_sentence_matches(sentence, spec, title)
+        )
+        if not fragments and spec.get("all_of") and all(
+            re.search(pattern, combined, re.IGNORECASE) for pattern in spec["all_of"]
+        ):
             fragments = tuple(
                 sentence
                 for sentence in sentence_list
@@ -650,44 +693,132 @@ def _industry_matches(sentences: Iterable[str]) -> tuple[RuleMatch, ...]:
                     re.IGNORECASE,
                 )
             )
+        if fragments:
             matches.append(
                 RuleMatch(
-                    "banking_credit_p_and_l",
-                    fragments,
-                    "The text assigns P&L ownership for a banking credit/lending product, which is outside the target role fit.",
-                    {},
+                    "domain_expertise_required",
+                    tuple(dict.fromkeys(fragments)),
+                    f"The role requires deep expertise in {spec['label']}, which is outside the target role fit.",
+                    {
+                        "domain": spec["domain"],
+                        "legacy_rule_id": spec["legacy_rule_id"],
+                    },
                 )
             )
-    if not any(match.rule_id == "ecommerce_commercial_leadership" for match in matches):
-        commercial_role_fragments = tuple(
-            sentence
-            for sentence in sentence_list
-            if re.search(
-                r"\b(?:chief|head|director|vp|vice president|lead|leader|leadership)\s+(?:of\s+)?commercial\b",
-                sentence,
-                re.IGNORECASE,
+
+    commercial_role_fragments = tuple(
+        sentence
+        for sentence in sentence_list
+        if re.search(
+            r"\b(?:chief|head|director|vp|vice president|lead|leader|leadership)\s+(?:of\s+)?commercial\b",
+            sentence,
+            re.IGNORECASE,
+        )
+    )
+    commercial_duty_fragments = tuple(
+        sentence for sentence in sentence_list if _has_ecommerce_commercial_duty(sentence)
+    )
+    ecommerce_fragments = tuple(
+        sentence
+        for sentence in sentence_list
+        if re.search(r"\b(?:e[- ]?commerce|ecommerce|marketplace)\b", sentence, re.IGNORECASE)
+    )
+    if commercial_role_fragments and commercial_duty_fragments and ecommerce_fragments:
+        matches.append(
+            RuleMatch(
+                "ecommerce_commercial_leadership",
+                tuple(dict.fromkeys((*commercial_role_fragments, *commercial_duty_fragments, *ecommerce_fragments))),
+                "The text identifies commercial/e-commerce or assortment leadership, which is outside the target role fit.",
+                {},
             )
         )
-        commercial_duty_fragments = tuple(
-            sentence for sentence in sentence_list if _has_ecommerce_commercial_duty(sentence)
-        )
-        ecommerce_fragments = tuple(
-            sentence
-            for sentence in sentence_list
-            if re.search(r"\b(?:e[- ]?commerce|ecommerce|marketplace)\b", sentence, re.IGNORECASE)
-        )
-        if commercial_role_fragments and commercial_duty_fragments and ecommerce_fragments:
-            matches.append(
-                RuleMatch(
-                    "ecommerce_commercial_leadership",
-                    tuple(dict.fromkeys((*commercial_role_fragments, *commercial_duty_fragments, *ecommerce_fragments))),
-                    "The text identifies commercial/e-commerce leadership, which is outside the target role fit.",
-                    {},
-                )
-            )
     return tuple(matches)
 
 
+def _domain_sentence_matches(sentence: str, spec: dict[str, Any], title: str) -> bool:
+    if _OPTIONAL_DOMAIN_CUES.search(sentence):
+        return False
+    subject_predicate = spec.get("subject_predicate")
+    if isinstance(subject_predicate, str):
+        subject_predicate = globals()[subject_predicate]
+    if subject_predicate is not None and subject_predicate(sentence):
+        return True
+    matched = tuple(
+        pattern
+        for pattern in spec["patterns"]
+        if re.search(pattern, sentence, re.IGNORECASE)
+    )
+    if not matched:
+        return False
+    if spec["domain"] == "banking_core_and_payment_infrastructure" and not re.search(
+        r"\b(?:portfolio|strategy|product|own|lead|responsible|accountable|experience|expertise|required)\b",
+        sentence,
+        re.IGNORECASE,
+    ) and not re.search(r"\b(?:banking|payments?)\b", title, re.IGNORECASE):
+        return False
+    if spec["domain"] == "banking_core_and_payment_infrastructure":
+        payment_infrastructure = any(
+            re.search(pattern, sentence, re.IGNORECASE)
+            for pattern in spec.get("mandatory_patterns", ())
+        )
+        if payment_infrastructure and not re.search(
+            r"\b(?:must|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
+            sentence,
+            re.IGNORECASE,
+        ):
+            return False
+    return True
+
+
+def _staffing_agency_matches(company: str, text: str) -> tuple[RuleMatch, ...]:
+    patterns = (
+        r"\bour\s+client\b",
+        r"\bon\s+behalf\s+of\s+(?:our|a|the)\s+(?:client|partner)\b",
+        r"\blisted\s+on\s+behalf\s+of\b",
+        r"\bpartner\s+company\b[^.!?\n]{0,80}\b(?:applications?|hiring)\b",
+        r"\b(?:recruitment|staffing|executive\s+search)\s+agency\b",
+    )
+    company_patterns = (
+        r"\bhuman\s+capital\b",
+        r"\b(?:staffing|recruit(?:ment|er)|headhunt(?:ing)?|executive\s+search)\b",
+        r"\b(?:talent|hire)\w*\b",
+    )
+    found = _find_patterns(text, patterns)
+    found += _find_patterns(company, company_patterns)
+    if not found and re.search(
+        r"\b(?:limited|ltd|consulting|consultancy|solutions|services)\b",
+        company,
+        re.IGNORECASE,
+    ) and re.search(
+        r"\b(?:telco|telecom)\b.{0,240}\bfintech\b",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ) and re.search(
+        r"\b(?:across|multiple)\s+(?:business\s+units|industr(?:y|ies)|markets)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        found += _find_patterns(
+            company,
+            (r"\b(?:limited|ltd|consulting|consultancy|solutions|services)\b",),
+        )
+        found += _find_patterns(
+            text,
+            (
+                r"\b(?:telco|telecom)\b.{0,240}\bfintech\b",
+                r"\b(?:across|multiple)\s+(?:business\s+units|industr(?:y|ies)|markets)\b",
+            ),
+        )
+    if not found:
+        return ()
+    return (
+        RuleMatch(
+            "staffing_agency_or_aggregator",
+            found,
+            "The vacancy appears to be published by a staffing agency or aggregator for a client, not by the hiring company.",
+            {"signals": found},
+        ),
+    )
 def _is_advertising_platform(sentence: str) -> re.Match[str] | None:
     if re.search(
         r"\b(?:not|no)\s+(?:an?\s+)?(?:advertising|adtech|ad\s*tech)\s+(?:platform|company|business)\b",
@@ -720,20 +851,6 @@ def _has_positive_ad_subject_signal(sentence: str) -> bool:
         if not re.search(r"\b(?:not|without|never|no)\s*$", prefix, re.IGNORECASE):
             return True
     return False
-
-
-def _has_banking_credit_p_and_l(text: str) -> bool:
-    return bool(
-        re.search(r"\b(?:bank\w*|banking)\b", text, re.IGNORECASE)
-        and re.search(r"\b(?:credit|lending|loan|mortgage)\b", text, re.IGNORECASE)
-        and re.search(r"\b(?:p\s*&\s*l|p&l|profit\s+and\s+loss)\b", text, re.IGNORECASE)
-    )
-
-
-def _is_ecommerce_commercial_leadership(sentence: str) -> re.Match[str] | None:
-    if not re.search(r"\b(?:e[- ]?commerce|ecommerce|marketplace)\b", sentence, re.IGNORECASE):
-        return None
-    return _has_ecommerce_commercial_duty(sentence)
 
 
 def _has_ecommerce_commercial_duty(sentence: str) -> re.Match[str] | None:

@@ -43,7 +43,8 @@ def test_rejects_advertising_platform_from_description() -> None:
     )
 
     assert decision.verdict == "reject"
-    match = decision.match_for("advertising_platform")
+    match = decision.match_for("domain_expertise_required")
+    assert match.details["domain"] == "adtech_and_advertising_platforms"
     assert "advertising technology" in " ".join(match.fragments).lower()
 
 
@@ -57,7 +58,10 @@ def test_rejects_industry_banking_software_portfolio() -> None:
     )
 
     assert decision.verdict == "reject"
-    assert decision.match_for("banking_software_portfolio").fragments
+    match = decision.match_for("domain_expertise_required")
+    assert match.details["domain"] == "banking_core_and_payment_infrastructure"
+    assert match.details["legacy_rule_id"] == "banking_software_portfolio"
+    assert match.fragments
 
 
 def test_rejects_banking_credit_product_p_and_l() -> None:
@@ -70,7 +74,9 @@ def test_rejects_banking_credit_product_p_and_l() -> None:
     )
 
     assert decision.verdict == "reject"
-    assert decision.match_for("banking_credit_p_and_l").fragments
+    match = decision.match_for("domain_expertise_required")
+    assert match.details["domain"] == "credit_p_and_l"
+    assert match.fragments
 
 
 def test_rejects_commercial_ecommerce_assortment_leadership() -> None:
@@ -168,9 +174,94 @@ def test_rule_matches_include_exact_trigger_fragments() -> None:
         "Core banking software portfolio.",
     )
 
-    match = decision.match_for("banking_software_portfolio")
+    match = decision.match_for("domain_expertise_required")
     assert all(fragment in decision.normalized_text for fragment in match.fragments)
     assert match.explanation
+
+
+def test_accepts_payments_role_when_fintech_experience_is_preferred() -> None:
+    decision = evaluate_role_fit(
+        "Group Product Manager, APAC",
+        "PaymentsCo",
+        "Singapore",
+        "Lead the payment engine and local payment methods across APAC. "
+        "Experience in fintech or financial services is preferred, while strong "
+        "product leadership and platform delivery are required.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "domain_expertise_required" not in decision.rule_ids
+
+
+def test_rejects_role_requiring_fraud_and_antifraud_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product (Fraud)",
+        "FintechCo",
+        "Sweden",
+        "Own the fraud prevention and detection product. This role requires deep "
+        "experience building fraud and anti-fraud systems and managing fraud risk "
+        "at scale.",
+    )
+
+    assert decision.verdict == "reject"
+    match = decision.match_for("domain_expertise_required")
+    assert match.details["domain"] == "fraud_and_anti_fraud"
+    assert "fraud" in match.explanation.lower()
+
+
+def test_rejects_role_requiring_erp_and_manufacturing_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Director of Product, Platform",
+        "EnterpriseCo",
+        "Pune",
+        "Own the product strategy for an ERP platform serving manufacturing operations. "
+        "Candidates must have deep experience with manufacturing systems and ERP "
+        "workflows.",
+    )
+
+    assert decision.verdict == "reject"
+    match = decision.match_for("domain_expertise_required")
+    assert match.details["domain"] == "erp_and_manufacturing_systems"
+
+
+def test_rejects_staffing_agency_role_using_client_placement_language() -> None:
+    decision = evaluate_role_fit(
+        "Senior Product Manager",
+        "Talent Search Partners",
+        "Remote",
+        "Our client is hiring a product leader. You will work on behalf of our client "
+        "and the recruitment team will coordinate the interview process.",
+    )
+
+    assert decision.verdict == "reject"
+    match = decision.match_for("staffing_agency_or_aggregator")
+    assert "client" in " ".join(match.fragments).lower()
+
+
+def test_does_not_reject_company_role_for_mentioning_a_recruiter() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme Software",
+        "Remote",
+        "Lead the software product roadmap and product team. A recruiter will "
+        "contact shortlisted candidates about the interview process.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "staffing_agency_or_aggregator" not in decision.rule_ids
+
+
+def test_accepts_physical_product_role() -> None:
+    decision = evaluate_role_fit(
+        "VP Product Experience",
+        "LearningCo",
+        "Billund",
+        "Lead product experience for physical learning kits and connected digital "
+        "software learning products. Own the product roadmap and product organization.",
+    )
+
+    assert decision.verdict == "accept"
+    assert "domain_expertise_required" not in decision.rule_ids
 
 
 def test_does_not_block_language_marked_as_preferred() -> None:
@@ -444,7 +535,7 @@ def test_rejects_banking_credit_p_and_l_across_sentences() -> None:
     )
 
     assert decision.verdict == "reject"
-    assert "banking_credit_p_and_l" in decision.rule_ids
+    assert "domain_expertise_required" in decision.rule_ids
 
 
 def test_blocks_short_bilingual_language_code_form() -> None:
@@ -644,7 +735,7 @@ def test_corpus_bilingual_english_dutch_description_is_not_dropped() -> None:
     assert "description_language_not_supported" not in decision.rule_ids
 
 
-def test_owner_labels_match_live_corpus_13_of_13() -> None:
+def test_owner_labels_match_live_corpus_20_of_20() -> None:
     labels_path = Path("/home/hermes/.hermes/job_intel/manual-shortlist/labels/owner-labels-2026-09.json")
     database = Path("/var/lib/job-intel/state/job_intel.sqlite3")
     if not labels_path.exists() or not database.exists():
@@ -677,5 +768,5 @@ def test_owner_labels_match_live_corpus_13_of_13() -> None:
         if decision.verdict != expected_verdicts[label["verdict"]]:
             mismatches.append((label["vacancy_key"], label["verdict"], decision.verdict, decision.rule_ids))
 
-    assert len(payload["labels"]) == 13
+    assert len(payload["labels"]) == 20
     assert mismatches == []
