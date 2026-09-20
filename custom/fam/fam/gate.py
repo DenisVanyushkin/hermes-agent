@@ -286,6 +286,25 @@ GATE_DIGEST_NO_QUESTION_INSTRUCTION = (
     "короткой фразой, без давления и без вопросов."
 )
 
+# Live-found bug (2026-09-20, the weekly ritual's first send): the week
+# summary reached the user as an empty string -- GATE_STYLE_INSTRUCTION's
+# "1-3 коротких предложения" has no room for a seven-line plan, and the
+# followup path had nothing telling the rewrite otherwise. weekly_plan is
+# a list to lay out, not prose to compress, so it gets its own carve-out,
+# mirroring how the digest exempts busy_two_days from its own rules.
+GATE_WEEKLY_PLAN_INSTRUCTION = (
+    "Поле weekly_plan — план на следующую неделю. Для него ограничение "
+    "в 1-3 предложения НЕ действует. Выведи его так: первой строкой "
+    "«Неделя <label>.», затем по строке на каждый элемент days в виде "
+    "«<day>: <titles через запятую>». Названия дел переписывай ДОСЛОВНО "
+    "и полностью — не сокращай, не переводи, не объединяй и не выдумывай. "
+    "Затем, если free_days непусто, строкой «Свободны: <дни через "
+    "запятую>.». Затем, если tails непусто, строкой «С прошлой недели "
+    "висят:» и по строке на каждый хвост с его title. "
+    "Вопросов не задавай и призывов не добавляй — завершающий вопрос "
+    "добавляется отдельно, после тебя."
+)
+
 # Live-found bug: a real reminder went out as "В 13:00 Тае пора
 # собираться в поселок" -- the rewrite bound the label's action
 # ("собираться", due right now, at send time) to event["start_local"]
@@ -630,6 +649,13 @@ def _build_prompt(raw, kind=None):
         # _strip_trailing_question can't catch. The closing question is
         # deliver()'s job alone (_ensure_trailing_question), so the
         # rewrite never sees it.
+        if "question" in raw:
+            raw = {k: v for k, v in raw.items() if k != "question"}
+    elif kind == "followup" and "weekly_plan" in raw:
+        instruction = f"{instruction} {GATE_WEEKLY_PLAN_INSTRUCTION}"
+        # Same reason the digest drops it: deliver() appends the real
+        # question itself (_ensure_trailing_question), so leaving it in
+        # <data> only invites a paraphrased duplicate mid-text.
         if "question" in raw:
             raw = {k: v for k, v in raw.items() if k != "question"}
     elif kind == "reminder":

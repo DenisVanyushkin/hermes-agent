@@ -1765,6 +1765,13 @@ def _followup(conn, now_utc, cfg):
             # the same way an unanswered clarify used to lose the whole
             # request. The weekly ask wins on Sunday; the day recap is
             # the part that can wait.
+            #
+            # The context goes into raw, NOT just into human_fallback:
+            # gate.deliver rewrites `raw` whenever the LLM call works and
+            # only reads human_fallback when it fails. The first live
+            # send arrived as a bare question because the week existed
+            # solely in the fallback.
+            raw["weekly_plan"] = weekly.plan_payload(weekly_snapshot)
             lines.append(weekly_question)
         else:
             lines.append(FOLLOWUP_QUESTION)

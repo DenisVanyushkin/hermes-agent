@@ -324,6 +324,32 @@ def question_text(snapshot):
     return "\n".join(lines)
 
 
+def plan_payload(snapshot):
+    """The week context as DATA for gate.deliver's rewrite prompt.
+
+    question_text() renders the same facts for human_fallback, which is
+    only used when the rewrite fails. On the happy path gate.deliver
+    builds the message out of `raw`, so context that lives only in the
+    fallback never reaches the user -- exactly how the first live send
+    (2026-09-20) arrived as a bare question with the whole week missing.
+    """
+    per_day = {}
+    for event in snapshot["events"]:
+        day_part = event["start_local"].partition("T")[0]
+        weekday = date.fromisoformat(day_part).isocalendar()[2]
+        per_day.setdefault(weekday, []).append(event["title"].strip())
+
+    return {
+        "label": snapshot["label"],
+        "days": [{"day": _WEEKDAY_SHORT_RU[wd], "titles": per_day[wd]}
+                 for wd in range(1, 8) if per_day.get(wd)],
+        "free_days": [_WEEKDAY_SHORT_RU[wd] for wd in range(1, 8)
+                      if not per_day.get(wd)],
+        "tails": [{"title": t["title"], "deadline": t["deadline"]}
+                  for t in snapshot["tails"]],
+    }
+
+
 def question_line(snapshot):
     """Just the closing question, as ONE line.
 
