@@ -140,18 +140,47 @@ def test_definitive_failure_never_waits():
 
 
 def test_no_response_returns_timeout_sentinel():
+    """Timeout prose carries the duration AND an instruction to proceed.
+
+    The bare "[user did not respond within Nm]" stated a fact with no
+    guidance, so the agent read it as "keep waiting" and dropped the part
+    of the request it had already understood. The prose now mirrors
+    clarify_tool.TIMEOUT_RESPONSE while keeping the duration.
+    """
     fut = MagicMock()
     fut.result.return_value = _Result(True)
     clarify_mod = MagicMock()
     clarify_mod.get_clarify_timeout.return_value = 600
     clarify_mod.wait_for_response.return_value = None
 
-    assert (
-        _clarify_send_then_wait(
-            fut, clarify_id="cid123", session_key="sk", clarify_mod=clarify_mod
-        )
-        == "[user did not respond within 10m]"
+    result = _clarify_send_then_wait(
+        fut, clarify_id="cid123", session_key="sk", clarify_mod=clarify_mod
     )
+
+    assert result.startswith("[user did not respond within 10m]")
+    assert "best judgement" in result
+
+
+def test_timeout_prose_still_reads_as_a_non_response_to_the_compressor():
+    """The compressor must not quote the new prose as a user answer.
+
+    Both ends are asserted against the SAME produced string rather than
+    against a shared constant: that is what proves the two modules are
+    actually connected, not merely agreeing about a literal.
+    """
+    from agent.context_compressor import _is_clarify_non_response_sentinel
+
+    fut = MagicMock()
+    fut.result.return_value = _Result(True)
+    clarify_mod = MagicMock()
+    clarify_mod.get_clarify_timeout.return_value = 3600
+    clarify_mod.wait_for_response.return_value = None
+
+    produced = _clarify_send_then_wait(
+        fut, clarify_id="cid123", session_key="sk", clarify_mod=clarify_mod
+    )
+
+    assert _is_clarify_non_response_sentinel(produced)
 
 
 # --- Definitive failures keep their diagnostic detail in the log ----------

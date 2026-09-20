@@ -1569,8 +1569,23 @@ def _clarify_send_then_wait(fut, *, clarify_id: str, session_key: str, clarify_m
     timeout = clarify_mod.get_clarify_timeout()
     response = clarify_mod.wait_for_response(clarify_id, timeout=float(timeout))
     if response is None or response == "":
-        # Timeout or session-boundary cancellation
-        return f"[user did not respond within {int(timeout / 60)}m]"
+        # Timeout or session-boundary cancellation.
+        #
+        # The prose states the fact AND what to do about it. A bare
+        # "[user did not respond within Nm]" is a status with no
+        # instruction, and agents read it as "keep waiting": a request
+        # that was already half-understood gets dropped instead of
+        # recorded with a default. The guidance mirrors
+        # clarify_tool.TIMEOUT_RESPONSE, which the CLI path has always
+        # returned; the "[user did not respond" prefix is load-bearing
+        # for context_compressor._CLARIFY_NON_RESPONSE_PREFIXES, which
+        # uses it to avoid quoting this prose as a real user answer.
+        return (
+            f"[user did not respond within {int(timeout / 60)}m] "
+            "Use your best judgement: act on whatever is already clear, "
+            "choose a sensible default for whatever is not, and say what "
+            "you assumed so the user can correct it."
+        )
     return response
 
 
