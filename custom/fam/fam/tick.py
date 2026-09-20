@@ -2321,7 +2321,12 @@ def digest(conn, cfg=None, now_utc=None, _fetch_weather=None, _real_now=None):
     ritual_target = goals.compute_target_month(conn, date_local, ritual_window_days)
     ritual_state_before = goals.plan_state_get(conn, ritual_target)
     ritual_question = _goal_ritual(conn, cfg, date_local)
-    question_text = ritual_question if ritual_question else DIGEST_QUESTION
+    # The weekly repeat rides the same slot, one rank below: a digest
+    # carries exactly ONE planning question, and the month outranks the
+    # week (Denis's call). An unrepeated week is not lost -- next Sunday
+    # opens a fresh cycle for the week after.
+    weekly_repeat = weekly.repeat_question(conn, date_local)
+    question_text = ritual_question or weekly_repeat or DIGEST_QUESTION
 
     # Empty/unavailable sections are dropped from raw entirely rather
     # than sent as null/[] -- the rewrite prompt tells the LLM to reflect

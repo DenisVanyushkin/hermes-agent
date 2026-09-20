@@ -537,8 +537,22 @@ show after cancel), make a second, separate terminal call.
       → that is NOT a plan: plans have no reminder chain of their own.
       Record it as a calendar event (rule 2 and the Calendar verbs) and
       say what you recorded.
+    - **Close the cycle when the dialog ends** → `fam weekly mark done`.
+      Without it the ritual stays in «offered» and asks again in
+      Monday's digest even though she already planned. Call it once,
+      after the plans are actually recorded (rule 12: only after the
+      `plan add` calls exited 0) — not before, and not instead.
+    - «не буду на этой неделе» / «пропустим» → `fam weekly mark
+      declined`, no plans created. That silences both the repeat and
+      any further question about this week.
     - «не сейчас» / «потом» / no reply → do nothing at all, no fam
-      call. The ritual re-offers by itself.
+      call. Monday's digest repeats the question once by itself; after
+      that the week is left alone.
+    - **Monday's repeat** («Неделю так и не спланировали — что в неё
+      добавим?») is the SAME dialog — same `plan add` calls, same
+      closing `fam weekly mark`. It is not a new kind of question.
+    - `fam weekly info --json` shows the target week and its state when
+      you need to check whether a cycle is still open.
 
 ## Quick Reference
 

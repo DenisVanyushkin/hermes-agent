@@ -2,7 +2,7 @@
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
 from urllib.parse import urljoin
-from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, resolve, series, shopping, tick, whereami
+from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, resolve, series, shopping, tick, weekly, whereami
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -3086,6 +3086,31 @@ def cmd_plan_done(args):
         print(f"done plan: {p['title']} (id={p['id']})")
     return 0
 
+def cmd_weekly_info(args):
+    conn = famdb.connect()
+    info = weekly.info(conn, goals.today_almaty())
+    if args.json:
+        print(json.dumps({k: v for k, v in info.items()
+                          if k != "events"}, ensure_ascii=False))
+    else:
+        print(f"week {info['target_week']} ({info['label']}), "
+              f"state={info['state']}, events={len(info['events'])}, "
+              f"tails={len(info['tails'])}")
+    return 0
+
+
+def cmd_weekly_mark(args):
+    conn = famdb.connect()
+    week = weekly.mark(conn, goals.today_almaty(), args.status)
+    conn.commit()
+    if args.json:
+        print(json.dumps({"week": week, "status": args.status},
+                         ensure_ascii=False))
+    else:
+        print(f"weekly {week}: {args.status}")
+    return 0
+
+
 def cmd_plan_due(args):
     conn = famdb.connect()
     deadline = None if args.clear else args.deadline
@@ -3982,6 +4007,16 @@ def build_parser():
     spd = plan_sub.add_parser("done"); spd.set_defaults(func=cmd_plan_done)
     spd.add_argument("id", type=int)
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    weekly_p = sub.add_parser("weekly", help="weekly planning ritual")
+    weekly_sub = weekly_p.add_subparsers(dest="weekly_cmd", required=True)
+    swi = weekly_sub.add_parser("info"); swi.set_defaults(func=cmd_weekly_info)
+    swi.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+    swm = weekly_sub.add_parser("mark"); swm.set_defaults(func=cmd_weekly_mark)
+    swm.add_argument("status", choices=("done", "declined"))
+    swm.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
 
     spdu = plan_sub.add_parser("due"); spdu.set_defaults(func=cmd_plan_due)

@@ -16,7 +16,7 @@ transaction, mirroring plans.py and goals.py.
 import re
 from datetime import date, timedelta
 
-from fam import cal, db, plans
+from fam import audit, cal, db, plans
 
 _WEEK_RE = re.compile(r"^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$")
 
@@ -118,6 +118,50 @@ def plan_state_get(conn, week):
         return None
     status, _, date_local = raw.partition(":")
     return status, date_local
+
+
+def repeat_question(conn, date_local):
+    """Monday's one repeat of an unanswered Sunday offer, or None.
+
+    Returns a single line, not the whole context block: the digest
+    passes it as raw["question"], which gate.deliver guarantees as the
+    final line (see question_line).
+
+    Due only on a Monday whose target week is still "offered". Three
+    silences matter:
+      * no state at all -> Sunday never actually asked (budget, error,
+        or a week already answered before the ritual existed), so there
+        is nothing to repeat and inventing a question would be worse
+        than saying nothing;
+      * done/declined -> answered, permanently quiet;
+      * any day but Monday -> exactly one repeat. Tuesday onwards the
+        week is left alone rather than nagged daily, which is where the
+        monthly ritual's repeat-until-answered would become noise at
+        weekly cadence.
+    """
+    if date.fromisoformat(date_local).isocalendar()[2] != 1:
+        return None
+    state_row = plan_state_get(conn, target_week(date_local))
+    if state_row is None or state_row[0] != "offered":
+        return None
+    return "Неделю так и не спланировали — что в неё добавим?"
+
+
+def mark(conn, date_local, status):
+    """Close the ritual cycle for whatever week `date_local` targets.
+
+    This is the verb the chat agent calls once the planning dialog
+    ends -- without it the cycle would sit in "offered" forever, the
+    plans created but the ritual never told it had been answered.
+    Works even with no prior offer: she may start planning on her own
+    before the ritual gets round to asking.
+    """
+    if status not in ("done", "declined"):
+        raise ValueError(f"invalid weekly plan state: {status}")
+    week = target_week(date_local)
+    plan_state_set(conn, week, status, date_local)
+    audit.log(conn, "weekly.mark", {"week": week, "status": status})
+    return week
 
 
 def plan_state_set(conn, week, status, today):
