@@ -1765,11 +1765,6 @@ def _followup(conn, now_utc, cfg):
             # the same way an unanswered clarify used to lose the whole
             # request. The weekly ask wins on Sunday; the day recap is
             # the part that can wait.
-            raw["weekly_plan"] = {
-                "target_week": weekly_snapshot["target_week"],
-                "n_events": len(weekly_snapshot["events"]),
-                "n_tails": len(weekly_snapshot["tails"]),
-            }
             lines.append(weekly_question)
         else:
             lines.append(FOLLOWUP_QUESTION)

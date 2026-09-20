@@ -74,7 +74,7 @@ def test_sunday_message_carries_the_weekly_question(db, fake_deliver):
 
     call = _followups(fake_deliver)[0]
     assert "Что запланируем на неделю?" in call["human_fallback"]
-    assert call["raw"]["weekly_plan"]["target_week"] == TARGET_WEEK
+    assert call["raw"]["question"] == "Что запланируем на неделю?"
 
 
 def test_weekly_question_replaces_the_usual_closing_question(db, fake_deliver):
@@ -129,7 +129,7 @@ def test_monday_followup_has_no_weekly_question(db, fake_deliver):
     tick.reminders(db, now_utc=MONDAY_AT_FOLLOWUP, cfg=CFG)
 
     for call in _followups(fake_deliver):
-        assert "weekly_plan" not in call["raw"]
+        assert "неделю" not in call["raw"]["question"].lower()
 
 
 def test_sunday_context_names_next_weeks_events(db, fake_deliver):
@@ -170,22 +170,16 @@ def test_raw_question_is_only_the_closing_line(db, fake_deliver):
     assert "\n" not in question
 
 
-def test_human_fallback_ends_with_that_same_question(db, fake_deliver):
+def test_human_fallback_ends_with_that_same_question_exactly_once(db,
+                                                                   fake_deliver):
     """The fallback path sends human_fallback as-is, so it must already
-    end the way the rewrite path is forced to end."""
+    end the way gate._ensure_trailing_question forces the rewrite path to
+    end -- and contain the question only once, or the gate re-appending
+    it would print the block twice."""
     fake_deliver.responses = ["sent"]
 
     tick.reminders(db, now_utc=SUNDAY_AT_FOLLOWUP, cfg=CFG)
 
     call = _followups(fake_deliver)[0]
     assert call["human_fallback"].rstrip().endswith(call["raw"]["question"])
-
-
-def test_context_is_not_duplicated_when_the_gate_reappends(db, fake_deliver):
-    """Simulate what gate does: fallback text + trailing question."""
-    fake_deliver.responses = ["sent"]
-
-    tick.reminders(db, now_utc=SUNDAY_AT_FOLLOWUP, cfg=CFG)
-
-    call = _followups(fake_deliver)[0]
     assert call["human_fallback"].count(call["raw"]["question"]) == 1

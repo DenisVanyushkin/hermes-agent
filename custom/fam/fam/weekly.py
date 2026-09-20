@@ -273,23 +273,11 @@ def info(conn, date_local):
 
 
 
-# Above this many events, naming them all turns a chat message into a
-# wall of text -- 2026-W39 really held 16. Past the threshold the block
-# switches to load-per-day plus the free days, which is what actually
-# answers "where do I put something new".
-_LIST_THRESHOLD = 4
-
-
-def _plural_dela(n):
-    """Russian count form for 'дело': 1 дело, 2 дела, 5 дел."""
-    if 11 <= n % 100 <= 14:
-        return "дел"
-    last = n % 10
-    if last == 1:
-        return "дело"
-    if last in (2, 3, 4):
-        return "дела"
-    return "дел"
+# One rendering for every week: a line per day, in place of naming each
+# event on its own line. 2026-W39 really holds 16 events -- sixteen lines
+# is not a chat message, and a bare count per day would drop the titles
+# she needs to answer against. Grouping keeps both and bounds the height
+# at seven lines whatever the week holds.
 
 
 def _events_block(events):
@@ -297,26 +285,15 @@ def _events_block(events):
     if not events:
         return ["В календаре пока пусто."]
 
-    if len(events) <= _LIST_THRESHOLD:
-        block = ["Уже в календаре:"]
-        for event in events:
-            day_part, _, time_part = event["start_local"].partition("T")
-            weekday = _WEEKDAY_SHORT_RU[date.fromisoformat(day_part).isocalendar()[2]]
-            block.append(f"• {weekday} {_day_month_ru(day_part)}, "
-                         f"{time_part[:5]} — {event['title']}")
-        return block
-
     per_day = {}
     for event in events:
         day_part = event["start_local"].partition("T")[0]
         weekday = date.fromisoformat(day_part).isocalendar()[2]
-        per_day[weekday] = per_day.get(weekday, 0) + 1
+        per_day.setdefault(weekday, []).append(event["title"].strip())
 
-    busy = [f"{_WEEKDAY_SHORT_RU[wd]} {per_day[wd]}"
-            for wd in range(1, 8) if per_day.get(wd)]
+    block = [f"{_WEEKDAY_SHORT_RU[wd]}: " + ", ".join(per_day[wd])
+             for wd in range(1, 8) if per_day.get(wd)]
     free = [_WEEKDAY_SHORT_RU[wd] for wd in range(1, 8) if not per_day.get(wd)]
-
-    block = [f"{len(events)} {_plural_dela(len(events))}: " + ", ".join(busy) + "."]
     if free:
         block.append("Свободны: " + ", ".join(free) + ".")
     return block
