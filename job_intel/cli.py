@@ -518,6 +518,18 @@ def _daily_run_total_status(run_status: str, spans: list[PerformanceSpan]) -> st
     return "ok"
 
 
+def _record_role_fit_trace(span: Any, trace: dict[str, Any]) -> None:
+    span.set_counts(
+        normalized_count=trace["evaluated_count"],
+        error_count=trace["error_count"],
+    )
+    span.add_metadata(
+        role_fit_evaluated_count=trace["evaluated_count"],
+        role_fit_error_count=trace["error_count"],
+        role_fit_duration_seconds=trace["duration_seconds"],
+    )
+
+
 
 def _coerce_collected(result: CollectedVacancies | tuple[list[Vacancy], dict[str, dict[str, Any]]]) -> CollectedVacancies:
     if isinstance(result, CollectedVacancies):
@@ -2571,6 +2583,11 @@ def run_daily() -> str:
     strategy_count = 0
     run_notes = ""
     run_metadata: dict[str, Any] = {}
+    role_fit_trace: dict[str, Any] = {
+        "evaluated_count": 0,
+        "error_count": 0,
+        "duration_seconds": 0.0,
+    }
     try:
         with performance.span("bootstrap_config", parent_span_name="daily_run_total"):
             cfg = load_config_bundle() or DEFAULT_CONFIG
@@ -3240,14 +3257,14 @@ def run_daily() -> str:
         notified_vacancy_ids = {int(item["vacancy_id"]) for item in vacancy_deliveries if item["delivery"].success}
         accepted_vacancy_ids = {vacancy_id for _, _, vacancy_id in accepted}
 
-        with performance.span("observability_persistence_total", parent_span_name="daily_run_total"):
+        with performance.span("observability_persistence_total", parent_span_name="daily_run_total") as observability_span:
             for vacancy, evaluation, _classification, _vacancy_id, duplicate in scored_rows:
                 if duplicate:
                     continue
                 rec = str(getattr(evaluation, "recommendation", "reject") or "reject")
                 if rec in {"strong_fit", "potential_fit", "needs_review", "near_miss"}:
                     store.upsert_user_feedback_unseen(canonical_vacancy_key(vacancy), run_id=run_id)
-            record_daily_observability(
+            role_fit_trace = record_daily_observability(
                 store,
                 run_id,
                 scored_rows,
@@ -3257,6 +3274,7 @@ def run_daily() -> str:
                 active_scoring_version=effective_scoring_version,
                 active_recommendation_version=effective_scoring_version,
             )
+            _record_role_fit_trace(observability_span, role_fit_trace)
 
             scored_registry_counts: dict[tuple[str, str, str], int] = {}
             for vacancy, _, _, _, _ in scored_rows:
@@ -3431,6 +3449,7 @@ def run_daily() -> str:
                 "vacancy_message_deliveries": vacancy_message_deliveries,
                 "performance_triggers": performance_reasons,
                 "performance_block_included": bool(performance_block),
+                "role_fit_observation": role_fit_trace,
             }
         )
         if v3_shadow_enabled:

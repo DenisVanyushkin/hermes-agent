@@ -7,12 +7,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
+import json
 import logging
 import re
 import sqlite3
+from time import perf_counter
 
 from .dedup import canonical_vacancy_key
 from .models import Evaluation, Vacancy
+from .product_search.role_fit import evaluate_role_fit
 from .store import JobIntelStore
 
 ROLE_BUCKETS = ("vp_product", "head_product", "director_product", "gm_product", "cpo", "other")
@@ -990,11 +993,15 @@ def record_daily_observability(
     dual_scores_by_url: dict[str, dict[str, Any]] | None = None,
     active_scoring_version: str | None = None,
     active_recommendation_version: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     accepted_vacancy_ids = accepted_vacancy_ids or set()
     notified_vacancy_ids = notified_vacancy_ids or set()
     dual_scores_by_url = dual_scores_by_url or {}
     rejection_events: list[dict[str, Any]] = []
+    role_fit_cache: dict[str, tuple[str, str]] = {}
+    role_fit_duration_seconds = 0.0
+    role_fit_evaluated_count = 0
+    role_fit_error_count = 0
     for vacancy, evaluation, classification, vacancy_id, duplicate in scored_rows:
         score = int(getattr(evaluation, "score", 0) or 0)
         score_band = score_band_for(score)
@@ -1009,6 +1016,28 @@ def record_daily_observability(
         created_at = getattr(vacancy, "scraped_at", None) or datetime.now(timezone.utc).isoformat()
         vacancy_key = canonical_vacancy_key(vacancy)
         recommendation = str(getattr(evaluation, "recommendation", None) or "") or None
+        if vacancy_key not in role_fit_cache:
+            started_role_fit = perf_counter()
+            try:
+                role_fit_decision = evaluate_role_fit(
+                    str(getattr(vacancy, "title", None) or ""),
+                    str(getattr(vacancy, "company", None) or ""),
+                    str(getattr(vacancy, "location", None) or ""),
+                    str(getattr(vacancy, "description", None) or ""),
+                )
+                role_fit_verdict = str(role_fit_decision.verdict)
+                role_fit_rules_json = json.dumps(
+                    list(role_fit_decision.rule_ids), ensure_ascii=False
+                )
+            except Exception as exc:  # noqa: BLE001 - observation must not fail the run
+                role_fit_verdict = "error"
+                role_fit_rules_json = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                role_fit_error_count += 1
+            finally:
+                role_fit_duration_seconds += perf_counter() - started_role_fit
+                role_fit_evaluated_count += 1
+            role_fit_cache[vacancy_key] = (role_fit_verdict, role_fit_rules_json)
+        role_fit_verdict, role_fit_rules_json = role_fit_cache[vacancy_key]
         # Dual-score fields: look up by vacancy URL if dual scoring was active
         dual = dual_scores_by_url.get(getattr(vacancy, "url", None) or "")
         score_v1: int | None = int(dual["score_v1"]) if dual and dual.get("score_v1") is not None else None
@@ -1048,6 +1077,8 @@ def record_daily_observability(
             selection_boundary_unknowns=list(
                 classification.get("selection_boundary_unknowns", ())
             ),
+            role_fit_verdict=role_fit_verdict,
+            role_fit_rules_json=role_fit_rules_json,
         )
         reasons = rejection_reasons_for(vacancy, evaluation, classification, duplicate=duplicate)
         top_reason = reasons[0] if reasons else None
@@ -1098,6 +1129,11 @@ def record_daily_observability(
                     }
                 )
     store.insert_vacancy_rejection_events(rejection_events)
+    return {
+        "evaluated_count": role_fit_evaluated_count,
+        "error_count": role_fit_error_count,
+        "duration_seconds": role_fit_duration_seconds,
+    }
 
 
 def _escape_label(value: str) -> str:

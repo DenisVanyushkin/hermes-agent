@@ -246,6 +246,8 @@ CREATE TABLE IF NOT EXISTS vacancy_observability (
     canonical_url TEXT,
     selection_boundary_reasons_json TEXT,
     selection_boundary_unknowns_json TEXT,
+    role_fit_verdict TEXT,
+    role_fit_rules_json TEXT,
     UNIQUE(run_id, vacancy_key, url),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
@@ -832,6 +834,8 @@ class JobIntelStore:
             self._ensure_column(conn, "vacancy_observability", "active_recommendation_version", "TEXT")
             self._ensure_column(conn, "vacancy_observability", "selection_boundary_reasons_json", "TEXT")
             self._ensure_column(conn, "vacancy_observability", "selection_boundary_unknowns_json", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "role_fit_verdict", "TEXT")
+            self._ensure_column(conn, "vacancy_observability", "role_fit_rules_json", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "reason_type", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_events", "severity", "TEXT")
             self._ensure_column(conn, "vacancy_rejection_summary", "recommendation", "TEXT")
@@ -961,6 +965,8 @@ CREATE TABLE vacancy_observability (
     score_v2 INTEGER,
     active_score INTEGER,
     recommendation TEXT,
+    role_fit_verdict TEXT,
+    role_fit_rules_json TEXT,
     UNIQUE(run_id, vacancy_key, url),
     FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE
 );
@@ -969,7 +975,8 @@ INSERT INTO vacancy_observability
            executive_detected, accepted, notified, score, score_band, confidence,
            is_duplicate, created_at,
            COALESCE(url, '') AS url,
-           company, title, location, score_v1, score_v2, active_score, recommendation
+           company, title, location, score_v1, score_v2, active_score, recommendation,
+           role_fit_verdict, role_fit_rules_json
     FROM _vacancy_observability_old;
 DROP TABLE _vacancy_observability_old;
 COMMIT;
@@ -1329,6 +1336,8 @@ PRAGMA foreign_keys=ON;
         active_recommendation_version: str | None = None,
         selection_boundary_reasons: list[str] | None = None,
         selection_boundary_unknowns: list[str] | None = None,
+        role_fit_verdict: str | None = None,
+        role_fit_rules_json: str | None = None,
     ) -> None:
         source_key = canonical_source_key(source)
         company_key = canonical_company_key(company)
@@ -1340,8 +1349,8 @@ PRAGMA foreign_keys=ON;
                     executive_detected, accepted, notified, score, score_band, confidence, is_duplicate, created_at,
                     company, canonical_company_key, title, location, url,
                     score_v1, score_v2, active_score, active_scoring_version, recommendation, active_recommendation_version, canonical_url,
-                    selection_boundary_reasons_json, selection_boundary_unknowns_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    selection_boundary_reasons_json, selection_boundary_unknowns_json, role_fit_verdict, role_fit_rules_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id, vacancy_key, url) DO UPDATE SET
                     source=excluded.source,
                     source_key=excluded.source_key,
@@ -1369,7 +1378,9 @@ PRAGMA foreign_keys=ON;
                     active_recommendation_version=excluded.active_recommendation_version,
                     canonical_url=excluded.canonical_url,
                     selection_boundary_reasons_json=excluded.selection_boundary_reasons_json,
-                    selection_boundary_unknowns_json=excluded.selection_boundary_unknowns_json
+                    selection_boundary_unknowns_json=excluded.selection_boundary_unknowns_json,
+                    role_fit_verdict=excluded.role_fit_verdict,
+                    role_fit_rules_json=excluded.role_fit_rules_json
                 """,
                 (
                     run_id,
@@ -1401,6 +1412,8 @@ PRAGMA foreign_keys=ON;
                     canonical_url,
                     json.dumps(selection_boundary_reasons or [], ensure_ascii=False),
                     json.dumps(selection_boundary_unknowns or [], ensure_ascii=False),
+                    role_fit_verdict,
+                    role_fit_rules_json,
                 ),
             )
 
