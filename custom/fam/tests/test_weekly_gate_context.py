@@ -1,32 +1,30 @@
 """The week's context must survive the LLM rewrite.
 
-Production incident 2026-09-20 20:00 Almaty: the ritual's first live
-send arrived as "\\n\\nЧто запланируем на неделю?" -- the whole week
-summary gone. gate.deliver builds the message from raw when the rewrite
-succeeds and only falls back to human_fallback when it fails, so context
-that exists solely in human_fallback is invisible on the happy path.
+Production incident, the ritual's first live send (2026-09-20): the
+message arrived as "\\n\\nЧто запланируем на неделю?" with the whole week
+missing. gate.deliver builds the text from `raw` whenever the rewrite
+succeeds and only reads human_fallback when it fails, so context that
+lives solely in the fallback is invisible on the happy path -- and five
+dry runs that stubbed gate.deliver all showed a perfect message.
 
-Every test here asserts against raw / the built prompt, never against a
-stubbed deliver -- stubbing deliver is what hid the bug for five dry
-runs.
+Nothing here stubs gate.deliver. The vertical cases stub only the two
+external edges: the model call and the transport.
 """
-import json
+import json as _json
 
 import pytest
 
-from fam import gate, plans, tick, weekly
+from fam import cal, gate, places, plans, tick, weekly
 
 
 class FakeDeliver:
     def __init__(self):
         self.calls = []
-        self.responses = []
 
     def __call__(self, conn, kind, raw, human_fallback, cfg, force=False,
                  now_utc=None, sent_ref=None):
-        self.calls.append({"kind": kind, "raw": raw,
-                           "human_fallback": human_fallback})
-        return self.responses.pop(0) if self.responses else "sent"
+        self.calls.append({"kind": kind, "raw": raw})
+        return "sent"
 
 
 @pytest.fixture()
@@ -51,32 +49,19 @@ def _followups(fd):
     return [c for c in fd.calls if c["kind"] == "followup"]
 
 
-def _seed(db):
-    from fam import cal
+# --- the payload reaches raw, not just the fallback -------------------
+
+def test_raw_carries_the_week_context(db, fake_deliver):
     cal.add(db, "Тренировка", "2026-07-22T05:00:00+00:00")   # Wed of W30
     plans.add(db, "Забрать куртку", deadline="2026-07-17")
     db.commit()
-
-
-# --- the context reaches raw, not just the fallback -------------------
-
-def test_raw_carries_the_week_context(db, fake_deliver):
-    _seed(db)
 
     tick.reminders(db, now_utc=SUNDAY_AT_FOLLOWUP, cfg=CFG)
 
     payload = _followups(fake_deliver)[0]["raw"]["weekly_plan"]
     assert payload["label"]
     assert payload["days"] == [{"day": "ср", "titles": ["Тренировка"]}]
-    assert "Забрать куртку" in [t["title"] for t in payload["tails"]]
-
-
-def test_raw_names_the_free_days(db, fake_deliver):
-    _seed(db)
-
-    tick.reminders(db, now_utc=SUNDAY_AT_FOLLOWUP, cfg=CFG)
-
-    payload = _followups(fake_deliver)[0]["raw"]["weekly_plan"]
+    assert [t["title"] for t in payload["tails"]] == ["Забрать куртку"]
     assert "сб" in payload["free_days"] and "вс" in payload["free_days"]
 
 
@@ -90,81 +75,61 @@ def test_an_empty_week_still_carries_the_label(db, fake_deliver):
 
 # --- the prompt the rewrite actually receives -------------------------
 
-def test_prompt_tells_the_rewrite_to_keep_the_week_listed(db):
-    raw = {"kind": "followup", "weekly_plan": {"label": "x", "days": [],
-                                               "free_days": [], "tails": []},
+def test_the_weekly_prompt_adds_the_carve_out_and_hides_the_question(db):
+    """The instruction exempts the plan from the generic 1-3 sentence
+    rule; the question is withheld because deliver() appends the real
+    one itself, and leaving it in <data> invites a paraphrased duplicate
+    the verbatim-only stripper cannot catch."""
+    raw = {"kind": "followup",
+           "weekly_plan": {"label": "x", "days": [], "free_days": [],
+                           "tails": []},
            "question": "Что запланируем на неделю?"}
 
     prompt = gate._build_prompt(raw, kind="followup")
 
-    assert "weekly_plan" in prompt
     assert gate.GATE_WEEKLY_PLAN_INSTRUCTION in prompt
-
-
-def test_the_question_is_kept_out_of_the_weekly_prompt(db):
-    """deliver() appends raw["question"] itself; leaving it in <data>
-    invites the rewrite to paraphrase it mid-text, producing a duplicate
-    the verbatim-only stripper cannot catch (the digest path already
-    learned this)."""
-    raw = {"kind": "followup", "weekly_plan": {"label": "x", "days": [],
-                                               "free_days": [], "tails": []},
-           "question": "Что запланируем на неделю?"}
-
-    prompt = gate._build_prompt(raw, kind="followup")
-
+    assert "weekly_plan" in prompt
     assert "Что запланируем на неделю?" not in prompt
 
 
 def test_an_ordinary_followup_prompt_is_untouched(db):
     """No weekly_plan -> the plain evening recap behaves exactly as
-    before, including keeping its own question in the payload."""
+    before, carve-out absent and its own question still in the payload."""
     raw = {"kind": "followup", "events": [], "plans": [],
            "question": tick.FOLLOWUP_QUESTION}
 
     prompt = gate._build_prompt(raw, kind="followup")
 
     assert gate.GATE_WEEKLY_PLAN_INSTRUCTION not in prompt
+    assert tick.FOLLOWUP_QUESTION in prompt
 
 
-# --- the regression test the production bug needed --------------------
+# --- vertical: the real gate, only the external edges stubbed ---------
 
 def test_the_week_survives_a_successful_rewrite(db, monkeypatch):
-    """Vertical: real gate.deliver, real prompt building, real question
-    appending. Only the two external edges are stubbed -- the model call
-    and the transport.
-
-    The stub rewrite does what a cooperative model does: it reflects the
-    data it was given. So if the week never reaches raw, the stub has
-    nothing to reflect and the message comes back as the bare question --
-    which is precisely how this failed in production on 2026-09-20. No
-    amount of stubbing gate.deliver itself would have caught that.
+    """The stub rewrite does what a cooperative model does: it reflects
+    the data it was handed. So a week that never reaches raw cannot
+    appear in the message -- precisely how this failed in production.
     """
-    import json as _json
-    from fam import cal, gate as gate_mod
-
-    cal.add(db, "Тренировка", "2026-07-22T05:00:00+00:00")   # Wed of W30
+    cal.add(db, "Тренировка", "2026-07-22T05:00:00+00:00")
     db.commit()
 
     def reflecting_rewrite(prompt, cfg):
         # The instruction text mentions the tag before the block itself,
         # so take the LAST opener.
         block = prompt.rsplit("<data>", 1)[1].split("</data>")[0]
-        payload = _json.loads(block)
-        week = payload.get("weekly_plan")
+        week = _json.loads(block).get("weekly_plan")
         if week is None:
             return "Как прошёл день?"
-        lines = [week["label"]]
-        lines += [f"{d['day']}: " + ", ".join(d["titles"]) for d in week["days"]]
-        return "\n".join(lines)
+        return "\n".join(
+            [week["label"]]
+            + [f"{d['day']}: " + ", ".join(d["titles"]) for d in week["days"]])
 
     sent = {}
-
-    def capture_send(text, cfg):
-        sent["text"] = text
-        return True, "stub-id"
-
-    monkeypatch.setattr(gate_mod, "_call_rewrite", reflecting_rewrite)
-    monkeypatch.setattr(gate_mod, "_call_send", capture_send)
+    monkeypatch.setattr(gate, "_call_rewrite", reflecting_rewrite)
+    monkeypatch.setattr(gate, "_call_send",
+                        lambda text, cfg: (sent.update(text=text),
+                                           (True, "stub-id"))[1])
 
     tick.reminders(db, now_utc=SUNDAY_AT_FOLLOWUP, cfg=CFG)
 
@@ -175,23 +140,22 @@ def test_the_week_survives_a_successful_rewrite(db, monkeypatch):
 
 
 def test_an_ordinary_followup_still_reaches_the_user(db, monkeypatch):
-    """The same vertical path, without a weekly plan: the plain evening
+    """The same vertical path without a weekly plan: the plain evening
     recap must keep working exactly as before."""
-    from fam import cal, gate as gate_mod, places, plans as plans_mod
-
     places.add(db, "Клиника", lat=43.2260, lon=76.8670)
     db.commit()
     ev = cal.add(db, "Врач", "2026-07-20T09:00:00+00:00", place="Клиника")
     db.commit()
-    pid = plans_mod.add(db, "Забрать справку")
+    pid = plans.add(db, "Забрать справку")
     db.commit()
-    plans_mod.attach(db, pid, ev["id"] if isinstance(ev, dict) else ev)
+    plans.attach(db, pid, ev["id"] if isinstance(ev, dict) else ev)
     db.commit()
 
     sent = {}
-    monkeypatch.setattr(gate_mod, "_call_rewrite", lambda p, c: "Вечерняя сводка.")
-    monkeypatch.setattr(gate_mod, "_call_send",
-                        lambda text, cfg: (sent.update(text=text), (True, "id"))[1])
+    monkeypatch.setattr(gate, "_call_rewrite", lambda p, c: "Вечерняя сводка.")
+    monkeypatch.setattr(gate, "_call_send",
+                        lambda text, cfg: (sent.update(text=text),
+                                           (True, "id"))[1])
 
     tick.reminders(db, now_utc="2026-07-20T15:00:00+00:00", cfg=CFG)
 

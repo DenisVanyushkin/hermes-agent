@@ -1554,11 +1554,9 @@ def _weekly_ritual_question(conn, date_local):
     """Sunday's weekly-planning question, or None when it is not due.
 
     Returns (snapshot, text) or (None, None). Due only on a Sunday whose
-    target week has no answer yet: "done"/"declined" silence it
-    permanently for that week, the same two terminal states the monthly
-    goal ritual uses. An "offered" week still returns the question --
-    the ritual repeats until answered, and the follow-up's own
-    once-a-day meta is what keeps that to one message per day.
+    target week is not already done/declined; the follow-up's own
+    once-a-day meta keeps an "offered" week to one message per day.
+    See weekly.repeat_question for the rest of the state machine.
     """
     if not weekly.is_ritual_day(date_local):
         return None, None
@@ -1766,11 +1764,8 @@ def _followup(conn, now_utc, cfg):
             # request. The weekly ask wins on Sunday; the day recap is
             # the part that can wait.
             #
-            # The context goes into raw, NOT just into human_fallback:
-            # gate.deliver rewrites `raw` whenever the LLM call works and
-            # only reads human_fallback when it fails. The first live
-            # send arrived as a bare question because the week existed
-            # solely in the fallback.
+            # The context goes into raw, not just human_fallback: see
+            # weekly.plan_payload.
             raw["weekly_plan"] = weekly.plan_payload(weekly_snapshot)
             lines.append(weekly_question)
         else:
@@ -1780,9 +1775,8 @@ def _followup(conn, now_utc, cfg):
         status = gate.deliver(conn, "followup", raw, human_fallback, cfg,
                                now_utc=now_utc)
         if status == "sent" and weekly_question is not None:
-            # Only on a real send, mirroring the follow-up's own meta
-            # contract: a budget/error refusal must not leave the ritual
-            # believing it already asked.
+            # Only on a real send: a budget/error refusal must not leave
+            # the ritual believing it already asked.
             weekly.record_offer(conn, weekly_snapshot["target_week"],
                                 date_local)
         if status == "sent" and prep_candidate is not None:

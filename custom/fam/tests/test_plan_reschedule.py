@@ -1,49 +1,47 @@
 """`plan due` -- move an open plan's deadline.
 
-The weekly ritual's tails need this: "перенеси на среду" was previously
-impossible without dropping the plan and re-adding it, which loses the
-row's id, its created_at and its audit history.
+The weekly ritual's tails need this: before it existed, "перенеси на
+среду" could only be done by dropping the plan and adding a new one,
+which loses the row id, its created_at and its audit history.
 """
 import pytest
 
-from fam import audit, plans
+from fam import plans
 
 
-def test_reschedule_moves_the_deadline(db):
-    pid = plans.add(db, "Забрать куртку", deadline="2026-09-18")
-    db.commit()
-
-    plans.reschedule(db, pid, "2026-09-24")
-    db.commit()
-
-    assert plans.get(db, pid)["deadline"] == "2026-09-24"
-
-
-def test_reschedule_keeps_the_same_row(db):
+def test_reschedule_moves_the_deadline_keeping_the_same_row(db):
+    """The point of the verb: a new date, everything else untouched."""
     pid = plans.add(db, "Забрать куртку", deadline="2026-09-18")
     db.commit()
     created = plans.get(db, pid)["created_at"]
 
-    plans.reschedule(db, pid, "2026-09-24")
+    assert plans.reschedule(db, pid, "2026-09-24") is True
     db.commit()
 
     after = plans.get(db, pid)
+    assert after["deadline"] == "2026-09-24"
     assert after["id"] == pid
     assert after["created_at"] == created
     assert after["status"] == "open"
+    assert "plan.reschedule" in [r[0] for r in
+                                 db.execute("SELECT kind FROM audit_log")]
 
 
-def test_reschedule_can_clear_the_deadline(db):
-    pid = plans.add(db, "Когда-нибудь", deadline="2026-09-18")
+@pytest.mark.parametrize("closed_status", ["done", "dropped"])
+def test_reschedule_refuses_a_closed_plan(db, closed_status):
+    """A closed plan's deadline records when it HAD been due; rewriting
+    it falsifies history, and `fam plan due` on one is a mistyped id far
+    more often than an intent."""
+    pid = plans.add(db, "Закрытое", deadline="2026-09-18")
+    plans.mark(db, pid, closed_status)
     db.commit()
 
-    plans.reschedule(db, pid, None)
-    db.commit()
-
-    assert plans.get(db, pid)["deadline"] is None
+    assert plans.reschedule(db, pid, "2026-09-24") is False
+    assert plans.get(db, pid)["deadline"] == "2026-09-18"
 
 
 def test_reschedule_validates_the_deadline_before_writing(db):
+    """Same "raise before any write" contract as plans.add."""
     pid = plans.add(db, "Забрать куртку", deadline="2026-09-18")
     db.commit()
 
@@ -55,34 +53,3 @@ def test_reschedule_validates_the_deadline_before_writing(db):
 
 def test_reschedule_returns_false_for_an_unknown_plan(db):
     assert plans.reschedule(db, 999, "2026-09-24") is False
-
-
-def test_reschedule_is_audited(db):
-    pid = plans.add(db, "Забрать куртку", deadline="2026-09-18")
-    db.commit()
-
-    plans.reschedule(db, pid, "2026-09-24")
-    db.commit()
-
-    kinds = [r["kind"] for r in db.execute("SELECT kind FROM audit_log")]
-    assert "plan.reschedule" in kinds
-
-
-def test_reschedule_refuses_a_closed_plan(db):
-    """`fam plan due` must not silently rewrite history: a done plan's
-    deadline is a record of when it was due, not a live field."""
-    pid = plans.add(db, "Сделано", deadline="2026-09-18")
-    plans.mark(db, pid, "done")
-    db.commit()
-
-    assert plans.reschedule(db, pid, "2026-09-24") is False
-    assert plans.get(db, pid)["deadline"] == "2026-09-18"
-
-
-def test_reschedule_refuses_a_dropped_plan(db):
-    pid = plans.add(db, "Отменено", deadline="2026-09-18")
-    plans.mark(db, pid, "dropped")
-    db.commit()
-
-    assert plans.reschedule(db, pid, "2026-09-24") is False
-    assert plans.get(db, pid)["deadline"] == "2026-09-18"

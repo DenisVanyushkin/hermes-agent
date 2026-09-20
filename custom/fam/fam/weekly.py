@@ -5,10 +5,10 @@ entity of its own: it is a conversation that ends in ordinary `plans`
 rows. So there is no weekly goal, no new table and no migration -- only
 the calendar arithmetic, the ritual's own meta state, and the text.
 
-Weeks are ISO weeks ('YYYY-Www', Monday..Sunday). The ISO YEAR is not
-always the calendar year: 1 Jan 2027 is a Friday and belongs to
-2026-W53, so every conversion here goes through date.isocalendar() /
-date.fromisocalendar() rather than any month/year arithmetic.
+Weeks are ISO weeks ('YYYY-Www', Monday..Sunday). The ISO year is not
+always the calendar year, so every conversion goes through
+date.isocalendar() / date.fromisocalendar() rather than month/year
+arithmetic of its own.
 
 Domain functions never commit -- callers (tests, CLI, tick) own the
 transaction, mirroring plans.py and goals.py.
@@ -28,10 +28,8 @@ def validate_week(period):
 
     Mirrors goals.validate_period's "raise before any insert" contract.
     The shape check alone is not enough: most years have 52 ISO weeks,
-    so 2021-W53 is well-formed but does not exist. Accepting it here
-    would only move the ValueError to whichever helper parsed it next,
-    which is the opposite of what a validator is for -- hence the
-    round-trip through fromisocalendar.
+    so 2021-W53 is well-formed but does not exist, and accepting it
+    would only move the ValueError to the next helper along.
     """
     if not isinstance(period, str):
         raise ValueError(f"invalid week: {period!r}")
@@ -57,20 +55,18 @@ def _format_week(iso_year, iso_week):
 def current_week(date_local):
     """'YYYY-MM-DD' (Asia/Almaty calendar date) -> its ISO week.
 
-    On a Sunday this is the week that ENDS today, since ISO weeks run
-    Monday..Sunday -- which is exactly why the Sunday ritual targets
-    next_week() rather than this one.
+    On a Sunday this is the week that ENDS today -- which is why the
+    Sunday ritual targets next_week() rather than this one.
     """
     iso = date.fromisoformat(date_local).isocalendar()
     return _format_week(iso[0], iso[1])
 
 
 def next_week(period):
-    """'YYYY-Www' -> the following ISO week, rolling the ISO year over.
+    """'YYYY-Www' -> the following ISO week.
 
-    Computed by stepping 7 days from the week's Monday rather than by
-    incrementing the number, because the last week of an ISO year is
-    52 or 53 depending on the year.
+    Steps 7 days from the week's Monday rather than incrementing the
+    number: the last week of an ISO year is 52 or 53 depending on year.
     """
     iso_year, iso_week = _parse_week(period)
     monday = date.fromisocalendar(iso_year, iso_week, 1) + timedelta(days=7)
@@ -374,10 +370,8 @@ def plan_payload(snapshot):
     """The week context as DATA for gate.deliver's rewrite prompt.
 
     question_text() renders the same facts for human_fallback, which is
-    only used when the rewrite fails. On the happy path gate.deliver
-    builds the message out of `raw`, so context that lives only in the
-    fallback never reaches the user -- exactly how the first live send
-    (2026-09-20) arrived as a bare question with the whole week missing.
+    read only when the rewrite FAILS -- so the payload, not the
+    fallback, is what actually reaches the user.
     """
     per_day = _group_by_day(snapshot["events"])
     return {

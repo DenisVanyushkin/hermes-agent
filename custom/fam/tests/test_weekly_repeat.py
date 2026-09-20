@@ -1,9 +1,9 @@
-"""Slice 2: closing the ritual cycle -- the Monday repeat and the verb
-that marks a week answered.
+"""Closing the ritual cycle: the Monday repeat and the verb that marks a
+week answered.
 
 Without a way to reach done/declined the state machine would sit in
-"offered" forever: the answer would create plans, but the ritual would
-never know it had been answered.
+"offered" forever -- the answer creating plans while the ritual went on
+believing it had never been answered.
 """
 import pytest
 
@@ -40,7 +40,6 @@ CFG = {
 # 2026-07-19 Sunday, 2026-07-20 Monday, 2026-07-21 Tuesday -> week W30.
 SUNDAY = "2026-07-19"
 MONDAY = "2026-07-20"
-TUESDAY = "2026-07-21"
 WEEK = "2026-W30"
 
 
@@ -49,22 +48,15 @@ WEEK = "2026-W30"
 def test_monday_repeats_an_unanswered_offer(db):
     weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
     db.commit()
+
     assert weekly.repeat_question(db, MONDAY) is not None
 
 
-def test_monday_repeat_targets_the_week_sunday_asked_about(db):
-    assert weekly.target_week(MONDAY) == WEEK
-
-
-def test_no_repeat_when_the_week_was_answered(db):
-    weekly.plan_state_set(db, WEEK, "done", SUNDAY)
+@pytest.mark.parametrize("answered", ["done", "declined"])
+def test_no_repeat_once_the_week_was_answered(db, answered):
+    weekly.plan_state_set(db, WEEK, answered, SUNDAY)
     db.commit()
-    assert weekly.repeat_question(db, MONDAY) is None
 
-
-def test_no_repeat_when_the_week_was_declined(db):
-    weekly.plan_state_set(db, WEEK, "declined", SUNDAY)
-    db.commit()
     assert weekly.repeat_question(db, MONDAY) is None
 
 
@@ -74,36 +66,46 @@ def test_no_repeat_when_nothing_was_ever_offered(db):
     assert weekly.repeat_question(db, MONDAY) is None
 
 
-def test_no_repeat_on_tuesday(db):
-    """Exactly one repeat: Monday's digest, then the week is left alone."""
+@pytest.mark.parametrize("day", [
+    "2026-07-21",   # Tuesday: at most ONE repeat, no daily nagging
+    SUNDAY,         # Sunday is the offer itself, not the repeat
+])
+def test_the_repeat_happens_on_monday_only(db, day):
     weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
     db.commit()
-    assert weekly.repeat_question(db, TUESDAY) is None
 
-
-def test_no_repeat_on_sunday_itself(db):
-    """Sunday is the offer, not the repeat."""
-    weekly.plan_state_set(db, "2026-W29", "offered", "2026-07-12")
-    db.commit()
-    assert weekly.repeat_question(db, SUNDAY) is None
+    assert weekly.repeat_question(db, day) is None
 
 
 # --- marking a week answered -------------------------------------------
 
-def test_mark_done_closes_the_cycle(db):
+@pytest.mark.parametrize("status", ["done", "declined"])
+def test_mark_closes_the_week_that_was_actually_offered(db, status):
+    """The week comes from the OPEN cycle, not from today: an answer can
+    arrive long after the question. Replying to Monday's question on the
+    following Sunday would otherwise close the NEXT week -- silencing it
+    before it was ever offered -- and leave W30 open forever.
+    """
+    weekly.plan_state_set(db, "2026-W29", "done", "2026-07-12")
     weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
     db.commit()
+
+    weekly.mark(db, "2026-07-26", status)      # the NEXT Sunday
+    db.commit()
+
+    assert weekly.plan_state_get(db, WEEK)[0] == status
+    assert weekly.plan_state_get(db, "2026-W31") is None
+
+
+def test_mark_falls_back_to_today_when_nothing_is_open(db):
+    """No open cycle -> she is planning on her own initiative, and
+    "today" is the only sensible target."""
     weekly.mark(db, MONDAY, "done")
     db.commit()
+
     assert weekly.plan_state_get(db, WEEK)[0] == "done"
-
-
-def test_mark_on_sunday_closes_the_week_just_offered(db):
-    weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
-    db.commit()
-    weekly.mark(db, SUNDAY, "declined")
-    db.commit()
-    assert weekly.plan_state_get(db, WEEK)[0] == "declined"
+    assert "weekly.mark" in [r[0] for r in
+                             db.execute("SELECT kind FROM audit_log")]
 
 
 def test_mark_rejects_an_unknown_status(db):
@@ -111,18 +113,20 @@ def test_mark_rejects_an_unknown_status(db):
         weekly.mark(db, MONDAY, "maybe")
 
 
-def test_mark_works_without_a_prior_offer(db):
-    """She may start planning on her own before the ritual asks."""
-    weekly.mark(db, MONDAY, "done")
+def test_recording_an_offer_never_reopens_an_answered_week(db):
+    """The send path reads the state, then makes a slow LLM call before
+    writing "offered". If she answers inside that window, the write must
+    not reopen the week she just closed."""
+    weekly.plan_state_set(db, WEEK, "done", SUNDAY)
     db.commit()
+
+    assert weekly.record_offer(db, WEEK, SUNDAY) is False
     assert weekly.plan_state_get(db, WEEK)[0] == "done"
 
 
-def test_mark_is_audited(db):
-    weekly.mark(db, MONDAY, "done")
-    db.commit()
-    kinds = [r[0] for r in db.execute("SELECT kind FROM audit_log")]
-    assert "weekly.mark" in kinds
+def test_recording_an_offer_on_a_fresh_week_works(db):
+    assert weekly.record_offer(db, WEEK, SUNDAY) is True
+    assert weekly.plan_state_get(db, WEEK) == ("offered", SUNDAY)
 
 
 # --- wiring into the morning digest ------------------------------------
@@ -139,7 +143,7 @@ def test_monday_digest_carries_the_repeat(db, fake_deliver):
 
 
 def test_the_monthly_ritual_drops_the_weekly_repeat(db, fake_deliver,
-                                                   monkeypatch):
+                                                    monkeypatch):
     """One planning question per message: the month wins and the weekly
     repeat is DROPPED, not deferred -- Tuesday is not eligible and next
     Sunday targets a different week. Accepted: the repeat is a courtesy,
@@ -154,62 +158,3 @@ def test_the_monthly_ritual_drops_the_weekly_repeat(db, fake_deliver,
 
     digests = [c for c in fake_deliver.calls if c["kind"] == "digest"]
     assert digests[0]["raw"]["question"] == "Готова запланировать цели на август?"
-
-
-# --- second-round review findings -------------------------------------
-
-def test_mark_closes_the_week_that_was_actually_offered(db):
-    """A late reply must not close a week nobody was asked about.
-
-    She answers Monday's question the following Sunday: deriving the
-    target from "today" would mark W31 done -- silencing a week before
-    it was ever offered -- while W30, the one actually asked about,
-    stayed open forever.
-    """
-    weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
-    db.commit()
-
-    weekly.mark(db, "2026-07-26", "done")     # the NEXT Sunday
-    db.commit()
-
-    assert weekly.plan_state_get(db, WEEK)[0] == "done"
-    assert weekly.plan_state_get(db, "2026-W31") is None
-
-
-def test_mark_falls_back_to_today_when_nothing_is_open(db):
-    """No open cycle -> she is planning on her own initiative, and
-    "today" is the only sensible target."""
-    weekly.mark(db, MONDAY, "done")
-    db.commit()
-    assert weekly.plan_state_get(db, WEEK)[0] == "done"
-
-
-def test_mark_prefers_the_open_cycle_over_a_closed_one(db):
-    weekly.plan_state_set(db, "2026-W29", "done", "2026-07-12")
-    weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
-    db.commit()
-
-    weekly.mark(db, "2026-07-26", "declined")
-    db.commit()
-
-    assert weekly.plan_state_get(db, WEEK)[0] == "declined"
-    assert weekly.plan_state_get(db, "2026-W29")[0] == "done"
-
-
-def test_recording_an_offer_never_overwrites_an_answer(db):
-    """The send path reads the state, then makes a slow LLM call before
-    writing "offered". If she answers in that window, the write must not
-    reopen the week she just closed."""
-    weekly.plan_state_set(db, WEEK, "done", SUNDAY)
-    db.commit()
-
-    weekly.record_offer(db, WEEK, SUNDAY)
-    db.commit()
-
-    assert weekly.plan_state_get(db, WEEK)[0] == "done"
-
-
-def test_recording_an_offer_on_a_fresh_week_works(db):
-    weekly.record_offer(db, WEEK, SUNDAY)
-    db.commit()
-    assert weekly.plan_state_get(db, WEEK) == ("offered", SUNDAY)

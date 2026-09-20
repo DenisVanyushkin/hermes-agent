@@ -1,63 +1,72 @@
-"""Weekly planning ritual: ISO-week helpers, target week, ritual state.
+"""Weekly planning ritual: ISO-week helpers, the snapshot, the message.
 
-The ritual asks on Sunday evening about the NEXT ISO week, and repeats
+The ritual asks on Sunday evening about the NEXT ISO week and repeats
 once in Monday's digest about that same week -- which by then is the
 current one. Like goals.compute_target_month, the target is a pure
-calendar rule with no stored state: once the calendar crosses into
-Monday, "next week" naturally becomes "this week", so an unanswered
-Sunday offer keeps resolving to the same target.
+calendar rule with no stored state, so an unanswered Sunday offer keeps
+resolving to the same target once the calendar crosses midnight.
 """
 import pytest
 
-from fam import weekly
+from fam import cal, plans, weekly
 
 
-# --- period helpers ---------------------------------------------------
+def _almaty_utc(date_local, hhmm="10:00"):
+    """Local Almaty wall time -> the UTC ISO string cal.add stores."""
+    from datetime import datetime, timezone
+    from fam.gate import ALMATY
+    y, m, d = (int(x) for x in date_local.split("-"))
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    return (datetime(y, m, d, hh, mm, tzinfo=ALMATY)
+            .astimezone(timezone.utc).isoformat(timespec="seconds"))
 
-def test_validate_week_accepts_iso_week():
-    assert weekly.validate_week("2026-W39") == "week"
+
+# --- calendar arithmetic ----------------------------------------------
+
+@pytest.mark.parametrize("week", ["2026-W39", "2026-W53"])
+def test_validate_week_accepts_real_weeks(week):
+    """2026 really does have a W53 (28 Dec 2026 - 3 Jan 2027)."""
+    assert weekly.validate_week(week) == "week"
 
 
 @pytest.mark.parametrize("bad", [
     "2026-W00", "2026-W54", "2026-39", "2026-W9", "2026-w39",
     "2026", "", None, 20260939,
+    "2021-W53",   # well-formed, but 2021 has only 52 ISO weeks
 ])
 def test_validate_week_rejects_bad_values(bad):
     with pytest.raises(ValueError):
         weekly.validate_week(bad)
 
 
-def test_current_week_sunday_belongs_to_the_week_that_ends_today():
-    # 2026-09-20 is a Sunday: ISO puts it at the END of week 38.
-    assert weekly.current_week("2026-09-20") == "2026-W38"
-
-
-def test_current_week_uses_iso_year_not_calendar_year():
-    """1 Jan 2027 is a Friday and still belongs to 2026-W53."""
-    assert weekly.current_week("2027-01-01") == "2026-W53"
+@pytest.mark.parametrize("day,expected", [
+    ("2026-09-20", "2026-W38"),   # Sunday ENDS its week
+    ("2026-09-21", "2026-W39"),   # Monday starts the next
+    ("2027-01-01", "2026-W53"),   # a Friday whose ISO year is 2026
+])
+def test_current_week(day, expected):
+    assert weekly.current_week(day) == expected
 
 
 def test_next_week_rolls_over_the_iso_year():
+    """Stepping by number would invent a 2026-W54."""
     assert weekly.next_week("2026-W53") == "2027-W01"
 
 
-def test_week_bounds_is_monday_to_sunday():
-    assert weekly.week_bounds("2026-W39") == ("2026-09-21", "2026-09-27")
+@pytest.mark.parametrize("week,bounds", [
+    ("2026-W39", ("2026-09-21", "2026-09-27")),
+    ("2026-W53", ("2026-12-28", "2027-01-03")),
+])
+def test_week_bounds_run_monday_to_sunday(week, bounds):
+    assert weekly.week_bounds(week) == bounds
 
 
-def test_week_bounds_across_the_year_boundary():
-    assert weekly.week_bounds("2026-W53") == ("2026-12-28", "2027-01-03")
-
-
-# --- target week: the pure calendar rule ------------------------------
-
-def test_target_week_on_sunday_is_the_week_that_starts_tomorrow():
-    assert weekly.target_week("2026-09-20") == "2026-W39"
-
-
-def test_target_week_on_monday_is_that_same_week():
-    """The Monday repeat must land on the week Sunday asked about."""
-    assert weekly.target_week("2026-09-21") == "2026-W39"
+@pytest.mark.parametrize("day", ["2026-09-20", "2026-09-21"])
+def test_target_week_is_the_same_across_the_sunday_monday_handover(day):
+    """Sunday's "next week" IS Monday's "this week" -- which is what
+    lets the Monday repeat land on the week Sunday asked about, with no
+    stored bookkeeping."""
+    assert weekly.target_week(day) == "2026-W39"
 
 
 def test_is_ritual_day_only_on_sunday():
@@ -67,12 +76,11 @@ def test_is_ritual_day_only_on_sunday():
 
 # --- ritual state ------------------------------------------------------
 
-def test_plan_state_is_none_before_any_cycle(db):
+def test_plan_state_round_trips(db):
     assert weekly.plan_state_get(db, "2026-W39") is None
 
-
-def test_plan_state_round_trips(db):
     weekly.plan_state_set(db, "2026-W39", "offered", "2026-09-20")
+
     assert weekly.plan_state_get(db, "2026-W39") == ("offered", "2026-09-20")
 
 
@@ -81,20 +89,7 @@ def test_plan_state_rejects_unknown_status(db):
         weekly.plan_state_set(db, "2026-W39", "maybe", "2026-09-20")
 
 
-
-
-# --- the snapshot the Sunday message is built from --------------------
-
-def _almaty_utc(date_local, hhmm="10:00"):
-    """Local Almaty wall time -> the UTC ISO string cal.add stores."""
-    from datetime import datetime
-    from fam.gate import ALMATY
-    from datetime import timezone as _tz
-    y, m, d = (int(x) for x in date_local.split("-"))
-    hh, mm = (int(x) for x in hhmm.split(":"))
-    return (datetime(y, m, d, hh, mm, tzinfo=ALMATY)
-            .astimezone(_tz.utc).isoformat(timespec="seconds"))
-
+# --- the snapshot ------------------------------------------------------
 
 def test_info_on_an_empty_base_still_names_the_target_week(db):
     info = weekly.info(db, "2026-09-20")
@@ -105,106 +100,75 @@ def test_info_on_an_empty_base_still_names_the_target_week(db):
     assert info["tails"] == []
 
 
-def test_info_lists_events_inside_the_target_week(db):
-    from fam import cal
-    cal.add(db, "Тренировка", _almaty_utc("2026-09-23"))
-    db.commit()
-    titles = [e["title"] for e in weekly.info(db, "2026-09-20")["events"]]
-    assert titles == ["Тренировка"]
-
-
-def test_info_excludes_events_outside_the_target_week(db):
-    from fam import cal
-    # Sunday of the CURRENT week (today) and Monday of the week after.
+def test_info_window_is_the_target_weeks_almaty_days(db):
+    """Both edges included, neighbours excluded -- and the edges are
+    LOCAL midnights, so a 00:30 Monday and a 23:30 Sunday both fall
+    inside even though plain UTC bounds would drop one."""
+    cal.add(db, "Понедельник", _almaty_utc("2026-09-21", "00:30"))
+    cal.add(db, "Воскресенье", _almaty_utc("2026-09-27", "23:30"))
     cal.add(db, "Сегодняшнее", _almaty_utc("2026-09-20"))
     cal.add(db, "Через две недели", _almaty_utc("2026-09-28"))
     db.commit()
-    assert weekly.info(db, "2026-09-20")["events"] == []
 
-
-def test_info_includes_the_boundary_days_of_the_week(db):
-    from fam import cal
-    cal.add(db, "Понедельник", _almaty_utc("2026-09-21", "00:30"))
-    cal.add(db, "Воскресенье", _almaty_utc("2026-09-27", "23:30"))
-    db.commit()
     titles = sorted(e["title"] for e in weekly.info(db, "2026-09-20")["events"])
     assert titles == ["Воскресенье", "Понедельник"]
 
 
-def test_tails_are_open_plans_overdue_before_the_target_week(db):
-    from fam import plans
-    plans.add(db, "Забрать куртку", deadline="2026-09-18")
+def test_a_plan_overdue_before_today_is_a_tail(db):
+    plans.add(db, "Вчерашнее", deadline="2026-09-19")
     db.commit()
+
     tails = weekly.info(db, "2026-09-20")["tails"]
-    assert [t["title"] for t in tails] == ["Забрать куртку"]
-    assert tails[0]["deadline"] == "2026-09-18"
+
+    assert [t["title"] for t in tails] == ["Вчерашнее"]
+    assert tails[0]["deadline"] == "2026-09-19"
 
 
-def test_a_plan_due_inside_the_target_week_is_not_a_tail(db):
-    from fam import plans
+def test_a_plan_due_today_is_not_yet_a_tail(db):
+    """Overdue means overdue TODAY, not "before the target week starts".
+    The ritual runs on Sunday evening and the week begins next morning,
+    so comparing against Monday would brand a task still due today as
+    late. Matches tick._burning_plans (deadline < today)."""
+    plans.add(db, "Сегодня ещё можно", deadline="2026-09-20")
+    db.commit()
+
+    assert weekly.info(db, "2026-09-20")["tails"] == []
+
+
+def test_plans_that_are_not_tails(db):
+    """Due inside the week, attached to an event, closed, or undated --
+    none of them are leftovers from the week before."""
     plans.add(db, "Внутри недели", deadline="2026-09-24")
-    db.commit()
-    assert weekly.info(db, "2026-09-20")["tails"] == []
-
-
-def test_a_plan_attached_to_an_event_is_not_a_tail(db):
-    from fam import cal, plans
+    plans.add(db, "Без срока", deadline=None)
+    closed = plans.add(db, "Сделано", deadline="2026-09-18")
+    plans.mark(db, closed, "done")
     ev = cal.add(db, "Дантист", _almaty_utc("2026-09-23"))
-    pid = plans.add(db, "Забрать справку", deadline="2026-09-18")
-    plans.attach(db, pid, ev["id"] if isinstance(ev, dict) else ev)
+    attached = plans.add(db, "Забрать справку", deadline="2026-09-18")
+    plans.attach(db, attached, ev["id"] if isinstance(ev, dict) else ev)
     db.commit()
+
     assert weekly.info(db, "2026-09-20")["tails"] == []
 
 
-def test_a_closed_plan_is_not_a_tail(db):
-    from fam import plans
-    pid = plans.add(db, "Сделано", deadline="2026-09-18")
-    plans.mark(db, pid, "done")
-    db.commit()
-    assert weekly.info(db, "2026-09-20")["tails"] == []
+# --- the message -------------------------------------------------------
 
-
-def test_a_plan_with_no_deadline_is_not_a_tail(db):
-    """No deadline means no week to be late for -- rule 26 of the skill
-    is what stops such plans being created during the ritual."""
-    from fam import plans
-    plans.add(db, "Когда-нибудь", deadline=None)
-    db.commit()
-    assert weekly.info(db, "2026-09-20")["tails"] == []
-
-
-# --- the message text --------------------------------------------------
-
-def test_question_text_names_the_week_range(db):
-    text = weekly.question_text(weekly.info(db, "2026-09-20"))
-    assert "21" in text and "27 сентября" in text
-
-
-def test_question_text_spans_two_months_when_the_week_does(db):
-    text = weekly.question_text(weekly.info(db, "2026-09-27"))
-    assert "28 сентября" in text and "4 октября" in text
-
-
-def test_question_text_lists_events_and_tails(db):
-    from fam import cal, plans
-    cal.add(db, "Тренировка", _almaty_utc("2026-09-23"))
-    plans.add(db, "Забрать куртку", deadline="2026-09-18")
-    db.commit()
-    text = weekly.question_text(weekly.info(db, "2026-09-20"))
-    assert "Тренировка" in text
-    assert "Забрать куртку" in text
+@pytest.mark.parametrize("today,expected", [
+    ("2026-09-20", "21–27 сентября"),
+    ("2026-09-27", "28 сентября — 4 октября"),   # spans two months
+])
+def test_question_text_names_the_week_range(db, today, expected):
+    assert expected in weekly.question_text(weekly.info(db, today))
 
 
 def test_question_text_says_the_week_is_empty_when_it_is(db):
-    text = weekly.question_text(weekly.info(db, "2026-09-20"))
-    assert "пока пусто" in text.lower()
+    assert "пока пусто" in weekly.question_text(
+        weekly.info(db, "2026-09-20")).lower()
 
 
-# --- a busy week must not arrive as a wall of text --------------------
-
-def _seed_busy_week(db):
-    from fam import cal
-    # 16 events across Mon-Fri, the real shape of Amina's 2026-W39.
+def test_every_week_renders_as_one_line_per_day(db):
+    """One rendering, however full the week: titles kept, height bounded
+    at seven lines. 16 events as 16 lines is not a chat message; bare
+    counts would drop the titles she answers against."""
     for day, times in (("2026-09-21", ("10:00", "14:00", "15:00", "19:00")),
                        ("2026-09-22", ("14:00",)),
                        ("2026-09-23", ("10:00", "15:15", "19:00")),
@@ -214,75 +178,21 @@ def _seed_busy_week(db):
             cal.add(db, f"Дело {day} {hhmm}", _almaty_utc(day, hhmm))
     db.commit()
 
-
-def test_a_busy_week_collapses_to_one_line_per_day(db):
-    """16 events must not become 16 lines in a WhatsApp message. One
-    line per day keeps every title while bounding the height at seven."""
-    _seed_busy_week(db)
     text = weekly.question_text(weekly.info(db, "2026-09-20"))
-    day_lines = [ln for ln in text.splitlines() if ln.startswith(("пн", "вт", "ср", "чт", "пт", "сб", "вс"))]
+
+    day_lines = [ln for ln in text.splitlines()
+                 if ln[:2] in ("пн", "вт", "ср", "чт", "пт", "сб", "вс")]
     assert len(day_lines) == 5
-
-
-def test_a_busy_week_names_the_free_days(db):
-    """Where to put something new is the point of the context."""
-    _seed_busy_week(db)
-    text = weekly.question_text(weekly.info(db, "2026-09-20"))
     assert "Свободны: сб, вс." in text
 
 
-def test_a_quiet_week_uses_the_same_rendering(db):
-    """No second code path for a light week -- one line per busy day."""
-    from fam import cal
-    cal.add(db, "Тренировка", _almaty_utc("2026-09-23"))
-    cal.add(db, "Дантист", _almaty_utc("2026-09-24"))
-    db.commit()
-    text = weekly.question_text(weekly.info(db, "2026-09-20"))
-    assert "ср: Тренировка" in text
-    assert "чт: Дантист" in text
-
-
-def test_several_events_on_one_day_share_its_line(db):
-    from fam import cal
+def test_a_days_events_share_its_line_with_the_tails_below(db):
     cal.add(db, "Тренировка", _almaty_utc("2026-09-23", "10:00"))
     cal.add(db, "Робототехника", _almaty_utc("2026-09-23", "15:15"))
+    plans.add(db, "Забрать куртку", deadline="2026-09-18")
     db.commit()
+
     text = weekly.question_text(weekly.info(db, "2026-09-20"))
+
     assert "ср: Тренировка, Робототехника" in text
-
-
-# --- review findings ---------------------------------------------------
-
-def test_a_plan_due_today_is_not_yet_a_tail(db):
-    """Overdue means overdue TODAY, not "before the target week starts".
-
-    The ritual runs on Sunday evening, and the target week begins the
-    next morning -- so comparing against Monday would brand a task still
-    due today as «срок был», hours before it is actually late. The rest
-    of the app (tick._burning_plans) calls a plan overdue only when
-    deadline < today; this must agree with it.
-    """
-    from fam import plans
-    plans.add(db, "Сегодня ещё можно", deadline="2026-09-20")
-    db.commit()
-    assert weekly.info(db, "2026-09-20")["tails"] == []
-
-
-def test_a_plan_due_yesterday_is_a_tail(db):
-    from fam import plans
-    plans.add(db, "Вчерашнее", deadline="2026-09-19")
-    db.commit()
-    assert [t["title"] for t in weekly.info(db, "2026-09-20")["tails"]] \
-        == ["Вчерашнее"]
-
-
-def test_validate_week_rejects_a_week_that_year_does_not_have(db):
-    """2021 has 52 ISO weeks. Accepting 2021-W53 here only moves the
-    ValueError to whichever helper parses it next, which is exactly what
-    a validator exists to prevent."""
-    with pytest.raises(ValueError):
-        weekly.validate_week("2021-W53")
-
-
-def test_validate_week_still_accepts_a_real_week_53(db):
-    assert weekly.validate_week("2026-W53") == "week"
+    assert "Забрать куртку" in text
