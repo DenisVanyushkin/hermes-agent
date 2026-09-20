@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 from typing import Any, Iterable, Literal
 
@@ -119,6 +121,43 @@ _LANGUAGE_DISTINCTIVE_SERVICE_WORDS = {
 _ENGLISH_LOW_SIGNAL_WORDS = frozenset(
     "a an and are as at be been by but for from had has have he her in is it its me of on or that the their them these they this those to was we were what when which who will with you".split()
 )
+_LANGUAGE_SCORE_WORDS = {
+    code: {
+        "ambiguous": tuple(
+            word
+            for word in service_words
+            if word in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
+        ),
+        "exclusive": tuple(
+            word
+            for word in service_words
+            if word not in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
+        ),
+    }
+    for code, service_words in _LANGUAGE_SERVICE_WORDS.items()
+}
+_LANGUAGE_SCORE_WORDS["en"]["high_signal"] = tuple(
+    word
+    for word in _LANGUAGE_SERVICE_WORDS["en"]
+    if word not in _ENGLISH_LOW_SIGNAL_WORDS
+    and word not in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
+)
+_LANGUAGE_SCORE_WORDS["en"]["low_signal"] = tuple(_ENGLISH_LOW_SIGNAL_WORDS)
+_LANGUAGE_SCORE_KIND_INDEX = {"exclusive": 0, "high_signal": 0, "ambiguous": 1, "low_signal": 2}
+_LANGUAGE_TOKEN_SCORE_KINDS: dict[str, tuple[tuple[str, tuple[int, ...]], ...]] = {}
+_token_score_kinds: dict[str, dict[str, list[int]]] = {}
+for _code, _score_words in _LANGUAGE_SCORE_WORDS.items():
+    for _kind, _words in _score_words.items():
+        if _code == "en" and _kind == "exclusive":
+            continue
+        for _word in _words:
+            _token_score_kinds.setdefault(_word, {}).setdefault(_code, []).append(
+                _LANGUAGE_SCORE_KIND_INDEX[_kind]
+            )
+for _word, _code_kinds in _token_score_kinds.items():
+    _LANGUAGE_TOKEN_SCORE_KINDS[_word] = tuple(
+        (_code, tuple(kinds)) for _code, kinds in _code_kinds.items()
+    )
 _LANGUAGE_LETTER_RANGES = {
     "cyrillic": ((0x0400, 0x04FF),),
     "latin": ((0x0041, 0x005A), (0x0061, 0x007A)),
@@ -175,6 +214,37 @@ _SCOPE_SIGNALS = (
     r"\bsingle\s+(?:product|vertical)\b",
     r"\b(?:product|business)\s+vertical\b",
     r"\bproduct\s+portfolio\b",
+)
+_ROLE_SIGNAL_TERMS = (
+    "chief",
+    "head",
+    "director",
+    "vp",
+    "vice president",
+    "group",
+    "product",
+    "cpo",
+    "saas",
+    "software",
+    "b2b",
+    "enterprise",
+    "cloud",
+    "developer",
+    "platform",
+    "technology",
+    "digital",
+    "tech",
+    "ai",
+    "artificial intelligence",
+    "machine learning",
+    "ml",
+    "online",
+    "web",
+    "mobile",
+    "co-founder",
+    "vertical",
+    "portfolio",
+    "single",
 )
 _LOCALIZED_LANGUAGE_REQUIREMENTS = {
     "fr": (
@@ -281,9 +351,21 @@ def evaluate_role_fit(
     sentences = _sentences(text)
     matches: list[RuleMatch] = []
 
-    software_fragments = _find_patterns(text, (*_PRODUCT_LEADERSHIP, *_SOFTWARE_SIGNALS, *_SCOPE_SIGNALS))
-    leadership_fragments = _find_patterns(title, _PRODUCT_LEADERSHIP)
-    software_signal_fragments = _find_patterns(text, _SOFTWARE_SIGNALS)
+    lower_text = text.lower()
+    has_role_signal = any(term in lower_text for term in _ROLE_SIGNAL_TERMS)
+    software_fragments = (
+        _find_patterns(text, (*_PRODUCT_LEADERSHIP, *_SOFTWARE_SIGNALS, *_SCOPE_SIGNALS))
+        if has_role_signal
+        else ()
+    )
+    leadership_fragments = (
+        _find_patterns(title, _PRODUCT_LEADERSHIP)
+        if any(term in title.lower() for term in _ROLE_SIGNAL_TERMS)
+        else ()
+    )
+    software_signal_fragments = (
+        _find_patterns(text, _SOFTWARE_SIGNALS) if has_role_signal else ()
+    )
     if leadership_fragments and software_signal_fragments:
         matches.append(
             RuleMatch(
@@ -339,13 +421,68 @@ def _sentences(text: str) -> tuple[str, ...]:
     )
 
 
+@lru_cache(maxsize=512)
+def _compiled_pattern(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern, re.IGNORECASE)
+
+
+_LANGUAGE_REQUIRED_CUES = _compiled_pattern(
+    r"\b(?:required|mandatory|must\s+(?:speak|be)|fluent|native|professional(?:ly)?\s+proficien(?:cy|t)|proficiency|business[- ]level|working\s+language|language\s+of\s+work|language\s+skills|excellent\s+command|excellent\s+communication|communication|oral|written|spoken|written\s+and\s+spoken|spoken\s+and\s+written|speaker|speaking)\b"
+)
+_OPTIONAL_LANGUAGE_CUES = _compiled_pattern(
+    r"\b(?:preferred|nice\s+to\s+have|bonus|plus|advantage|desirable|optional)\b|\bnot\s+required\b"
+)
+_LOCALIZED_LANGUAGE_REQUIREMENT_PATTERNS = {
+    code: tuple(_compiled_pattern(pattern) for pattern in patterns)
+    for code, patterns in _LOCALIZED_LANGUAGE_REQUIREMENTS.items()
+}
+_LANGUAGE_CODE_REQUIREMENT_PATTERNS = {
+    code: tuple(_compiled_pattern(pattern) for pattern in patterns)
+    for code, patterns in _LANGUAGE_CODE_REQUIREMENTS.items()
+}
+_AD_NEGATION_PATTERN = _compiled_pattern(
+    r"\b(?:not|no)\s+(?:an?\s+)?(?:advertising|adtech|ad\s*tech)\s+(?:platform|company|business)\b"
+)
+_AD_PLATFORM_PATTERN = _compiled_pattern(
+    r"\b(?:adtech|ad\s*tech|advertising\s+technology\s+(?:platform|company|business)|programmatic\s+advertising\s+(?:platform|business)|advertising\s+platform|demand[- ]side\s+platform)\b"
+)
+_AD_SUBJECT_PATTERN = _compiled_pattern(
+    r"\b(?:ad[- ]?serv(?:ing|er)|dsp|ssp|ad\s+ops?|ad\s+operations|ad\s+exchange|real[- ]time\s+bidding|rtb|ad(?:vertising)?\s+auction|demand[- ]side\s+platform|advertising\s+inventory|campaign\s+delivery|ecpm|monetization)\b"
+)
+_NEGATED_SUBJECT_PATTERN = _compiled_pattern(r"\b(?:not|without|never|no)\s*$")
+_EXPERIENCE_PREFIX_PATTERN = _compiled_pattern(
+    r"\b(?:experience|background|familiarity)\s+with\s+(?:an?\s+)?$"
+)
+_ECOMMERCE_DUTY_PATTERN = _compiled_pattern(
+    r"\b(?:assortment|procurement|purchasing|sourcing|margin|merchandising|category\s+management|range\s+planning|supplier\s+(?:management|relationships?))\b"
+)
+
+
+@lru_cache(maxsize=128)
+def _combined_pattern(patterns: tuple[str, ...]) -> re.Pattern[str]:
+    return re.compile("|".join(f"(?:{pattern})" for pattern in patterns), re.IGNORECASE)
+
+
+_LANGUAGE_NAME_COMBINED = _combined_pattern(tuple(rf"\b{re.escape(name)}\b" for name in _LANGUAGE_NAMES))
+_LANGUAGE_ANY_REQUIREMENT_PATTERN = _combined_pattern(
+    tuple(
+        pattern
+        for patterns in (*_LOCALIZED_LANGUAGE_REQUIREMENTS.values(), *_LANGUAGE_CODE_REQUIREMENTS.values())
+        for pattern in patterns
+    )
+    + tuple(rf"\b{re.escape(name)}\b" for name in _LANGUAGE_NAMES)
+)
+
+
 def _find_patterns(text: str, patterns: Iterable[str]) -> tuple[str, ...]:
-    found: list[tuple[int, str]] = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            fragment = text[match.start() : match.end()].strip()
-            if fragment:
-                found.append((match.start(), fragment))
+    pattern_tuple = tuple(patterns)
+    if not pattern_tuple:
+        return ()
+    found = [
+        (match.start(), text[match.start() : match.end()].strip())
+        for match in _combined_pattern(pattern_tuple).finditer(text)
+        if match.group()
+    ]
     unique: list[str] = []
     for _, fragment in sorted(found):
         if fragment not in unique:
@@ -360,29 +497,42 @@ def _unsupported_description_language_match(
     dominance_margin: int = _LANGUAGE_DOMINANCE_MARGIN,
 ) -> RuleMatch | None:
     description = description.strip()
-    tokens = tuple(re.findall(r"[^\W\d_]+", description.lower(), flags=re.UNICODE))
+    lower_description = description.lower()
+    tokens = tuple(re.findall(r"[^\W\d_]+", lower_description, flags=re.UNICODE))
     if len(tokens) < _MIN_LANGUAGE_TEXT_TOKENS:
         return None
+    sentences = _sentences(description)
 
     allowed = {_normalise_language(language) for language in supported_languages}
     if set(KNOWN_LANGUAGE_CODES).issubset(allowed):
         return None
     cyrillic_letters = _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES["cyrillic"])
     latin_letters = _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES["latin"])
+    script_letter_counts = {
+        "cyrillic": cyrillic_letters,
+        "latin": latin_letters,
+        **{
+            script: _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES[script])
+            for script in {"arabic", "cjk", "hangul"}
+        },
+    }
+    token_counts = Counter(tokens)
+    language_marker_counts = Counter(
+        _LANGUAGES[token] for token in tokens if token in _LANGUAGES
+    )
+    description_letter_counts = Counter(lower_description)
+    distinctive_letter_counts = {
+        code: sum(description_letter_counts.get(letter, 0) for letter in letters)
+        for code, letters in _LANGUAGE_DISTINCTIVE_LETTERS.items()
+    }
+    language_service_scores = _language_service_scores(tokens)
     scores: dict[str, int] = {}
     for code, service_words in _LANGUAGE_SERVICE_WORDS.items():
-        service_score = _base_language_service_score(code, tokens)
-        marker_score = sum(
-            token in _LANGUAGES and _LANGUAGES[token] == code
-            for token in tokens
-        )
-        distinctive_score = sum(char in _LANGUAGE_DISTINCTIVE_LETTERS.get(code, ()) for char in description.lower())
+        service_score = language_service_scores[code]
+        marker_score = language_marker_counts.get(code, 0)
+        distinctive_score = distinctive_letter_counts.get(code, 0)
         script_name = _LANGUAGE_SCRIPT_BY_CODE.get(code)
-        script_letters = (
-            _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES[script_name])
-            if script_name is not None
-            else 0
-        )
+        script_letters = script_letter_counts.get(script_name, 0)
         script_score = min(script_letters // 8, 3)
         if code == "en" and latin_letters >= 8:
             script_score += 1
@@ -395,7 +545,7 @@ def _unsupported_description_language_match(
     )
     if best_unsupported is None:
         return None
-    unsupported_service_score = _base_language_service_score(best_unsupported, tokens)
+    unsupported_service_score = language_service_scores[best_unsupported]
     unsupported_service_score += min(
         sum(
             token in _LANGUAGES and _LANGUAGES[token] == best_unsupported
@@ -404,24 +554,17 @@ def _unsupported_description_language_match(
         2,
     )
     unsupported_service_score += min(
-        sum(char in _LANGUAGE_DISTINCTIVE_LETTERS.get(best_unsupported, ()) for char in description.lower()),
+        distinctive_letter_counts.get(best_unsupported, 0),
         2,
     )
     unsupported_script = _LANGUAGE_SCRIPT_BY_CODE.get(best_unsupported)
-    unsupported_script_letters = (
-        _count_letters_in_ranges(description, _LANGUAGE_LETTER_RANGES[unsupported_script])
-        if unsupported_script is not None
-        else 0
-    )
+    unsupported_script_letters = script_letter_counts.get(unsupported_script, 0)
     unsupported_service_score += min(unsupported_script_letters // 8, 3)
     distinctive_word_count = sum(
         token in _LANGUAGE_DISTINCTIVE_SERVICE_WORDS.get(best_unsupported, frozenset())
         for token in tokens
     )
-    distinctive_letter_count = sum(
-        char in _LANGUAGE_DISTINCTIVE_LETTERS.get(best_unsupported, frozenset())
-        for char in description.lower()
-    )
+    distinctive_letter_count = distinctive_letter_counts.get(best_unsupported, 0)
     distinctive_word_evidence = distinctive_word_count > 0
     distinctive_letter_evidence = distinctive_letter_count > 0
     script_evidence = unsupported_script_letters >= 8
@@ -440,7 +583,7 @@ def _unsupported_description_language_match(
         ):
             return _unknown_language_match(
                 description,
-                _sentences(description),
+                sentences,
                 tuple(sorted(allowed)),
                 scores,
                 len(tokens),
@@ -453,7 +596,7 @@ def _unsupported_description_language_match(
         ):
             return _unknown_language_match(
                 description,
-                _sentences(description),
+                sentences,
                 tuple(sorted(allowed)),
                 scores,
                 len(tokens),
@@ -482,11 +625,10 @@ def _unsupported_description_language_match(
     if unsupported_service_score < minimum_service_score:
         return None
     if best_supported_score >= 1:
-        required_language_match = _language_match(_sentences(description), allowed)
+        required_language_match = _language_match(sentences, allowed)
         if required_language_match is not None:
             return None
 
-    sentences = _sentences(description)
     service_words = _LANGUAGE_SERVICE_WORDS[best_unsupported]
     fragments = tuple(
         sentence
@@ -540,33 +682,64 @@ def _has_unsupported_language_title_marker(title: str, supported_codes: set[str]
     )
 
 
-def _base_language_service_score(code: str, tokens: tuple[str, ...]) -> int:
-    service_words = _LANGUAGE_SERVICE_WORDS[code]
+def _base_language_service_score(
+    code: str,
+    tokens: tuple[str, ...],
+    token_counts: dict[str, int] | None = None,
+) -> int:
+    token_counts = token_counts if token_counts is not None else Counter(tokens)
+    score_words = _LANGUAGE_SCORE_WORDS[code]
     ambiguous_score = sum(
-        token in service_words and token in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
-        for token in tokens
+        token_counts.get(token, 0) for token in score_words["ambiguous"]
     )
     exclusive_score = sum(
-        token in service_words and token not in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
-        for token in tokens
+        token_counts.get(token, 0) for token in score_words["exclusive"]
     )
     if code != "en":
         return exclusive_score + min(ambiguous_score, 2)
     high_signal_score = sum(
-        token in service_words
-        and token not in _ENGLISH_LOW_SIGNAL_WORDS
-        and token not in _AMBIGUOUS_LANGUAGE_SERVICE_WORDS
-        for token in tokens
+        token_counts.get(token, 0) for token in score_words["high_signal"]
     )
     low_signal_score = min(
-        sum(token in _ENGLISH_LOW_SIGNAL_WORDS for token in tokens),
+        sum(token_counts.get(token, 0) for token in score_words["low_signal"]),
         4,
     )
     return high_signal_score + low_signal_score + min(ambiguous_score, 2)
 
 
+def _language_service_scores(tokens: tuple[str, ...]) -> dict[str, int]:
+    counts = {
+        code: [0, 0, 0]
+        for code in _LANGUAGE_SERVICE_WORDS
+    }
+    for token in tokens:
+        for code, kinds in _LANGUAGE_TOKEN_SCORE_KINDS.get(token, ()):
+            for kind in kinds:
+                counts[code][kind] += 1
+    return {
+        code: (
+            values[0]
+            + min(values[1], 2)
+            if code != "en"
+            else values[0] + min(values[2], 4) + min(values[1], 2)
+        )
+        for code, values in counts.items()
+    }
+
+
+@lru_cache(maxsize=16)
+def _letter_range_translation_table(
+    ranges: tuple[tuple[int, int], ...],
+) -> dict[int, None]:
+    return {
+        codepoint: None
+        for start, end in ranges
+        for codepoint in range(start, end + 1)
+    }
+
+
 def _count_letters_in_ranges(text: str, ranges: tuple[tuple[int, int], ...]) -> int:
-    return sum(any(start <= ord(char) <= end for start, end in ranges) for char in text)
+    return len(text) - len(text.translate(_letter_range_translation_table(ranges)))
 
 
 def _supported_sentence_coverage(
@@ -583,7 +756,11 @@ def _supported_sentence_coverage(
         return 100, 0
 
     supported_count = 0
+    minimum_supported_count = (
+        len(substantive_sentences) * _MIN_SUPPORTED_SENTENCE_COVERAGE_PERCENT + 99
+    ) // 100
     for sentence, tokens in substantive_sentences:
+        sentence_service_scores = _language_service_scores(tokens)
         sentence_scores = []
         for code in supported_languages:
             if code == "ru":
@@ -591,11 +768,13 @@ def _supported_sentence_coverage(
                 if letters >= max(8, _count_letters_in_ranges(sentence, _LANGUAGE_LETTER_RANGES["latin"])):
                     sentence_scores.append(len(tokens))
                     continue
-            score = _base_language_service_score(code, tokens)
+            score = sentence_service_scores[code]
             sentence_scores.append(score)
         sentence_score = max(sentence_scores, default=0)
         sentence_supported = sentence_score * 100 >= len(tokens) * _MIN_SUPPORTED_LANGUAGE_DENSITY_PERCENT
         supported_count += sentence_supported
+        if supported_count >= minimum_supported_count:
+            return _MIN_SUPPORTED_SENTENCE_COVERAGE_PERCENT, len(substantive_sentences)
     return (
         supported_count * 100 // len(substantive_sentences),
         len(substantive_sentences),
@@ -685,16 +864,14 @@ def _industry_matches(sentences: Iterable[str], title: str) -> tuple[RuleMatch, 
             if _domain_sentence_matches(sentence, spec, title)
         )
         if not fragments and spec.get("all_of") and all(
-            re.search(pattern, combined, re.IGNORECASE) for pattern in spec["all_of"]
+            _compiled_pattern(pattern).search(combined) for pattern in spec["all_of"]
         ):
             fragments = tuple(
                 sentence
                 for sentence in sentence_list
-                if re.search(
+                if _compiled_pattern(
                     r"\b(?:bank\w*|banking|credit|lending|loan|mortgage|p\s*&\s*l|p&l|profit\s+and\s+loss)\b",
-                    sentence,
-                    re.IGNORECASE,
-                )
+                ).search(sentence)
             )
         if fragments:
             matches.append(
@@ -712,11 +889,9 @@ def _industry_matches(sentences: Iterable[str], title: str) -> tuple[RuleMatch, 
     commercial_role_fragments = tuple(
         sentence
         for sentence in sentence_list
-        if re.search(
+        if _compiled_pattern(
             r"\b(?:chief|head|director|vp|vice president|lead|leader|leadership)\s+(?:of\s+)?commercial\b",
-            sentence,
-            re.IGNORECASE,
-        )
+        ).search(sentence)
     )
     commercial_duty_fragments = tuple(
         sentence for sentence in sentence_list if _has_ecommerce_commercial_duty(sentence)
@@ -724,7 +899,7 @@ def _industry_matches(sentences: Iterable[str], title: str) -> tuple[RuleMatch, 
     ecommerce_fragments = tuple(
         sentence
         for sentence in sentence_list
-        if re.search(r"\b(?:e[- ]?commerce|ecommerce|marketplace)\b", sentence, re.IGNORECASE)
+        if _compiled_pattern(r"\b(?:e[- ]?commerce|ecommerce|marketplace)\b").search(sentence)
     )
     if commercial_role_fragments and commercial_duty_fragments and ecommerce_fragments:
         matches.append(
@@ -746,34 +921,40 @@ def _domain_sentence_matches(sentence: str, spec: dict[str, Any], title: str) ->
         subject_predicate = globals()[subject_predicate]
     if subject_predicate is not None and subject_predicate(sentence):
         return True
-    matched = tuple(
-        pattern
-        for pattern in spec["patterns"]
-        if re.search(pattern, sentence, re.IGNORECASE)
-    )
-    if not matched:
+    if not _combined_pattern(tuple(spec["patterns"])).search(sentence):
         return False
-    if spec["domain"] == "banking_core_and_payment_infrastructure" and not re.search(
+    if spec["domain"] == "banking_core_and_payment_infrastructure" and not _compiled_pattern(
         r"\b(?:portfolio|strategy|product|own|lead|responsible|accountable|experience|expertise|required)\b",
-        sentence,
-        re.IGNORECASE,
-    ) and not re.search(r"\b(?:banking|payments?)\b", title, re.IGNORECASE):
+    ).search(sentence) and not _compiled_pattern(r"\b(?:banking|payments?)\b").search(title):
         return False
     if spec["domain"] == "banking_core_and_payment_infrastructure":
-        payment_infrastructure = any(
-            re.search(pattern, sentence, re.IGNORECASE)
-            for pattern in spec.get("mandatory_patterns", ())
-        )
-        if payment_infrastructure and not re.search(
+        payment_infrastructure = _combined_pattern(
+            tuple(spec.get("mandatory_patterns", ()))
+        ).search(sentence)
+        if payment_infrastructure and not _compiled_pattern(
             r"\b(?:must|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
-            sentence,
-            re.IGNORECASE,
-        ):
+        ).search(sentence):
             return False
     return True
 
 
 def _staffing_agency_matches(company: str, text: str) -> tuple[RuleMatch, ...]:
+    staffing_signal_text = f"{company} {text}".lower()
+    if not any(
+        term in staffing_signal_text
+        for term in (
+            "client",
+            "behalf",
+            "recruit",
+            "staffing",
+            "headhunt",
+            "executive search",
+            "talent acquisition",
+            "partner",
+            "human capital",
+        )
+    ):
+        return ()
     patterns = (
         r"\bour\s+client\s+(?:is\s+)?(?:seeking|hiring|looking\s+for|recruiting)\b",
         r"\bour\s+client\s*,\s*[^.!?\n]{0,120}\b(?:is\s+)?(?:seeking|hiring|looking\s+for|recruiting)\b",
@@ -802,47 +983,31 @@ def _staffing_agency_matches(company: str, text: str) -> tuple[RuleMatch, ...]:
         ),
     )
 def _is_advertising_platform(sentence: str) -> re.Match[str] | None:
-    if re.search(
-        r"\b(?:not|no)\s+(?:an?\s+)?(?:advertising|adtech|ad\s*tech)\s+(?:platform|company|business)\b",
-        sentence,
-        re.IGNORECASE,
-    ):
+    if _AD_NEGATION_PATTERN.search(sentence):
         return None
-    match = re.search(
-        r"\b(?:adtech|ad\s*tech|advertising\s+technology\s+(?:platform|company|business)|programmatic\s+advertising\s+(?:platform|business)|advertising\s+platform|demand[- ]side\s+platform)\b",
-        sentence,
-        re.IGNORECASE,
-    )
+    match = _AD_PLATFORM_PATTERN.search(sentence)
     if match is None:
         return None
     if not _has_positive_ad_subject_signal(sentence):
         return None
     prefix = sentence[max(0, match.start() - 80) : match.start()]
-    if re.search(r"\b(?:experience|background|familiarity)\s+with\s+(?:an?\s+)?$", prefix, re.IGNORECASE):
+    if _EXPERIENCE_PREFIX_PATTERN.search(prefix):
         return None
     return match
 
 
 def _has_positive_ad_subject_signal(sentence: str) -> bool:
-    subject_pattern = re.compile(
-        r"\b(?:ad[- ]?serv(?:ing|er)|dsp|ssp|ad\s+ops?|ad\s+operations|ad\s+exchange|real[- ]time\s+bidding|rtb|ad(?:vertising)?\s+auction|demand[- ]side\s+platform|advertising\s+inventory|campaign\s+delivery|ecpm|monetization)\b",
-        re.IGNORECASE,
-    )
-    for subject_match in subject_pattern.finditer(sentence):
+    for subject_match in _AD_SUBJECT_PATTERN.finditer(sentence):
         prefix = sentence[max(0, subject_match.start() - 24) : subject_match.start()]
-        if not re.search(r"\b(?:not|without|never|no)\s*$", prefix, re.IGNORECASE):
+        if not _NEGATED_SUBJECT_PATTERN.search(prefix):
             return True
     return False
 
 
 def _has_ecommerce_commercial_duty(sentence: str) -> re.Match[str] | None:
-    duty_pattern = re.compile(
-        r"\b(?:assortment|procurement|purchasing|sourcing|margin|merchandising|category\s+management|range\s+planning|supplier\s+(?:management|relationships?))\b",
-        re.IGNORECASE,
-    )
-    for duty_match in duty_pattern.finditer(sentence):
+    for duty_match in _ECOMMERCE_DUTY_PATTERN.finditer(sentence):
         prefix = sentence[max(0, duty_match.start() - 80) : duty_match.start()]
-        if not re.search(r"\b(?:not|without|never|no)\s*$", prefix, re.IGNORECASE):
+        if not _NEGATED_SUBJECT_PATTERN.search(prefix):
             return duty_match
     return None
 
@@ -859,30 +1024,24 @@ def _normalise_language(value: str) -> str:
 def _language_match(sentences: Iterable[str], owner_languages: Iterable[str]) -> RuleMatch | None:
     allowed = {_normalise_language(language) for language in owner_languages}
     required: dict[str, list[str]] = {}
-    cues = re.compile(
-        r"\b(?:required|mandatory|must\s+(?:speak|be)|fluent|native|professional(?:ly)?\s+proficien(?:cy|t)|proficiency|business[- ]level|working\s+language|language\s+of\s+work|language\s+skills|excellent\s+command|excellent\s+communication|communication|oral|written|spoken|written\s+and\s+spoken|spoken\s+and\s+written|speaker|speaking)\b",
-        re.IGNORECASE,
-    )
-    optional = re.compile(
-        r"\b(?:preferred|nice\s+to\s+have|bonus|plus|advantage|desirable|optional)\b|\bnot\s+required\b",
-        re.IGNORECASE,
-    )
     for sentence in sentences:
-        for code, patterns in _LOCALIZED_LANGUAGE_REQUIREMENTS.items():
-            if code not in allowed and any(
-                re.search(pattern, sentence, re.IGNORECASE) for pattern in patterns
-            ):
-                required.setdefault(code, []).append(sentence)
-        for code, patterns in _LANGUAGE_CODE_REQUIREMENTS.items():
-            if code not in allowed and any(
-                re.search(pattern, sentence, re.IGNORECASE) for pattern in patterns
-            ):
-                required.setdefault(code, []).append(sentence)
-        if not cues.search(sentence):
+        if not _LANGUAGE_ANY_REQUIREMENT_PATTERN.search(sentence):
             continue
-        for name in _LANGUAGE_NAMES:
-            language_match = re.search(rf"\b{re.escape(name)}\b", sentence, re.IGNORECASE)
-            if language_match and not _is_optional_language(sentence, language_match, optional):
+        for code, patterns in _LOCALIZED_LANGUAGE_REQUIREMENT_PATTERNS.items():
+            if code not in allowed and _combined_pattern(
+                tuple(pattern.pattern for pattern in patterns)
+            ).search(sentence):
+                required.setdefault(code, []).append(sentence)
+        for code, patterns in _LANGUAGE_CODE_REQUIREMENT_PATTERNS.items():
+            if code not in allowed and _combined_pattern(
+                tuple(pattern.pattern for pattern in patterns)
+            ).search(sentence):
+                required.setdefault(code, []).append(sentence)
+        if not _LANGUAGE_REQUIRED_CUES.search(sentence):
+            continue
+        for language_match in _LANGUAGE_NAME_COMBINED.finditer(sentence):
+            name = language_match.group().lower()
+            if not _is_optional_language(sentence, language_match, _OPTIONAL_LANGUAGE_CUES):
                 code = _LANGUAGES[name]
                 if code not in allowed:
                     required.setdefault(code, []).append(sentence)
@@ -905,10 +1064,28 @@ def _is_optional_language(sentence: str, language_match: re.Match[str], optional
 
 
 def _urgency_matches(sentences: Iterable[str], short_contract_months: int) -> tuple[RuleMatch, ...]:
+    sentence_list = tuple(sentences)
+    if not any(
+        term in " ".join(sentence_list).lower()
+        for term in (
+            "interim",
+            "maternity",
+            "parental",
+            "paternity",
+            "replacement",
+            "backfill",
+            "cover",
+            "contract",
+            "fixed-term",
+            "temporary",
+            "month",
+        )
+    ):
+        return ()
     interim_fragments: list[str] = []
     short_fragments: list[str] = []
     duration_pattern = re.compile(r"\b(\d{1,3})\s*[- ]?month(?:s)?\b", re.IGNORECASE)
-    for sentence in sentences:
+    for sentence in sentence_list:
         if re.search(
             r"\binterim\b|\b(?:maternity|parental|parent)\s+(?:leave\s+)?cover\b|\b(?:temporary\s+)?replacement\b|\bbackfill\b",
             sentence,

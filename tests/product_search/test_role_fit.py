@@ -773,6 +773,35 @@ def test_does_not_drop_full_english_description_with_dutch_tail() -> None:
     assert "description_language_not_supported" not in decision.rule_ids
 
 
+def test_does_not_drop_english_tail_after_long_french_description() -> None:
+    french_prefix = (
+        "Description du poste en français pour diriger le produit et collaborer "
+        "avec les équipes. "
+    ) * 20
+    english_tail = (
+        "We are looking for a Head of Product to lead the software product roadmap, "
+        "manage the product team, and own strategy. "
+    ) * 45
+
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "SaaSCo",
+        "Remote",
+        french_prefix + english_tail,
+    )
+
+    assert decision.verdict == "accept"
+    assert decision.rule_ids == ("software_product_leadership",)
+
+
+def test_counts_letters_in_unicode_ranges() -> None:
+    role_fit = importlib.import_module("job_intel.product_search.role_fit")
+
+    assert role_fit._count_letters_in_ranges(
+        "AБЖxyz", role_fit._LANGUAGE_LETTER_RANGES["cyrillic"]
+    ) == 2
+
+
 def test_russian_description_reaches_industry_rules_without_language_rejection() -> None:
     decision = evaluate_role_fit(
         "Руководитель продукта",
