@@ -1783,8 +1783,8 @@ def _followup(conn, now_utc, cfg):
             # Only on a real send, mirroring the follow-up's own meta
             # contract: a budget/error refusal must not leave the ritual
             # believing it already asked.
-            weekly.plan_state_set(conn, weekly_snapshot["target_week"],
-                                  "offered", date_local)
+            weekly.record_offer(conn, weekly_snapshot["target_week"],
+                                date_local)
         if status == "sent" and prep_candidate is not None:
             conn.execute(
                 "UPDATE events SET prep_asked=1 WHERE id=?",

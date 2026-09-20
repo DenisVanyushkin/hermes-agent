@@ -3113,10 +3113,7 @@ def cmd_weekly_mark(args):
 
 def cmd_plan_due(args):
     conn = famdb.connect()
-    deadline = None if args.clear else args.deadline
-    if not args.clear and deadline is None:
-        raise ValueError("pass a deadline (YYYY-MM-DD) or --clear")
-    if not plans.reschedule(conn, args.id, deadline):
+    if not plans.reschedule(conn, args.id, args.deadline):
         raise ValueError(f"unknown plan: {args.id}")
     conn.commit()
     p = plans.get(conn, args.id)
@@ -4021,9 +4018,7 @@ def build_parser():
 
     spdu = plan_sub.add_parser("due"); spdu.set_defaults(func=cmd_plan_due)
     spdu.add_argument("id", type=int)
-    spdu.add_argument("deadline", nargs="?", help="YYYY-MM-DD local")
-    spdu.add_argument("--clear", action="store_true",
-                       help="remove the deadline instead of moving it")
+    spdu.add_argument("deadline", help="YYYY-MM-DD local")
     spdu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                        help="machine-readable output")
 

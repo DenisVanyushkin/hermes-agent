@@ -138,9 +138,12 @@ def test_monday_digest_carries_the_repeat(db, fake_deliver):
     assert "неделю" in digests[0]["raw"]["question"].lower()
 
 
-def test_the_monthly_ritual_outranks_the_weekly_repeat(db, fake_deliver,
-                                                       monkeypatch):
-    """One planning question per message: the month wins, the week waits."""
+def test_the_monthly_ritual_drops_the_weekly_repeat(db, fake_deliver,
+                                                   monkeypatch):
+    """One planning question per message: the month wins and the weekly
+    repeat is DROPPED, not deferred -- Tuesday is not eligible and next
+    Sunday targets a different week. Accepted: the repeat is a courtesy,
+    not a guarantee (see weekly.repeat_question)."""
     monkeypatch.setattr(tick, "_goal_ritual",
                         lambda *a, **k: "Готова запланировать цели на август?")
     weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
@@ -151,3 +154,62 @@ def test_the_monthly_ritual_outranks_the_weekly_repeat(db, fake_deliver,
 
     digests = [c for c in fake_deliver.calls if c["kind"] == "digest"]
     assert digests[0]["raw"]["question"] == "Готова запланировать цели на август?"
+
+
+# --- second-round review findings -------------------------------------
+
+def test_mark_closes_the_week_that_was_actually_offered(db):
+    """A late reply must not close a week nobody was asked about.
+
+    She answers Monday's question the following Sunday: deriving the
+    target from "today" would mark W31 done -- silencing a week before
+    it was ever offered -- while W30, the one actually asked about,
+    stayed open forever.
+    """
+    weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
+    db.commit()
+
+    weekly.mark(db, "2026-07-26", "done")     # the NEXT Sunday
+    db.commit()
+
+    assert weekly.plan_state_get(db, WEEK)[0] == "done"
+    assert weekly.plan_state_get(db, "2026-W31") is None
+
+
+def test_mark_falls_back_to_today_when_nothing_is_open(db):
+    """No open cycle -> she is planning on her own initiative, and
+    "today" is the only sensible target."""
+    weekly.mark(db, MONDAY, "done")
+    db.commit()
+    assert weekly.plan_state_get(db, WEEK)[0] == "done"
+
+
+def test_mark_prefers_the_open_cycle_over_a_closed_one(db):
+    weekly.plan_state_set(db, "2026-W29", "done", "2026-07-12")
+    weekly.plan_state_set(db, WEEK, "offered", SUNDAY)
+    db.commit()
+
+    weekly.mark(db, "2026-07-26", "declined")
+    db.commit()
+
+    assert weekly.plan_state_get(db, WEEK)[0] == "declined"
+    assert weekly.plan_state_get(db, "2026-W29")[0] == "done"
+
+
+def test_recording_an_offer_never_overwrites_an_answer(db):
+    """The send path reads the state, then makes a slow LLM call before
+    writing "offered". If she answers in that window, the write must not
+    reopen the week she just closed."""
+    weekly.plan_state_set(db, WEEK, "done", SUNDAY)
+    db.commit()
+
+    weekly.record_offer(db, WEEK, SUNDAY)
+    db.commit()
+
+    assert weekly.plan_state_get(db, WEEK)[0] == "done"
+
+
+def test_recording_an_offer_on_a_fresh_week_works(db):
+    weekly.record_offer(db, WEEK, SUNDAY)
+    db.commit()
+    assert weekly.plan_state_get(db, WEEK) == ("offered", SUNDAY)

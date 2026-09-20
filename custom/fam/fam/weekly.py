@@ -120,6 +120,21 @@ def plan_state_get(conn, week):
     return status, date_local
 
 
+def record_offer(conn, week, today):
+    """Stamp `week` as offered, unless it has already been answered.
+
+    The send path reads the state, then makes a slow LLM rewrite and an
+    external send before writing back. If she answers inside that
+    window, an unconditional write would reopen the week she just
+    closed and ask again on Monday. done/declined are terminal.
+    """
+    state_row = plan_state_get(conn, week)
+    if state_row is not None and state_row[0] in ("done", "declined"):
+        return False
+    plan_state_set(conn, week, "offered", today)
+    return True
+
+
 def repeat_question(conn, date_local):
     """Monday's one repeat of an unanswered Sunday offer, or None.
 
@@ -134,10 +149,17 @@ def repeat_question(conn, date_local):
         is nothing to repeat and inventing a question would be worse
         than saying nothing;
       * done/declined -> answered, permanently quiet;
-      * any day but Monday -> exactly one repeat. Tuesday onwards the
+      * any day but Monday -> at most one repeat. Tuesday onwards the
         week is left alone rather than nagged daily, which is where the
         monthly ritual's repeat-until-answered would become noise at
         weekly cadence.
+
+    "At most" is literal: the digest carries ONE planning question and
+    the monthly goal ritual outranks this one, so a Monday that the
+    month has claimed drops the weekly repeat entirely rather than
+    deferring it. That is accepted -- the week is not lost, it is just
+    not asked about twice, and next Sunday opens a fresh cycle for the
+    week after. Nothing downstream may assume the repeat always fires.
     """
     if date.fromisoformat(date_local).isocalendar()[2] != 1:
         return None
@@ -147,18 +169,37 @@ def repeat_question(conn, date_local):
     return "Неделю так и не спланировали — что в неё добавим?"
 
 
+def open_cycle_week(conn):
+    """The week still waiting for an answer, or None.
+
+    Keys sort correctly as text ('2026-W53' < '2027-W01'), so the last
+    offered key is the most recent open cycle.
+    """
+    row = conn.execute(
+        "SELECT key FROM meta WHERE key LIKE 'weekly_plan_state:%' "
+        "AND value LIKE 'offered:%' ORDER BY key DESC LIMIT 1"
+    ).fetchone()
+    return row[0].split(":", 1)[1] if row else None
+
+
 def mark(conn, date_local, status):
-    """Close the ritual cycle for whatever week `date_local` targets.
+    """Close the open ritual cycle, or the one `date_local` targets.
 
     This is the verb the chat agent calls once the planning dialog
     ends -- without it the cycle would sit in "offered" forever, the
     plans created but the ritual never told it had been answered.
-    Works even with no prior offer: she may start planning on her own
-    before the ritual gets round to asking.
+
+    The week comes from the OPEN cycle rather than from today, because
+    the answer can arrive long after the question: replying to Monday's
+    question on the following Sunday would otherwise mark the next week
+    done -- silencing it before it was ever offered -- and leave the
+    week actually asked about open forever. With no open cycle it falls
+    back to today's target: she may start planning on her own before
+    the ritual gets round to asking.
     """
     if status not in ("done", "declined"):
         raise ValueError(f"invalid weekly plan state: {status}")
-    week = target_week(date_local)
+    week = open_cycle_week(conn) or target_week(date_local)
     plan_state_set(conn, week, status, date_local)
     audit.log(conn, "weekly.mark", {"week": week, "status": status})
     return week
@@ -280,17 +321,22 @@ def info(conn, date_local):
 # at seven lines whatever the week holds.
 
 
-def _events_block(events):
-    """The context lines about the week's calendar."""
-    if not events:
-        return ["В календаре пока пусто."]
-
+def _group_by_day(events):
+    """{ISO weekday -> [titles]} for one week's events, in time order."""
     per_day = {}
     for event in events:
         day_part = event["start_local"].partition("T")[0]
         weekday = date.fromisoformat(day_part).isocalendar()[2]
         per_day.setdefault(weekday, []).append(event["title"].strip())
+    return per_day
 
+
+def _events_block(events):
+    """The context lines about the week's calendar."""
+    if not events:
+        return ["В календаре пока пусто."]
+
+    per_day = _group_by_day(events)
     block = [f"{_WEEKDAY_SHORT_RU[wd]}: " + ", ".join(per_day[wd])
              for wd in range(1, 8) if per_day.get(wd)]
     free = [_WEEKDAY_SHORT_RU[wd] for wd in range(1, 8) if not per_day.get(wd)]
@@ -333,12 +379,7 @@ def plan_payload(snapshot):
     fallback never reaches the user -- exactly how the first live send
     (2026-09-20) arrived as a bare question with the whole week missing.
     """
-    per_day = {}
-    for event in snapshot["events"]:
-        day_part = event["start_local"].partition("T")[0]
-        weekday = date.fromisoformat(day_part).isocalendar()[2]
-        per_day.setdefault(weekday, []).append(event["title"].strip())
-
+    per_day = _group_by_day(snapshot["events"])
     return {
         "label": snapshot["label"],
         "days": [{"day": _WEEKDAY_SHORT_RU[wd], "titles": per_day[wd]}

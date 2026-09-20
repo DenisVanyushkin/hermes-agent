@@ -124,3 +124,77 @@ def test_an_ordinary_followup_prompt_is_untouched(db):
     prompt = gate._build_prompt(raw, kind="followup")
 
     assert gate.GATE_WEEKLY_PLAN_INSTRUCTION not in prompt
+
+
+# --- the regression test the production bug needed --------------------
+
+def test_the_week_survives_a_successful_rewrite(db, monkeypatch):
+    """Vertical: real gate.deliver, real prompt building, real question
+    appending. Only the two external edges are stubbed -- the model call
+    and the transport.
+
+    The stub rewrite does what a cooperative model does: it reflects the
+    data it was given. So if the week never reaches raw, the stub has
+    nothing to reflect and the message comes back as the bare question --
+    which is precisely how this failed in production on 2026-09-20. No
+    amount of stubbing gate.deliver itself would have caught that.
+    """
+    import json as _json
+    from fam import cal, gate as gate_mod
+
+    cal.add(db, "Тренировка", "2026-07-22T05:00:00+00:00")   # Wed of W30
+    db.commit()
+
+    def reflecting_rewrite(prompt, cfg):
+        # The instruction text mentions the tag before the block itself,
+        # so take the LAST opener.
+        block = prompt.rsplit("<data>", 1)[1].split("</data>")[0]
+        payload = _json.loads(block)
+        week = payload.get("weekly_plan")
+        if week is None:
+            return "Как прошёл день?"
+        lines = [week["label"]]
+        lines += [f"{d['day']}: " + ", ".join(d["titles"]) for d in week["days"]]
+        return "\n".join(lines)
+
+    sent = {}
+
+    def capture_send(text, cfg):
+        sent["text"] = text
+        return True, "stub-id"
+
+    monkeypatch.setattr(gate_mod, "_call_rewrite", reflecting_rewrite)
+    monkeypatch.setattr(gate_mod, "_call_send", capture_send)
+
+    tick.reminders(db, now_utc=SUNDAY_AT_FOLLOWUP, cfg=CFG)
+
+    text = sent.get("text") or ""
+    assert "Тренировка" in text, "the week never reached the rewrite"
+    assert text.rstrip().endswith("Что запланируем на неделю?")
+    assert text.count("Что запланируем на неделю?") == 1
+
+
+def test_an_ordinary_followup_still_reaches_the_user(db, monkeypatch):
+    """The same vertical path, without a weekly plan: the plain evening
+    recap must keep working exactly as before."""
+    from fam import cal, gate as gate_mod, places, plans as plans_mod
+
+    places.add(db, "Клиника", lat=43.2260, lon=76.8670)
+    db.commit()
+    ev = cal.add(db, "Врач", "2026-07-20T09:00:00+00:00", place="Клиника")
+    db.commit()
+    pid = plans_mod.add(db, "Забрать справку")
+    db.commit()
+    plans_mod.attach(db, pid, ev["id"] if isinstance(ev, dict) else ev)
+    db.commit()
+
+    sent = {}
+    monkeypatch.setattr(gate_mod, "_call_rewrite", lambda p, c: "Вечерняя сводка.")
+    monkeypatch.setattr(gate_mod, "_call_send",
+                        lambda text, cfg: (sent.update(text=text), (True, "id"))[1])
+
+    tick.reminders(db, now_utc="2026-07-20T15:00:00+00:00", cfg=CFG)
+
+    text = sent.get("text") or ""
+    assert "Вечерняя сводка." in text
+    assert text.rstrip().endswith(tick.FOLLOWUP_QUESTION)
