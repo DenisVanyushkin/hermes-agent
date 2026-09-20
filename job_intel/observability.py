@@ -15,7 +15,7 @@ from time import perf_counter
 
 from .dedup import canonical_vacancy_key
 from .models import Evaluation, Vacancy
-from .product_search.role_fit import evaluate_role_fit
+from .product_search.role_fit import ROLE_FIT_RULESET_VERSION, evaluate_role_fit
 from .store import JobIntelStore
 
 ROLE_BUCKETS = ("vp_product", "head_product", "director_product", "gm_product", "cpo", "other")
@@ -1027,11 +1027,21 @@ def record_daily_observability(
                 )
                 role_fit_verdict = str(role_fit_decision.verdict)
                 role_fit_rules_json = json.dumps(
-                    list(role_fit_decision.rule_ids), ensure_ascii=False
+                    {
+                        "ruleset_version": ROLE_FIT_RULESET_VERSION,
+                        "rule_ids": list(role_fit_decision.rule_ids),
+                    },
+                    ensure_ascii=False,
                 )
             except Exception as exc:  # noqa: BLE001 - observation must not fail the run
                 role_fit_verdict = "error"
-                role_fit_rules_json = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                role_fit_rules_json = json.dumps(
+                    {
+                        "ruleset_version": ROLE_FIT_RULESET_VERSION,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                )
                 role_fit_error_count += 1
             finally:
                 role_fit_duration_seconds += perf_counter() - started_role_fit

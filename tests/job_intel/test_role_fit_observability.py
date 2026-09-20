@@ -11,6 +11,7 @@ from job_intel.cli import _record_role_fit_trace
 from job_intel.models import Evaluation, Vacancy
 from job_intel.observability import record_daily_observability
 from job_intel.performance import RunPerformanceRecorder
+from job_intel.product_search.role_fit import ROLE_FIT_RULESET_VERSION
 from job_intel.store import JobIntelStore
 
 
@@ -145,7 +146,10 @@ def test_role_fit_verdict_and_rules_are_persisted_once_per_vacancy(tmp_path, mon
     assert calls == 1
     assert stats["evaluated_count"] == 1
     assert row[0] == "accept"
-    assert json.loads(row[1]) == ["software_product_leadership"]
+    assert json.loads(row[1]) == {
+        "ruleset_version": ROLE_FIT_RULESET_VERSION,
+        "rule_ids": ["software_product_leadership"],
+    }
 
 
 def test_role_fit_error_is_persisted_without_failing_observability(tmp_path, monkeypatch) -> None:
@@ -170,7 +174,10 @@ def test_role_fit_error_is_persisted_without_failing_observability(tmp_path, mon
     assert stats["evaluated_count"] == 1
     assert stats["error_count"] == 1
     assert row[0] == "error"
-    assert json.loads(row[1]) == {"error": "role-fit fixture failure"}
+    assert json.loads(row[1]) == {
+        "ruleset_version": ROLE_FIT_RULESET_VERSION,
+        "error": "role-fit fixture failure",
+    }
 
 
 def test_role_fit_trace_counts_include_errors_and_elapsed_time(tmp_path, monkeypatch) -> None:

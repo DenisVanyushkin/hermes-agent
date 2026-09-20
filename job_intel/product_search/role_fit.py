@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import hashlib
 from functools import lru_cache
+from pathlib import Path
 import re
 from typing import Any, Iterable, Literal
 
@@ -1124,3 +1126,23 @@ def _urgency_matches(sentences: Iterable[str], short_contract_months: int) -> tu
             )
         )
     return tuple(matches)
+
+
+def _ruleset_version() -> str:
+    """Digest the rule source itself, so a rule edit cannot ship under an old version.
+
+    A hand-bumped constant is only as good as the memory of whoever edits a
+    regex below; comparing two observation runs then silently compares two
+    different rule sets. Hashing this module makes the version a consequence of
+    the rules rather than a promise about them. A cosmetic edit also moves it,
+    which is the safe direction: it claims a difference that may not matter,
+    never sameness that is untrue.
+    """
+    try:
+        source = Path(__file__).read_bytes()
+    except OSError:
+        return "rf1-unknown"
+    return f"rf1-{hashlib.sha256(source).hexdigest()[:12]}"
+
+
+ROLE_FIT_RULESET_VERSION = _ruleset_version()
