@@ -27,15 +27,21 @@ def validate_week(period):
     """Validate an ISO week string and return its period_type ('week').
 
     Mirrors goals.validate_period's "raise before any insert" contract.
-    Note this accepts W53 for every year rather than checking whether
-    that year really has 53 weeks: the callers all derive their week
-    strings from real dates, and a hand-typed 2026-W53 is in fact valid.
+    The shape check alone is not enough: most years have 52 ISO weeks,
+    so 2021-W53 is well-formed but does not exist. Accepting it here
+    would only move the ValueError to whichever helper parsed it next,
+    which is the opposite of what a validator is for -- hence the
+    round-trip through fromisocalendar.
     """
     if not isinstance(period, str):
         raise ValueError(f"invalid week: {period!r}")
-    if _WEEK_RE.match(period):
-        return "week"
-    raise ValueError(f"invalid week (expected YYYY-Www): {period}")
+    if not _WEEK_RE.match(period):
+        raise ValueError(f"invalid week (expected YYYY-Www): {period}")
+    try:
+        date.fromisocalendar(int(period[:4]), int(period[6:]), 1)
+    except ValueError:
+        raise ValueError(f"no such ISO week: {period}") from None
+    return "week"
 
 
 def _parse_week(period):
@@ -179,14 +185,19 @@ def info(conn, date_local):
 
     `events` -- active events already sitting in the target week, so she
     answers against the real week rather than into the void.
-    `tails` -- open, unattached plans whose deadline fell BEFORE the
-    target week started: the ones the previous week did not close.
+    `tails` -- open, unattached plans already overdue TODAY: the ones
+    the previous week did not close. Overdue is measured against
+    date_local, not against the target week's Monday -- the ritual runs
+    on Sunday evening and the week starts next morning, so comparing
+    against Monday would brand a task still due today as late. This is
+    the same rule tick._burning_plans uses (deadline < today).
     A plan with no deadline is not a tail (it belongs to no week at all)
     and, per the skill's ritual rule, must not be created by the ritual
     in the first place -- an undated plan never surfaces in the digest.
     """
     target = target_week(date_local)
     monday, _sunday = week_bounds(target)
+    today = date.fromisoformat(date_local)
     state_row = plan_state_get(conn, target)
 
     from_utc, to_utc = _week_utc_bounds(target)
@@ -200,7 +211,7 @@ def info(conn, date_local):
         if deadline is None:
             continue
         try:
-            overdue = date.fromisoformat(deadline) < date.fromisoformat(monday)
+            overdue = date.fromisoformat(deadline) < today
         except (TypeError, ValueError):
             continue
         if overdue:

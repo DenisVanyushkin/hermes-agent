@@ -272,3 +272,40 @@ def test_a_quiet_week_is_still_listed_in_full(db):
     db.commit()
     text = weekly.question_text(weekly.info(db, "2026-09-20"))
     assert "Тренировка" in text and "Дантист" in text
+
+
+# --- review findings ---------------------------------------------------
+
+def test_a_plan_due_today_is_not_yet_a_tail(db):
+    """Overdue means overdue TODAY, not "before the target week starts".
+
+    The ritual runs on Sunday evening, and the target week begins the
+    next morning -- so comparing against Monday would brand a task still
+    due today as «срок был», hours before it is actually late. The rest
+    of the app (tick._burning_plans) calls a plan overdue only when
+    deadline < today; this must agree with it.
+    """
+    from fam import plans
+    plans.add(db, "Сегодня ещё можно", deadline="2026-09-20")
+    db.commit()
+    assert weekly.info(db, "2026-09-20")["tails"] == []
+
+
+def test_a_plan_due_yesterday_is_a_tail(db):
+    from fam import plans
+    plans.add(db, "Вчерашнее", deadline="2026-09-19")
+    db.commit()
+    assert [t["title"] for t in weekly.info(db, "2026-09-20")["tails"]] \
+        == ["Вчерашнее"]
+
+
+def test_validate_week_rejects_a_week_that_year_does_not_have(db):
+    """2021 has 52 ISO weeks. Accepting 2021-W53 here only moves the
+    ValueError to whichever helper parses it next, which is exactly what
+    a validator exists to prevent."""
+    with pytest.raises(ValueError):
+        weekly.validate_week("2021-W53")
+
+
+def test_validate_week_still_accepts_a_real_week_53(db):
+    assert weekly.validate_week("2026-W53") == "week"

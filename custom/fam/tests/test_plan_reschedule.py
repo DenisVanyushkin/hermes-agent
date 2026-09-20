@@ -66,3 +66,23 @@ def test_reschedule_is_audited(db):
 
     kinds = [r["kind"] for r in db.execute("SELECT kind FROM audit_log")]
     assert "plan.reschedule" in kinds
+
+
+def test_reschedule_refuses_a_closed_plan(db):
+    """`fam plan due` must not silently rewrite history: a done plan's
+    deadline is a record of when it was due, not a live field."""
+    pid = plans.add(db, "Сделано", deadline="2026-09-18")
+    plans.mark(db, pid, "done")
+    db.commit()
+
+    assert plans.reschedule(db, pid, "2026-09-24") is False
+    assert plans.get(db, pid)["deadline"] == "2026-09-18"
+
+
+def test_reschedule_refuses_a_dropped_plan(db):
+    pid = plans.add(db, "Отменено", deadline="2026-09-18")
+    plans.mark(db, pid, "dropped")
+    db.commit()
+
+    assert plans.reschedule(db, pid, "2026-09-24") is False
+    assert plans.get(db, pid)["deadline"] == "2026-09-18"

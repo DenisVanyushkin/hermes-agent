@@ -200,13 +200,20 @@ def reschedule(conn, plan_id, deadline):
     "raise before any insert" contract as add(). Returns False on an
     unknown plan_id (no write, no audit); True on success.
 
+    Only an OPEN plan can be moved. A done or dropped plan's deadline
+    records when it had been due, so rewriting it would quietly falsify
+    history -- and `fam plan due` on a closed plan is a mistyped id far
+    more often than an intent. Returns False there too, same as an
+    unknown id.
+
     Deliberately does NOT touch attached_event_id or status: a deadline
     is a date, not a lifecycle change, so none of mark()'s route
     recomputation applies.
     """
     _validate_deadline(deadline)
     existing = conn.execute(
-        "SELECT id FROM plans WHERE id=?", (plan_id,)).fetchone()
+        "SELECT id FROM plans WHERE id=? AND status='open'",
+        (plan_id,)).fetchone()
     if existing is None:
         return False
 
