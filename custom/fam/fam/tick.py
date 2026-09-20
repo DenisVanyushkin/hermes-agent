@@ -39,7 +39,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fam import (audit, cal, db, gate, goals, meds, plans, presence, rem, road,
-                 shopping, weather, whereami)
+                 shopping, weather, weekly, whereami)
 
 ALMATY = ZoneInfo("Asia/Almaty")
 
@@ -1550,6 +1550,24 @@ def _followup_prep_check_candidate(conn, now_dt, date_local, cfg):
     return cal.get(conn, row["id"])
 
 
+def _weekly_ritual_question(conn, date_local):
+    """Sunday's weekly-planning question, or None when it is not due.
+
+    Returns (snapshot, text) or (None, None). Due only on a Sunday whose
+    target week has no answer yet: "done"/"declined" silence it
+    permanently for that week, the same two terminal states the monthly
+    goal ritual uses. An "offered" week still returns the question --
+    the ritual repeats until answered, and the follow-up's own
+    once-a-day meta is what keeps that to one message per day.
+    """
+    if not weekly.is_ritual_day(date_local):
+        return None, None
+    snapshot = weekly.info(conn, date_local)
+    if snapshot["state"] in ("done", "declined"):
+        return None, None
+    return snapshot, weekly.question_text(snapshot)
+
+
 def _followup(conn, now_utc, cfg):
     """3b Task 6: the evening combined follow-up.
 
@@ -1693,8 +1711,15 @@ def _followup(conn, now_utc, cfg):
         for r in conn.execute(held_sql, held_params)
     ]
 
+    weekly_snapshot, weekly_question = _weekly_ritual_question(
+        conn, date_local)
+
     has_recap = bool(outbound_events and related_plans)
-    if not has_recap and prep_candidate is None and not held_meds:
+    # The weekly ritual joins the reasons to speak: a Sunday with no
+    # outbound events would otherwise fall into the ordinary silence
+    # below and swallow the offer entirely.
+    if (not has_recap and prep_candidate is None and not held_meds
+            and weekly_question is None):
         status = "no_events" if not outbound_events else "no_plans"
     else:
         raw = {
@@ -1707,7 +1732,13 @@ def _followup(conn, now_utc, cfg):
             ],
             "plans": [{"plan_id": p["id"], "title": p["title"]}
                       for p in related_plans],
-            "question": FOLLOWUP_QUESTION,
+            # The gate guarantees this exact string as the last line
+            # (gate._ensure_trailing_question), so it is the question
+            # ALONE -- weekly_question's context lines are already in
+            # `lines` below and must not be repeated here.
+            "question": (weekly.question_line(weekly_snapshot)
+                         if weekly_question is not None
+                         else FOLLOWUP_QUESTION),
         }
         lines = []
         if related_plans:
@@ -1728,11 +1759,30 @@ def _followup(conn, now_utc, cfg):
                 f"Не забыли подготовиться к «{prep_candidate['title']}» "
                 f"({prep_candidate['start_local']})?"
             )
-        lines.append(FOLLOWUP_QUESTION)
+        if weekly_question is not None:
+            # ONE question per message. Asking "how did the day go" AND
+            # "what shall we plan" gets exactly one of them answered --
+            # the same way an unanswered clarify used to lose the whole
+            # request. The weekly ask wins on Sunday; the day recap is
+            # the part that can wait.
+            raw["weekly_plan"] = {
+                "target_week": weekly_snapshot["target_week"],
+                "n_events": len(weekly_snapshot["events"]),
+                "n_tails": len(weekly_snapshot["tails"]),
+            }
+            lines.append(weekly_question)
+        else:
+            lines.append(FOLLOWUP_QUESTION)
         human_fallback = "\n".join(lines)
 
         status = gate.deliver(conn, "followup", raw, human_fallback, cfg,
                                now_utc=now_utc)
+        if status == "sent" and weekly_question is not None:
+            # Only on a real send, mirroring the follow-up's own meta
+            # contract: a budget/error refusal must not leave the ritual
+            # believing it already asked.
+            weekly.plan_state_set(conn, weekly_snapshot["target_week"],
+                                  "offered", date_local)
         if status == "sent" and prep_candidate is not None:
             conn.execute(
                 "UPDATE events SET prep_asked=1 WHERE id=?",

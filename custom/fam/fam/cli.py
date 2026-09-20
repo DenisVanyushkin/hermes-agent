@@ -3086,6 +3086,22 @@ def cmd_plan_done(args):
         print(f"done plan: {p['title']} (id={p['id']})")
     return 0
 
+def cmd_plan_due(args):
+    conn = famdb.connect()
+    deadline = None if args.clear else args.deadline
+    if not args.clear and deadline is None:
+        raise ValueError("pass a deadline (YYYY-MM-DD) or --clear")
+    if not plans.reschedule(conn, args.id, deadline):
+        raise ValueError(f"unknown plan: {args.id}")
+    conn.commit()
+    p = plans.get(conn, args.id)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        when = p["deadline"] or "без срока"
+        print(f"plan due: {p['title']} (id={p['id']}) -> {when}")
+    return 0
+
 def cmd_plan_drop(args):
     conn = famdb.connect()
     if not plans.mark(conn, args.id, "dropped"):
@@ -3967,6 +3983,14 @@ def build_parser():
     spd.add_argument("id", type=int)
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    spdu = plan_sub.add_parser("due"); spdu.set_defaults(func=cmd_plan_due)
+    spdu.add_argument("id", type=int)
+    spdu.add_argument("deadline", nargs="?", help="YYYY-MM-DD local")
+    spdu.add_argument("--clear", action="store_true",
+                       help="remove the deadline instead of moving it")
+    spdu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
 
     spdr = plan_sub.add_parser("drop"); spdr.set_defaults(func=cmd_plan_drop)
     spdr.add_argument("id", type=int)

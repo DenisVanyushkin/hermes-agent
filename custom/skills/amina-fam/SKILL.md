@@ -513,6 +513,32 @@ show after cancel), make a second, separate terminal call.
     права, напомню утром в субботу и воскресенье — скажи, если неудобно.»
     Что было сделано вместо этого и чего делать нельзя: «Поставлю на оба
     ближайших выходных — осталось уточнить время» и ни одной записи.
+26. **Воскресный сбор планов на неделю: у каждой задачи ОБЯЗАН быть
+    срок.** On Sunday evening the follow-up asks «Что запланируем на
+    неделю?», listing the week's load and any tails. Like every other
+    background message it is NOT in your session context — look
+    everything up fresh, never recall it.
+    - She names things to do → `fam plan add "TITLE" --deadline
+      YYYY-MM-DD` for each, with the deadline resolved per rule 1 from
+      the message timestamp. **A plan with no deadline never surfaces
+      anywhere** — `_burning_plans` only picks up dated ones, so an
+      undated plan is invisible until someone remembers it by hand. If
+      she names a thing without a day, ask which day, or put it on the
+      last day of the week and say so: "Записала на воскресенье —
+      скажи, если раньше." Never record a ritual plan with no date.
+    - The deadline belongs INSIDE the target week. A thing she wants
+      later is an ordinary plan, not part of this week's set.
+    - **Tails** (the «С прошлой недели висят» list) go one at a time:
+      «перенеси» → `fam plan due <id> <новая дата>`; «сделано» →
+      `fam plan done <id>`; «не надо» → `fam plan drop <id>`. Resolve
+      each id with `fam plan list` — the ritual message names titles,
+      not ids.
+    - She wants a reminder at a specific time ("напомни в среду в 10")
+      → that is NOT a plan: plans have no reminder chain of their own.
+      Record it as a calendar event (rule 2 and the Calendar verbs) and
+      say what you recorded.
+    - «не сейчас» / «потом» / no reply → do nothing at all, no fam
+      call. The ritual re-offers by itself.
 
 ## Quick Reference
 
@@ -733,6 +759,15 @@ protocol as rule 3 applies if `--place` is given and doesn't resolve.
      done <id>`, confirm briefly ("Отметил: куртка куплена.").
   3. Several plausible matches, or none → ask which plan they mean, or
      say there's no open plan like that — never guess an id.
+- **Moving a plan's deadline** ("перенеси на среду", "давай до пятницы",
+  "сдвинь на следующую неделю") → `fam plan due <id> YYYY-MM-DD`
+  (`fam plan due <id> --clear` removes the deadline). Found the same way
+  as done above — `fam plan list`, match by title, never guess an id.
+  The date follows the no-arithmetic rule 1: resolve "среду" from the
+  message timestamp, never count days in your head. This keeps the SAME
+  plan row — never drop-and-re-add to change a date, that loses the id
+  and its history. Confirm in one line: "Перенёс: забрать куртку — до
+  24 сентября."
 - **Dropping a plan** ("уже не надо", "отменяется", "передумали") →
   `fam plan drop <id>`, found the same way as done above.
 - **Accepting "по пути"** — the agent may mention in a reminder that an
