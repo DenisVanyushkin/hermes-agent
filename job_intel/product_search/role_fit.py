@@ -287,6 +287,13 @@ _US_LOCATION_PATTERNS = (
     r",\s*(?:ca|ny|wa|tx|ma|il|co|nj)\b",
 )
 _REMOTE_LOCATION_PATTERN = r"\bremote\b"
+# A sentence that denies sponsorship contains the word "sponsorship", so the
+# cue alone opens the very gate it should keep shut. Run 510 accepted two US
+# roles whose text read "visa sponsorship is not available" and "without the
+# need for new visa sponsorship".
+_SPONSORSHIP_DENIAL_PATTERN = (
+    r"\b(?:not|no|never|without|cannot|can\s*not|unable|ineligible|not\s+eligible)\b"
+)
 _SPONSORSHIP_CUES = (
     r"\bsponsor(?:s|ship|ing)?\b",
     r"\bh-?1b\b",
@@ -1018,11 +1025,30 @@ def _adjacent_function_matches(title: str) -> tuple[RuleMatch, ...]:
     )
 
 
+def _offers_sponsorship(text: str) -> bool:
+    """True only where a sponsorship cue appears in a sentence that does not deny it.
+
+    Sentence scope is what makes this readable: "we cannot sponsor visas" and
+    "we sponsor work visas" differ by one word that sits beside the cue, not
+    anywhere in the posting. A denial elsewhere in a long description must not
+    cancel a genuine offer, and an offer elsewhere must not excuse a denial in
+    the sentence that states the requirement.
+    """
+    denial = _compiled_pattern(_SPONSORSHIP_DENIAL_PATTERN)
+    for sentence in _sentences(text):
+        if not _find_patterns(sentence, _SPONSORSHIP_CUES):
+            continue
+        if denial.search(sentence.lower()):
+            continue
+        return True
+    return False
+
+
 def _work_authorisation_matches(location: str, text: str) -> tuple[RuleMatch, ...]:
     """Separate a US onsite requirement from an open question about remote eligibility."""
     if not _find_patterns(location, _US_LOCATION_PATTERNS):
         return ()
-    if _find_patterns(text, _SPONSORSHIP_CUES):
+    if _offers_sponsorship(text):
         return ()
     if _find_patterns(location, (_REMOTE_LOCATION_PATTERN,)):
         return (
