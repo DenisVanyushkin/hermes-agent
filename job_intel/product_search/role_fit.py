@@ -248,6 +248,55 @@ _ROLE_SIGNAL_TERMS = (
     "portfolio",
     "single",
 )
+_ADJACENT_PRODUCT_FUNCTIONS = (
+    "design",
+    "marketing",
+    "localisation",
+    "localization",
+    "partnerships",
+    "communications",
+    "research",
+)
+# "Product Marketing Lead" is a marketing mandate that happens to name product;
+# "Product Director, Localisation" is a product mandate that happens to name a
+# domain. The difference is word order, so the pattern anchors on the function
+# sitting immediately after "product" and before the seniority word.
+_ADJACENT_FUNCTION_PATTERNS = tuple(
+    rf"\bproduct\s+{function}\b" for function in _ADJACENT_PRODUCT_FUNCTIONS
+) + tuple(
+    rf"\b{function}\s+(?:lead|director|head)\b" for function in _ADJACENT_PRODUCT_FUNCTIONS
+)
+_US_LOCATION_PATTERNS = (
+    r"\bunited\s+states\b",
+    r"\busa\b",
+    r"\bu\.s\.a?\b",
+    # Safe as a whole word here because only the location field is matched;
+    # in a description "us" appears in every "join us".
+    r"\bus\b",
+    r"\bsan\s+francisco\b",
+    r"\bnew\s+york\b",
+    r"\bseattle\b",
+    r"\bchicago\b",
+    r"\bboston\b",
+    r"\baustin\b",
+    r"\bdenver\b",
+    r"\blos\s+angeles\b",
+    r"\bcalifornia\b",
+    r"\bwashington\b",
+    r"\bnew\s+jersey\b",
+    r",\s*(?:ca|ny|wa|tx|ma|il|co|nj)\b",
+)
+_REMOTE_LOCATION_PATTERN = r"\bremote\b"
+_SPONSORSHIP_CUES = (
+    r"\bsponsor(?:s|ship|ing)?\b",
+    r"\bh-?1b\b",
+    r"\bvisa\s+(?:support|sponsorship)\b",
+    r"\brelocation\s+(?:support|package|assistance)\b",
+    r"\bwork\s+authorisation\s+support\b",
+    r"\bwork\s+authorization\s+support\b",
+)
+
+
 _LOCALIZED_LANGUAGE_REQUIREMENTS = {
     "fr": (
         r"\b(?:excellente|bonne)\s+communication\s+en\s+fran(?:ç|c)ais\b",
@@ -378,6 +427,8 @@ def evaluate_role_fit(
             )
         )
 
+    matches.extend(_adjacent_function_matches(title))
+    matches.extend(_work_authorisation_matches(location, text))
     matches.extend(_industry_matches(sentences, title))
     matches.extend(_staffing_agency_matches(company, text))
 
@@ -394,6 +445,9 @@ def evaluate_role_fit(
     elif required_language_match is not None:
         verdict = "blocked"
         explanation = "The role otherwise remains eligible, but a required working language is unavailable."
+    elif any(match.rule_id in _BLOCKING_RULES for match in matches):
+        verdict = "blocked"
+        explanation = "The role otherwise remains eligible, but an eligibility question is unresolved."
     elif any(match.rule_id == "software_product_leadership" for match in matches):
         verdict = "accept"
         explanation = "The role matches the software/SaaS product-leadership rule."
@@ -404,8 +458,12 @@ def evaluate_role_fit(
     return RoleFitDecision(verdict, tuple(matches), text, explanation)
 
 
+_BLOCKING_RULES = frozenset({"us_remote_eligibility_unknown"})
+
 _HARD_REJECT_RULES = frozenset(
     {
+        "adjacent_product_function",
+        "us_onsite_without_sponsorship",
         "domain_expertise_required",
         "ecommerce_commercial_leadership",
         "interim_or_cover",
@@ -938,6 +996,51 @@ def _domain_sentence_matches(sentence: str, spec: dict[str, Any], title: str) ->
         ).search(sentence):
             return False
     return True
+
+
+def _adjacent_function_matches(title: str) -> tuple[RuleMatch, ...]:
+    """Reject a title whose mandate is an adjacent function rather than product.
+
+    Only the title is examined. A product-leadership description mentions
+    marketing and design in passing all the time, so reading the body here
+    would reject the very roles the rule exists to protect.
+    """
+    fragments = _find_patterns(title, _ADJACENT_FUNCTION_PATTERNS)
+    if not fragments:
+        return ()
+    return (
+        RuleMatch(
+            "adjacent_product_function",
+            fragments,
+            "The title names an adjacent function (design, marketing, localisation, partnerships) rather than a product mandate.",
+            {"title": title},
+        ),
+    )
+
+
+def _work_authorisation_matches(location: str, text: str) -> tuple[RuleMatch, ...]:
+    """Separate a US onsite requirement from an open question about remote eligibility."""
+    if not _find_patterns(location, _US_LOCATION_PATTERNS):
+        return ()
+    if _find_patterns(text, _SPONSORSHIP_CUES):
+        return ()
+    if _find_patterns(location, (_REMOTE_LOCATION_PATTERN,)):
+        return (
+            RuleMatch(
+                "us_remote_eligibility_unknown",
+                (location,),
+                "The role is remote within the US and states no eligibility or sponsorship, which is unresolved rather than disqualifying.",
+                {"location": location},
+            ),
+        )
+    return (
+        RuleMatch(
+            "us_onsite_without_sponsorship",
+            (location,),
+            "The role requires presence in the US and states no sponsorship, which is a hard gate.",
+            {"location": location},
+        ),
+    )
 
 
 def _staffing_agency_matches(company: str, text: str) -> tuple[RuleMatch, ...]:

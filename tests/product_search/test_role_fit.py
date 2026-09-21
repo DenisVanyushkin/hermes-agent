@@ -597,8 +597,17 @@ def test_accepts_senior_product_title_with_em_dash() -> None:
 
 
 def test_accepts_product_function_title_with_level_after_product() -> None:
+    """The seniority word may follow "product" instead of preceding it.
+
+    The original example here was "Product Marketing Director", which the
+    adjacent-function rule now rejects: product marketing is a marketing
+    mandate, not product ownership, and the owner rejected that class in the
+    2026-09 labels. The property under test is word order, so the example is
+    restated with a function that is a product domain rather than a
+    substitute for it.
+    """
     decision = evaluate_role_fit(
-        "Product Marketing Director",
+        "Product Platform Director",
         "SaaSCo",
         "Remote",
         "Own the software product portfolio and product strategy.",
