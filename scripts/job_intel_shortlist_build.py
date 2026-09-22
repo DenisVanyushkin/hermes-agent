@@ -50,13 +50,21 @@ def dedup_key(company: str, title: str) -> tuple[str, str]:
 
 
 def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
-                 max_per_company: int = MAX_PER_COMPANY) -> list[dict[str, Any]]:
-    """Newest first, one role per company, hard cap, no filling with weaker roles.
+                 max_per_company: int = MAX_PER_COMPANY,
+                 issued_keys: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Newest first, capped per company, hard cap, no filling with weaker roles.
 
     Ordering is total: first_seen_at descending, then company, title and
     vacancy_key, so the same run always produces the same batch in the same
     order. A shortage is delivered as a shortage; there is nothing in this
     function that can reach past the accepted set to reach the cap.
+
+    `issued_keys` are vacancy keys already delivered in an earlier release.
+    They are dropped before the cap is applied, not after: filtering
+    afterwards would let roles the owner has already seen consume the cap and
+    silently shrink the release. It arrives as a set rather than as a reader,
+    so this function stays free of any knowledge of where releases are
+    recorded, and its tests need no manifests on disk.
     """
     ordered = sorted(
         rows,
@@ -71,6 +79,8 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
     per_company: dict[str, int] = {}
     batch: list[dict[str, Any]] = []
     for row in ordered:
+        if row.get("vacancy_key") in issued_keys:
+            continue
         company = " ".join((row.get("company") or "").lower().split())
         key = dedup_key(row.get("company") or "", row.get("title") or "")
         if key in seen:
@@ -126,9 +136,10 @@ def ruleset_versions(rows: list[dict[str, Any]]) -> list[str]:
     return sorted(versions)
 
 
-def build(connection: sqlite3.Connection, run_id: int, commit: str) -> dict[str, Any]:
+def build(connection: sqlite3.Connection, run_id: int, commit: str,
+          issued_keys: frozenset[str] = frozenset()) -> dict[str, Any]:
     accepted = fetch_accepted(connection, run_id)
-    batch = select_batch(accepted)
+    batch = select_batch(accepted, issued_keys=issued_keys)
     return {
         "artifact": "job_intel_shortlist",
         "version": "v1",
@@ -139,6 +150,7 @@ def build(connection: sqlite3.Connection, run_id: int, commit: str) -> dict[str,
         "cap": BATCH_CAP,
         "max_per_company": MAX_PER_COMPANY,
         "accepted_total": len(accepted),
+        "issued_keys_supplied": len(issued_keys),
         "delivered_count": len(batch),
         "short_of_cap": len(batch) < BATCH_CAP,
         "items": [
@@ -203,10 +215,23 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.home() / ".hermes" / "hermes-agent")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--print-only", action="store_true")
+    parser.add_argument(
+        "--issued-keys",
+        type=Path,
+        default=None,
+        help="JSON array of vacancy keys already delivered; they are dropped before the cap",
+    )
     args = parser.parse_args()
 
+    issued_keys: frozenset[str] = frozenset()
+    if args.issued_keys is not None:
+        payload = json.loads(args.issued_keys.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise SystemExit("--issued-keys must contain a JSON array of vacancy keys")
+        issued_keys = frozenset(str(item) for item in payload)
+
     connection = connect_read_only(args.db)
-    artifact = build(connection, args.run_id, _head_commit(args.repo))
+    artifact = build(connection, args.run_id, _head_commit(args.repo), issued_keys=issued_keys)
     sha = digest(artifact)
     print(render_text(artifact, sha))
     if args.print_only:

@@ -129,3 +129,22 @@ def test_build_reads_only_accepted_rows_of_the_pinned_run(tmp_path) -> None:
     assert artifact["ruleset_versions"] == ["rf1-test"]
     assert artifact["commit"] == "deadbeef"
     assert artifact["short_of_cap"] is True
+
+
+def test_already_issued_roles_are_dropped_before_the_cap() -> None:
+    """Filtering after the cap would let seen roles consume it and shrink the release."""
+    rows = [
+        row(f"k{index}", f"Company{index:02d}", "VP Product", f"2026-09-{index % 28 + 1:02d}T00:00:00+00:00")
+        for index in range(builder.BATCH_CAP + 3)
+    ]
+    issued = frozenset(item["vacancy_key"] for item in rows[:3])
+
+    batch = builder.select_batch(rows, issued_keys=issued)
+
+    assert len(batch) == builder.BATCH_CAP
+    assert not issued & {item["vacancy_key"] for item in batch}
+
+
+def test_issued_keys_default_to_none_supplied() -> None:
+    rows = [row("k1", "Acme", "VP Product", "2026-09-03T00:00:00+00:00")]
+    assert len(builder.select_batch(rows)) == 1
