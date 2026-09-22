@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 from typing import Any
 
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
@@ -31,6 +32,38 @@ MAX_PER_COMPANY = 3
 
 _NORMALISE_SPLIT = re.compile(r"[^a-z0-9]+")
 _TRAILING_REQUISITION = re.compile(r"\b\d{3,}\b")
+
+
+def role_fit_evaluation_inputs(repo: Path) -> dict[str, Any]:
+    """Pin the arguments the verdicts were computed with, not only the rule text.
+
+    ruleset_version is a digest of role_fit.py, which is self-contained, so it
+    is a faithful version of the *rules*. It is not a version of the
+    *evaluation*: evaluate_role_fit takes owner_languages, supported_languages
+    and short_contract_months as arguments, and a caller passing different
+    ones produces different verdicts under an identical ruleset_version. The
+    verdicts this builder reads are written by observability.py, which calls
+    on the module defaults, so the defaults plus the entrypoint are what make
+    this artifact reproducible.
+    """
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    try:
+        from job_intel.product_search import role_fit
+    except ImportError as exc:
+        return {"available": False, "error": str(exc)}
+    arguments = {
+        "owner_languages": list(role_fit.DEFAULT_OWNER_LANGUAGES),
+        "supported_languages": list(role_fit.DEFAULT_OWNER_LANGUAGES),
+        "short_contract_months": role_fit.DEFAULT_SHORT_CONTRACT_MONTHS,
+    }
+    canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "available": True,
+        "entrypoint": "job_intel.observability.record_daily_observability",
+        "arguments": arguments,
+        "arguments_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
 
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
@@ -172,7 +205,8 @@ def ruleset_versions(rows: list[dict[str, Any]]) -> list[str]:
 
 
 def build(connection: sqlite3.Connection, run_id: int, commit: str,
-          issued_keys: frozenset[str] = frozenset()) -> dict[str, Any]:
+          issued_keys: frozenset[str] = frozenset(),
+          evaluation_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
     accepted = fetch_accepted(connection, run_id)
     batch, suppressed = select_batch(accepted, issued_keys=issued_keys)
     return {
@@ -181,6 +215,7 @@ def build(connection: sqlite3.Connection, run_id: int, commit: str,
         "run_id": run_id,
         "commit": commit,
         "ruleset_versions": ruleset_versions(accepted),
+        "role_fit_evaluation": evaluation_inputs if evaluation_inputs is not None else {"available": False},
         "built_at": datetime.now(timezone.utc).isoformat(),
         "cap": BATCH_CAP,
         "max_per_company": MAX_PER_COMPANY,
@@ -232,6 +267,7 @@ def render_text(artifact: dict[str, Any], sha: str) -> str:
         f"SHORTLIST run_id={artifact['run_id']} delivered={artifact['delivered_count']} of cap {artifact['cap']}",
         f"accepted_total={artifact['accepted_total']} ruleset={','.join(artifact['ruleset_versions']) or 'unknown'}",
         f"commit={artifact['commit']}",
+        f"eval_args={(artifact.get('role_fit_evaluation') or {}).get('arguments_sha256', 'unknown')[:12]}",
         f"sha256={sha}",
         "",
     ]
@@ -278,7 +314,13 @@ def main() -> int:
         issued_keys = frozenset(str(item) for item in payload)
 
     connection = connect_read_only(args.db)
-    artifact = build(connection, args.run_id, _head_commit(args.repo), issued_keys=issued_keys)
+    artifact = build(
+        connection,
+        args.run_id,
+        _head_commit(args.repo),
+        issued_keys=issued_keys,
+        evaluation_inputs=role_fit_evaluation_inputs(args.repo),
+    )
     sha = digest(artifact)
     print(render_text(artifact, sha))
     if args.print_only:

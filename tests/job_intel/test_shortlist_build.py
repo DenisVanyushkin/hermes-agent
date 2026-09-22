@@ -238,3 +238,29 @@ def test_artifact_exposes_suppression_counts(tmp_path) -> None:
     assert artifact["delivered_count"] == 1
     assert artifact["suppressed_counts"]["title_collapsed"] == 1
     assert artifact["suppressed"]["title_collapsed"][0]["collapsed_into"] == "a"
+
+
+def test_evaluation_inputs_are_pinned_beside_the_ruleset_version() -> None:
+    """Identical rules with different arguments are a different evaluation."""
+    repo = Path("/home/hermes/.hermes/hermes-agent")
+    inputs = builder.role_fit_evaluation_inputs(repo)
+    if not inputs.get("available"):
+        import pytest
+
+        pytest.skip(f"role_fit not importable here: {inputs.get('error')}")
+    assert inputs["entrypoint"] == "job_intel.observability.record_daily_observability"
+    assert inputs["arguments"]["owner_languages"] == ["en", "ru"]
+    assert len(inputs["arguments_sha256"]) == 64
+
+
+def test_digest_changes_when_the_evaluation_arguments_change() -> None:
+    base = {
+        "artifact": "job_intel_shortlist",
+        "run_id": 511,
+        "built_at": "2026-09-22T04:00:00+00:00",
+        "ruleset_versions": ["rf1-test"],
+        "role_fit_evaluation": {"arguments_sha256": "a" * 64},
+        "items": [{"position": 1, "company": "Acme"}],
+    }
+    other_arguments = dict(base, role_fit_evaluation={"arguments_sha256": "b" * 64})
+    assert builder.digest(base) != builder.digest(other_arguments)
