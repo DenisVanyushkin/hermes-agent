@@ -246,8 +246,12 @@ def render_text(artifact: dict[str, Any], sha: str) -> str:
             for entry in rows[:5]:
                 lines.append(f"   [{reason}] {entry['company']} — {entry['title']} | {entry['location']}")
     if artifact["short_of_cap"]:
-        lines += ["", "Fewer than the cap: the accepted set held no further distinct companies.",
-                  "Nothing weaker was added to reach seven."]
+        lines += [
+            "",
+            f"Short of the cap: {artifact['delivered_count']} of {artifact['cap']}. The accepted set "
+            "held nothing further that the rules above admit; see HELD BACK for what was not weaker "
+            "but merely capped or collapsed. Nothing weaker was added to reach the cap.",
+        ]
     return "\n".join(lines)
 
 
