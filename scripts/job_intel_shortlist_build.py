@@ -51,13 +51,21 @@ def dedup_key(company: str, title: str) -> tuple[str, str]:
 
 def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
                  max_per_company: int = MAX_PER_COMPANY,
-                 issued_keys: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+                 issued_keys: frozenset[str] = frozenset(),
+                 ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     """Newest first, capped per company, hard cap, no filling with weaker roles.
 
     Ordering is total: first_seen_at descending, then company, title and
     vacancy_key, so the same run always produces the same batch in the same
     order. A shortage is delivered as a shortage; there is nothing in this
     function that can reach past the accepted set to reach the cap.
+
+    Returns the batch and an audit of everything held back, grouped by the
+    reason it was held back. A diversity policy that works by a bare
+    `continue` is a policy nobody can review: a collapsed title and a role
+    that was never a candidate look identical from the outside, and a false
+    collapse becomes a loss the owner cannot notice. Naming the suppressed
+    rows is what keeps that from being silent.
 
     `issued_keys` are vacancy keys already delivered in an earlier release.
     They are dropped before the cap is applied, not after: filtering
@@ -75,24 +83,51 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
             row.get("vacancy_key") or "",
         ),
     )
-    seen: set[tuple[str, str]] = set()
+    seen: dict[tuple[str, str], str] = {}
     per_company: dict[str, int] = {}
     batch: list[dict[str, Any]] = []
+    suppressed: dict[str, list[dict[str, Any]]] = {
+        "already_issued": [],
+        "title_collapsed": [],
+        "company_capped": [],
+        "over_cap": [],
+    }
+
+    def _record(reason: str, row: dict[str, Any], **extra: Any) -> None:
+        suppressed[reason].append(
+            {
+                "vacancy_key": row.get("vacancy_key"),
+                "company": row.get("company"),
+                "title": row.get("title"),
+                "location": row.get("location"),
+                "url": row.get("url"),
+                **extra,
+            }
+        )
+
     for row in ordered:
-        if row.get("vacancy_key") in issued_keys:
-            continue
         company = " ".join((row.get("company") or "").lower().split())
         key = dedup_key(row.get("company") or "", row.get("title") or "")
+        # The order of these branches is the definition of the groups: each row
+        # leaves by the first one that matches, so the audit groups below are
+        # disjoint by construction rather than by arithmetic. Changing the
+        # order changes the partition.
+        if row.get("vacancy_key") in issued_keys:
+            _record("already_issued", row)
+            continue
+        if len(batch) >= cap:
+            _record("over_cap", row)
+            continue
         if key in seen:
+            _record("title_collapsed", row, collapsed_into=seen[key])
             continue
         if per_company.get(company, 0) >= max_per_company:
+            _record("company_capped", row, company_limit=max_per_company)
             continue
-        seen.add(key)
+        seen[key] = str(row.get("vacancy_key") or "")
         per_company[company] = per_company.get(company, 0) + 1
         batch.append(row)
-        if len(batch) >= cap:
-            break
-    return batch
+    return batch, suppressed
 
 
 def _descending(value: str) -> tuple[int, str]:
@@ -139,7 +174,7 @@ def ruleset_versions(rows: list[dict[str, Any]]) -> list[str]:
 def build(connection: sqlite3.Connection, run_id: int, commit: str,
           issued_keys: frozenset[str] = frozenset()) -> dict[str, Any]:
     accepted = fetch_accepted(connection, run_id)
-    batch = select_batch(accepted, issued_keys=issued_keys)
+    batch, suppressed = select_batch(accepted, issued_keys=issued_keys)
     return {
         "artifact": "job_intel_shortlist",
         "version": "v1",
@@ -151,6 +186,8 @@ def build(connection: sqlite3.Connection, run_id: int, commit: str,
         "max_per_company": MAX_PER_COMPANY,
         "accepted_total": len(accepted),
         "issued_keys_supplied": len(issued_keys),
+        "suppressed_counts": {reason: len(rows) for reason, rows in sorted(suppressed.items())},
+        "suppressed": {reason: rows for reason, rows in sorted(suppressed.items())},
         "delivered_count": len(batch),
         "short_of_cap": len(batch) < BATCH_CAP,
         "items": [
@@ -202,6 +239,12 @@ def render_text(artifact: dict[str, Any], sha: str) -> str:
         lines.append(f"{item['position']}. {item['company']} — {item['title']}")
         lines.append(f"   {item['location']} | {item['source']} | first seen {item['first_seen_at']}")
         lines.append(f"   {item['url']}")
+    held = artifact.get("suppressed_counts") or {}
+    if any(held.values()):
+        lines += ["", "HELD BACK " + " ".join(f"{k}={v}" for k, v in sorted(held.items()) if v)]
+        for reason, rows in sorted((artifact.get("suppressed") or {}).items()):
+            for entry in rows[:5]:
+                lines.append(f"   [{reason}] {entry['company']} — {entry['title']} | {entry['location']}")
     if artifact["short_of_cap"]:
         lines += ["", "Fewer than the cap: the accepted set held no further distinct companies.",
                   "Nothing weaker was added to reach seven."]
