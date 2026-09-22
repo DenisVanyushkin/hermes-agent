@@ -22,8 +22,12 @@ from typing import Any
 
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 DEFAULT_OUT = Path.home() / ".hermes" / "job_intel" / "shortlist"
-BATCH_CAP = 7
-MAX_PER_COMPANY = 1
+# Both numbers are the owner's, answered explicitly on 2026-09-22: a wider
+# batch loses fewer good roles to the cap, and three per employer keeps one
+# company with seven openings from taking a quarter of the release while
+# still showing genuinely distinct mandates.
+BATCH_CAP = 25
+MAX_PER_COMPANY = 3
 
 _NORMALISE_SPLIT = re.compile(r"[^a-z0-9]+")
 _TRAILING_REQUISITION = re.compile(r"\b\d{3,}\b")

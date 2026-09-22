@@ -54,16 +54,19 @@ def test_one_role_in_two_cities_is_one_role() -> None:
 
 
 def test_one_company_cannot_take_the_whole_batch() -> None:
+    """okx had seven accepted roles in run 510; three of them may travel, not all."""
     rows = [row(f"k{index}", "okx", f"Product Director {index}", "2026-09-03T00:00:00+00:00") for index in range(7)]
     rows.append(row("other", "wise", "Product Lead", "2026-09-02T00:00:00+00:00"))
     batch = builder.select_batch(rows)
-    assert [item["company"] for item in batch] == ["okx", "wise"]
+    companies = [item["company"] for item in batch]
+    assert companies.count("okx") == builder.MAX_PER_COMPANY == 3
+    assert companies.count("wise") == 1
 
 
 def test_cap_is_hard_and_shortage_is_not_filled() -> None:
     many = [
-        row(f"k{index}", f"Company{index:02d}", "VP Product", f"2026-09-{index + 1:02d}T00:00:00+00:00")
-        for index in range(12)
+        row(f"k{index}", f"Company{index:02d}", "VP Product", f"2026-09-{index % 28 + 1:02d}T00:00:00+00:00")
+        for index in range(builder.BATCH_CAP + 5)
     ]
     assert len(builder.select_batch(many)) == builder.BATCH_CAP
 
