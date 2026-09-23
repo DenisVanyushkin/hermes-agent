@@ -4,6 +4,15 @@ Status: local implementation only. The VPS has not received these files, the
 legacy seed marker has not been written there, no shortlist cron job has been
 installed, and no live Slack or model call has been made by this implementation.
 
+Read-only VPS preflight on 2026-09-23 (`ssh hermes-agent`): checkout
+`/home/hermes/.hermes/hermes-agent` is on `local/customizations` at
+`367d952c10`; it contains an unrelated untracked plan file. The live database
+is `/var/lib/job-intel/state/job_intel.sqlite3` (the older
+`~/.hermes/job_intel/job_intel.sqlite3` path is absent). The 20-label source
+file, cron registry and Job Intel environment file exist. Hermes config has an
+empty `timezone`, and the VPS system timezone is `Europe/Berlin`; recheck both
+when installing jobs, since the scheduler uses its configured or system zone.
+
 ## Runtime contract
 
 - The scheduler timezone must be `Europe/Berlin`. The logical release is the
