@@ -410,6 +410,17 @@ class RoleFitDecision:
         raise KeyError(rule_id)
 
 
+def title_product_leadership_fragments(title: str) -> tuple[str, ...]:
+    """Return the product-leadership evidence ``evaluate_role_fit`` reads from a title.
+
+    Sourcing uses the same predicate to decide which titles are worth fetching
+    full text for, so the two cannot disagree about what counts as leadership.
+    """
+    if not any(term in title.lower() for term in _ROLE_SIGNAL_TERMS):
+        return ()
+    return _find_patterns(title, _PRODUCT_LEADERSHIP)
+
+
 def evaluate_role_fit(
     title: str,
     company: str,
@@ -455,11 +466,7 @@ def evaluate_role_fit(
         if has_role_signal
         else ()
     )
-    leadership_fragments = (
-        _find_patterns(title, _PRODUCT_LEADERSHIP)
-        if any(term in title.lower() for term in _ROLE_SIGNAL_TERMS)
-        else ()
-    )
+    leadership_fragments = title_product_leadership_fragments(title)
     software_signal_fragments = (
         _find_patterns(text, _SOFTWARE_SIGNALS) if has_role_signal else ()
     )

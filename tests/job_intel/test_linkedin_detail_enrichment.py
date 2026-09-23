@@ -10,6 +10,7 @@ from job_intel.browser_sourcing import (
     linkedin_detail_title_matches,
 )
 from job_intel.models import Vacancy
+from job_intel.product_search.role_fit import evaluate_role_fit
 from job_intel.store import JobIntelStore
 
 
@@ -55,9 +56,34 @@ def test_detail_title_filter_normalizes_executive_product_title_variants(title) 
     assert linkedin_detail_title_matches(title)
 
 
-@pytest.mark.parametrize("title", ["Head of eCommerce", "Product Lead"])
+@pytest.mark.parametrize("title", ["Head of eCommerce", "Product Designer", "Senior Product Manager"])
 def test_detail_title_filter_does_not_expand_to_non_dictionary_titles(title) -> None:
     assert not linkedin_detail_title_matches(title)
+
+
+# Titles role_fit accepted with no description in runs 509-514: the detail
+# filter skipped them, so the verdict was taken on the title alone.
+_ROLE_FIT_TITLE_ONLY_ACCEPTS = (
+    "AI Product Lead",
+    "Product Lead, Xplore platform",
+    "Product Lead, AI Email App",
+    "Technical Product Lead - AI Finance App",
+    "Product Lead - AI Neobank App",
+)
+
+
+@pytest.mark.parametrize("title", ["Product Lead", *_ROLE_FIT_TITLE_ONLY_ACCEPTS])
+def test_detail_title_filter_admits_role_fit_product_leadership_titles(title) -> None:
+    assert linkedin_detail_title_matches(title)
+
+
+@pytest.mark.parametrize("title", _ROLE_FIT_TITLE_ONLY_ACCEPTS)
+def test_title_role_fit_would_accept_is_eligible_for_detail_text(title) -> None:
+    # A title role_fit accepts without any text must be fetched with text,
+    # otherwise the text-only selection rules never get to run on it.
+    decision = evaluate_role_fit(title, "Example", "Remote", title)
+    assert decision.verdict == "accept"
+    assert linkedin_detail_title_matches(title)
 
 
 def test_detail_parser_reads_both_real_public_fixtures() -> None:
