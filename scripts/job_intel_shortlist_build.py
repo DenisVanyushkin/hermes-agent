@@ -100,6 +100,15 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
     collapse becomes a loss the owner cannot notice. Naming the suppressed
     rows is what keeps that from being silent.
 
+    Roles the owner's selection boundaries reject (company blacklist, crypto,
+    Russia, scope, work authorisation...) are held back as `boundary_rejected`
+    with their reasons. role_fit and the boundaries are separate rule systems
+    and role_fit accepts roles the boundaries reject: run 511 delivered three
+    roles of an explicitly blacklisted company. A row whose reasons were never
+    recorded is held back as `boundary_unassessed` rather than treated as
+    clean, because "no reasons recorded" and "no reasons found" are different
+    facts. Both leave before the cap for the same reason issued roles do.
+
     `issued_keys` are vacancy keys already delivered in an earlier release.
     They are dropped before the cap is applied, not after: filtering
     afterwards would let roles the owner has already seen consume the cap and
@@ -121,6 +130,8 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
     batch: list[dict[str, Any]] = []
     suppressed: dict[str, list[dict[str, Any]]] = {
         "already_issued": [],
+        "boundary_rejected": [],
+        "boundary_unassessed": [],
         "title_collapsed": [],
         "company_capped": [],
         "over_cap": [],
@@ -148,6 +159,13 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
         if row.get("vacancy_key") in issued_keys:
             _record("already_issued", row)
             continue
+        reasons = row.get("selection_boundary_reasons")
+        if reasons is None:
+            _record("boundary_unassessed", row)
+            continue
+        if reasons:
+            _record("boundary_rejected", row, reasons=list(reasons))
+            continue
         if len(batch) >= cap:
             _record("over_cap", row)
             continue
@@ -172,12 +190,30 @@ def _invert(value: str) -> str:
     return "".join(chr(0x10FFFD - ord(char)) if ord(char) < 0x10FFFD else char for char in value)
 
 
+def parse_boundary_reasons(raw: str | None, vacancy_key: str) -> list[str] | None:
+    """None means never assessed; anything unreadable stops the build.
+
+    Reading a corrupt value as "no reasons" would deliver exactly the roles
+    the boundaries exist to stop, so it is an error, not a default.
+    """
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"selection_boundary_reasons_json of {vacancy_key} is not JSON: {raw!r}") from exc
+    if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+        raise ValueError(f"selection_boundary_reasons_json of {vacancy_key} is not a list of strings: {raw!r}")
+    return payload
+
+
 def fetch_accepted(connection: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
         SELECT o.vacancy_key, o.company, o.title, o.location, o.source,
                COALESCE(o.canonical_url, o.url) AS url,
-               o.role_fit_rules_json, v.first_seen_at, v.last_seen_at, v.posted_at
+               o.role_fit_rules_json, v.first_seen_at, v.last_seen_at, v.posted_at,
+               o.selection_boundary_reasons_json
         FROM vacancy_observability AS o
         LEFT JOIN vacancies AS v ON v.vacancy_key = o.vacancy_key
         WHERE o.run_id = ? AND o.role_fit_verdict = 'accept'
@@ -189,7 +225,12 @@ def fetch_accepted(connection: sqlite3.Connection, run_id: int) -> list[dict[str
         "vacancy_key", "company", "title", "location", "source", "url",
         "role_fit_rules_json", "first_seen_at", "last_seen_at", "posted_at",
     ]
-    return [dict(zip(columns, row)) for row in rows]
+    accepted = []
+    for row in rows:
+        record = dict(zip(columns, row[:-1]))
+        record["selection_boundary_reasons"] = parse_boundary_reasons(row[-1], record["vacancy_key"])
+        accepted.append(record)
+    return accepted
 
 
 def ruleset_versions(rows: list[dict[str, Any]]) -> list[str]:
@@ -280,7 +321,8 @@ def render_text(artifact: dict[str, Any], sha: str) -> str:
         lines += ["", "HELD BACK " + " ".join(f"{k}={v}" for k, v in sorted(held.items()) if v)]
         for reason, rows in sorted((artifact.get("suppressed") or {}).items()):
             for entry in rows[:5]:
-                lines.append(f"   [{reason}] {entry['company']} — {entry['title']} | {entry['location']}")
+                why = f" ({', '.join(entry['reasons'])})" if entry.get("reasons") else ""
+                lines.append(f"   [{reason}] {entry['company']} — {entry['title']} | {entry['location']}{why}")
     if artifact["short_of_cap"]:
         lines += [
             "",

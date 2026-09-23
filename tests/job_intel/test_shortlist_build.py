@@ -30,6 +30,7 @@ def row(key: str, company: str, title: str, first_seen: str, location: str = "Lo
         "first_seen_at": first_seen,
         "last_seen_at": first_seen,
         "posted_at": None,
+        "selection_boundary_reasons": [],
     }
 
 
@@ -102,14 +103,15 @@ def test_build_reads_only_accepted_rows_of_the_pinned_run(tmp_path) -> None:
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT,"
-        " location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT)"
+        " location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT,"
+        " selection_boundary_reasons_json TEXT)"
     )
     conn.execute(
         "CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT)"
     )
     payload = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["software_product_leadership"]})
     conn.executemany(
-        "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,'[]')",
         [
             (511, "k1", "Acme", "VP Product", "London", "LinkedIn", "u1", "u1", "accept", payload),
             (511, "k2", "Beta", "Product Marketing Lead", "Berlin", "Greenhouse", "u2", "u2", "reject", payload),
@@ -214,12 +216,13 @@ def test_artifact_exposes_suppression_counts(tmp_path) -> None:
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT,"
-        " location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT)"
+        " location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT,"
+        " selection_boundary_reasons_json TEXT)"
     )
     conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT)")
     payload = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["software_product_leadership"]})
     conn.executemany(
-        "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,'[]')",
         [
             (511, "a", "Xero", "Head of Product", "Auckland", "LinkedIn", "u1", "u1", "accept", payload),
             (511, "b", "Xero", "Head of Product", "Wellington", "LinkedIn", "u2", "u2", "accept", payload),
@@ -264,3 +267,101 @@ def test_digest_changes_when_the_evaluation_arguments_change() -> None:
     }
     other_arguments = dict(base, role_fit_evaluation={"arguments_sha256": "b" * 64})
     assert builder.digest(base) != builder.digest(other_arguments)
+
+
+def boundary_db(tmp_path, reasons_by_key: dict[str, str | None]) -> Path:
+    path = tmp_path / "boundaries.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT,"
+        " location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT,"
+        " selection_boundary_reasons_json TEXT)"
+    )
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT)")
+    payload = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["software_product_leadership"]})
+    for index, (key, reasons) in enumerate(sorted(reasons_by_key.items())):
+        conn.execute(
+            "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (511, key, f"Company{index}", "VP Product", "London", "LinkedIn", key, key, "accept", payload, reasons),
+        )
+        conn.execute(
+            "INSERT INTO vacancies VALUES (?,?,?,?)",
+            (key, f"2026-09-{index + 1:02d}T00:00:00+00:00", f"2026-09-{index + 1:02d}T00:00:00+00:00", None),
+        )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_a_role_the_selection_boundaries_reject_is_never_delivered() -> None:
+    """Run 511 delivered three okx roles while okx was explicitly blacklisted."""
+    banned = row("okx1", "okx", "Product Director, Trading Infrastructure", "2026-09-09T00:00:00+00:00")
+    banned["selection_boundary_reasons"] = [
+        "company_blacklist", "company_blacklist:explicit", "crypto_industry_mismatch",
+    ]
+    rows = [banned, row("wise", "wise", "Product Lead", "2026-09-01T00:00:00+00:00")]
+
+    batch, suppressed = builder.select_batch(rows)
+
+    assert [item["vacancy_key"] for item in batch] == ["wise"]
+    assert [item["vacancy_key"] for item in suppressed["boundary_rejected"]] == ["okx1"]
+    assert suppressed["boundary_rejected"][0]["reasons"] == [
+        "company_blacklist", "company_blacklist:explicit", "crypto_industry_mismatch",
+    ]
+
+
+def test_boundary_rejections_do_not_consume_the_cap() -> None:
+    rows = [
+        row(f"k{index}", f"Company{index:02d}", "VP Product", f"2026-09-{index % 28 + 1:02d}T00:00:00+00:00")
+        for index in range(builder.BATCH_CAP + 3)
+    ]
+    for item in rows[-3:]:
+        item["selection_boundary_reasons"] = ["russia_employer_country"]
+
+    batch, suppressed = builder.select_batch(rows)
+
+    assert len(batch) == builder.BATCH_CAP
+    assert suppressed["over_cap"] == []
+    assert len(suppressed["boundary_rejected"]) == 3
+
+
+def test_a_role_whose_boundaries_were_never_assessed_is_held_back_by_name() -> None:
+    """No reasons recorded is not the same fact as no reasons found."""
+    unassessed = row("u", "Acme", "VP Product", "2026-09-09T00:00:00+00:00")
+    unassessed["selection_boundary_reasons"] = None
+    missing = row("m", "Beta", "VP Product", "2026-09-08T00:00:00+00:00")
+    del missing["selection_boundary_reasons"]
+
+    batch, suppressed = builder.select_batch([unassessed, missing])
+
+    assert batch == []
+    assert [item["vacancy_key"] for item in suppressed["boundary_unassessed"]] == ["u", "m"]
+
+
+def test_the_release_manifest_names_boundary_rejections(tmp_path) -> None:
+    path = boundary_db(tmp_path, {
+        "ok": "[]",
+        "banned": json.dumps(["company_blacklist", "company_blacklist:explicit"]),
+        "unassessed": None,
+    })
+
+    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef")
+
+    assert [item["vacancy_key"] for item in artifact["items"]] == ["ok"]
+    assert artifact["suppressed_counts"]["boundary_rejected"] == 1
+    assert artifact["suppressed_counts"]["boundary_unassessed"] == 1
+    assert artifact["suppressed"]["boundary_rejected"][0]["reasons"] == [
+        "company_blacklist", "company_blacklist:explicit",
+    ]
+    assert artifact["delivered_count"] + sum(artifact["suppressed_counts"].values()) == artifact["accepted_total"]
+
+
+def test_malformed_boundary_reasons_stop_the_build(tmp_path) -> None:
+    """A corrupt column must not read as 'no reasons' and let a banned role through."""
+    import pytest
+
+    for corrupt in ("not json", json.dumps({"reasons": []}), json.dumps([1, 2])):
+        path = boundary_db(tmp_path, {"bad": corrupt})
+        with pytest.raises(ValueError):
+            builder.build(builder.connect_read_only(path), 511, "deadbeef")
+        path.unlink()
