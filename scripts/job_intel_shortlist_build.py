@@ -1,17 +1,18 @@
-"""Build the delivery batch from one run's accepted roles, and fix it with a digest.
+"""Build a frozen shortlist from one run or a completed Berlin calendar week.
 
 The batch the owner reviews and the batch that is delivered must be the same
 object, not two runs of the same query: the database moves twice a day, so
 re-selecting at delivery time would send something the owner never saw. This
-builder therefore reads one pinned run, writes a canonical serialisation, and
-records its SHA-256. Delivery re-computes that digest and refuses to send on
-any mismatch.
+builder writes a canonical serialisation and records its SHA-256. The weekly
+path retains the latest observation for each vacancy key and accounts for
+every selected, sampled, suppressed and excluded key. Delivery re-computes
+that digest and refuses to send on any mismatch.
 """
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -20,6 +21,7 @@ import sqlite3
 import subprocess
 import sys
 from typing import Any
+from zoneinfo import ZoneInfo
 
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 DEFAULT_OUT = Path.home() / ".hermes" / "job_intel" / "shortlist"
@@ -85,6 +87,7 @@ def dedup_key(company: str, title: str) -> tuple[str, str]:
 def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
                  max_per_company: int = MAX_PER_COMPANY,
                  issued_keys: frozenset[str] = frozenset(),
+                 order_key: Any = None,
                  ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
     """Newest first, capped per company, hard cap, no filling with weaker roles.
 
@@ -109,12 +112,12 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
     """
     ordered = sorted(
         rows,
-        key=lambda row: (
+        key=order_key or (lambda row: (
             _descending(row.get("first_seen_at") or ""),
             row.get("company") or "",
             row.get("title") or "",
             row.get("vacancy_key") or "",
-        ),
+        )),
     )
     seen: dict[tuple[str, str], str] = {}
     per_company: dict[str, int] = {}
@@ -242,6 +245,216 @@ def build(connection: sqlite3.Connection, run_id: int, commit: str,
     }
 
 
+def weekly_bounds(week_start: date) -> tuple[datetime, datetime]:
+    """Return the half-open Berlin Monday-to-Monday window in UTC."""
+    if week_start.weekday() != 0:
+        raise ValueError("week_start must be a Monday in Europe/Berlin")
+    berlin = ZoneInfo("Europe/Berlin")
+    start = datetime.combine(week_start, time.min, berlin)
+    end = datetime.combine(week_start + timedelta(days=7), time.min, berlin)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _weekly_observations(connection: sqlite3.Connection, start: datetime,
+                         end: datetime) -> tuple[list[dict[str, Any]], list[int]]:
+    """One SELECT supplies the complete, consistent window and role text."""
+    cursor = connection.execute(
+        """
+        SELECT o.run_id, o.vacancy_key, o.company, o.title, o.location,
+               o.source, COALESCE(o.canonical_url, o.url) AS url, o.role_fit_verdict,
+               o.role_fit_rules_json, o.created_at, v.first_seen_at,
+               v.posted_at, v.description
+        FROM vacancy_observability AS o
+        LEFT JOIN vacancies AS v ON v.vacancy_key = o.vacancy_key
+        WHERE o.created_at >= ? AND o.created_at < ?
+        """,
+        (start.isoformat(), end.isoformat()),
+    )
+    columns = [column[0] for column in cursor.description]
+    observations = [dict(zip(columns, row)) for row in cursor]
+    for row in observations:
+        observed = datetime.fromisoformat(row["created_at"])
+        if observed.tzinfo is None or not start <= observed.astimezone(timezone.utc) < end:
+            raise ValueError("observability timestamp is outside the frozen UTC window")
+    return observations, sorted({int(row["run_id"]) for row in observations})
+
+
+def _rule_payload(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        payload = json.loads(row.get("role_fit_rules_json") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _frozen_item(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _rule_payload(row)
+    role_fit_input = {key: row.get(key) or "" for key in ("title", "company", "location", "description")}
+    input_bytes = json.dumps(role_fit_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    rule_ids = payload.get("rule_ids")
+    posted, posted_unparsed = _posted_instant(row.get("posted_at"))
+    return {
+        "vacancy_key": row["vacancy_key"], "company": row["company"],
+        "title": row["title"], "location": row["location"],
+        "source": row["source"], "url": row["url"],
+        "description": row["description"], "first_seen_at": row["first_seen_at"],
+        "posted_at": row["posted_at"], "observed_at": row["created_at"],
+        "posted_at_utc": posted.isoformat() if posted else None,
+        "posted_at_unparsed": posted_unparsed,
+        "recency_source": "posted_at" if posted else "first_seen_at",
+        "run_id": row["run_id"], "role_fit_verdict": row["role_fit_verdict"],
+        "rule_ids": rule_ids if isinstance(rule_ids, list) else [],
+        "ruleset_version": payload.get("ruleset_version"),
+        # Observability does not store the exact description evaluated in each
+        # run. This hash identifies the text read from vacancies at build time.
+        "current_role_text_sha256": hashlib.sha256(input_bytes).hexdigest(),
+        "description_provenance": "vacancies_at_build",
+    }
+
+
+def _census_audit_item(row: dict[str, Any]) -> dict[str, Any]:
+    """Keep every identity/verdict without copying every full description."""
+    return {
+        key: row[key] for key in (
+            "vacancy_key", "company", "title", "source", "url", "run_id",
+            "observed_at", "role_fit_verdict", "rule_ids", "ruleset_version",
+            "current_role_text_sha256", "posted_at_utc", "posted_at_unparsed",
+        )
+    } | {"description_present": bool((row["description"] or "").strip())}
+
+
+def _utc_instant(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"invalid role date: {value!r}") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _posted_instant(value: str | None) -> tuple[datetime | None, bool]:
+    """Parse observed scraper formats; unknown dates fall back visibly."""
+    if not value:
+        return None, False
+    if re.fullmatch(r"\d{13}", value):
+        try:
+            return datetime.fromtimestamp(int(value) / 1000, timezone.utc), False
+        except (OverflowError, OSError, ValueError):
+            return None, True
+    if value.endswith(" UTC"):
+        value = value[:-4] + "+00:00"
+    try:
+        return _utc_instant(value), False
+    except ValueError:
+        return None, True
+
+
+def _weekly_recency(row: dict[str, Any]) -> tuple[float, float, str]:
+    first_seen = _utc_instant(row.get("first_seen_at")) or _utc_instant(row.get("observed_at"))
+    if first_seen is None:
+        raise ValueError("weekly role has neither first_seen_at nor observed_at")
+    posted = _utc_instant(row.get("posted_at_utc")) or first_seen
+    return (-posted.timestamp(), -first_seen.timestamp(), row["vacancy_key"])
+
+
+def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
+                 *, release_id: str, issued_keys: frozenset[str] = frozenset(),
+                 evaluation_inputs: dict[str, Any] | None = None,
+                 as_of: datetime | None = None) -> dict[str, Any]:
+    """Freeze the latest observation of every key in one seven-day window."""
+    start, end = weekly_bounds(week_start)
+    as_of = as_of or datetime.now(timezone.utc)
+    if as_of.tzinfo is None or as_of.astimezone(timezone.utc) < end:
+        raise ValueError("weekly window must be complete before building")
+    observations, run_ids = _weekly_observations(connection, start, end)
+    latest: dict[str, dict[str, Any]] = {}
+    for row in observations:
+        key = row["vacancy_key"]
+        if not key:
+            raise ValueError("observability row has no vacancy_key")
+        previous = latest.get(key)
+        order = (row["created_at"], row["run_id"], row["url"] or "")
+        if previous is None or order > (previous["created_at"], previous["run_id"], previous["url"] or ""):
+            latest[key] = row
+
+    census = [_frozen_item(latest[key]) for key in sorted(latest)]
+    census_audit = [_census_audit_item(row) for row in census]
+    accepted: list[dict[str, Any]] = []
+    sample_candidates: list[dict[str, Any]] = []
+    excluded: dict[str, list[dict[str, Any]]] = {
+        "empty_description": [], "reject_not_sampled": [],
+        "blocked_not_sampled": [], "not_evaluated": [],
+    }
+    for row in census:
+        if not (row["description"] or "").strip():
+            excluded["empty_description"].append(_census_audit_item(row))
+        elif row["role_fit_verdict"] == "accept":
+            accepted.append(row)
+        elif row["role_fit_verdict"] in {"reject", "blocked"}:
+            sample_candidates.append(row)
+        else:
+            excluded["not_evaluated"].append(_census_audit_item(row))
+
+    # Calibration's single-rule rejects and unresolved blocked roles are the
+    # cheapest policy decisions to challenge. Sort within each class by a
+    # release-bound hash so a retry produces exactly the same sample.
+    def sample_order(row: dict[str, Any]) -> tuple[int, str, str]:
+        priority = 0 if row["role_fit_verdict"] == "reject" and len(row["rule_ids"]) == 1 else 1 if row["role_fit_verdict"] == "blocked" else 2
+        tie = hashlib.sha256(f"{release_id}:{row['vacancy_key']}".encode()).hexdigest()
+        return priority, tie, row["vacancy_key"]
+
+    sample = sorted(sample_candidates, key=sample_order)[:10]
+    sampled_keys = {row["vacancy_key"] for row in sample}
+    for row in sample_candidates:
+        if row["vacancy_key"] not in sampled_keys:
+            group = "reject_not_sampled" if row["role_fit_verdict"] == "reject" else "blocked_not_sampled"
+            excluded[group].append(_census_audit_item(row))
+
+    batch, suppressed = select_batch(
+        accepted, issued_keys=issued_keys,
+        order_key=_weekly_recency,
+    )
+    selected = [row | {"position": index + 1} for index, row in enumerate(batch)]
+    by_key = {row["vacancy_key"]: row for row in census}
+    suppressed = {
+        reason: [entry | {
+            "source": by_key[entry["vacancy_key"]]["source"],
+            "first_seen_at": by_key[entry["vacancy_key"]]["first_seen_at"],
+            "posted_at": by_key[entry["vacancy_key"]]["posted_at"],
+            "posted_at_utc": by_key[entry["vacancy_key"]]["posted_at_utc"],
+            "posted_at_unparsed": by_key[entry["vacancy_key"]]["posted_at_unparsed"],
+            "recency_source": by_key[entry["vacancy_key"]]["recency_source"],
+        } for entry in entries]
+        for reason, entries in suppressed.items()
+    }
+    partition = [row["vacancy_key"] for row in selected + sample]
+    partition += [row["vacancy_key"] for group in suppressed.values() for row in group]
+    partition += [row["vacancy_key"] for group in excluded.values() for row in group]
+    if len(partition) != len(census) or set(partition) != set(latest):
+        raise ValueError("weekly census partition is incomplete or overlapping")
+    census_sha = hashlib.sha256(json.dumps(census_audit, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return {
+        "artifact": "job_intel_weekly_shortlist", "version": "v2",
+        "release_id": release_id, "week_start": week_start.isoformat(),
+        "window_start_utc": start.isoformat(), "window_end_utc": end.isoformat(),
+        "as_of": as_of.astimezone(timezone.utc).isoformat(), "built_at": datetime.now(timezone.utc).isoformat(),
+        "run_ids": run_ids, "commit": commit, "ruleset_versions": ruleset_versions(list(latest.values())),
+        "role_fit_evaluation": evaluation_inputs if evaluation_inputs is not None else {"available": False},
+        "census_count": len(census), "census_sha256": census_sha,
+        "census": census_audit,
+        "partition_count": len(partition), "accepted_total": len(accepted),
+        "issued_keys_supplied": len(issued_keys), "cap": BATCH_CAP,
+        "max_per_company": MAX_PER_COMPANY, "delivered_count": len(selected),
+        "short_of_cap": len(selected) < BATCH_CAP, "items": selected,
+        "rejected_sample": sample, "suppressed": suppressed,
+        "suppressed_counts": {key: len(value) for key, value in suppressed.items()},
+        "excluded": excluded, "excluded_counts": {key: len(value) for key, value in excluded.items()},
+    }
+
+
 def canonical_bytes(artifact: dict[str, Any]) -> bytes:
     """Serialise for hashing: the digest must not depend on dict order or build time."""
     hashable = {key: value for key, value in artifact.items() if key != "built_at"}
@@ -263,6 +476,18 @@ def _head_commit(repo: Path) -> str:
 
 
 def render_text(artifact: dict[str, Any], sha: str) -> str:
+    if artifact.get("version") == "v2":
+        lines = [
+            f"WEEKLY SHORTLIST {artifact['release_id']} {artifact['window_start_utc']}..{artifact['window_end_utc']}",
+            f"census={artifact['census_count']} runs={len(artifact['run_ids'])} selected={artifact['delivered_count']}",
+            f"rejected_sample={len(artifact['rejected_sample'])} excluded={artifact['excluded_counts']}",
+            f"suppressed={artifact['suppressed_counts']}",
+            f"census_sha256={artifact['census_sha256']}",
+            f"sha256={sha}",
+        ]
+        for item in artifact["items"]:
+            lines.append(f"{item['position']}. {item['company']} — {item['title']} | {item['url']}")
+        return "\n".join(lines)
     lines = [
         f"SHORTLIST run_id={artifact['run_id']} delivered={artifact['delivered_count']} of cap {artifact['cap']}",
         f"accepted_total={artifact['accepted_total']} ruleset={','.join(artifact['ruleset_versions']) or 'unknown'}",
@@ -294,7 +519,11 @@ def render_text(artifact: dict[str, Any], sha: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--run-id", type=int, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run-id", type=int)
+    source.add_argument("--week-start", type=date.fromisoformat, help="Monday date in Europe/Berlin")
+    source.add_argument("--weekly", action="store_true", help="previous completed Berlin ISO week")
+    parser.add_argument("--release-id")
     parser.add_argument("--repo", type=Path, default=Path.home() / ".hermes" / "hermes-agent")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--print-only", action="store_true")
@@ -306,6 +535,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if (args.week_start or args.weekly) and args.issued_keys is None:
+        parser.error("weekly builds require --issued-keys from delivered release manifests")
+
     issued_keys: frozenset[str] = frozenset()
     if args.issued_keys is not None:
         payload = json.loads(args.issued_keys.read_text(encoding="utf-8"))
@@ -314,20 +546,26 @@ def main() -> int:
         issued_keys = frozenset(str(item) for item in payload)
 
     connection = connect_read_only(args.db)
-    artifact = build(
-        connection,
-        args.run_id,
-        _head_commit(args.repo),
-        issued_keys=issued_keys,
-        evaluation_inputs=role_fit_evaluation_inputs(args.repo),
-    )
+    if args.week_start or args.weekly:
+        berlin_today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+        week_start = args.week_start or (berlin_today - timedelta(days=berlin_today.weekday() + 7))
+        release_id = args.release_id or f"shortlist-{week_start.isocalendar().year}-W{week_start.isocalendar().week:02d}"
+        artifact = build_weekly(
+            connection, week_start, _head_commit(args.repo), release_id=release_id,
+            issued_keys=issued_keys, evaluation_inputs=role_fit_evaluation_inputs(args.repo),
+        )
+    else:
+        artifact = build(
+            connection, args.run_id, _head_commit(args.repo), issued_keys=issued_keys,
+            evaluation_inputs=role_fit_evaluation_inputs(args.repo),
+        )
     sha = digest(artifact)
     print(render_text(artifact, sha))
     if args.print_only:
         return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    target = args.out_dir / f"{stamp}-run{args.run_id}"
+    target = args.out_dir / (artifact["release_id"] if args.week_start or args.weekly else f"{stamp}-run{args.run_id}")
     target.mkdir(parents=True, exist_ok=True)
     (target / "shortlist.json").write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"

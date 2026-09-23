@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import date, datetime, timezone
 import json
 import sqlite3
 import sys
@@ -189,6 +190,97 @@ def test_company_cap_is_reported_when_it_actually_binds() -> None:
 
     assert [item["vacancy_key"] for item in suppressed["company_capped"]] == ["okx1", "okx0"]
     assert [item["company"] for item in batch] == ["okx", "okx", "okx", "wise"]
+
+
+def test_weekly_census_uses_all_runs_and_latest_verdict(tmp_path) -> None:
+    path = tmp_path / "weekly.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
+    rules = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["one_rule"]})
+    observations = [
+        (1, "older", "A", "VP Product", "London", "x", "u1", "u1", "accept", rules, "2026-09-14T00:00:00+00:00"),
+        (2, "change", "B", "VP Product", "London", "x", "u2", "u2", "accept", rules, "2026-09-15T10:00:00+00:00"),
+        (3, "change", "B", "VP Product", "London", "x", "u2", "u2", "reject", rules, "2026-09-17T10:00:00+00:00"),
+        (4, "new", "C", "Head of Product", "London", "x", "u3", "u3", "accept", rules, "2026-09-20T10:00:00+00:00"),
+        (4, "posted", "F", "Product Lead", "London", "x", "u6", "u6", "accept", rules, "2026-09-20T11:00:00+00:00"),
+        (4, "empty", "D", "Product Director", "London", "x", "u4", "u4", "accept", rules, "2026-09-20T10:00:00+00:00"),
+        (5, "later", "E", "VP Product", "London", "x", "u5", "u5", "accept", rules, "2026-09-21T22:00:00+00:00"),
+    ]
+    conn.executemany("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", observations)
+    conn.executemany("INSERT INTO vacancies VALUES (?,?,?,?,?)", [
+        (key, "2026-09-15T00:00:00+00:00", None, None, "real job description")
+        for key in ("older", "change", "new", "later")
+    ] + [("posted", "2026-09-14T00:00:00+00:00", None, "2026-09-19T00:00:00+00:00", "real job description")
+    ] + [("empty", "2026-09-20T00:00:00+00:00", None, None, "")])
+    conn.commit()
+    conn.close()
+
+    artifact = builder.build_weekly(
+        builder.connect_read_only(path), date(2026, 9, 14), "deadbeef",
+        release_id="shortlist-2026-W38", issued_keys=frozenset({"older"}),
+    )
+
+    assert artifact["run_ids"] == [1, 2, 3, 4]
+    assert artifact["census_count"] == 5
+    assert [item["vacancy_key"] for item in artifact["items"]] == ["posted", "new"]
+    assert [item["vacancy_key"] for item in artifact["rejected_sample"]] == ["change"]
+    assert [item["vacancy_key"] for item in artifact["suppressed"]["already_issued"]] == ["older"]
+    assert [item["vacancy_key"] for item in artifact["excluded"]["empty_description"]] == ["empty"]
+    assert "description" not in artifact["excluded"]["empty_description"][0]
+    assert len(artifact["census"]) == artifact["census_count"]
+    assert artifact["partition_count"] == artifact["census_count"]
+    assert builder.digest(artifact) == builder.digest(dict(artifact, built_at="tomorrow"))
+    assert artifact["items"][0]["description"] == "real job description"
+    assert artifact["items"][0]["description_provenance"] == "vacancies_at_build"
+
+
+def test_weekly_window_is_berlin_local_monday() -> None:
+    start, end = builder.weekly_bounds(date(2026, 9, 14))
+    assert start.isoformat() == "2026-09-13T22:00:00+00:00"
+    assert end.isoformat() == "2026-09-20T22:00:00+00:00"
+    autumn_start, autumn_end = builder.weekly_bounds(date(2026, 10, 19))
+    assert autumn_start.isoformat() == "2026-10-18T22:00:00+00:00"
+    assert autumn_end.isoformat() == "2026-10-25T23:00:00+00:00"
+
+
+def test_weekly_build_refuses_an_incomplete_week() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="complete"):
+        builder.build_weekly(
+            None, date(2026, 9, 21), "deadbeef", release_id="shortlist-2026-W39",
+            as_of=datetime(2026, 9, 23, tzinfo=timezone.utc),
+        )
+
+
+def test_role_dates_with_different_offsets_compare_as_instants() -> None:
+    assert builder._utc_instant("2026-09-16T11:00:00-04:00") == builder._utc_instant("2026-09-16T15:00:00Z")
+
+
+def test_fresh_undated_role_competes_with_older_dated_roles(tmp_path) -> None:
+    path = tmp_path / "recency.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
+    rules = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["software_product_leadership"]})
+    for index in range(25):
+        key = f"old-{index:02d}"
+        conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (1, key, f"Company {index:02d}", "VP Product", "London", "Greenhouse", key, key, "accept", rules, "2026-09-17T12:00:00+00:00"))
+        posted = {0: "1779266357514", 1: "2026-07-03 15:57:43 UTC", 2: "bad scraper date"}.get(index, "2026-07-29T18:00:00-04:00")
+        conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", (key, "2026-09-14T00:00:00+00:00", None, posted, "Complete job text"))
+    conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (2, "fresh", "LinkedIn role", "VP Product", "London", "LinkedIn", "fresh", "fresh", "accept", rules, "2026-09-20T10:00:00+00:00"))
+    conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", ("fresh", "2026-09-20T09:00:00+00:00", None, None, "Complete job text"))
+    conn.commit()
+    artifact = builder.build_weekly(builder.connect_read_only(path), date(2026, 9, 14), "deadbeef", release_id="shortlist-2026-W38")
+    assert artifact["delivered_count"] == 25
+    assert artifact["items"][0]["vacancy_key"] == "fresh"
+    assert "fresh" not in {row["vacancy_key"] for row in artifact["suppressed"]["over_cap"]}
+    keyed = {row["vacancy_key"]: row for row in artifact["items"] + artifact["suppressed"]["over_cap"]}
+    assert keyed["old-00"]["posted_at_utc"] is not None
+    assert keyed["old-01"]["posted_at_utc"] == "2026-07-03T15:57:43+00:00"
+    assert keyed["old-02"]["posted_at_unparsed"] is True
+    assert keyed["old-02"]["recency_source"] == "first_seen_at"
 
 
 def test_the_audit_groups_account_for_every_input_row() -> None:
