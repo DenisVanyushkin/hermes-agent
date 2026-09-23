@@ -56,7 +56,7 @@ def test_scribe_handoff_task_selects_stable_text_policy():
 
     assert selection.policy_class == "scribe"
     assert selection.policy_name == "scribe_stable_text"
-    assert selection.preferred_model == "gpt-5.6-luna"  # tiers.standard
+    assert selection.preferred_model == "gpt-6-luna"  # tiers.standard
 
 
 
@@ -245,7 +245,7 @@ def test_general_operator_haircut_task_selects_default_policy():
 
     assert selection.policy_class == "general_operator"
     assert selection.policy_name == "general_default"
-    assert selection.preferred_model == "gpt-5.6-luna"  # tiers.standard
+    assert selection.preferred_model == "gpt-6-luna"  # tiers.standard
 
 
 def test_research_complex_synthesis_selects_reasoning_model():
@@ -271,7 +271,7 @@ def test_critical_approval_cloudflare_task_selects_approval_critical_policy():
 
     assert selection.policy_class == "approval_critical"
     assert selection.policy_name == "approval_critical"
-    assert selection.preferred_model == "gpt-5.6-sol"  # tiers.critical
+    assert selection.preferred_model == "gpt-6-sol"  # tiers.critical
     assert selection.allow_fallback is False
     assert selection.fallback_chain_key == "stop_and_escalate"
 
@@ -310,5 +310,5 @@ def test_security_critical_engineer_task_uses_critical_tier_without_fallback():
 
     assert selection.policy_class == "approval_critical"
     assert selection.preferred_provider == "openai-codex"
-    assert selection.preferred_model == "gpt-5.6-sol"  # tiers.critical
+    assert selection.preferred_model == "gpt-6-sol"  # tiers.critical
     assert selection.allow_fallback is False

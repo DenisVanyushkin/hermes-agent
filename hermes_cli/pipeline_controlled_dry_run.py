@@ -26,8 +26,8 @@ ENGINEERING_PIPELINE_ID = "engineering_review_pipeline"
 # does not fail loudly -- it refuses the run, so keep these bound to the config
 # (enforced by tests/hermes_cli/test_model_policy_lineup.py).
 SMOKE_ENGINEER_MODEL = "gpt-5.6-terra"  # tiers.coding
-SMOKE_REVIEWER_MODEL = "gpt-5.6-sol"  # tiers.code_review
-SMOKE_ROUTER_MODEL = "gpt-5.6-luna"  # tiers.standard
+SMOKE_REVIEWER_MODEL = "gpt-6-sol"  # tiers.code_review
+SMOKE_ROUTER_MODEL = "gpt-6-luna"  # tiers.standard
 SMOKE_ALLOWED_REAL_MODELS = (SMOKE_ENGINEER_MODEL, SMOKE_REVIEWER_MODEL)
 # Legacy helper/test names remain for dry-run compatibility, but they now
 # exercise the autonomous execution path only.

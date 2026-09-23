@@ -54,7 +54,7 @@ PROFILE_ID_ALIASES = {
 }
 
 MODEL_TIERS = {"standard", "reasoning", "coding", "critical", "code_review"}
-DEFAULT_BASE_MODEL = "gpt-5.6-luna"
+DEFAULT_BASE_MODEL = "gpt-6-luna"
 #: The lineup a role may name. Membership, not equality with DEFAULT_BASE_MODEL:
 #: roles are meant to differ, and pinning them all to one constant made the
 #: policy file unable to express that.
@@ -66,7 +66,7 @@ DEFAULT_BASE_MODEL = "gpt-5.6-luna"
 #: this stays a closed set and why validate_role_policies() reports per role.
 #: Kept in step with the tier block of config/hermes-model-policy.yaml by
 #: tests/hermes_cli/test_role_model_differentiation.py.
-SUPPORTED_BASE_MODELS = frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"})
+SUPPORTED_BASE_MODELS = frozenset({"gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"})
 #: Roles that are parked rather than configured.
 DEFERRED_BASE_MODEL = "deferred"
 CANONICAL_TOOL_CATEGORIES = {

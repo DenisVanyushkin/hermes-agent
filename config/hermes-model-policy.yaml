@@ -2,11 +2,11 @@ schema_version: 1
 tiers:
   standard:
     provider: openai-codex
-    model: gpt-5.6-luna
+    model: gpt-6-luna
     fallback_behavior: fallback_allowed
   cheap:
     provider: openai-codex
-    model: gpt-5.6-luna
+    model: gpt-6-luna
     fallback_behavior: fallback_allowed
   reasoning:
     provider: openai-codex
@@ -14,7 +14,7 @@ tiers:
     fallback_behavior: fallback_allowed
   critical:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-sol
     allow_fallback: false
     unavailable_behavior: stop_and_escalate
     fallback_models: []
@@ -25,7 +25,7 @@ tiers:
     fallback_behavior: reasoning_then_standard
   code_review:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-sol
     fallback_behavior: critical_then_reasoning_then_standard
   coding:
     provider: openai-codex
@@ -42,7 +42,7 @@ profile_tiers:
   general_operator: standard
   security_auditor: critical
 model_governance:
-  default_base_model: gpt-5.6-luna
+  default_base_model: gpt-6-luna
   base_model_owner: human_operator_maintainer
   escalation_model_owner: human_operator_maintainer
   free_fallback_owner: hermes_runtime_selector
@@ -113,7 +113,7 @@ fallback_selection_policy:
       supportsResponseFormat: true
 role_policies:
   chief_coordinator:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - routing
@@ -131,7 +131,7 @@ role_policies:
           supportsResponseFormat: true
           supportsReasoning: true
   engineer:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - draft
@@ -148,7 +148,7 @@ role_policies:
           liteEvalScore: high
           contextLength: large
   security_auditor:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - risk_summary
@@ -165,7 +165,7 @@ role_policies:
           supportsReasoning: true
           contextLength: large
   scribe:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - document
@@ -182,7 +182,7 @@ role_policies:
           supportsResponseFormat: true
           latencyMs: low
   artist:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - clarifying_dialogue
@@ -198,7 +198,7 @@ role_policies:
           supportsResponseFormat: true
           latencyMs: low
   researcher:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - source_gathering
@@ -215,7 +215,7 @@ role_policies:
           supportsReasoning: true
           contextLength: large
   lawyer:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - clarifying_dialogue
@@ -229,7 +229,7 @@ role_policies:
           supportsStructuredOutputs: true
           latencyMs: low
   career_strategist:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - fit_assessment
@@ -246,7 +246,7 @@ role_policies:
           supportsReasoning: true
           contextLength: large
   general_operator:
-    base_model: gpt-5.6-luna
+    base_model: gpt-6-luna
     free_fallback:
       allowed_for:
       - personal_admin

@@ -27,7 +27,7 @@ POLICY = Path(DEFAULT_MODEL_POLICY_PATH)
 
 def test_lineup_is_explicit():
     assert SUPPORTED_BASE_MODELS == {
-        "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+        "gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol",
     }
 
 
@@ -40,7 +40,7 @@ def test_the_lineup_matches_the_policy_file():
 def test_differentiated_policies_are_valid():
     policies = {
         "engineer": {"base_model": "gpt-5.6-terra"},
-        "scribe": {"base_model": "gpt-5.6-luna"},
+        "scribe": {"base_model": "gpt-6-luna"},
     }
     result = validate_role_policies(policies)
     assert result.valid
@@ -58,7 +58,7 @@ def test_invalid_policy_does_not_silently_downgrade_all_roles():
     """The historical failure mode: one bad entry soft-fell-back every role."""
     policies = {
         "engineer": {"base_model": "gpt-4o-mini"},
-        "scribe": {"base_model": "gpt-5.6-luna"},
+        "scribe": {"base_model": "gpt-6-luna"},
     }
     result = validate_role_policies(policies)
     assert result.invalid_roles == {"engineer"}
@@ -89,6 +89,6 @@ def test_the_shipped_policy_actually_differentiates_the_roles():
         return tiers[profile_tiers[role]]["model"]
 
     assert model_for("engineer") == "gpt-5.6-terra"
-    assert model_for("security_auditor") == "gpt-5.6-sol"
-    assert model_for("scribe") == "gpt-5.6-luna"
-    assert model_for("general_operator") == "gpt-5.6-luna"
+    assert model_for("security_auditor") == "gpt-6-sol"
+    assert model_for("scribe") == "gpt-6-luna"
+    assert model_for("general_operator") == "gpt-6-luna"

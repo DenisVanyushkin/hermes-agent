@@ -292,7 +292,7 @@ _API_CALL_MODULES = frozenset({
 #: Models a role policy may repoint the runtime at. A stale or typo'd entry must
 #: not be able to send a turn somewhere unsanctioned, so this is a closed set --
 #: the same one profile_validation enforces for the policy file.
-_ROLE_SWITCHABLE_MODELS = frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"})
+_ROLE_SWITCHABLE_MODELS = frozenset({"gpt-6-luna", "gpt-5.6-terra", "gpt-6-sol"})
 
 
 def apply_role_model(agent: Any, *, preferred_model: str, preferred_provider: str) -> str:
@@ -355,7 +355,7 @@ def log_model_selection(
     chains, or runtime model state". Logging its ``preferred_model`` as a bare
     ``model=`` therefore asserted a fact it had never established: the line read
     ``model=gpt-5.4`` on turns that ``Turn ended`` reported as
-    ``model=gpt-5.6-luna``, and model decisions were being made off that.
+    ``model=gpt-6-luna``, and model decisions were being made off that.
 
     ``effective_model`` is ``agent.model`` — the model the turn actually starts
     on. Runtime fallback can still move it mid-turn (``chat_completion_helpers``

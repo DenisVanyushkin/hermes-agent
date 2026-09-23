@@ -13,12 +13,12 @@ selection:
 models:
   default:
     provider: openai-codex
-    model: gpt-5.6-sol
+    model: gpt-6-sol
     class: senior_reasoning
     tier: critical
   allowed:
     - provider: openai-codex
-      model: gpt-5.6-sol
+      model: gpt-6-sol
       class: senior_reasoning
       tier: critical
   fallback:

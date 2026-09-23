@@ -18,9 +18,9 @@ _CODING_PROVIDER = "openai-codex"
 # the single source of truth for the sanctioned lineup. This module stays pure
 # and import-light (see the module docstring) rather than parsing YAML at import
 # time, so tests/hermes_cli/test_model_policy_lineup.py enforces the agreement.
-_DEFAULT_MODEL = "gpt-5.6-luna"      # tiers.standard
+_DEFAULT_MODEL = "gpt-6-luna"      # tiers.standard
 _REASONING_MODEL = "gpt-5.6-terra"   # tiers.reasoning
-_CRITICAL_MODEL = "gpt-5.6-sol"      # tiers.critical
+_CRITICAL_MODEL = "gpt-6-sol"      # tiers.critical
 _CODING_MODEL = "gpt-5.6-terra"      # tiers.coding
 
 _TRADING_ROLES = {"trading_observer_trader", "trading_observer_trader_deferred"}

@@ -25,7 +25,7 @@ DEFAULT_ROUTER_LLM_PROVIDER = "openai-codex"
 # tiers.standard of config/hermes-model-policy.yaml. The 5.6 lineup has no
 # "mini", so the cheap classifier tier is luna. Held to the config by
 # tests/hermes_cli/test_model_policy_lineup.py.
-DEFAULT_ROUTER_LLM_MODEL = "gpt-5.6-luna"
+DEFAULT_ROUTER_LLM_MODEL = "gpt-6-luna"
 DEFAULT_ROUTER_LLM_TIMEOUT_SECONDS = 10.0
 DEFAULT_ROUTER_LLM_MIN_CONFIDENCE = 0.70
 DEFAULT_ROUTER_LLM_MAX_ATTEMPTS = 2

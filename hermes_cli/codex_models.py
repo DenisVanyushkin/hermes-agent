@@ -13,12 +13,12 @@ import os
 logger = logging.getLogger(__name__)
 
 DEFAULT_CODEX_MODELS: List[str] = [
-    # GPT-5.6 series (Sol/Terra/Luna). The public API exposes "-pro"
+    # Active Codex lineup: GPT-6 Sol/Luna and GPT-5.6 Terra. The public API exposes "-pro"
     # variants, but the ChatGPT Codex OAuth backend rejects them with HTTP 400,
     # so the curated offline fallback must not surface those dead choices.
-    "gpt-5.6-sol",
+    "gpt-6-sol",
     "gpt-5.6-terra",
-    "gpt-5.6-luna",
+    "gpt-6-luna",
     "gpt-5.5",
     "gpt-5.4-mini",
     "gpt-5.4",
@@ -51,9 +51,9 @@ DEFAULT_CODEX_MODELS: List[str] = [
 ]
 
 _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
-    ("gpt-5.6-sol", ("gpt-5.5", "gpt-5.4")),
+    ("gpt-6-sol", ("gpt-5.5", "gpt-5.4")),
     ("gpt-5.6-terra", ("gpt-5.5", "gpt-5.4")),
-    ("gpt-5.6-luna", ("gpt-5.5", "gpt-5.4")),
+    ("gpt-6-luna", ("gpt-5.5", "gpt-5.4")),
     ("gpt-5.5", ("gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex")),
     ("gpt-5.4-mini", ("gpt-5.3-codex",)),
     ("gpt-5.4", ("gpt-5.3-codex",)),

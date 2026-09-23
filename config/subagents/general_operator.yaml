@@ -14,16 +14,16 @@ selection:
 models:
   default:
     provider: openai-codex
-    model: gpt-5.6-luna
+    model: gpt-6-luna
     class: general
     tier: cheap
   allowed:
     - provider: openai-codex
-      model: gpt-5.6-luna
+      model: gpt-6-luna
       class: general
       tier: cheap
     - provider: openai-codex
-      model: gpt-5.6-sol
+      model: gpt-6-sol
       class: senior_reasoning
       tier: critical
   fallback:

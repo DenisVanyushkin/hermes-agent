@@ -9,15 +9,15 @@ from hermes_cli.codex_models import (
 
 
 CHATGPT_REJECTED_CODEX_PRO_SLUGS = {
-    "gpt-5.6-sol-pro",
+    "gpt-6-sol-pro",
     "gpt-5.6-terra-pro",
-    "gpt-5.6-luna-pro",
+    "gpt-6-luna-pro",
 }
 
 
 def test_curated_codex_fallback_excludes_chatgpt_rejected_pro_slugs(monkeypatch):
     """OAuth fallback retains real models but never synthesizes rejected ones."""
-    retained_models = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+    retained_models = {"gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna"}
     template_models = {model for model, _fallbacks in _FORWARD_COMPAT_TEMPLATE_MODELS}
 
     assert retained_models.issubset(DEFAULT_CODEX_MODELS)
