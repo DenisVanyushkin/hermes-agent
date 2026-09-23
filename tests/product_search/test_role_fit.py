@@ -1115,3 +1115,40 @@ def test_optional_or_descriptive_edtech_is_not_domain_expertise(sentence: str) -
     )
 
     assert "domain_expertise_required" not in decision.rule_ids
+
+
+def test_content_group_mandate_requires_ugc_landscape() -> None:
+    decision = evaluate_role_fit(
+        "Product Lead - Content Group",
+        "canva",
+        "Sydney",
+        _PLATFORM
+        + "The Content Group is responsible for our content library of templates. "
+        "It is made up of our content sources (in-house designers, creators, content acquisitions, "
+        "and content partners), content review, content platform, and content experience.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "ugc_and_content_platforms"
+
+
+def test_content_in_title_without_ugc_domain_is_not_rejected() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product, Content",
+        "Acme",
+        "London",
+        _PLATFORM + "Lead the product organisation for our B2B analytics suite.",
+    )
+
+    assert "domain_expertise_required" not in decision.rule_ids
+
+
+def test_creators_in_description_without_content_mandate_is_not_rejected() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "London",
+        _PLATFORM + "Our tools are used by creators and content partners worldwide.",
+    )
+
+    assert "domain_expertise_required" not in decision.rule_ids

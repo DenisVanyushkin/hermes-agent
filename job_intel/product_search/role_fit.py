@@ -478,6 +478,7 @@ def evaluate_role_fit(
     matches.extend(_industry_matches(sentences, title))
     matches.extend(_staffing_agency_matches(company, text))
     matches.extend(_russia_location_matches(location))
+    matches.extend(_content_platform_matches(title, text))
     matches.extend(_advanced_degree_matches(sentences))
 
     required_language_match = _language_match(sentences, owner_languages)
@@ -1120,6 +1121,33 @@ def _work_authorisation_matches(location: str, text: str) -> tuple[RuleMatch, ..
             (location,),
             "The role requires presence in the US and states no sponsorship, which is a hard gate.",
             {"location": location},
+        ),
+    )
+
+
+# A product lead whose mandate is content itself - templates, creators, content
+# partners - is expected to know the whole UGC landscape (owner, canva Content
+# Group, release 084423Z). The title must name content as the mandate and the
+# text must describe that domain; either alone is ordinary product work.
+_CONTENT_MANDATE_TITLE_PATTERN = r"\b(?:content|creators?|ugc|user[- ]generated)\b"
+_UGC_DOMAIN_PATTERN = (
+    r"\b(?:creators?|user[- ]generated|ugc|content\s+(?:library|platform|partners?|acquisitions?|review|sources?|marketplace))\b"
+)
+
+
+def _content_platform_matches(title: str, text: str) -> tuple[RuleMatch, ...]:
+    if not _find_patterns(title, _PRODUCT_LEADERSHIP):
+        return ()
+    title_fragments = _find_patterns(title, (_CONTENT_MANDATE_TITLE_PATTERN,))
+    domain_fragments = _find_patterns(text, (_UGC_DOMAIN_PATTERN,))
+    if not title_fragments or not domain_fragments:
+        return ()
+    return (
+        RuleMatch(
+            "domain_expertise_required",
+            (title, *domain_fragments),
+            "The role's mandate is a content/UGC platform, which requires deep knowledge of the UGC landscape.",
+            {"domain": "ugc_and_content_platforms", "legacy_rule_id": "ugc_and_content_platforms"},
         ),
     )
 
