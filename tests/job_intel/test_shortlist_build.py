@@ -421,7 +421,8 @@ def test_the_release_drops_what_the_scoring_path_marked_as_out_of_bounds(tmp_pat
     assert "company_blacklist:explicit" in artifact["suppressed"]["boundary_rejected"][0]["reasons"]
 
 
-def duplicate_db(tmp_path, members: list[tuple[str, str | None]]) -> Path:
+def duplicate_db(tmp_path, members: list[tuple[str, str | None]],
+                 companies: tuple[str, ...] = ()) -> Path:
     """One vacancy_key observed several times in one run under different URLs."""
     path = tmp_path / "duplicates.sqlite3"
     conn = sqlite3.connect(path)
@@ -432,10 +433,11 @@ def duplicate_db(tmp_path, members: list[tuple[str, str | None]]) -> Path:
     )
     conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT)")
     payload = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["software_product_leadership"]})
-    for url, reasons in members:
+    for index, (url, reasons) in enumerate(members):
+        company = companies[index] if companies else "Doit"
         conn.execute(
             "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (511, "k", "Doit", "Product Lead", "Tokyo", "LinkedIn", url, url, "accept", payload, reasons),
+            (511, "k", company, "Product Lead", "Tokyo", "LinkedIn", url, url, "accept", payload, reasons),
         )
     conn.execute("INSERT INTO vacancies VALUES ('k', '2026-09-21T00:00:00+00:00', '2026-09-21T00:00:00+00:00', NULL)")
     conn.commit()
@@ -543,3 +545,16 @@ def test_a_missing_assessment_is_written_as_unassessed_not_as_clean(tmp_path) ->
 
     assert [item["company"] for item in artifact["items"]] == ["Assessed"]
     assert [entry["company"] for entry in artifact["suppressed"]["boundary_unassessed"]] == ["Unassessed"]
+
+
+def test_a_blacklisted_company_on_any_observation_holds_the_key_back(tmp_path) -> None:
+    """SSB-2 closure: one key can carry different company labels; the representative must not decide."""
+    blacklist = {"doit": {"origin": "explicit", "negative_event_count": 0}}
+    for companies in (("Example", "Doit"), ("Doit", "Example")):
+        path = duplicate_db(tmp_path, [("a", "[]"), ("b", "[]")], companies=companies)
+        artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist=blacklist)
+        assert artifact["items"] == [], companies
+        assert artifact["suppressed"]["boundary_rejected"][0]["reasons"] == [
+            "company_blacklist", "company_blacklist:explicit",
+        ]
+        path.unlink()

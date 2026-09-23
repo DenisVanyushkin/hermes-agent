@@ -241,6 +241,14 @@ def fetch_accepted(connection: sqlite3.Connection, run_id: int,
     for row in rows:
         record = dict(zip(columns, row[:-1]))
         reasons = parse_boundary_reasons(row[-1], record["vacancy_key"])
+        # The blacklist is applied to each observation, before merging: one
+        # key can carry different company labels, and the representative's
+        # label must not decide whether a blacklisted one travels.
+        company_key = canonical_company_key(record.get("company"))
+        entry = company_blacklist.get(company_key) if company_key else None
+        if entry is not None:
+            current = ["company_blacklist", f"company_blacklist:{entry.get('origin') or 'unknown'}"]
+            reasons = _merge_reasons(reasons, current)
         key = record["vacancy_key"]
         if key not in grouped:
             # The first member by URL is the representative; ORDER BY makes it deterministic.
@@ -249,12 +257,6 @@ def fetch_accepted(connection: sqlite3.Connection, run_id: int,
             continue
         merged = grouped[key]["selection_boundary_reasons"]
         grouped[key]["selection_boundary_reasons"] = _merge_reasons(merged, reasons)
-    for record in grouped.values():
-        company_key = canonical_company_key(record.get("company"))
-        entry = company_blacklist.get(company_key) if company_key else None
-        if entry is not None:
-            current = ["company_blacklist", f"company_blacklist:{entry.get('origin') or 'unknown'}"]
-            record["selection_boundary_reasons"] = _merge_reasons(record["selection_boundary_reasons"], current)
     return list(grouped.values())
 
 
