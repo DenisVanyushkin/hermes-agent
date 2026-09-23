@@ -20,7 +20,28 @@ class BackfillError(ValueError):
 
 
 LIVE_2026_09_KEYS_SHA256 = "43c8253b686bfbfc751a210162eb149195f20215ce74957c3202ba7b9d310bd3"
-LEGACY_ROUNDS = frozenset({None, "2026-09-19-round3"})
+LIVE_2026_09_KEYS = (
+    "20b5aca098b7b934a4d6503f7565bab35723d6efc95c174bdfca75ede5f5c49c",
+    "3e9d401102b5f215a9909b302149e82277feae85c9016643749c190429e630b9",
+    "448d40159e3bdc1efa853af5d169cdf7969e772d0be075805719b91bc7ed8a76",
+    "459e37d52b4f4d7ac2f33dba19114f581cedf2b29cb3e46a11dde7f2b95251f9",
+    "4d89285605c9c1861bbe69f8491e91124b963b3aa2fc9293714ec8b5552f196c",
+    "505352279398bf034d143869ce1ca6aa2e023af24a33c0c67db1ae3707d5a504",
+    "638e93d2089e5c870724a255e45b2024afc42c3e55090530bced881d45e648ae",
+    "6efb55305d7162605ea5a252ea213832f50f39f4023fa32e7d4978e1cd2e60f1",
+    "84d39856a3667e85314343dabc5cf5ff31ea5a857c72d4396594818c8e924c67",
+    "85243f75680a11ec2b38e8329e1cbf55803c23e0f1498c3f1a468039eb8f5478",
+    "86193a7ff7f6d0deb97bdd1d945cd7bc89fe2055bb607fba94a229b6bee4a889",
+    "8fb09e918091ab4274c5ce0b3edd35211767e94dcd75341c3ff522956a7d8bb4",
+    "b8e4b0c1c177e491cab90457004eab47ea6dc6576711128fc35bd43e1292554e",
+    "be93f21243b797eff4e8f2287c68a28a5a4074fe7c90c0829601dbef04089cf4",
+    "ce53dbd364fe3d4032a5c5fc5399b162571d8ac0db4af0bd2f7f77d98ab42de9",
+    "cf93f4eb6db8fd502f21ede7130f8218b1f3ccf68a2599e5b196a228fa3e97c6",
+    "d2f820d4ab4bf1d5914dccdaba19245e8695d7eb769cf8a6fe17b538eea1b265",
+    "edf4787f88c1cc51cebf7045b5858bd8d023b484b383a90f7e6da66e9a0728d2",
+    "f7b7dc2956836c77ad012f8d12d89de2c7ecf190f9c84fec8e09c852ec354f8e",
+    "ff772e7a599c381811bbbf3d3a5ff7696eec2d934bf69deb40fda0005f0f087c",
+)
 MARKER_NAME = "legacy-seed-v1.json"
 
 
@@ -30,10 +51,15 @@ def _canonical_bytes(value: object) -> bytes:
 
 def prepare_legacy_seed(labels_path: Path, db_path: Path, release_root: Path, *,
                         expected_count: int = 20,
-                        expected_keys_sha256: str = LIVE_2026_09_KEYS_SHA256) -> dict:
+                        expected_keys_sha256: str = LIVE_2026_09_KEYS_SHA256,
+                        audited_keys: tuple[str, ...] = LIVE_2026_09_KEYS) -> dict:
     """Create a durable marker only after every historical key maps once to vacancies."""
     if expected_count < 1 or not re.fullmatch(r"[0-9a-f]{64}", expected_keys_sha256):
         raise BackfillError("invalid seed expectation")
+    if len(audited_keys) != expected_count or len(set(audited_keys)) != expected_count:
+        raise BackfillError("audited key list is invalid")
+    if hashlib.sha256(_canonical_bytes(sorted(audited_keys))).hexdigest() != expected_keys_sha256:
+        raise BackfillError("audited key list does not match its digest")
     marker_path = release_root / MARKER_NAME
     if marker_path.exists():
         try:
@@ -51,7 +77,10 @@ def prepare_legacy_seed(labels_path: Path, db_path: Path, release_root: Path, *,
         raise BackfillError("cannot read owner labels") from error
     if not isinstance(document, dict) or not isinstance(document.get("labels"), list):
         raise BackfillError("owner labels have no labels list")
-    old = [row for row in document["labels"] if isinstance(row, dict) and row.get("round") in LEGACY_ROUNDS]
+    audited_set = set(audited_keys)
+    old = [row for row in document["labels"] if isinstance(row, dict)
+           and isinstance(row.get("vacancy_key"), str)
+           and row["vacancy_key"] in audited_set]
     if len(old) != expected_count:
         raise BackfillError(f"expected {expected_count} historical decisions; found {len(old)}")
     raw_keys = [row.get("vacancy_key") for row in old]

@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from job_intel_shortlist_backfill import BackfillError, prepare_legacy_seed
 from job_intel_shortlist_issued import issued_keys
 
+FAKE_AUDITED_KEYS = ("old-a", "old-b")
+
 
 def _fixture(tmp_path):
     labels_path = tmp_path / "labels.json"
@@ -35,15 +37,34 @@ def _fixture(tmp_path):
 
 def test_seed_only_exact_historical_keys_and_is_idempotent(tmp_path):
     labels, db, root, expected = _fixture(tmp_path)
-    marker = prepare_legacy_seed(labels, db, root, expected_count=2, expected_keys_sha256=expected)
+    marker = prepare_legacy_seed(labels, db, root, expected_count=2,
+                                 expected_keys_sha256=expected, audited_keys=FAKE_AUDITED_KEYS)
     assert marker["keys"] == ["old-a", "old-b"]
     assert issued_keys(root) == frozenset({"old-a", "old-b"})
     assert prepare_legacy_seed(labels, db, root, expected_count=2,
-                               expected_keys_sha256=expected) == marker
+                               expected_keys_sha256=expected, audited_keys=FAKE_AUDITED_KEYS) == marker
+
+
+def test_new_roundless_import_does_not_expand_historical_seed(tmp_path):
+    labels, db, root, expected = _fixture(tmp_path)
+    document = json.loads(labels.read_text())
+    document["labels"].append({
+        "vacancy_key": "new-c", "company": "Gamma", "title": "Product Lead", "verdict": "yes",
+    })
+    labels.write_text(json.dumps(document))
+    marker = prepare_legacy_seed(labels, db, root, expected_count=2,
+                                 expected_keys_sha256=expected, audited_keys=FAKE_AUDITED_KEYS)
+    assert marker["keys"] == ["old-a", "old-b"]
+
+
+def test_missing_seed_blocks_issued_index(tmp_path):
+    _, _, root, _ = _fixture(tmp_path)
+    with pytest.raises(ValueError, match="legacy seed"):
+        issued_keys(root)
 
 
 @pytest.mark.parametrize("mutation", ["missing_db", "duplicate_db", "wrong_title", "duplicate_label",
-                                            "extra_old_label", "changed_expected_digest", "missing_key",
+                                            "changed_expected_digest", "missing_key",
                                             "invalid_verdict"])
 def test_seed_fails_closed_without_marker(tmp_path, mutation):
     labels, db, root, expected = _fixture(tmp_path)
@@ -57,8 +78,6 @@ def test_seed_fails_closed_without_marker(tmp_path, mutation):
         connection.execute("UPDATE vacancies SET title='Other role' WHERE vacancy_key='old-a'")
     elif mutation == "duplicate_label":
         document["labels"].append(dict(document["labels"][0]))
-    elif mutation == "extra_old_label":
-        document["labels"][2].pop("round")
     elif mutation == "changed_expected_digest":
         expected = "0" * 64
     elif mutation == "missing_key":
@@ -69,13 +88,15 @@ def test_seed_fails_closed_without_marker(tmp_path, mutation):
     connection.close()
     labels.write_text(json.dumps(document))
     with pytest.raises(BackfillError):
-        prepare_legacy_seed(labels, db, root, expected_count=2, expected_keys_sha256=expected)
+        prepare_legacy_seed(labels, db, root, expected_count=2,
+                            expected_keys_sha256=expected, audited_keys=FAKE_AUDITED_KEYS)
     assert not (root / "legacy-seed-v1.json").exists()
 
 
 def test_corrupt_marker_blocks_issued_index(tmp_path):
     labels, db, root, expected = _fixture(tmp_path)
-    prepare_legacy_seed(labels, db, root, expected_count=2, expected_keys_sha256=expected)
+    prepare_legacy_seed(labels, db, root, expected_count=2,
+                        expected_keys_sha256=expected, audited_keys=FAKE_AUDITED_KEYS)
     marker_path = root / "legacy-seed-v1.json"
     marker = json.loads(marker_path.read_text())
     marker["keys"].append("new-c")

@@ -222,7 +222,7 @@ def test_duplicate_report_voids_only_report_and_scan_error_is_retryable(tmp_path
         report.publish_report(source, releases, RELEASE, slack, now=NOW)
     assert publish.load_receipt(attempt)["state"] == "imported"
     assert "report_intent" in publish.load_receipt(attempt)
-    assert issued.issued_keys(releases) == {"k1", "k2", "k5"}
+    assert issued.issued_keys(releases, require_seed=False) == {"k1", "k2", "k5"}
     slack.scan_error = False
     assert report.publish_report(source, releases, RELEASE, slack, now=NOW)["state"] == "reported"
 

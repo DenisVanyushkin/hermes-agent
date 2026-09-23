@@ -25,10 +25,12 @@ _ISSUED_STATES = frozenset({"delivered", "imported", "reported", "expired"})
 _SKIP_STATES = frozenset({"prepared"})
 
 
-def legacy_seed_keys(release_root: Path) -> frozenset[str]:
+def legacy_seed_keys(release_root: Path, *, required: bool = True) -> frozenset[str]:
     """Read the audited pre-automation seed if present, rejecting corruption."""
     path = release_root / "legacy-seed-v1.json"
     if not path.exists():
+        if required:
+            raise IssuedIndexError("legacy seed marker missing")
         return frozenset()
     marker = _receipt(path)
     keys = marker.get("keys")
@@ -174,7 +176,7 @@ def _empty_keys(path: Path, receipt: dict) -> frozenset[str]:
     return frozenset()
 
 
-def issued_keys(release_root: Path) -> frozenset[str]:
+def issued_keys(release_root: Path, *, require_seed: bool = True) -> frozenset[str]:
     """Return exactly the shortlist keys from verified delivered releases."""
     if not release_root.is_dir():
         raise IssuedIndexError(f"release root missing: {release_root}")
@@ -205,7 +207,7 @@ def issued_keys(release_root: Path) -> frozenset[str]:
         if release_id in delivered:
             raise IssuedIndexError(f"duplicate delivered release: {release_id}")
         delivered[release_id] = path, receipt
-    keys: set[str] = set(legacy_seed_keys(release_root))
+    keys: set[str] = set(legacy_seed_keys(release_root, required=require_seed))
     for path, receipt in superseded_after_delivery:
         release_id = receipt["release_id"]
         if path.parent.name != release_id:

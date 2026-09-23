@@ -43,7 +43,7 @@ def test_only_verified_delivered_shortlists_issue_keys(tmp_path: Path) -> None:
     release(tmp_path, "shortlist-20260922T084423Z", keys=("a", "b"))
     release(tmp_path, "shortlist-20260922T070100Z", state="superseded", keys=("old",))
     release(tmp_path, "canary-20260922T051349Z", keys=("canary",))
-    assert issued.issued_keys(tmp_path) == frozenset({"a", "b"})
+    assert issued.issued_keys(tmp_path, require_seed=False) == frozenset({"a", "b"})
 
 
 def test_tampered_or_missing_delivered_csv_fails_closed(tmp_path: Path) -> None:
@@ -51,10 +51,10 @@ def test_tampered_or_missing_delivered_csv_fails_closed(tmp_path: Path) -> None:
     path = directory / "shortlist-20260922T084423Z.csv"
     path.write_bytes(path.read_bytes().replace(b"k1", b"k9"))
     with pytest.raises(issued.IssuedIndexError, match="SHA-256"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
     path.unlink()
     with pytest.raises(issued.IssuedIndexError, match="missing"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
 
 
 def test_duplicate_delivered_release_id_fails_closed(tmp_path: Path) -> None:
@@ -63,19 +63,19 @@ def test_duplicate_delivered_release_id_fails_closed(tmp_path: Path) -> None:
     second.mkdir()
     (second / "receipt.json").write_bytes((first / "receipt.json").read_bytes())
     with pytest.raises(issued.IssuedIndexError, match="duplicate delivered release"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
 
 
 def test_duplicate_vacancy_key_and_wrong_projection_fail_closed(tmp_path: Path) -> None:
     directory = release(tmp_path, "shortlist-20260922T084423Z", keys=("same", "same"))
     with pytest.raises(issued.IssuedIndexError, match="duplicate vacancy_key"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
     receipt_path = directory / "receipt.json"
     receipt = json.loads(receipt_path.read_text())
     receipt["projection_sha256"] = "different"
     receipt_path.write_text(json.dumps(receipt))
     with pytest.raises(issued.IssuedIndexError, match="projection"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
 
 
 def test_nested_delivered_manifest_is_source_of_future_issued_keys(tmp_path: Path) -> None:
@@ -98,17 +98,17 @@ def test_nested_delivered_manifest_is_source_of_future_issued_keys(tmp_path: Pat
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
     }
     (directory / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
-    assert issued.issued_keys(tmp_path) == frozenset({"new-role"})
+    assert issued.issued_keys(tmp_path, require_seed=False) == frozenset({"new-role"})
     manifest["items"][0]["vacancy_key"] = "tampered"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(issued.IssuedIndexError, match="manifest SHA-256"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
 
 
 def test_unreconciled_anchor_blocks_new_index(tmp_path: Path) -> None:
     release(tmp_path, "shortlist-20260922T084423Z", state="anchored")
     with pytest.raises(issued.IssuedIndexError, match="unresolved release state"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
 
 
 def test_delivered_supersede_requires_same_projection(tmp_path: Path) -> None:
@@ -120,13 +120,13 @@ def test_delivered_supersede_requires_same_projection(tmp_path: Path) -> None:
     receipt = json.loads(receipt_path.read_text())
     receipt.update({"bot_file_id": "FOLD", "delivered_at": "2026-09-22T07:01:01Z", "superseded_by": final_id})
     receipt_path.write_text(json.dumps(receipt))
-    assert issued.issued_keys(tmp_path) == frozenset({"a", "b"})
+    assert issued.issued_keys(tmp_path, require_seed=False) == frozenset({"a", "b"})
 
     final = tmp_path / final_id
     shutil.rmtree(final)
     release(tmp_path, final_id, keys=("a",))
     with pytest.raises(issued.IssuedIndexError, match="superseded"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)
 
 
 def test_superseded_legacy_metadata_must_bind_projection(tmp_path: Path) -> None:
@@ -144,4 +144,4 @@ def test_superseded_legacy_metadata_must_bind_projection(tmp_path: Path) -> None
     receipt["artifact_sha256"] = hashlib.sha256(csv_path.read_bytes()).hexdigest()
     receipt_path.write_text(json.dumps(receipt))
     with pytest.raises(issued.IssuedIndexError, match="projection mismatch"):
-        issued.issued_keys(tmp_path)
+        issued.issued_keys(tmp_path, require_seed=False)

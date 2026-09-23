@@ -62,4 +62,4 @@ def test_empty_week_is_reported_once_and_does_not_issue_keys(tmp_path):
     assert receipt["empty"] is True
     assert slack.posts == 1
     assert "Новых ролей нет" in slack.messages[0]["text"]
-    assert issued_keys(root) == frozenset()
+    assert issued_keys(root, require_seed=False) == frozenset()

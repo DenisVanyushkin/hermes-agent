@@ -171,7 +171,7 @@ def test_delivered_receipt_binds_manifest_and_workbook(tmp_path: Path) -> None:
     from sys import path as sys_path
     sys_path.insert(0, str(MODULE_PATH.parent))
     from job_intel_shortlist_issued import issued_keys
-    assert issued_keys(tmp_path / "releases") == frozenset({"key-1"})
+    assert issued_keys(tmp_path / "releases", require_seed=False) == frozenset({"key-1"})
 
 
 def test_rejected_sample_only_still_gets_review_workbook(tmp_path: Path) -> None:
