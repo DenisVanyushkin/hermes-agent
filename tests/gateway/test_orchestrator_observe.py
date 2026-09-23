@@ -459,7 +459,7 @@ def test_gateway_orchestrator_observe_engineering_pipeline_adds_plan_only_report
     assert engineer_runtime_plan["environment_policy"]["can_mutate_files"] is True
     assert reviewer_runtime_plan["status"] == "plan_only"
     assert reviewer_runtime_plan["provider"] == "openai-codex"
-    assert reviewer_runtime_plan["model"] == "gpt-5.6-sol"
+    assert reviewer_runtime_plan["model"] == "gpt-6-sol"
     assert reviewer_runtime_plan["environment_policy"]["can_mutate_files"] is False
     assert "actual_provider" not in payload_text
     assert "actual_model" not in payload_text

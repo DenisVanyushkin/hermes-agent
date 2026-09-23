@@ -206,14 +206,14 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
             "allow_real_provider_execution": True,
             "request_real_provider_execution": True,
             "allowed_real_providers": ("openai-codex",),
-            "allowed_real_models": ("gpt-5.6-terra", "gpt-5.6-sol"),
+            "allowed_real_models": ("gpt-5.6-terra", "gpt-6-sol"),
             "allowed_real_providers_by_role": {
                 "engineer": ("openai-codex",),
                 "reviewer": ("openai-codex",),
             },
             "allowed_real_models_by_role": {
                 "engineer": ("gpt-5.6-terra",),
-                "reviewer": ("gpt-5.6-sol",),
+                "reviewer": ("gpt-6-sol",),
             },
             "allowed_real_providers_by_subagent": {
                 "hermes_engineer_core": ("openai-codex",),
@@ -221,7 +221,7 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
             },
             "allowed_real_models_by_subagent": {
                 "hermes_engineer_core": ("gpt-5.6-terra",),
-                "hermes_code_reviewer": ("gpt-5.6-sol",),
+                "hermes_code_reviewer": ("gpt-6-sol",),
             },
             "real_provider_client_factory": _real_provider_factory,
             "allow_mutations": True,
@@ -241,7 +241,7 @@ def test_controlled_engineering_pipeline_e2e_mutates_tests_reviews_and_reports(t
         ("hermes_engineer_core", "openai-codex", "gpt-5.6-terra"),
         ("hermes_engineer_core", "openai-codex", "gpt-5.6-terra"),
         ("hermes_engineer_core", "openai-codex", "gpt-5.6-terra"),
-        ("hermes_code_reviewer", "openai-codex", "gpt-5.6-sol"),
+        ("hermes_code_reviewer", "openai-codex", "gpt-6-sol"),
     ]
     assert created_file.exists()
     assert created_file.read_text(encoding="utf-8") == "def test_generated_example():\n    assert 1 + 1 == 2\n"

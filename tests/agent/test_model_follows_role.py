@@ -2,7 +2,7 @@
 
 Until now select_model_policy() was advisory by construction and nothing applied
 its answer: agent.model came from the gateway config and every role ran on
-gpt-5.6-luna regardless of what the policy file said. This applies it.
+gpt-6-luna regardless of what the policy file said. This applies it.
 
 The selector is the authority, not profile_tiers, because it is the only one of
 the two that can express a task-dependent choice -- researcher takes luna for a
@@ -47,12 +47,12 @@ def test_chief_hermes_gets_the_reasoning_tier():
 
 def test_researcher_is_the_documented_exception():
     """A flat tier cannot express "cheap for lookups, strong for synthesis"."""
-    assert _selector_model("researcher", "what is the weather today") == "gpt-5.6-luna"
+    assert _selector_model("researcher", "what is the weather today") == "gpt-6-luna"
     assert _selector_model(
         "researcher", "deep research: synthesize conflicting sources into a brief"
     ) == "gpt-5.6-terra"
     # The config records the cheap end of that range.
-    assert _config_model("researcher") == "gpt-5.6-luna"
+    assert _config_model("researcher") == "gpt-6-luna"
 
 
 def test_the_cheap_research_path_works_in_russian_too():
@@ -63,8 +63,8 @@ def test_the_cheap_research_path_works_in_russian_too():
     the test now pins the fixed behaviour instead of the limitation. Detailed
     coverage lives in tests/hermes_cli/test_research_hints_bilingual.py.
     """
-    assert _selector_model("researcher", "какая погода в Алматы") == "gpt-5.6-luna"
-    assert _selector_model("researcher", "what is the weather in Almaty") == "gpt-5.6-luna"
+    assert _selector_model("researcher", "какая погода в Алматы") == "gpt-6-luna"
+    assert _selector_model("researcher", "what is the weather in Almaty") == "gpt-6-luna"
     assert _selector_model(
         "researcher", "сопоставь данные из нескольких источников"
     ) == "gpt-5.6-terra"
@@ -89,7 +89,7 @@ def switches(monkeypatch):
     return calls
 
 
-def _agent(model="gpt-5.6-luna", provider="openai-codex"):
+def _agent(model="gpt-6-luna", provider="openai-codex"):
     return SimpleNamespace(model=model, provider=provider, session_id="s1")
 
 
@@ -108,10 +108,10 @@ def test_a_role_already_on_its_model_does_not_switch(switches):
     from agent.conversation_loop import apply_role_model
 
     applied = apply_role_model(
-        _agent(), preferred_model="gpt-5.6-luna", preferred_provider="openai-codex"
+        _agent(), preferred_model="gpt-6-luna", preferred_provider="openai-codex"
     )
 
-    assert applied == "gpt-5.6-luna"
+    assert applied == "gpt-6-luna"
     assert switches == []
 
 
@@ -124,7 +124,7 @@ def test_a_model_outside_the_lineup_is_refused(switches):
         agent, preferred_model="gpt-4o-mini", preferred_provider="openai-codex"
     )
 
-    assert applied == "gpt-5.6-luna"   # unchanged
+    assert applied == "gpt-6-luna"   # unchanged
     assert switches == []
 
 
@@ -132,7 +132,7 @@ def test_an_empty_policy_model_is_a_no_op(switches):
     from agent.conversation_loop import apply_role_model
 
     applied = apply_role_model(_agent(), preferred_model="", preferred_provider="")
-    assert applied == "gpt-5.6-luna"
+    assert applied == "gpt-6-luna"
     assert switches == []
 
 
@@ -150,7 +150,7 @@ def test_a_failing_switch_leaves_the_turn_on_its_current_model(monkeypatch):
     applied = apply_role_model(
         agent, preferred_model="gpt-5.6-terra", preferred_provider="openai-codex"
     )
-    assert applied == "gpt-5.6-luna"
+    assert applied == "gpt-6-luna"
 
 
 # --- Контролируемый субагент не переключается по роли (инцидент 2026-07-29) ---
@@ -185,7 +185,7 @@ def test_an_ordinary_agent_still_follows_its_role():
 
     # Регрессия наоборот: разговорный агент обязан продолжать слушаться роли,
     # ради чего apply_role_model и заводился.
-    agent = SimpleNamespace(model="gpt-5.6-luna", provider="openai-codex")
+    agent = SimpleNamespace(model="gpt-6-luna", provider="openai-codex")
     switched = []
 
     def _switch(a, target, provider, *rest, **kw):
@@ -204,7 +204,7 @@ def test_an_ordinary_agent_still_follows_its_role():
 def test_the_flag_being_absent_is_treated_as_an_ordinary_agent():
     from agent import conversation_loop
 
-    agent = SimpleNamespace(model="gpt-5.6-luna", provider="openai-codex")
+    agent = SimpleNamespace(model="gpt-6-luna", provider="openai-codex")
     switched = []
 
     def _switch(a, target, provider, *rest, **kw):

@@ -38,7 +38,7 @@ def test_valid_canonical_registry_passes():
     policy = yaml.safe_load(CANONICAL_POLICY.read_text(encoding="utf-8"))
     assert policy["profile_tiers"]["general_operator"] == "standard"
     assert policy["profile_tiers"]["engineer"] == "coding"
-    assert policy["model_governance"]["default_base_model"] == "gpt-5.6-luna"
+    assert policy["model_governance"]["default_base_model"] == "gpt-6-luna"
     assert policy["fallback_selection_policy"]["mode"] == "capability_based"
     assert set(policy["role_policies"]) == {
         "chief_coordinator",
@@ -56,7 +56,7 @@ def test_valid_canonical_registry_passes():
     # it pinned a model outside the sanctioned lineup. Assert its absence so the
     # fiction cannot come back unnoticed.
     assert "escalation" not in policy["role_policies"]["engineer"]
-    assert policy["role_policies"]["engineer"]["base_model"] == "gpt-5.6-luna"
+    assert policy["role_policies"]["engineer"]["base_model"] == "gpt-6-luna"
     assert policy["role_policies"]["general_operator"]["free_fallback"]["role_filters"]["prefer"]["latencyMs"] == "low"
     assert policy["role_policies"]["trading_observer_trader_deferred"]["status"] == "deferred"
 
