@@ -8,6 +8,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+# Resolve job_intel from this checkout before any test puts another repository
+# on sys.path (role_fit_evaluation_inputs inserts the live one).
+import job_intel.store  # noqa: E402,F401
+
 MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "job_intel_shortlist_build.py"
 spec = importlib.util.spec_from_file_location("job_intel_shortlist_build", MODULE_PATH)
 assert spec and spec.loader
@@ -126,7 +130,7 @@ def test_build_reads_only_accepted_rows_of_the_pinned_run(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef")
+    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist={})
     assert artifact["accepted_total"] == 1
     assert [item["company"] for item in artifact["items"]] == ["Acme"]
     assert artifact["ruleset_versions"] == ["rf1-test"]
@@ -236,7 +240,7 @@ def test_artifact_exposes_suppression_counts(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef")
+    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist={})
 
     assert artifact["delivered_count"] == 1
     assert artifact["suppressed_counts"]["title_collapsed"] == 1
@@ -345,7 +349,7 @@ def test_the_release_manifest_names_boundary_rejections(tmp_path) -> None:
         "unassessed": None,
     })
 
-    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef")
+    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist={})
 
     assert [item["vacancy_key"] for item in artifact["items"]] == ["ok"]
     assert artifact["suppressed_counts"]["boundary_rejected"] == 1
@@ -363,7 +367,7 @@ def test_malformed_boundary_reasons_stop_the_build(tmp_path) -> None:
     for corrupt in ("not json", json.dumps({"reasons": []}), json.dumps([1, 2])):
         path = boundary_db(tmp_path, {"bad": corrupt})
         with pytest.raises(ValueError):
-            builder.build(builder.connect_read_only(path), 511, "deadbeef")
+            builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist={})
         path.unlink()
 
 
@@ -408,8 +412,99 @@ def test_the_release_drops_what_the_scoring_path_marked_as_out_of_bounds(tmp_pat
         ).fetchall())
     assert verdicts == {"Doit": "accept", "Example": "accept"}
 
-    artifact = builder.build(builder.connect_read_only(store.db_path), run_id, "deadbeef")
+    artifact = builder.build(
+        builder.connect_read_only(store.db_path), run_id, "deadbeef", company_blacklist=blacklist
+    )
 
     assert [item["company"] for item in artifact["items"]] == ["Example"]
     assert [entry["company"] for entry in artifact["suppressed"]["boundary_rejected"]] == ["Doit"]
     assert "company_blacklist:explicit" in artifact["suppressed"]["boundary_rejected"][0]["reasons"]
+
+
+def duplicate_db(tmp_path, members: list[tuple[str, str | None]]) -> Path:
+    """One vacancy_key observed several times in one run under different URLs."""
+    path = tmp_path / "duplicates.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT,"
+        " location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT,"
+        " selection_boundary_reasons_json TEXT)"
+    )
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT)")
+    payload = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["software_product_leadership"]})
+    for url, reasons in members:
+        conn.execute(
+            "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (511, "k", "Doit", "Product Lead", "Tokyo", "LinkedIn", url, url, "accept", payload, reasons),
+        )
+    conn.execute("INSERT INTO vacancies VALUES ('k', '2026-09-21T00:00:00+00:00', '2026-09-21T00:00:00+00:00', NULL)")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_a_clean_duplicate_cannot_mask_a_rejected_one(tmp_path) -> None:
+    """SSB-1: grouping picked an arbitrary member, so [] could hide a rejection."""
+    for members in (
+        [("a", "[]"), ("b", json.dumps(["company_blacklist"]))],
+        [("a", json.dumps(["company_blacklist"])), ("b", "[]")],
+    ):
+        path = duplicate_db(tmp_path, members)
+        artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist={})
+        assert artifact["items"] == []
+        assert artifact["suppressed"]["boundary_rejected"][0]["reasons"] == ["company_blacklist"]
+        assert artifact["accepted_total"] == 1
+        path.unlink()
+
+
+def test_an_unassessed_duplicate_holds_the_role_back(tmp_path) -> None:
+    path = duplicate_db(tmp_path, [("a", "[]"), ("b", None)])
+    artifact = builder.build(builder.connect_read_only(path), 511, "deadbeef", company_blacklist={})
+    assert artifact["items"] == []
+    assert artifact["suppressed_counts"]["boundary_unassessed"] == 1
+
+
+def test_the_current_blacklist_applies_to_a_run_scored_before_it(tmp_path) -> None:
+    """SSB-2: reasons are frozen at scoring time; a later blacklist entry must still bind."""
+    path = boundary_db(tmp_path, {"old": "[]"})
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE vacancy_observability SET company = 'Doit'")
+    conn.commit()
+    conn.close()
+
+    artifact = builder.build(
+        builder.connect_read_only(path), 511, "deadbeef",
+        company_blacklist={"doit": {"origin": "explicit", "negative_event_count": 0}},
+    )
+
+    assert artifact["items"] == []
+    assert artifact["suppressed"]["boundary_rejected"][0]["reasons"] == [
+        "company_blacklist", "company_blacklist:explicit",
+    ]
+    assert artifact["company_blacklist_applied"] == [{"company_key": "doit", "origin": "explicit"}]
+
+
+def test_the_release_loads_the_effective_blacklist_from_the_repository(tmp_path) -> None:
+    from job_intel.store import JobIntelStore
+
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    repo = Path(__file__).resolve().parents[2]
+
+    effective = builder.load_company_blacklist(store.db_path, repo)
+
+    assert {"okx", "bjak", "doit", "actai", "kira"} <= set(effective)
+
+
+def test_the_company_key_matches_the_scoring_path() -> None:
+    from job_intel.store import canonical_company_key
+
+    for name in ("Doit", "DoiT International", "  ActAI ", "Kira Systems", "BJAK", "OKX", "Unknown", "", "Lamoda Tech"):
+        assert builder.canonical_company_key(name) == canonical_company_key(name), name
+
+
+def test_the_blacklist_is_refused_from_a_foreign_checkout(tmp_path) -> None:
+    import pytest
+
+    with pytest.raises(RuntimeError, match="not from"):
+        builder.load_company_blacklist(tmp_path / "db.sqlite3", tmp_path)
