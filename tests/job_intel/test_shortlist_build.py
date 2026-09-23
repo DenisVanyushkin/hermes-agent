@@ -508,3 +508,38 @@ def test_the_blacklist_is_refused_from_a_foreign_checkout(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="not from"):
         builder.load_company_blacklist(tmp_path / "db.sqlite3", tmp_path)
+
+
+def test_a_missing_assessment_is_written_as_unassessed_not_as_clean(tmp_path) -> None:
+    """SSB-3: the writer turned an absent classification key into [], i.e. 'clean'."""
+    from job_intel.models import Evaluation, Vacancy
+    from job_intel.observability import record_daily_observability
+    from job_intel.store import JobIntelStore
+
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+
+    def scored(index: int, company: str, classification: dict) -> tuple:
+        item = Vacancy(
+            source="linkedin", source_id=f"fixture-{index}", company=company,
+            title="Product Lead - AI Neobank App", location="Singapore",
+            url=f"https://www.linkedin.com/jobs/view/{index}", description="Product Lead - AI Neobank App",
+        )
+        evaluation = Evaluation(score=60, tier="possible_fit", recommendation="needs_review")
+        return (item, evaluation, {"classification": "vp_product", **classification}, index, False)
+
+    run_id = store.start_run("test")
+    record_daily_observability(store, run_id, [
+        scored(1, "Assessed", {"selection_boundary_reasons": [], "selection_boundary_unknowns": []}),
+        scored(2, "Unassessed", {}),
+    ])
+    with store.connect(read_only=True) as conn:
+        stored = dict(conn.execute(
+            "SELECT company, selection_boundary_reasons_json FROM vacancy_observability WHERE run_id = ?", (run_id,)
+        ).fetchall())
+    assert stored == {"Assessed": "[]", "Unassessed": None}
+
+    artifact = builder.build(builder.connect_read_only(store.db_path), run_id, "deadbeef", company_blacklist={})
+
+    assert [item["company"] for item in artifact["items"]] == ["Assessed"]
+    assert [entry["company"] for entry in artifact["suppressed"]["boundary_unassessed"]] == ["Unassessed"]
