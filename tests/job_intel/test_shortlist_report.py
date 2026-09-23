@@ -240,3 +240,16 @@ def test_duplicate_report_voids_only_report_and_scan_error_is_retryable(tmp_path
     duplicate_receipt = publish.load_receipt(attempt2)
     assert duplicate_receipt["state"] == "imported"
     assert duplicate_receipt["report_state"] == "void"
+
+
+@pytest.mark.parametrize("location", ["Toronto, CA", "Tel Aviv, IL", "Bogotá, CO", "Casablanca, MA"])
+def test_country_suffix_does_not_look_like_us_state(location: str) -> None:
+    assert not report._defective_us_gate({
+        "ruleset_version": report.DEFECTIVE_US_RULESET, "location": location, "rule_ids": [],
+    })
+
+
+def test_us_state_suffix_requires_country_context() -> None:
+    assert report._defective_us_gate({
+        "ruleset_version": report.DEFECTIVE_US_RULESET, "location": "Dallas, TX, USA", "rule_ids": [],
+    })

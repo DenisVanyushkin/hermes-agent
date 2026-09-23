@@ -174,6 +174,21 @@ def test_delivered_receipt_binds_manifest_and_workbook(tmp_path: Path) -> None:
     assert issued_keys(tmp_path / "releases") == frozenset({"key-1"})
 
 
+def test_rejected_sample_only_still_gets_review_workbook(tmp_path: Path) -> None:
+    source = artifact_dir(tmp_path)
+    artifact = json.loads((source / "shortlist.json").read_text())
+    sample = {**artifact["items"][0], "role_fit_verdict": "reject"}
+    artifact["items"] = []
+    artifact["rejected_sample"] = [sample]
+    (source / "shortlist.json").write_text(json.dumps(artifact))
+    canonical = json.dumps({key: value for key, value in artifact.items() if key != "built_at"},
+                           ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    (source / "SHA256SUMS").write_text(f"{hashlib.sha256(canonical).hexdigest()}  canonical\n")
+    receipt = run(tmp_path, FakeSlack(), source)
+    assert receipt["state"] == "delivered"
+    assert receipt["rows"] == 0 and receipt["rejected_sample_rows"] == 1
+
+
 def test_crash_before_prepared_receipt_recovers_frozen_files(tmp_path: Path) -> None:
     source = artifact_dir(tmp_path)
     root = tmp_path / "releases"

@@ -34,7 +34,8 @@ _US_LOCATION_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
     r"\bsan\s+francisco\b", r"\bnew\s+york\b", r"\bseattle\b",
     r"\bchicago\b", r"\bboston\b", r"\baustin\b", r"\bdenver\b",
     r"\blos\s+angeles\b", r"\bcalifornia\b", r"\bwashington\b",
-    r"\bnew\s+jersey\b", r",\s*(?:ca|ny|wa|tx|ma|il|co|nj)\b",
+    r"\bnew\s+jersey\b", r"\btexas\b",
+    r",\s*(?:ca|ny|wa|tx|ma|il|co|nj)\s*,\s*(?:us|usa|united\s+states)\b",
 ))
 _US_GATE_RULE_IDS = frozenset({"us_onsite_without_sponsorship", "us_remote_eligibility_unknown"})
 

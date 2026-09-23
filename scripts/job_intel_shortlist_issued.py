@@ -151,6 +151,29 @@ def _manifest_keys(path: Path, receipt: dict) -> frozenset[str]:
     return frozenset(keys)
 
 
+def _empty_keys(path: Path, receipt: dict) -> frozenset[str]:
+    release_id = receipt["release_id"]
+    if (receipt.get("state") != "reported" or receipt.get("rows") != 0
+            or receipt.get("rejected_sample_rows") != 0 or not receipt.get("thread_ts")
+            or receipt.get("report_ts") != receipt["thread_ts"]
+            or path.parent.name != receipt.get("attempt_id")
+            or path.parent.parent.name != release_id):
+        raise IssuedIndexError(f"invalid empty release receipt: {release_id}")
+    manifest_path = path.parent / "manifest.json"
+    try:
+        payload = manifest_path.read_bytes()
+        manifest = json.loads(payload)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise IssuedIndexError(f"invalid empty release manifest: {release_id}") from error
+    if (hashlib.sha256(payload).hexdigest() != receipt.get("manifest_sha256")
+            or not isinstance(manifest, dict) or manifest.get("release_id") != release_id
+            or manifest.get("attempt_id") != receipt.get("attempt_id")
+            or manifest.get("projection_sha256") != receipt.get("projection_sha256")
+            or manifest.get("items") != [] or manifest.get("rejected_sample") != []):
+        raise IssuedIndexError(f"empty release manifest mismatch: {release_id}")
+    return frozenset()
+
+
 def issued_keys(release_root: Path) -> frozenset[str]:
     """Return exactly the shortlist keys from verified delivered releases."""
     if not release_root.is_dir():
@@ -207,7 +230,9 @@ def issued_keys(release_root: Path) -> frozenset[str]:
         if artifact_id != release_id or artifact_projection != receipt.get("projection_sha256"):
             raise IssuedIndexError(f"superseded artifact projection mismatch: {release_id}")
     for path, receipt in delivered.values():
-        if "attempt_id" in receipt:
+        if receipt.get("empty") is True:
+            keys.update(_empty_keys(path, receipt))
+        elif "attempt_id" in receipt:
             keys.update(_manifest_keys(path, receipt))
         else:
             keys.update(_delivered_keys(path, receipt))

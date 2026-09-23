@@ -99,7 +99,9 @@ def _source(source_dir: Path) -> tuple[dict[str, Any], str]:
         raise PublishError("source artifact SHA256SUMS missing") from error
     if declared != f"{source_sha}  canonical":
         raise PublishError("source artifact digest mismatch")
-    if not isinstance(artifact.get("items"), list) or not artifact["items"]:
+    if (not isinstance(artifact.get("items"), list)
+            or not isinstance(artifact.get("rejected_sample"), list)
+            or not (artifact["items"] or artifact["rejected_sample"])):
         raise PublishError("empty weekly release needs the separate zero-manifest report path")
     return artifact, source_sha
 
