@@ -29,6 +29,7 @@ BASE_COLUMNS = (
     "role_fit_verdict", "rule_ids", "ruleset_version", "run_id",
 )
 OWNER_COLUMNS = ("owner_decision", "owner_note")
+SUMMARY_COLUMNS = ("summary", "summary_status")
 RELEASE_FIELDS = (
     "release_id", "attempt_id", "schema_version", "projection_sha256",
     "commit", "run_ids", "ruleset_versions", "census_sha256",
@@ -53,6 +54,8 @@ def _row(item: dict[str, Any]) -> dict[str, str]:
         "ruleset_version": _text(item.get("ruleset_version")),
         "run_id": _text(item.get("run_id")),
         "description": _text(item.get("description")),
+        "summary": _text(item.get("summary")),
+        "summary_status": _text(item.get("summary_status") or "unavailable"),
     }
 
 
@@ -105,7 +108,8 @@ def _description_columns(sections: dict[str, list[dict[str, str]]]) -> int:
 
 
 def _headers(description_columns: int) -> list[str]:
-    return [*BASE_COLUMNS, *(f"description_{index}" for index in range(1, description_columns + 1)), *OWNER_COLUMNS]
+    return [*BASE_COLUMNS, *(f"description_{index}" for index in range(1, description_columns + 1)),
+            *SUMMARY_COLUMNS, *OWNER_COLUMNS]
 
 
 def _set_string(cell: Any, value: str) -> None:
@@ -155,6 +159,7 @@ def write_workbook(path: Path, artifact: dict[str, Any], attempt_id: str) -> str
         for row_number, row in enumerate(rows, start=2):
             values = [row[field] for field in BASE_COLUMNS]
             values += [row["description"][index * TEXT_CHUNK:(index + 1) * TEXT_CHUNK] for index in range(description_columns)]
+            values += [row[field] for field in SUMMARY_COLUMNS]
             values += ["", ""]
             for column, value in enumerate(values, start=1):
                 cell = sheet.cell(row_number, column)
@@ -169,7 +174,10 @@ def write_workbook(path: Path, artifact: dict[str, Any], attempt_id: str) -> str
         sheet.column_dimensions["C"].width = 36
         for index in range(len(BASE_COLUMNS) + 1, len(BASE_COLUMNS) + description_columns + 1):
             sheet.column_dimensions[sheet.cell(1, index).column_letter].width = 70
-        owner_column = len(BASE_COLUMNS) + description_columns + 1
+        summary_column = len(BASE_COLUMNS) + description_columns + 1
+        sheet.column_dimensions[sheet.cell(1, summary_column).column_letter].width = 70
+        sheet.column_dimensions[sheet.cell(1, summary_column + 1).column_letter].width = 20
+        owner_column = summary_column + len(SUMMARY_COLUMNS)
         sheet.column_dimensions[sheet.cell(1, owner_column).column_letter].width = 23
         sheet.column_dimensions[sheet.cell(1, owner_column + 1).column_letter].width = 54
         validation = DataValidation(type="list", formula1='"yes,no,blocked_language"', allow_blank=True)
@@ -230,9 +238,11 @@ def read_owner_workbook(path: Path, artifact: dict[str, Any], attempt_id: str) -
                 _cell_text(sheet.cell(row_number, len(BASE_COLUMNS) + index))
                 for index in range(1, description_columns + 1)
             )
+            for index, field in enumerate(SUMMARY_COLUMNS, start=1):
+                actual[field] = _cell_text(sheet.cell(row_number, len(BASE_COLUMNS) + description_columns + index))
             if actual != expected:
                 raise WorkbookContractError(f"frozen role changed: {sheet_name} row {row_number}")
-            owner_column = len(BASE_COLUMNS) + description_columns + 1
+            owner_column = len(BASE_COLUMNS) + description_columns + len(SUMMARY_COLUMNS) + 1
             decision = _cell_text(sheet.cell(row_number, owner_column)).strip().lower()
             note = _cell_text(sheet.cell(row_number, owner_column + 1))
             if decision not in DECISIONS:

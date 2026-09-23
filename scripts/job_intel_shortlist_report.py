@@ -27,6 +27,7 @@ class ReportError(ValueError):
 REPORT_TAG = "JI_SHORTLIST_REPORT_V1"
 DEFECTIVE_US_RULESET = "rf1-a428b6ed9234"
 ENTRYPOINT = "job_intel.observability.record_daily_observability"
+WEEKLY_ENTRYPOINT = "scripts.job_intel_shortlist_build.build_weekly"
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
 _US_LOCATION_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
@@ -51,7 +52,7 @@ def _defective_us_gate(item: dict[str, Any]) -> bool:
 def _evaluation_hash(artifact: dict[str, Any]) -> str:
     evaluation = artifact.get("role_fit_evaluation")
     if (not isinstance(evaluation, dict) or evaluation.get("available") is not True
-            or evaluation.get("entrypoint") != ENTRYPOINT
+            or evaluation.get("entrypoint") not in {ENTRYPOINT, WEEKLY_ENTRYPOINT}
             or not isinstance(evaluation.get("arguments"), dict)):
         raise ReportError("frozen role-fit evaluation arguments unavailable")
     canonical = json.dumps(evaluation["arguments"], ensure_ascii=False, sort_keys=True,
@@ -169,7 +170,7 @@ def build_report(artifact: dict[str, Any], receipt: dict[str, Any],
         "projection_sha256": receipt["projection_sha256"],
         "owner_file_sha256": receipt["owner_file_sha256"],
         "evaluation_arguments_sha256": arguments_sha,
-        "entrypoint": ENTRYPOINT,
+        "entrypoint": artifact["role_fit_evaluation"]["entrypoint"],
         "observability_check_counts": dict(sorted(Counter(observability.values()).items())),
         "counts": {name: counts[name] for name in
                    ("false_positive", "miss", "blocked_language", "agreement", "undecided",

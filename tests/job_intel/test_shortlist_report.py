@@ -121,6 +121,13 @@ def test_frozen_discrepancy_categories_and_narrow_ruleset_defect(tmp_path: Path)
     assert result["evaluation_arguments_sha256"] == artifact["role_fit_evaluation"]["arguments_sha256"]
 
 
+def test_report_accepts_weekly_recomputed_verdict_provenance(tmp_path: Path) -> None:
+    _source, _releases, attempt, artifact = fixture(tmp_path)
+    artifact["role_fit_evaluation"]["entrypoint"] = "scripts.job_intel_shortlist_build.build_weekly"
+    result = report.build_report(artifact, publish.load_receipt(attempt))
+    assert result["entrypoint"] == "scripts.job_intel_shortlist_build.build_weekly"
+
+
 def test_argument_hash_mismatch_fails_closed(tmp_path: Path) -> None:
     source, releases, attempt, artifact = fixture(tmp_path)
     artifact["role_fit_evaluation"]["arguments_sha256"] = "0" * 64

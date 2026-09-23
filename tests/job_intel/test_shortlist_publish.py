@@ -189,6 +189,25 @@ def test_rejected_sample_only_still_gets_review_workbook(tmp_path: Path) -> None
     assert receipt["rows"] == 0 and receipt["rejected_sample_rows"] == 1
 
 
+def test_cap_dropped_is_visible_in_manifest_and_slack_anchor(tmp_path: Path) -> None:
+    source = artifact_dir(tmp_path)
+    artifact = json.loads((source / "shortlist.json").read_text())
+    artifact["suppressed"] = {"over_cap": [{"vacancy_key": "held-key"}]}
+    artifact["suppressed_counts"] = {"over_cap": 1}
+    artifact["partition_count"] = 2
+    (source / "shortlist.json").write_text(json.dumps(artifact))
+    canonical = json.dumps({key: value for key, value in artifact.items() if key != "built_at"},
+                           ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    (source / "SHA256SUMS").write_text(f"{hashlib.sha256(canonical).hexdigest()}  canonical\n")
+    slack = FakeSlack()
+
+    run(tmp_path, slack, source)
+
+    manifest = json.loads((tmp_path / "releases" / "shortlist-2026-W39" / "attempt-001" / "manifest.json").read_text())
+    assert manifest["cap_dropped"] == ["held-key"]
+    assert "cap_dropped=1" in slack.anchors[0]["text"]
+
+
 def test_crash_before_prepared_receipt_recovers_frozen_files(tmp_path: Path) -> None:
     source = artifact_dir(tmp_path)
     root = tmp_path / "releases"

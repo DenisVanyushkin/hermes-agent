@@ -56,7 +56,7 @@ def answer(attempt: Path, tmp_path: Path, *, decision: str = "yes", mutate: bool
     path = tmp_path / f"answer-{len(list(tmp_path.glob('answer-*')))}.xlsx"
     path.write_bytes((attempt / "review.xlsx").read_bytes())
     book = load_workbook(path)
-    book["shortlist"]["M2"] = decision
+    book["shortlist"]["O2"] = decision
     if mutate:
         book["shortlist"]["A2"] = "foreign-key"
     book.save(path)

@@ -218,7 +218,7 @@ def test_weekly_census_uses_all_runs_and_latest_verdict(tmp_path) -> None:
 
     artifact = builder.build_weekly(
         builder.connect_read_only(path), date(2026, 9, 14), "deadbeef",
-        release_id="shortlist-2026-W38", issued_keys=frozenset({"older"}),
+        release_id="shortlist-2026-W38", issued_keys=frozenset({"older"}), _recompute=False,
     )
 
     assert artifact["run_ids"] == [1, 2, 3, 4]
@@ -233,6 +233,51 @@ def test_weekly_census_uses_all_runs_and_latest_verdict(tmp_path) -> None:
     assert builder.digest(artifact) == builder.digest(dict(artifact, built_at="tomorrow"))
     assert artifact["items"][0]["description"] == "real job description"
     assert artifact["items"][0]["description_provenance"] == "vacancies_at_build"
+
+
+def test_recent_rejected_sample_is_not_reissued(tmp_path) -> None:
+    path = tmp_path / "cooldown.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
+    rules = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["one_rule"]})
+    for key in ("cooled", "new"):
+        conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (1, key, key, "VP Product", "London", "LinkedIn", key, key, "reject", rules, "2026-09-18T12:00:00+00:00"))
+        conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", (key, "2026-09-18T00:00:00+00:00", None, None, "Complete job text"))
+    conn.commit()
+
+    artifact = builder.build_weekly(
+        builder.connect_read_only(path), date(2026, 9, 14), "deadbeef",
+        release_id="shortlist-2026-W38", sample_cooldown_keys=frozenset({"cooled"}),
+    )
+
+    assert [row["vacancy_key"] for row in artifact["rejected_sample"]] == ["new"]
+    assert [row["vacancy_key"] for row in artifact["excluded"]["sample_cooldown"]] == ["cooled"]
+    assert artifact["partition_count"] == artifact["census_count"] == 2
+
+
+def test_weekly_release_recomputes_verdict_from_frozen_vacancy_text(tmp_path) -> None:
+    path = tmp_path / "recompute.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
+    prior = json.dumps({"ruleset_version": "rf1-prior", "rule_ids": ["product"]})
+    cases = (
+        ("product", "VP Product", "Own product strategy, roadmap, engineering partnership and P&L for a software platform."),
+        ("marketing", "Product Marketing Manager", "Create marketing campaigns and demand generation for products."),
+    )
+    for key, title, description in cases:
+        conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (1, key, key, title, "London", "LinkedIn", key, key, "accept", prior, "2026-09-18T12:00:00+00:00"))
+        conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", (key, "2026-09-18T10:00:00+00:00", None, None, description))
+    conn.commit()
+
+    artifact = builder.build_weekly(builder.connect_read_only(path), date(2026, 9, 14), "test", release_id="shortlist-2026-W38")
+
+    assert [row["vacancy_key"] for row in artifact["items"]] == ["product"]
+    assert [row["vacancy_key"] for row in artifact["rejected_sample"]] == ["marketing"]
+    assert artifact["rejected_sample"][0]["observed_role_fit_verdict"] == "accept"
+    assert artifact["rejected_sample"][0]["role_fit_verdict"] == "reject"
+    assert artifact["rejected_sample"][0]["ruleset_version"] != "rf1-prior"
 
 
 def test_weekly_window_is_berlin_local_monday() -> None:
@@ -272,7 +317,7 @@ def test_fresh_undated_role_competes_with_older_dated_roles(tmp_path) -> None:
     conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (2, "fresh", "LinkedIn role", "VP Product", "London", "LinkedIn", "fresh", "fresh", "accept", rules, "2026-09-20T10:00:00+00:00"))
     conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", ("fresh", "2026-09-20T09:00:00+00:00", None, None, "Complete job text"))
     conn.commit()
-    artifact = builder.build_weekly(builder.connect_read_only(path), date(2026, 9, 14), "deadbeef", release_id="shortlist-2026-W38")
+    artifact = builder.build_weekly(builder.connect_read_only(path), date(2026, 9, 14), "deadbeef", release_id="shortlist-2026-W38", _recompute=False)
     assert artifact["delivered_count"] == 25
     assert artifact["items"][0]["vacancy_key"] == "fresh"
     assert "fresh" not in {row["vacancy_key"] for row in artifact["suppressed"]["over_cap"]}
@@ -281,6 +326,29 @@ def test_fresh_undated_role_competes_with_older_dated_roles(tmp_path) -> None:
     assert keyed["old-01"]["posted_at_utc"] == "2026-07-03T15:57:43+00:00"
     assert keyed["old-02"]["posted_at_unparsed"] is True
     assert keyed["old-02"]["recency_source"] == "first_seen_at"
+
+
+def test_future_scraper_date_cannot_displace_current_roles_at_cap(tmp_path) -> None:
+    path = tmp_path / "future-date.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
+    rules = json.dumps({"ruleset_version": "rf1-test", "rule_ids": ["one_rule"]})
+    for index in range(25):
+        key = f"current-{index:02d}"
+        conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (1, key, key, "VP Product", "London", "LinkedIn", key, key, "accept", rules, "2026-09-19T12:00:00+00:00"))
+        conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", (key, "2026-09-18T00:00:00+00:00", None, "2026-09-18T00:00:00+00:00", "Complete job text"))
+    conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (1, "future", "future", "VP Product", "London", "LinkedIn", "future", "future", "accept", rules, "2026-09-19T12:00:00+00:00"))
+    conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", ("future", "2026-09-14T00:00:00+00:00", None, "9999999999999", "Complete job text"))
+    conn.commit()
+
+    artifact = builder.build_weekly(builder.connect_read_only(path), date(2026, 9, 14), "test", release_id="shortlist-2026-W38", as_of=datetime(2026, 9, 21, tzinfo=timezone.utc), _recompute=False)
+
+    assert artifact["delivered_count"] == 25
+    assert "future" not in {row["vacancy_key"] for row in artifact["items"]}
+    held = next(row for row in artifact["suppressed"]["over_cap"] if row["vacancy_key"] == "future")
+    assert held["posted_at_future"] is True
+    assert held["recency_source"] == "first_seen_at"
 
 
 def test_the_audit_groups_account_for_every_input_row() -> None:

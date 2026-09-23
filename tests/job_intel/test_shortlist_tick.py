@@ -81,3 +81,28 @@ def test_tick_recovers_prepared_empty_release(monkeypatch, tmp_path: Path) -> No
                              db_path=tmp_path / "db", now=datetime(2026, 9, 23, tzinfo=timezone.utc)) == [
                                  {"release_id": release_id, "state": "reported"}]
     assert calls == [(release_id, "COWNER")]
+
+
+def test_poll_and_report_cron_stages_have_separate_work(monkeypatch, tmp_path: Path) -> None:
+    releases = tmp_path / "releases"
+    _receipt(releases, "shortlist-2026-W38", "delivered")
+    _receipt(releases, "shortlist-2026-W39", "imported")
+    calls = []
+
+    def poll(_source, _root, release_id, _labels, _uid, _client, *, now):
+        calls.append(("poll", release_id))
+        return {"release_id": release_id, "state": "delivered"}
+
+    def report(_source, _root, release_id, _client, *, now, db_path):
+        calls.append(("report", release_id))
+        return {"release_id": release_id, "state": "reported"}
+
+    monkeypatch.setattr(tick, "poll_release", poll)
+    monkeypatch.setattr(tick, "publish_report", report)
+    args = (tmp_path / "source", releases, tmp_path / "labels", "UOWNER", object())
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    tick.tick_pending(*args, stage="poll", now=now)
+    assert calls == [("poll", "shortlist-2026-W38")]
+    calls.clear()
+    tick.tick_pending(*args, stage="report", now=now)
+    assert calls == [("report", "shortlist-2026-W39")]

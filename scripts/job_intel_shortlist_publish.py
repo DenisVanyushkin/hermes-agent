@@ -106,6 +106,20 @@ def _source(source_dir: Path) -> tuple[dict[str, Any], str]:
     return artifact, source_sha
 
 
+def _cap_dropped(artifact: dict[str, Any]) -> list[str]:
+    suppressed = artifact.get("suppressed") or {}
+    rows = suppressed.get("over_cap") or []
+    if not isinstance(rows, list):
+        raise PublishError("invalid cap-dropped audit")
+    keys = [row.get("vacancy_key") if isinstance(row, dict) else None for row in rows]
+    if any(not isinstance(key, str) or not key for key in keys) or len(keys) != len(set(keys)):
+        raise PublishError("invalid cap-dropped keys")
+    counts = artifact.get("suppressed_counts") or {}
+    if counts and counts.get("over_cap") != len(keys):
+        raise PublishError("cap-dropped count mismatch")
+    return keys
+
+
 def _verify_frozen(attempt_dir: Path, receipt: dict[str, Any], *, source_sha: str, channel: str) -> dict[str, Any]:
     manifest_path = attempt_dir / "manifest.json"
     workbook_path = attempt_dir / "review.xlsx"
@@ -209,6 +223,10 @@ def _prepare_unlocked(artifact: dict[str, Any], source_sha: str, release_dir: Pa
         "rejected_sample": [{"vacancy_key": item["vacancy_key"], "role_fit_verdict": item["role_fit_verdict"]}
                             for item in artifact["rejected_sample"]],
         "census_sha256": artifact.get("census_sha256"),
+        "cap_dropped": _cap_dropped(artifact),
+        "suppressed_counts": artifact.get("suppressed_counts"),
+        "excluded_counts": artifact.get("excluded_counts"),
+        "partition_count": artifact.get("partition_count"),
         "run_ids": artifact.get("run_ids"), "ruleset_versions": artifact.get("ruleset_versions"),
         "commit": artifact.get("commit"),
     }
@@ -356,6 +374,7 @@ def publish_release(source_dir: Path, release_root: Path, channel: str, client: 
                     channel=channel,
                     text=(f"*Еженедельный обзор вакансий* {receipt['release_id']}\n"
                           f"{receipt['rows']} в shortlist, {receipt['rejected_sample_rows']} в rejected_sample. "
+                          f"cap_dropped={len(_cap_dropped(artifact))}. "
                           "Заполни owner_decision и owner_note, затем ответь в этот тред тем же XLSX.\n"
                           + anchor_marker(receipt)),
                 )

@@ -21,13 +21,16 @@ DEFAULT_LABELS = Path.home() / ".hermes" / "job_intel" / "manual-shortlist" / "l
 
 def tick_pending(source_root: Path, release_root: Path, labels_path: Path,
                  operator_uid: str, client: Any, *, db_path: Path = DEFAULT_DB,
-                 now: datetime | None = None) -> list[dict[str, str]]:
+                 now: datetime | None = None,
+                 stage: str = "all") -> list[dict[str, str]]:
     """Advance each current-format release; one failure does not hide later work."""
     if not operator_uid or not release_root.is_dir():
         raise ValueError("operator UID or release root missing")
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("tick time must be timezone aware")
+    if stage not in {"poll", "report", "all"}:
+        raise ValueError("unknown shortlist tick stage")
     outcomes: list[dict[str, str]] = []
     for release_dir in sorted(release_root.iterdir()):
         release_id = release_dir.name
@@ -43,16 +46,20 @@ def tick_pending(source_root: Path, release_root: Path, labels_path: Path,
             state = receipt.get("state")
             if state in {"reported", "expired"}:
                 continue
+            if stage == "poll" and state == "imported":
+                continue
+            if stage == "report" and state != "imported":
+                continue
             source_dir = source_root / release_id
-            if state == "prepared" and receipt.get("empty") is True:
+            if stage != "report" and state == "prepared" and receipt.get("empty") is True:
                 receipt = publish_empty_release(source_dir, release_root, receipt["channel"],
                                                 client, now=now)
                 state = receipt["state"]
-            elif state in {"prepared", "anchored", "delivered"} and not receipt.get("empty"):
+            elif stage != "report" and state in {"prepared", "anchored", "delivered"} and not receipt.get("empty"):
                 receipt = poll_release(source_dir, release_root, release_id, labels_path,
                                        operator_uid, client, now=now)
                 state = receipt["state"]
-            if state == "imported":
+            if state == "imported" and stage != "poll":
                 receipt = publish_report(source_dir, release_root, release_id, client,
                                          now=now, db_path=db_path)
                 state = receipt["state"]
@@ -68,20 +75,21 @@ def tick_pending(source_root: Path, release_root: Path, labels_path: Path,
     return outcomes
 
 
-def main() -> int:
+def main(default_stage: str = "all") -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--release-root", type=Path, default=DEFAULT_RELEASE_ROOT)
     parser.add_argument("--labels-path", type=Path, default=DEFAULT_LABELS)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--operator-uid")
+    parser.add_argument("--stage", choices=("poll", "report", "all"), default=default_stage)
     args = parser.parse_args()
     from slack_sdk import WebClient
     from job_intel_shortlist_send import load_token
 
     result = tick_pending(args.source_root, args.release_root, args.labels_path,
                           args.operator_uid or load_operator_uid(), WebClient(token=load_token()),
-                          db_path=args.db)
+                          db_path=args.db, stage=args.stage)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 1 if any("error" in item for item in result) else 0
 

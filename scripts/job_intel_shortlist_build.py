@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -44,15 +45,12 @@ def role_fit_evaluation_inputs(repo: Path) -> dict[str, Any]:
     *evaluation*: evaluate_role_fit takes owner_languages, supported_languages
     and short_contract_months as arguments, and a caller passing different
     ones produces different verdicts under an identical ruleset_version. The
-    verdicts this builder reads are written by observability.py, which calls
-    on the module defaults, so the defaults plus the entrypoint are what make
-    this artifact reproducible.
+    weekly verdicts are recomputed by this builder with module defaults, so
+    the effective defaults plus the entrypoint make this artifact reproducible.
     """
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
     try:
-        from job_intel.product_search import role_fit
-    except ImportError as exc:
+        role_fit = _load_role_fit(repo / "job_intel" / "product_search" / "role_fit.py")
+    except (ImportError, OSError) as exc:
         return {"available": False, "error": str(exc)}
     arguments = {
         "owner_languages": list(role_fit.DEFAULT_OWNER_LANGUAGES),
@@ -62,10 +60,20 @@ def role_fit_evaluation_inputs(repo: Path) -> dict[str, Any]:
     canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return {
         "available": True,
-        "entrypoint": "job_intel.observability.record_daily_observability",
+        "entrypoint": "scripts.job_intel_shortlist_build.build_weekly",
         "arguments": arguments,
         "arguments_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     }
+
+
+def _load_role_fit(path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location("job_intel_shortlist_role_fit", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load role-fit rules from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def connect_read_only(path: Path) -> sqlite3.Connection:
@@ -287,12 +295,15 @@ def _rule_payload(row: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _frozen_item(row: dict[str, Any]) -> dict[str, Any]:
+def _frozen_item(row: dict[str, Any], as_of: datetime) -> dict[str, Any]:
     payload = _rule_payload(row)
     role_fit_input = {key: row.get(key) or "" for key in ("title", "company", "location", "description")}
     input_bytes = json.dumps(role_fit_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     rule_ids = payload.get("rule_ids")
     posted, posted_unparsed = _posted_instant(row.get("posted_at"))
+    posted_future = posted is not None and posted > as_of.astimezone(timezone.utc)
+    if posted_future:
+        posted = None
     return {
         "vacancy_key": row["vacancy_key"], "company": row["company"],
         "title": row["title"], "location": row["location"],
@@ -301,6 +312,7 @@ def _frozen_item(row: dict[str, Any]) -> dict[str, Any]:
         "posted_at": row["posted_at"], "observed_at": row["created_at"],
         "posted_at_utc": posted.isoformat() if posted else None,
         "posted_at_unparsed": posted_unparsed,
+        "posted_at_future": posted_future,
         "recency_source": "posted_at" if posted else "first_seen_at",
         "run_id": row["run_id"], "role_fit_verdict": row["role_fit_verdict"],
         "rule_ids": rule_ids if isinstance(rule_ids, list) else [],
@@ -319,8 +331,14 @@ def _census_audit_item(row: dict[str, Any]) -> dict[str, Any]:
             "vacancy_key", "company", "title", "source", "url", "run_id",
             "observed_at", "role_fit_verdict", "rule_ids", "ruleset_version",
             "current_role_text_sha256", "posted_at_utc", "posted_at_unparsed",
+            "posted_at_future",
         )
-    } | {"description_present": bool((row["description"] or "").strip())}
+    } | {
+        "description_present": bool((row["description"] or "").strip()),
+        "observed_role_fit_verdict": row.get("observed_role_fit_verdict"),
+        "observed_rule_ids": row.get("observed_rule_ids"),
+        "role_fit_error": row.get("role_fit_error"),
+    }
 
 
 def _utc_instant(value: str | None) -> datetime | None:
@@ -362,8 +380,11 @@ def _weekly_recency(row: dict[str, Any]) -> tuple[float, float, str]:
 
 def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
                  *, release_id: str, issued_keys: frozenset[str] = frozenset(),
+                 sample_cooldown_keys: frozenset[str] = frozenset(),
                  evaluation_inputs: dict[str, Any] | None = None,
-                 as_of: datetime | None = None) -> dict[str, Any]:
+                 as_of: datetime | None = None,
+                 ruleset_path: Path | None = None,
+                 _recompute: bool = True) -> dict[str, Any]:
     """Freeze the latest observation of every key in one seven-day window."""
     start, end = weekly_bounds(week_start)
     as_of = as_of or datetime.now(timezone.utc)
@@ -380,13 +401,33 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
         if previous is None or order > (previous["created_at"], previous["run_id"], previous["url"] or ""):
             latest[key] = row
 
-    census = [_frozen_item(latest[key]) for key in sorted(latest)]
+    census = [_frozen_item(latest[key], as_of) for key in sorted(latest)]
+    if _recompute:
+        role_fit = _load_role_fit(ruleset_path or Path(__file__).resolve().parents[1] / "job_intel" / "product_search" / "role_fit.py")
+        for row in census:
+            row["observed_role_fit_verdict"] = row["role_fit_verdict"]
+            row["observed_rule_ids"] = row["rule_ids"]
+            if not (row["description"] or "").strip():
+                continue
+            try:
+                decision = role_fit.evaluate_role_fit(
+                    row["title"] or "", row["company"] or "", row["location"] or "",
+                    row["description"],
+                )
+            except Exception as error:
+                row["role_fit_verdict"] = "error"
+                row["rule_ids"] = []
+                row["role_fit_error"] = type(error).__name__
+            else:
+                row["role_fit_verdict"] = decision.verdict
+                row["rule_ids"] = list(decision.rule_ids)
+            row["ruleset_version"] = role_fit.ROLE_FIT_RULESET_VERSION
     census_audit = [_census_audit_item(row) for row in census]
     accepted: list[dict[str, Any]] = []
     sample_candidates: list[dict[str, Any]] = []
     excluded: dict[str, list[dict[str, Any]]] = {
         "empty_description": [], "reject_not_sampled": [],
-        "blocked_not_sampled": [], "not_evaluated": [],
+        "blocked_not_sampled": [], "not_evaluated": [], "sample_cooldown": [],
     }
     for row in census:
         if not (row["description"] or "").strip():
@@ -394,7 +435,10 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
         elif row["role_fit_verdict"] == "accept":
             accepted.append(row)
         elif row["role_fit_verdict"] in {"reject", "blocked"}:
-            sample_candidates.append(row)
+            if row["vacancy_key"] in sample_cooldown_keys:
+                excluded["sample_cooldown"].append(_census_audit_item(row))
+            else:
+                sample_candidates.append(row)
         else:
             excluded["not_evaluated"].append(_census_audit_item(row))
 
@@ -426,6 +470,7 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
             "posted_at": by_key[entry["vacancy_key"]]["posted_at"],
             "posted_at_utc": by_key[entry["vacancy_key"]]["posted_at_utc"],
             "posted_at_unparsed": by_key[entry["vacancy_key"]]["posted_at_unparsed"],
+            "posted_at_future": by_key[entry["vacancy_key"]]["posted_at_future"],
             "recency_source": by_key[entry["vacancy_key"]]["recency_source"],
         } for entry in entries]
         for reason, entries in suppressed.items()
@@ -441,7 +486,8 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
         "release_id": release_id, "week_start": week_start.isoformat(),
         "window_start_utc": start.isoformat(), "window_end_utc": end.isoformat(),
         "as_of": as_of.astimezone(timezone.utc).isoformat(), "built_at": datetime.now(timezone.utc).isoformat(),
-        "run_ids": run_ids, "commit": commit, "ruleset_versions": ruleset_versions(list(latest.values())),
+        "run_ids": run_ids, "commit": commit,
+        "ruleset_versions": sorted({str(row["ruleset_version"]) for row in census if row.get("ruleset_version")}),
         "role_fit_evaluation": evaluation_inputs if evaluation_inputs is not None else {"available": False},
         "census_count": len(census), "census_sha256": census_sha,
         "census": census_audit,
@@ -553,6 +599,7 @@ def main() -> int:
         artifact = build_weekly(
             connection, week_start, _head_commit(args.repo), release_id=release_id,
             issued_keys=issued_keys, evaluation_inputs=role_fit_evaluation_inputs(args.repo),
+            ruleset_path=args.repo / "job_intel" / "product_search" / "role_fit.py",
         )
     else:
         artifact = build(

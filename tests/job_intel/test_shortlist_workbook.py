@@ -40,9 +40,9 @@ def test_full_vacancy_text_and_owner_roundtrip(tmp_path: Path) -> None:
     assert book.sheetnames == ["release", "shortlist", "rejected_sample"]
     assert "".join(book["shortlist"].cell(2, column).value for column in (11, 12)) == source["items"][0]["description"]
     assert book["rejected_sample"]["K2"].value == source["rejected_sample"][0]["description"]
-    book["shortlist"]["M2"] = "yes"
-    book["shortlist"]["N2"] = "Good scope"
-    book["rejected_sample"]["M2"] = "blocked_language"
+    book["shortlist"]["O2"] = "yes"
+    book["shortlist"]["P2"] = "Good scope"
+    book["rejected_sample"]["O2"] = "blocked_language"
     book.save(path)
     result = workbook.read_owner_workbook(path, source, "attempt-001")
     assert result["projection_sha256"] == projection
@@ -50,6 +50,22 @@ def test_full_vacancy_text_and_owner_roundtrip(tmp_path: Path) -> None:
         "yes-1": {"owner_decision": "yes", "owner_note": "Good scope", "sheet": "shortlist"},
         "no-1": {"owner_decision": "blocked_language", "owner_note": "", "sheet": "rejected_sample"},
     }
+
+
+def test_model_summary_is_visible_and_frozen_in_owner_workbook(tmp_path: Path) -> None:
+    source = artifact()
+    source["items"][0]["summary"] = "Leads roadmap and owns P&L."
+    source["items"][0]["summary_status"] = "ok"
+    path = tmp_path / "review.xlsx"
+    workbook.write_workbook(path, source, "attempt-001")
+    book = load_workbook(path)
+    assert book["shortlist"]["M1"].value == "summary"
+    assert book["shortlist"]["M2"].value == "Leads roadmap and owns P&L."
+    assert book["shortlist"]["N2"].value == "ok"
+    book["shortlist"]["M2"] = "Invented scope"
+    book.save(path)
+    with pytest.raises(workbook.WorkbookContractError, match="frozen"):
+        workbook.read_owner_workbook(path, source, "attempt-001")
 
 
 @pytest.mark.parametrize("tamper", ["company", "description", "missing", "extra", "duplicate", "release", "formula", "extra_column"])
@@ -71,9 +87,9 @@ def test_frozen_projection_or_row_set_change_fails(tmp_path: Path, tamper: str) 
     elif tamper == "release":
         book["release"]["B2"] = "other-release"
     elif tamper == "formula":
-        book["shortlist"]["N2"] = "=1+1"
+        book["shortlist"]["P2"] = "=1+1"
     elif tamper == "extra_column":
-        book["shortlist"]["O2"] = "untracked edit"
+        book["shortlist"]["Q2"] = "untracked edit"
     book.save(path)
     with pytest.raises(workbook.WorkbookContractError):
         workbook.read_owner_workbook(path, source, "attempt-001")
