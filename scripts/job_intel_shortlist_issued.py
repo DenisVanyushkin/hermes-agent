@@ -25,6 +25,26 @@ _ISSUED_STATES = frozenset({"delivered", "imported", "reported", "expired"})
 _SKIP_STATES = frozenset({"prepared"})
 
 
+def legacy_seed_keys(release_root: Path) -> frozenset[str]:
+    """Read the audited pre-automation seed if present, rejecting corruption."""
+    path = release_root / "legacy-seed-v1.json"
+    if not path.exists():
+        return frozenset()
+    marker = _receipt(path)
+    keys = marker.get("keys")
+    if (marker.get("schema") != "job_intel_legacy_seed_v1"
+            or not isinstance(keys, list) or not keys
+            or any(not isinstance(key, str) or not key for key in keys)
+            or len(keys) != len(set(keys)) or keys != sorted(keys)
+            or marker.get("count") != len(keys)):
+        raise IssuedIndexError("invalid legacy seed marker")
+    digest = hashlib.sha256(json.dumps(keys, ensure_ascii=False, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8")).hexdigest()
+    if marker.get("keys_sha256") != digest:
+        raise IssuedIndexError("legacy seed digest mismatch")
+    return frozenset(keys)
+
+
 def _receipt(path: Path) -> dict:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -162,7 +182,7 @@ def issued_keys(release_root: Path) -> frozenset[str]:
         if release_id in delivered:
             raise IssuedIndexError(f"duplicate delivered release: {release_id}")
         delivered[release_id] = path, receipt
-    keys: set[str] = set()
+    keys: set[str] = set(legacy_seed_keys(release_root))
     for path, receipt in superseded_after_delivery:
         release_id = receipt["release_id"]
         if path.parent.name != release_id:
