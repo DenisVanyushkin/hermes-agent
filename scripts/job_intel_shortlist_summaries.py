@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import os
+import re
 from typing import Any
 
 
@@ -11,6 +12,20 @@ DEFAULT_MODEL = "openai/gpt-5-mini"
 PROMPT_VERSION = "weekly-shortlist-summary-v1"
 MAX_INPUT_CHARS = 20_000
 MAX_SUMMARY_CHARS = 1_500
+NO_FALLBACK_EXTRA_BODY = {"provider": {"allow_fallbacks": False}}
+
+
+def _allowed_response_model(requested: str, actual: str) -> bool:
+    """Allow the pinned model or its dated snapshot, never a family variant."""
+    if not actual:
+        return False
+    base = requested.split("/", 1)[-1]
+    if actual in {requested, base}:
+        return True
+    return re.fullmatch(
+        rf"(?:{re.escape(requested)}|{re.escape(base)})-\d{{4}}-\d{{2}}-\d{{2}}",
+        actual,
+    ) is not None
 
 
 def enrich_summaries(artifact: dict[str, Any],
@@ -72,7 +87,11 @@ def live_summarizer(model_id: str = DEFAULT_MODEL) -> Callable[[str, str], str]:
             ],
             temperature=0,
             max_tokens=350,
+            extra_body=NO_FALLBACK_EXTRA_BODY,
         )
+        response_model = getattr(response, "model", None)
+        if not isinstance(response_model, str) or not _allowed_response_model(model_id, response_model):
+            raise ValueError("summary response model differs from pinned model")
         choices = getattr(response, "choices", None) or []
         if not choices:
             raise ValueError("summary response has no choices")
