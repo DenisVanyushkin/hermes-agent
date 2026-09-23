@@ -365,3 +365,51 @@ def test_malformed_boundary_reasons_stop_the_build(tmp_path) -> None:
         with pytest.raises(ValueError):
             builder.build(builder.connect_read_only(path), 511, "deadbeef")
         path.unlink()
+
+
+def test_the_release_drops_what_the_scoring_path_marked_as_out_of_bounds(tmp_path) -> None:
+    """Writer and reader together: the column the scoring path fills is the one the release reads.
+
+    Each end has its own tests; only this one proves they are connected. The
+    blacklisted role must be a role_fit accept, or the test would pass for the
+    wrong reason.
+    """
+    from job_intel.models import Evaluation, Vacancy
+    from job_intel.observability import record_daily_observability
+    from job_intel.selection_boundaries import assess_selection_boundaries
+    from job_intel.store import JobIntelStore
+
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    blacklist = store.fetch_company_blacklist()
+
+    def scored(index: int, company: str, title: str) -> tuple:
+        item = Vacancy(
+            source="linkedin", source_id=f"fixture-{index}", company=company, title=title,
+            location="Singapore", url=f"https://www.linkedin.com/jobs/view/{index}", description=title,
+        )
+        assessment = assess_selection_boundaries(item, blacklisted_company_keys=blacklist)
+        classification = {
+            "classification": "vp_product",
+            "executive_detected": True,
+            "selection_boundary_reasons": list(assessment.rejection_reasons),
+            "selection_boundary_unknowns": list(assessment.unknown_reasons),
+        }
+        return (item, Evaluation(score=60, tier="possible_fit", recommendation="needs_review"), classification, index, False)
+
+    run_id = store.start_run("test")
+    record_daily_observability(store, run_id, [
+        scored(1, "Doit", "Product Lead - AI Neobank App"),
+        scored(2, "Example", "Product Lead - AI Neobank App"),
+    ])
+    with store.connect(read_only=True) as conn:
+        verdicts = dict(conn.execute(
+            "SELECT company, role_fit_verdict FROM vacancy_observability WHERE run_id = ?", (run_id,)
+        ).fetchall())
+    assert verdicts == {"Doit": "accept", "Example": "accept"}
+
+    artifact = builder.build(builder.connect_read_only(store.db_path), run_id, "deadbeef")
+
+    assert [item["company"] for item in artifact["items"]] == ["Example"]
+    assert [entry["company"] for entry in artifact["suppressed"]["boundary_rejected"]] == ["Doit"]
+    assert "company_blacklist:explicit" in artifact["suppressed"]["boundary_rejected"][0]["reasons"]

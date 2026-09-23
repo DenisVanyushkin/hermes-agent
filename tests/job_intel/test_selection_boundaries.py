@@ -408,3 +408,26 @@ def test_selection_boundaries_source_does_not_name_replay_companies() -> None:
         "almedia", "vondel", "publicis",
     ):
         assert company_name not in source_text, company_name
+
+
+def test_the_bjak_brand_group_is_blacklisted_by_exact_name_only(tmp_path) -> None:
+    """BJAK posts the same templated roles as Doit, ActAI and Kira (owner, 2026-09-23).
+
+    The names are generic, so the match must stay exact: DoiT International and
+    Kira Systems are different employers and must not be caught.
+    """
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    effective = store.fetch_company_blacklist()
+
+    for company in ("BJAK", "Doit", "ActAI", "Kira"):
+        assessment = assess_selection_boundaries(
+            vacancy(company=company), blacklisted_company_keys=effective
+        )
+        assert f"{REASON_COMPANY_BLACKLIST}:explicit" in assessment.rejection_reasons, company
+
+    for namesake in ("DoiT International", "Kira Systems"):
+        assessment = assess_selection_boundaries(
+            vacancy(company=namesake), blacklisted_company_keys=effective
+        )
+        assert REASON_COMPANY_BLACKLIST not in assessment.rejection_reasons, namesake
