@@ -1013,3 +1013,105 @@ def test_optional_or_alternative_degree_is_not_rejected(sentence: str) -> None:
 
     assert "advanced_degree_required" not in decision.rule_ids
     assert decision.verdict == "accept"
+
+
+# Calibration against the owner's "no" answers on release 084423Z (2026-09-23).
+
+_PLATFORM = "Acme builds a SaaS software platform used by millions. "
+
+
+@pytest.mark.parametrize("title", ["AVP/VP, Product Owner - GR TMRW", "VP, Product Owner", "Director / Product Owner"])
+def test_product_owner_after_a_grade_is_not_product_leadership(title: str) -> None:
+    decision = evaluate_role_fit(
+        title,
+        "UOB",
+        "Singapore",
+        _PLATFORM + "Manage the product backlog for the digital platform with the Function Lead.",
+    )
+
+    assert decision.verdict == "reject"
+    assert "software_product_leadership" not in decision.rule_ids
+
+
+@pytest.mark.parametrize("title", ["VP, Product", "VP Product", "Director, Product Management", "Group Product Manager"])
+def test_grade_followed_by_product_is_still_leadership(title: str) -> None:
+    decision = evaluate_role_fit(title, "Acme", "London", _PLATFORM + "Lead the product organisation.")
+
+    assert decision.verdict == "accept"
+
+
+def test_plural_erps_are_erp_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Product Lead - Group Financials",
+        "wise",
+        "London",
+        _PLATFORM + "You have experience with Tier 1 ERPs such as SAP or Oracle.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "erp_and_manufacturing_systems"
+
+
+def test_required_martech_understanding_is_advertising_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Director Product Management",
+        "Sonova Group",
+        "Singapore",
+        _PLATFORM
+        + "Define the end-to-end processes from Ad impression to CRM communication. "
+        "Strong understanding of Online Marketing and the Digital Landscape, Conversion Optimisation, "
+        "UX principles, and MarTech.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "adtech_and_advertising_platforms"
+
+
+def test_optional_marketing_background_is_not_advertising_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "London",
+        _PLATFORM + "A background in online marketing or MarTech is a plus.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "— Обязателен опыт в EdTech / онлайн-образовании",
+        "EdTech experience is required.",
+        "You must have a background in online education.",
+    ],
+)
+def test_mandatory_edtech_is_domain_expertise(sentence: str) -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "MindGate",
+        "Алматы",
+        "Мы AI-холдинг, развиваем онлайн-платформу и software продукт. " + sentence,
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "edtech_and_online_education"
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Опыт в EdTech будет плюсом.",
+        "EdTech experience is a plus.",
+        "We build an EdTech platform for schools.",
+    ],
+)
+def test_optional_or_descriptive_edtech_is_not_domain_expertise(sentence: str) -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "London",
+        _PLATFORM + sentence,
+    )
+
+    assert "domain_expertise_required" not in decision.rule_ids

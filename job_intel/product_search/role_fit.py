@@ -193,10 +193,12 @@ _MIN_LANGUAGE_SERVICE_WORDS = 2
 _MIN_SUPPORTED_SENTENCE_COVERAGE_PERCENT = 35
 _MIN_SUPPORTED_SENTENCE_TOKENS = 8
 
+# "AVP/VP, Product Owner" is a corporate grade in front of a backlog role, not
+# "VP Product": the seniority patterns stop where "product" runs on into "owner".
 _PRODUCT_LEADERSHIP = (
-    r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\b",
+    r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\b(?!\s+owner\b)",
     r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\s+(?:management|function|area)\b",
-    r"\b(?:chief|head|director|vp|vice president|group)\s*[, :/\-&—–]+\s*(?:of\s+)?product(?:\s+(?:management|function|area))?\b",
+    r"\b(?:chief|head|director|vp|vice president|group)\s*[, :/\-&—–]+\s*(?:of\s+)?product(?!\s+owner\b)(?:\s+(?:management|function|area))?\b",
     r"\bproduct(?:\s+[a-z&/-]+){0,3}\s+(?:chief|head|director|vp|vice president|lead)\b",
     r"\bproduct\s+general\s+manager\b",
     r"\bproduct\s+lead\b",
@@ -921,8 +923,8 @@ _DOMAIN_EXPERTISE_RULES = (
         "legacy_rule_id": "advertising_platform",
         "label": "adtech and advertising platforms",
         "patterns": (
-            r"\b(?:must\s+have|required|deeply?\s+speciali[sz]ed|experience|background|expertise|knowledge)\b[^.!?\n]{0,140}\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?)\b",
-            r"\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?)\b[^.!?\n]{0,140}\b(?:must\s+have|required|experience|background|expertise|knowledge)\b",
+            r"\b(?:must\s+have|required|deeply?\s+speciali[sz]ed|experience|background|expertise|knowledge|(?:strong|deep|solid)\s+understanding)\b[^.!?\n]{0,140}\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?|martech|marketing\s+technology|online\s+marketing|ad\s+impressions?)\b",
+            r"\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?|martech|marketing\s+technology|online\s+marketing|ad\s+impressions?)\b[^.!?\n]{0,140}\b(?:must\s+have|required|experience|background|expertise|knowledge)\b",
         ),
         "subject_predicate": "_is_advertising_platform",
     },
@@ -938,13 +940,25 @@ _DOMAIN_EXPERTISE_RULES = (
         ),
     },
     {
+        # Only an explicit requirement counts: an EdTech company hiring a product
+        # lead is the target, an EdTech track record demanded of the candidate
+        # is not (MindGate, release 084423Z: "Обязателен опыт в EdTech").
+        "domain": "edtech_and_online_education",
+        "legacy_rule_id": "edtech_and_online_education",
+        "label": "EdTech and online education",
+        "patterns": (
+            r"(?:\b(?:required|mandatory|must\s+have)\b|обязател\w*)[^.!?\n]{0,140}(?:\bed-?tech\b|\bonline\s+education\b|\beducation(?:al)?\s+technology\b|онлайн[- ]образовани\w*)",
+            r"(?:\bed-?tech\b|\bonline\s+education\b|\beducation(?:al)?\s+technology\b|онлайн[- ]образовани\w*)[^.!?\n]{0,80}(?:\b(?:required|mandatory|must)\b|обязател\w*)",
+        ),
+    },
+    {
         "domain": "erp_and_manufacturing_systems",
         "legacy_rule_id": "erp_and_manufacturing_systems",
         "label": "ERP and manufacturing systems",
         "patterns": (
-            r"\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b[^.!?\n]{0,160}\b(?:erp|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b",
-            r"\b(?:erp|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b[^.!?\n]{0,160}\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
-            r"\b(?:erp|enterprise\s+resource\s+planning)\b[^.!?\n]{0,120}\bmanufactur\w*\b",
+            r"\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b[^.!?\n]{0,160}\b(?:erps?|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b",
+            r"\b(?:erps?|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b[^.!?\n]{0,160}\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
+            r"\b(?:erps?|enterprise\s+resource\s+planning)\b[^.!?\n]{0,120}\bmanufactur\w*\b",
         ),
     },
 )
