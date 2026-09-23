@@ -31,6 +31,12 @@ _LANGUAGES = {
     "japanese": "ja",
     "kazakh": "kk",
     "korean": "ko",
+    # Job texts name the spoken variety, not the family: run 511 issued okx
+    # roles reading "Fluent in English and Mandarin" because only "chinese"
+    # was known.
+    "mandarin": "zh",
+    "cantonese": "zh",
+    "putonghua": "zh",
     "polish": "pl",
     "portuguese": "pt",
     "russian": "ru",
@@ -287,6 +293,37 @@ _US_LOCATION_PATTERNS = (
     r",\s*(?:ca|ny|wa|tx|ma|il|co|nj)\b",
 )
 _REMOTE_LOCATION_PATTERN = r"\bremote\b"
+# The owner does not take roles located in Russia (ruling on release
+# shortlist-20260922T084423Z). Only the location field is matched: a
+# description listing "РФ, СНГ, GCC" as markets says nothing about where the
+# role sits.
+_RUSSIA_LOCATION_PATTERNS = (
+    r"\brussia\b",
+    r"\brussian\s+federation\b",
+    r"\bmoscow\b",
+    r"\b(?:saint|st\.?)\s*petersburg\b",
+    r"росси",
+    r"\bрф\b",
+    r"москв",
+    r"санкт-петербург",
+    r"новосибирск",
+    r"екатеринбург",
+    r"\bказань\b",
+    r"нижний\s+новгород",
+)
+# A required master's or doctorate is a hard gate for the owner. Anything that
+# admits an alternative (a bachelor's, "or equivalent") or softens it
+# ("preferred", "a plus") keeps the role open.
+_ADVANCED_DEGREE_PATTERN = (
+    r"\bmaster'?s?\s+(?:degree|of)\b|\bmsc\b|\bm\.sc\b|\bmba\b|\bph\.?\s?d\b|\bdoctorate\b|магистр"
+)
+_DEGREE_REQUIRED_CUE = (
+    r"\b(?:required|requires?|mandatory|must|essential|obligatory|minimum)\b|обязательн"
+)
+_DEGREE_ALTERNATIVE_CUE = (
+    r"\b(?:bachelor'?s?|bsc|b\.sc|undergraduate|equivalent|preferred|preferably|plus|advantage|"
+    r"desirable|ideally|nice\s+to\s+have|bonus|beneficial|or\s+similar)\b|бакалавр|желательн|плюсом"
+)
 # A sentence that denies sponsorship contains the word "sponsorship", so the
 # cue alone opens the very gate it should keep shut. Run 510 accepted two US
 # roles whose text read "visa sponsorship is not available" and "without the
@@ -438,6 +475,8 @@ def evaluate_role_fit(
     matches.extend(_work_authorisation_matches(location, text))
     matches.extend(_industry_matches(sentences, title))
     matches.extend(_staffing_agency_matches(company, text))
+    matches.extend(_russia_location_matches(location))
+    matches.extend(_advanced_degree_matches(sentences))
 
     required_language_match = _language_match(sentences, owner_languages)
     if required_language_match is not None:
@@ -474,6 +513,8 @@ _HARD_REJECT_RULES = frozenset(
         "domain_expertise_required",
         "ecommerce_commercial_leadership",
         "interim_or_cover",
+        "russia_location",
+        "advanced_degree_required",
         "short_contract",
         "staffing_agency_or_aggregator",
     }
@@ -1065,6 +1106,40 @@ def _work_authorisation_matches(location: str, text: str) -> tuple[RuleMatch, ..
             (location,),
             "The role requires presence in the US and states no sponsorship, which is a hard gate.",
             {"location": location},
+        ),
+    )
+
+
+def _russia_location_matches(location: str) -> tuple[RuleMatch, ...]:
+    if not _find_patterns(location, _RUSSIA_LOCATION_PATTERNS):
+        return ()
+    return (
+        RuleMatch(
+            "russia_location",
+            (location,),
+            "The role is located in Russia, which the owner excludes.",
+            {"location": location},
+        ),
+    )
+
+
+def _advanced_degree_matches(sentences: Iterable[str]) -> tuple[RuleMatch, ...]:
+    required = _compiled_pattern(_DEGREE_REQUIRED_CUE)
+    alternative = _compiled_pattern(_DEGREE_ALTERNATIVE_CUE)
+    degree = _compiled_pattern(_ADVANCED_DEGREE_PATTERN)
+    fragments = tuple(
+        sentence
+        for sentence in sentences
+        if degree.search(sentence) and required.search(sentence) and not alternative.search(sentence)
+    )
+    if not fragments:
+        return ()
+    return (
+        RuleMatch(
+            "advanced_degree_required",
+            fragments,
+            "The text makes a master's degree or doctorate a hard requirement.",
+            {},
         ),
     )
 
