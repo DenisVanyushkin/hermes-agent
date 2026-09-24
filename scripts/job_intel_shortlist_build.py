@@ -551,6 +551,7 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
     excluded: dict[str, list[dict[str, Any]]] = {
         "empty_description": [], "reject_not_sampled": [],
         "blocked_not_sampled": [], "not_evaluated": [], "sample_cooldown": [],
+        "sample_boundary_rejected": [], "sample_boundary_unassessed": [],
     }
     for row in census:
         if not (row["description"] or "").strip():
@@ -558,7 +559,11 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
         elif row["role_fit_verdict"] == "accept":
             accepted.append(row)
         elif row["role_fit_verdict"] in {"reject", "blocked"}:
-            if row["vacancy_key"] in sample_cooldown_keys:
+            if row["selection_boundary_reasons"] is None:
+                excluded["sample_boundary_unassessed"].append(_census_audit_item(row))
+            elif row["selection_boundary_reasons"]:
+                excluded["sample_boundary_rejected"].append(_census_audit_item(row))
+            elif row["vacancy_key"] in sample_cooldown_keys:
                 excluded["sample_cooldown"].append(_census_audit_item(row))
             else:
                 sample_candidates.append(row)

@@ -734,6 +734,52 @@ def test_weekly_boundary_verdict_uses_every_observation_and_current_blacklist(tm
     ]
 
 
+def test_rejected_sample_only_contains_boundary_clean_roles(tmp_path) -> None:
+    path = tmp_path / "sample-boundaries.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT,"
+        " title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT,"
+        " role_fit_verdict TEXT, role_fit_rules_json TEXT, created_at TEXT,"
+        " selection_boundary_reasons_json TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT,"
+        " posted_at TEXT, description TEXT)"
+    )
+    rules = json.dumps({"ruleset_version": "test", "rule_ids": ["product"]})
+    for key, boundary in (
+        ("clean", "[]"),
+        ("rejected", '["company_blacklist"]'),
+        ("unassessed", None),
+    ):
+        conn.execute(
+            "INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (1, key, key, "Product Marketing Manager", "London", "LinkedIn", key, key,
+             "reject", rules, "2026-09-18T12:00:00+00:00", boundary),
+        )
+        conn.execute(
+            "INSERT INTO vacancies VALUES (?,?,?,?,?)",
+            (key, "2026-09-18T00:00:00+00:00", None, None, "Complete vacancy description"),
+        )
+    conn.commit()
+    conn.close()
+
+    artifact = builder.build_weekly(
+        builder.connect_read_only(path), date(2026, 9, 14), "test",
+        release_id="shortlist-2026-W38", _recompute=False, company_blacklist={},
+    )
+
+    assert [row["vacancy_key"] for row in artifact["rejected_sample"]] == ["clean"]
+    assert [row["vacancy_key"] for row in artifact["excluded"]["sample_boundary_rejected"]] == [
+        "rejected"
+    ]
+    assert [row["vacancy_key"] for row in artifact["excluded"]["sample_boundary_unassessed"]] == [
+        "unassessed"
+    ]
+    assert artifact["partition_count"] == artifact["census_count"] == 3
+
+
 def test_the_blacklist_is_refused_from_a_foreign_checkout(tmp_path) -> None:
     import pytest
 
