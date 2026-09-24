@@ -56,16 +56,18 @@ def test_empty_week_cannot_claim_successful_model_summaries() -> None:
 
 
 @pytest.mark.parametrize(
-    ("served_model", "accepted"),
+    ("served_model", "finish_reason", "accepted"),
     [
-        ("openai/gpt-5-mini", True),
-        ("gpt-5-mini-2026-08-01", True),
-        ("openai/gpt-5-nano", False),
-        ("", False),
+        ("openai/gpt-5-mini", "stop", True),
+        ("gpt-5-mini-2026-08-01", "stop", True),
+        ("openai/gpt-5-nano", "stop", False),
+        ("", "stop", False),
+        ("openai/gpt-5-mini", "length", False),
     ],
 )
 def test_live_summary_requires_pinned_model_without_provider_fallback(
-    monkeypatch: pytest.MonkeyPatch, served_model: str, accepted: bool,
+    monkeypatch: pytest.MonkeyPatch, served_model: str, finish_reason: str,
+    accepted: bool,
 ) -> None:
     module_path = Path(__file__).resolve().parents[2] / "scripts" / "job_intel_shortlist_summaries.py"
     spec = importlib.util.spec_from_file_location("job_intel_shortlist_summaries", module_path)
@@ -79,7 +81,10 @@ def test_live_summary_requires_pinned_model_without_provider_fallback(
         calls.append(kwargs)
         return SimpleNamespace(
             model=served_model,
-            choices=[SimpleNamespace(message=SimpleNamespace(content="Frozen role summary."))],
+            choices=[SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(content="Frozen role summary."),
+            )],
         )
 
     class FakeClient:
@@ -98,7 +103,8 @@ def test_live_summary_requires_pinned_model_without_provider_fallback(
     if accepted:
         assert summarize("VP Product", "Own product strategy.") == "Frozen role summary."
     else:
-        with pytest.raises(ValueError, match="model"):
+        with pytest.raises(ValueError, match="model|finish"):
             summarize("VP Product", "Own product strategy.")
     assert calls[0]["model"] == "openai/gpt-5-mini"
+    assert calls[0]["max_tokens"] == 1200
     assert calls[0]["extra_body"] == {"provider": {"allow_fallbacks": False}}

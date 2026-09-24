@@ -86,7 +86,7 @@ def live_summarizer(model_id: str = DEFAULT_MODEL) -> Callable[[str, str], str]:
                 {"role": "user", "content": f"Title: {title}\nVacancy text:\n{description}"},
             ],
             temperature=0,
-            max_tokens=350,
+            max_tokens=1200,
             extra_body=NO_FALLBACK_EXTRA_BODY,
         )
         response_model = getattr(response, "model", None)
@@ -95,6 +95,8 @@ def live_summarizer(model_id: str = DEFAULT_MODEL) -> Callable[[str, str], str]:
         choices = getattr(response, "choices", None) or []
         if not choices:
             raise ValueError("summary response has no choices")
+        if getattr(choices[0], "finish_reason", None) != "stop":
+            raise ValueError("summary response did not finish normally")
         text = getattr(getattr(choices[0], "message", None), "content", None)
         if not isinstance(text, str):
             raise ValueError("summary response is not text")
