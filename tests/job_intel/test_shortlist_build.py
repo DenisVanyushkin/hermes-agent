@@ -426,13 +426,13 @@ def test_artifact_exposes_suppression_counts(tmp_path) -> None:
 
 def test_evaluation_inputs_are_pinned_beside_the_ruleset_version() -> None:
     """Identical rules with different arguments are a different evaluation."""
-    repo = Path("/home/hermes/.hermes/hermes-agent")
+    repo = Path(__file__).resolve().parents[2]
     inputs = builder.role_fit_evaluation_inputs(repo)
     if not inputs.get("available"):
         import pytest
 
         pytest.skip(f"role_fit not importable here: {inputs.get('error')}")
-    assert inputs["entrypoint"] == "job_intel.observability.record_daily_observability"
+    assert inputs["entrypoint"] == "scripts.job_intel_shortlist_build.build_weekly"
     assert inputs["arguments"]["owner_languages"] == ["en", "ru"]
     assert len(inputs["arguments_sha256"]) == 64
 
