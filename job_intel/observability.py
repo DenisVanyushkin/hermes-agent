@@ -1081,11 +1081,18 @@ def record_daily_observability(
             canonical_url=canonical_url,
             active_scoring_version=active_scoring_version,
             active_recommendation_version=active_recommendation_version,
-            selection_boundary_reasons=list(
-                classification.get("selection_boundary_reasons", ())
+            # Absent means never assessed and is stored as NULL; an assessed
+            # empty list is stored as []. The shortlist release holds the
+            # former back, so the two must not collapse into one value.
+            selection_boundary_reasons=(
+                list(classification["selection_boundary_reasons"])
+                if "selection_boundary_reasons" in classification
+                else None
             ),
-            selection_boundary_unknowns=list(
-                classification.get("selection_boundary_unknowns", ())
+            selection_boundary_unknowns=(
+                list(classification["selection_boundary_unknowns"])
+                if "selection_boundary_unknowns" in classification
+                else None
             ),
             role_fit_verdict=role_fit_verdict,
             role_fit_rules_json=role_fit_rules_json,

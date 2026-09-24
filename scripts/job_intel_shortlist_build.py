@@ -21,7 +21,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 DEFAULT_DB = Path("/var/lib/job-intel/state/job_intel.sqlite3")
@@ -111,6 +111,15 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
     collapse becomes a loss the owner cannot notice. Naming the suppressed
     rows is what keeps that from being silent.
 
+    Roles the owner's selection boundaries reject (company blacklist, crypto,
+    Russia, scope, work authorisation...) are held back as `boundary_rejected`
+    with their reasons. role_fit and the boundaries are separate rule systems
+    and role_fit accepts roles the boundaries reject: run 511 delivered three
+    roles of an explicitly blacklisted company. A row whose reasons were never
+    recorded is held back as `boundary_unassessed` rather than treated as
+    clean, because "no reasons recorded" and "no reasons found" are different
+    facts. Both leave before the cap for the same reason issued roles do.
+
     `issued_keys` are vacancy keys already delivered in an earlier release.
     They are dropped before the cap is applied, not after: filtering
     afterwards would let roles the owner has already seen consume the cap and
@@ -132,6 +141,8 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
     batch: list[dict[str, Any]] = []
     suppressed: dict[str, list[dict[str, Any]]] = {
         "already_issued": [],
+        "boundary_rejected": [],
+        "boundary_unassessed": [],
         "title_collapsed": [],
         "company_capped": [],
         "over_cap": [],
@@ -159,6 +170,13 @@ def select_batch(rows: list[dict[str, Any]], cap: int = BATCH_CAP,
         if row.get("vacancy_key") in issued_keys:
             _record("already_issued", row)
             continue
+        reasons = row.get("selection_boundary_reasons")
+        if reasons is None:
+            _record("boundary_unassessed", row)
+            continue
+        if reasons:
+            _record("boundary_rejected", row, reasons=list(reasons))
+            continue
         if len(batch) >= cap:
             _record("over_cap", row)
             continue
@@ -183,16 +201,46 @@ def _invert(value: str) -> str:
     return "".join(chr(0x10FFFD - ord(char)) if ord(char) < 0x10FFFD else char for char in value)
 
 
-def fetch_accepted(connection: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
+def parse_boundary_reasons(raw: str | None, vacancy_key: str) -> list[str] | None:
+    """None means never assessed; anything unreadable stops the build.
+
+    Reading a corrupt value as "no reasons" would deliver exactly the roles
+    the boundaries exist to stop, so it is an error, not a default.
+    """
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"selection_boundary_reasons_json of {vacancy_key} is not JSON: {raw!r}") from exc
+    if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+        raise ValueError(f"selection_boundary_reasons_json of {vacancy_key} is not a list of strings: {raw!r}")
+    return payload
+
+
+def fetch_accepted(connection: sqlite3.Connection, run_id: int,
+                   company_blacklist: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One row per accepted vacancy_key, with the boundary verdict of all its observations.
+
+    A run can observe one vacancy_key several times under different URLs. The
+    verdict is taken over every observation, never from one picked by SQL: a
+    clean member must not mask a rejected one. Any rejection wins; otherwise
+    any unassessed member makes the key unassessed.
+
+    Reasons are frozen when a run is scored, so a company blacklisted after
+    that would otherwise still travel. The blacklist in force at build time is
+    applied on top, and recorded in the artifact by build().
+    """
     rows = connection.execute(
         """
         SELECT o.vacancy_key, o.company, o.title, o.location, o.source,
                COALESCE(o.canonical_url, o.url) AS url,
-               o.role_fit_rules_json, v.first_seen_at, v.last_seen_at, v.posted_at
+               o.role_fit_rules_json, v.first_seen_at, v.last_seen_at, v.posted_at,
+               o.selection_boundary_reasons_json
         FROM vacancy_observability AS o
         LEFT JOIN vacancies AS v ON v.vacancy_key = o.vacancy_key
         WHERE o.run_id = ? AND o.role_fit_verdict = 'accept'
-        GROUP BY o.vacancy_key
+        ORDER BY o.vacancy_key, url, o.selection_boundary_reasons_json
         """,
         (run_id,),
     ).fetchall()
@@ -200,7 +248,61 @@ def fetch_accepted(connection: sqlite3.Connection, run_id: int) -> list[dict[str
         "vacancy_key", "company", "title", "location", "source", "url",
         "role_fit_rules_json", "first_seen_at", "last_seen_at", "posted_at",
     ]
-    return [dict(zip(columns, row)) for row in rows]
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        record = dict(zip(columns, row[:-1]))
+        reasons = parse_boundary_reasons(row[-1], record["vacancy_key"])
+        # The blacklist is applied to each observation, before merging: one
+        # key can carry different company labels, and the representative's
+        # label must not decide whether a blacklisted one travels.
+        company_key = canonical_company_key(record.get("company"))
+        entry = company_blacklist.get(company_key) if company_key else None
+        if entry is not None:
+            current = ["company_blacklist", f"company_blacklist:{entry.get('origin') or 'unknown'}"]
+            reasons = _merge_reasons(reasons, current)
+        key = record["vacancy_key"]
+        if key not in grouped:
+            # The first member by URL is the representative; ORDER BY makes it deterministic.
+            record["selection_boundary_reasons"] = reasons
+            grouped[key] = record
+            continue
+        merged = grouped[key]["selection_boundary_reasons"]
+        grouped[key]["selection_boundary_reasons"] = _merge_reasons(merged, reasons)
+    return list(grouped.values())
+
+
+def _merge_reasons(left: list[str] | None, right: list[str] | None) -> list[str] | None:
+    """Rejection beats unassessed beats clean; reasons keep first-seen order."""
+    if left or right:
+        return list(dict.fromkeys([*(left or []), *(right or [])]))
+    if left is None or right is None:
+        return None
+    return []
+
+
+def load_company_blacklist(db_path: Path, repo: Path) -> dict[str, dict[str, Any]]:
+    """The effective blacklist, computed by the same code the scoring path uses."""
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from job_intel import store
+
+    # A job_intel imported earlier from another checkout would answer with
+    # that checkout's blacklist file, silently. Refuse instead.
+    loaded_from = Path(store.__file__).resolve()
+    if not loaded_from.is_relative_to(repo.resolve()):
+        raise RuntimeError(f"job_intel.store loaded from {loaded_from}, not from {repo}")
+    return store.JobIntelStore(db_path).fetch_company_blacklist()
+
+
+def canonical_company_key(value: str | None) -> str | None:
+    """Mirror of job_intel.store.canonical_company_key; a test pins the two together."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    collapsed = re.sub(r"\s+", " ", raw.casefold())
+    if collapsed == "unknown":
+        return "unknown"
+    return "".join(ch for ch in collapsed if ch.isalnum()) or None
 
 
 def ruleset_versions(rows: list[dict[str, Any]]) -> list[str]:
@@ -217,8 +319,9 @@ def ruleset_versions(rows: list[dict[str, Any]]) -> list[str]:
 
 def build(connection: sqlite3.Connection, run_id: int, commit: str,
           issued_keys: frozenset[str] = frozenset(),
-          evaluation_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
-    accepted = fetch_accepted(connection, run_id)
+          evaluation_inputs: dict[str, Any] | None = None,
+          *, company_blacklist: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    accepted = fetch_accepted(connection, run_id, company_blacklist)
     batch, suppressed = select_batch(accepted, issued_keys=issued_keys)
     return {
         "artifact": "job_intel_shortlist",
@@ -230,6 +333,10 @@ def build(connection: sqlite3.Connection, run_id: int, commit: str,
         "built_at": datetime.now(timezone.utc).isoformat(),
         "cap": BATCH_CAP,
         "max_per_company": MAX_PER_COMPANY,
+        "company_blacklist_applied": [
+            {"company_key": key, "origin": str(company_blacklist[key].get("origin") or "unknown")}
+            for key in sorted(company_blacklist)
+        ],
         "accepted_total": len(accepted),
         "issued_keys_supplied": len(issued_keys),
         "suppressed_counts": {reason: len(rows) for reason, rows in sorted(suppressed.items())},
@@ -270,7 +377,8 @@ def _weekly_observations(connection: sqlite3.Connection, start: datetime,
         """
         SELECT o.run_id, o.vacancy_key, o.company, o.title, o.location,
                o.source, COALESCE(o.canonical_url, o.url) AS url, o.role_fit_verdict,
-               o.role_fit_rules_json, o.created_at, v.first_seen_at,
+               o.role_fit_rules_json, o.selection_boundary_reasons_json,
+               o.created_at, v.first_seen_at,
                v.posted_at, v.description
         FROM vacancy_observability AS o
         LEFT JOIN vacancies AS v ON v.vacancy_key = o.vacancy_key
@@ -317,6 +425,7 @@ def _frozen_item(row: dict[str, Any], as_of: datetime) -> dict[str, Any]:
         "run_id": row["run_id"], "role_fit_verdict": row["role_fit_verdict"],
         "rule_ids": rule_ids if isinstance(rule_ids, list) else [],
         "ruleset_version": payload.get("ruleset_version"),
+        "selection_boundary_reasons": row["selection_boundary_reasons"],
         # Observability does not store the exact description evaluated in each
         # run. This hash identifies the text read from vacancies at build time.
         "current_role_text_sha256": hashlib.sha256(input_bytes).hexdigest(),
@@ -332,6 +441,7 @@ def _census_audit_item(row: dict[str, Any]) -> dict[str, Any]:
             "observed_at", "role_fit_verdict", "rule_ids", "ruleset_version",
             "current_role_text_sha256", "posted_at_utc", "posted_at_unparsed",
             "posted_at_future",
+            "selection_boundary_reasons",
         )
     } | {
         "description_present": bool((row["description"] or "").strip()),
@@ -381,6 +491,7 @@ def _weekly_recency(row: dict[str, Any]) -> tuple[float, float, str]:
 def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
                  *, release_id: str, issued_keys: frozenset[str] = frozenset(),
                  sample_cooldown_keys: frozenset[str] = frozenset(),
+                 company_blacklist: Mapping[str, Mapping[str, Any]],
                  evaluation_inputs: dict[str, Any] | None = None,
                  as_of: datetime | None = None,
                  ruleset_path: Path | None = None,
@@ -392,16 +503,28 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
         raise ValueError("weekly window must be complete before building")
     observations, run_ids = _weekly_observations(connection, start, end)
     latest: dict[str, dict[str, Any]] = {}
+    boundary_by_key: dict[str, list[str] | None] = {}
     for row in observations:
         key = row["vacancy_key"]
         if not key:
             raise ValueError("observability row has no vacancy_key")
+        reasons = parse_boundary_reasons(row["selection_boundary_reasons_json"], key)
+        company_key = canonical_company_key(row.get("company"))
+        entry = company_blacklist.get(company_key) if company_key else None
+        if entry is not None:
+            reasons = _merge_reasons(
+                reasons, ["company_blacklist", f"company_blacklist:{entry.get('origin') or 'unknown'}"],
+            )
+        boundary_by_key[key] = _merge_reasons(boundary_by_key[key], reasons) if key in boundary_by_key else reasons
         previous = latest.get(key)
         order = (row["created_at"], row["run_id"], row["url"] or "")
         if previous is None or order > (previous["created_at"], previous["run_id"], previous["url"] or ""):
             latest[key] = row
 
-    census = [_frozen_item(latest[key], as_of) for key in sorted(latest)]
+    census = []
+    for key in sorted(latest):
+        row = dict(latest[key], selection_boundary_reasons=boundary_by_key[key])
+        census.append(_frozen_item(row, as_of))
     if _recompute:
         role_fit = _load_role_fit(ruleset_path or Path(__file__).resolve().parents[1] / "job_intel" / "product_search" / "role_fit.py")
         for row in census:
@@ -487,6 +610,10 @@ def build_weekly(connection: sqlite3.Connection, week_start: date, commit: str,
         "window_start_utc": start.isoformat(), "window_end_utc": end.isoformat(),
         "as_of": as_of.astimezone(timezone.utc).isoformat(), "built_at": datetime.now(timezone.utc).isoformat(),
         "run_ids": run_ids, "commit": commit,
+        "company_blacklist_applied": [
+            {"company_key": key, "origin": str(company_blacklist[key].get("origin") or "unknown")}
+            for key in sorted(company_blacklist)
+        ],
         "ruleset_versions": sorted({str(row["ruleset_version"]) for row in census if row.get("ruleset_version")}),
         "role_fit_evaluation": evaluation_inputs if evaluation_inputs is not None else {"available": False},
         "census_count": len(census), "census_sha256": census_sha,
@@ -551,7 +678,8 @@ def render_text(artifact: dict[str, Any], sha: str) -> str:
         lines += ["", "HELD BACK " + " ".join(f"{k}={v}" for k, v in sorted(held.items()) if v)]
         for reason, rows in sorted((artifact.get("suppressed") or {}).items()):
             for entry in rows[:5]:
-                lines.append(f"   [{reason}] {entry['company']} — {entry['title']} | {entry['location']}")
+                why = f" ({', '.join(entry['reasons'])})" if entry.get("reasons") else ""
+                lines.append(f"   [{reason}] {entry['company']} — {entry['title']} | {entry['location']}{why}")
     if artifact["short_of_cap"]:
         lines += [
             "",
@@ -591,6 +719,7 @@ def main() -> int:
             raise SystemExit("--issued-keys must contain a JSON array of vacancy keys")
         issued_keys = frozenset(str(item) for item in payload)
 
+    company_blacklist = load_company_blacklist(args.db, args.repo)
     connection = connect_read_only(args.db)
     if args.week_start or args.weekly:
         berlin_today = datetime.now(ZoneInfo("Europe/Berlin")).date()
@@ -600,11 +729,13 @@ def main() -> int:
             connection, week_start, _head_commit(args.repo), release_id=release_id,
             issued_keys=issued_keys, evaluation_inputs=role_fit_evaluation_inputs(args.repo),
             ruleset_path=args.repo / "job_intel" / "product_search" / "role_fit.py",
+            company_blacklist=company_blacklist,
         )
     else:
         artifact = build(
             connection, args.run_id, _head_commit(args.repo), issued_keys=issued_keys,
             evaluation_inputs=role_fit_evaluation_inputs(args.repo),
+            company_blacklist=company_blacklist,
         )
     sha = digest(artifact)
     print(render_text(artifact, sha))

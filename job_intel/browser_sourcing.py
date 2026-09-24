@@ -61,6 +61,7 @@ from urllib.request import urlopen
 
 from .dedup import canonical_job_url
 from .models import Vacancy
+from .product_search.role_fit import title_product_leadership_fragments
 from .runtime import resolve_browser_profile_base, sha256_text
 
 
@@ -803,8 +804,13 @@ def linkedin_detail_title_matches(title: str) -> bool:
     """Whether a title is eligible for public detail enrichment.
 
     This is deliberately title-only and uses the eight-family vocabulary from
-    the accepted M0 review pool.  Mandate interpretation remains downstream.
+    the accepted M0 review pool, plus every title in which role_fit finds
+    product-leadership evidence: role_fit can accept such a title, and without
+    detail text it would do so on the title alone.  Mandate interpretation
+    remains downstream.
     """
+    if title_product_leadership_fragments(title or ""):
+        return True
     text = re.sub(r"[^a-z0-9]+", " ", (title or "").casefold())
     text = _normalize_whitespace(text)
     text = re.sub(r"\bproduct management\b", "product", text)

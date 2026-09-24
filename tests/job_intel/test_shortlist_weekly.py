@@ -14,13 +14,14 @@ SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 
-def test_retry_keeps_the_first_frozen_census_after_database_changes(tmp_path: Path) -> None:
+def test_retry_keeps_the_first_frozen_census_after_database_changes(tmp_path: Path, monkeypatch) -> None:
     module_path = SCRIPTS / "job_intel_shortlist_weekly.py"
     assert module_path.is_file(), "weekly entry point is missing"
     spec = importlib.util.spec_from_file_location("job_intel_shortlist_weekly", module_path)
     assert spec and spec.loader
     weekly = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(weekly)
+    monkeypatch.setattr(weekly, "load_company_blacklist", lambda db_path, repo: {})
 
     db = tmp_path / "jobs.sqlite3"
     conn = sqlite3.connect(db)
@@ -30,6 +31,8 @@ def test_retry_keeps_the_first_frozen_census_after_database_changes(tmp_path: Pa
     conn.execute("INSERT INTO vacancy_observability VALUES (?,?,?,?,?,?,?,?,?,?,?)", (1, "fresh", "Acme", "VP Product", "London", "LinkedIn", "https://example.org/fresh", "https://example.org/fresh", "accept", rules, "2026-09-18T12:00:00+00:00"))
     original_description = "Own product strategy, roadmap, engineering partnership and P&L for a software platform."
     conn.execute("INSERT INTO vacancies VALUES (?,?,?,?,?)", ("fresh", "2026-09-18T10:00:00+00:00", None, None, original_description))
+    conn.commit()
+    conn.execute("ALTER TABLE vacancy_observability ADD COLUMN selection_boundary_reasons_json TEXT DEFAULT '[]'")
     conn.commit()
     release_root = tmp_path / "releases"
     release_root.mkdir()

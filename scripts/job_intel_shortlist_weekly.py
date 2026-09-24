@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 from job_intel_shortlist_build import (
     DEFAULT_DB, DEFAULT_OUT, _head_commit, build_weekly, connect_read_only,
-    digest, render_text, role_fit_evaluation_inputs,
+    digest, load_company_blacklist, render_text, role_fit_evaluation_inputs,
 )
 from job_intel_shortlist_cooldown import sample_cooldown_keys
 from job_intel_shortlist_empty import publish_empty_release
@@ -92,6 +92,7 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                         connection, week_start, commit or _head_commit(repo),
                         release_id=release_id, issued_keys=issued,
                         sample_cooldown_keys=cooled,
+                        company_blacklist=load_company_blacklist(db_path, repo),
                         evaluation_inputs=role_fit_evaluation_inputs(repo), as_of=now,
                         ruleset_path=repo / "job_intel" / "product_search" / "role_fit.py",
                     )

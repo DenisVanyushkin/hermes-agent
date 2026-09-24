@@ -881,8 +881,14 @@ def test_owner_labels_match_live_corpus_20_of_20() -> None:
         "reject": "reject",
         "blocked": "blocked",
     }
+    # The file also collects later release rounds, whose disagreements are the
+    # input to calibration rather than a promise; this test pins the three
+    # rounds the ruleset was built against.
+    calibration_labels = [
+        label for label in payload["labels"] if label.get("round", "") < "2026-09-23"
+    ]
     mismatches = []
-    for label in payload["labels"]:
+    for label in calibration_labels:
         row = connection.execute(
             """
             SELECT title, company, location, description
@@ -898,5 +904,251 @@ def test_owner_labels_match_live_corpus_20_of_20() -> None:
         if decision.verdict != expected_verdicts[label["verdict"]]:
             mismatches.append((label["vacancy_key"], label["verdict"], decision.verdict, decision.rule_ids))
 
-    assert len(payload["labels"]) == 20
+    assert len(calibration_labels) == 20
     assert mismatches == []
+
+
+# Owner decisions on release shortlist-20260922T084423Z (2026-09-23).
+
+_SAAS = "OKX builds a crypto trading platform and software products for millions of users. "
+
+
+def test_mandarin_requirement_blocks_the_role() -> None:
+    decision = evaluate_role_fit(
+        "Product Director, Trading Infrastructure",
+        "okx",
+        "Singapore",
+        _SAAS + "Own the product roadmap. Fluent in English and Mandarin "
+        "(to communicate with Mandarin speaking clients / cross-teams).",
+    )
+
+    assert decision.verdict == "blocked"
+    assert decision.match_for("required_language_unavailable").details["languages"] == ("zh",)
+
+
+def test_optional_mandarin_does_not_block() -> None:
+    decision = evaluate_role_fit(
+        "Product Director",
+        "okx",
+        "Singapore",
+        _SAAS + "Lead product management for the platform. Mandarin is a plus.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+@pytest.mark.parametrize("location", ["Москва", "Moscow, Russia", "Санкт-Петербург", "Russian Federation"])
+def test_russia_location_is_rejected(location: str) -> None:
+    decision = evaluate_role_fit(
+        "CPO E-commerce (Chief Product Officer)",
+        "Retailer",
+        location,
+        "Lead product management for our SaaS software platform and mobile app.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("russia_location").fragments == (location,)
+
+
+@pytest.mark.parametrize("location", ["Алматы", "Remote", "Tbilisi, Georgia"])
+def test_non_russian_location_is_not_rejected_as_russia(location: str) -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        location,
+        "Lead product management for our SaaS software platform. Работа в команде продукта.",
+    )
+
+    assert "russia_location" not in decision.rule_ids
+
+
+def test_russia_in_description_alone_is_not_a_location() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "Алматы",
+        "Lead product management for our SaaS software platform. Клиенты в РФ, СНГ и GCC.",
+    )
+
+    assert "russia_location" not in decision.rule_ids
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "A Master's degree in Computer Science is required.",
+        "Must hold a master's degree in engineering or business.",
+        "MSc or PhD in a quantitative field is mandatory.",
+    ],
+)
+def test_required_advanced_degree_is_rejected(sentence: str) -> None:
+    decision = evaluate_role_fit(
+        "AI Product Lead",
+        "Acme",
+        "Copenhagen",
+        "Lead product management for our SaaS software platform. " + sentence,
+    )
+
+    assert decision.verdict == "reject"
+    assert sentence in decision.match_for("advanced_degree_required").fragments
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "A Bachelor's or Master's degree in Computer Science is required.",
+        "Master's degree preferred.",
+        "An MBA is a plus.",
+        "Master's degree or equivalent experience required.",
+        "You will master our product craft; experience is required.",
+    ],
+)
+def test_optional_or_alternative_degree_is_not_rejected(sentence: str) -> None:
+    decision = evaluate_role_fit(
+        "AI Product Lead",
+        "Acme",
+        "Copenhagen",
+        "Lead product management for our SaaS software platform. " + sentence,
+    )
+
+    assert "advanced_degree_required" not in decision.rule_ids
+    assert decision.verdict == "accept"
+
+
+# Calibration against the owner's "no" answers on release 084423Z (2026-09-23).
+
+_PLATFORM = "Acme builds a SaaS software platform used by millions. "
+
+
+@pytest.mark.parametrize("title", ["AVP/VP, Product Owner - GR TMRW", "VP, Product Owner", "Director / Product Owner"])
+def test_product_owner_after_a_grade_is_not_product_leadership(title: str) -> None:
+    decision = evaluate_role_fit(
+        title,
+        "UOB",
+        "Singapore",
+        _PLATFORM + "Manage the product backlog for the digital platform with the Function Lead.",
+    )
+
+    assert decision.verdict == "reject"
+    assert "software_product_leadership" not in decision.rule_ids
+
+
+@pytest.mark.parametrize("title", ["VP, Product", "VP Product", "Director, Product Management", "Group Product Manager"])
+def test_grade_followed_by_product_is_still_leadership(title: str) -> None:
+    decision = evaluate_role_fit(title, "Acme", "London", _PLATFORM + "Lead the product organisation.")
+
+    assert decision.verdict == "accept"
+
+
+def test_plural_erps_are_erp_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Product Lead - Group Financials",
+        "wise",
+        "London",
+        _PLATFORM + "You have experience with Tier 1 ERPs such as SAP or Oracle.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "erp_and_manufacturing_systems"
+
+
+def test_required_martech_understanding_is_advertising_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Director Product Management",
+        "Sonova Group",
+        "Singapore",
+        _PLATFORM
+        + "Define the end-to-end processes from Ad impression to CRM communication. "
+        "Strong understanding of Online Marketing and the Digital Landscape, Conversion Optimisation, "
+        "UX principles, and MarTech.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "adtech_and_advertising_platforms"
+
+
+def test_optional_marketing_background_is_not_advertising_expertise() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "London",
+        _PLATFORM + "A background in online marketing or MarTech is a plus.",
+    )
+
+    assert decision.verdict == "accept"
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "— Обязателен опыт в EdTech / онлайн-образовании",
+        "EdTech experience is required.",
+        "You must have a background in online education.",
+    ],
+)
+def test_mandatory_edtech_is_domain_expertise(sentence: str) -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "MindGate",
+        "Алматы",
+        "Мы AI-холдинг, развиваем онлайн-платформу и software продукт. " + sentence,
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "edtech_and_online_education"
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Опыт в EdTech будет плюсом.",
+        "EdTech experience is a plus.",
+        "We build an EdTech platform for schools.",
+    ],
+)
+def test_optional_or_descriptive_edtech_is_not_domain_expertise(sentence: str) -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "London",
+        _PLATFORM + sentence,
+    )
+
+    assert "domain_expertise_required" not in decision.rule_ids
+
+
+def test_content_group_mandate_requires_ugc_landscape() -> None:
+    decision = evaluate_role_fit(
+        "Product Lead - Content Group",
+        "canva",
+        "Sydney",
+        _PLATFORM
+        + "The Content Group is responsible for our content library of templates. "
+        "It is made up of our content sources (in-house designers, creators, content acquisitions, "
+        "and content partners), content review, content platform, and content experience.",
+    )
+
+    assert decision.verdict == "reject"
+    assert decision.match_for("domain_expertise_required").details["domain"] == "ugc_and_content_platforms"
+
+
+def test_content_in_title_without_ugc_domain_is_not_rejected() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product, Content",
+        "Acme",
+        "London",
+        _PLATFORM + "Lead the product organisation for our B2B analytics suite.",
+    )
+
+    assert "domain_expertise_required" not in decision.rule_ids
+
+
+def test_creators_in_description_without_content_mandate_is_not_rejected() -> None:
+    decision = evaluate_role_fit(
+        "Head of Product",
+        "Acme",
+        "London",
+        _PLATFORM + "Our tools are used by creators and content partners worldwide.",
+    )
+
+    assert "domain_expertise_required" not in decision.rule_ids

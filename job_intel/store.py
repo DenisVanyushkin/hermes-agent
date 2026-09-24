@@ -1410,8 +1410,12 @@ PRAGMA foreign_keys=ON;
                     recommendation,
                     active_recommendation_version,
                     canonical_url,
-                    json.dumps(selection_boundary_reasons or [], ensure_ascii=False),
-                    json.dumps(selection_boundary_unknowns or [], ensure_ascii=False),
+                    None
+                    if selection_boundary_reasons is None
+                    else json.dumps(selection_boundary_reasons, ensure_ascii=False),
+                    None
+                    if selection_boundary_unknowns is None
+                    else json.dumps(selection_boundary_unknowns, ensure_ascii=False),
                     role_fit_verdict,
                     role_fit_rules_json,
                 ),

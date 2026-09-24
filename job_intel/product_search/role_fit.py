@@ -31,6 +31,12 @@ _LANGUAGES = {
     "japanese": "ja",
     "kazakh": "kk",
     "korean": "ko",
+    # Job texts name the spoken variety, not the family: run 511 issued okx
+    # roles reading "Fluent in English and Mandarin" because only "chinese"
+    # was known.
+    "mandarin": "zh",
+    "cantonese": "zh",
+    "putonghua": "zh",
     "polish": "pl",
     "portuguese": "pt",
     "russian": "ru",
@@ -187,10 +193,12 @@ _MIN_LANGUAGE_SERVICE_WORDS = 2
 _MIN_SUPPORTED_SENTENCE_COVERAGE_PERCENT = 35
 _MIN_SUPPORTED_SENTENCE_TOKENS = 8
 
+# "AVP/VP, Product Owner" is a corporate grade in front of a backlog role, not
+# "VP Product": the seniority patterns stop where "product" runs on into "owner".
 _PRODUCT_LEADERSHIP = (
-    r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\b",
+    r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\b(?!\s+owner\b)",
     r"\b(?:chief|head|director|vp|vice president|group)\s+(?:of\s+)?product\s+(?:management|function|area)\b",
-    r"\b(?:chief|head|director|vp|vice president|group)\s*[, :/\-&—–]+\s*(?:of\s+)?product(?:\s+(?:management|function|area))?\b",
+    r"\b(?:chief|head|director|vp|vice president|group)\s*[, :/\-&—–]+\s*(?:of\s+)?product(?!\s+owner\b)(?:\s+(?:management|function|area))?\b",
     r"\bproduct(?:\s+[a-z&/-]+){0,3}\s+(?:chief|head|director|vp|vice president|lead)\b",
     r"\bproduct\s+general\s+manager\b",
     r"\bproduct\s+lead\b",
@@ -287,6 +295,37 @@ _US_LOCATION_PATTERNS = (
     r",\s*(?:ca|ny|wa|tx|ma|il|co|nj)\b",
 )
 _REMOTE_LOCATION_PATTERN = r"\bremote\b"
+# The owner does not take roles located in Russia (ruling on release
+# shortlist-20260922T084423Z). Only the location field is matched: a
+# description listing "РФ, СНГ, GCC" as markets says nothing about where the
+# role sits.
+_RUSSIA_LOCATION_PATTERNS = (
+    r"\brussia\b",
+    r"\brussian\s+federation\b",
+    r"\bmoscow\b",
+    r"\b(?:saint|st\.?)\s*petersburg\b",
+    r"росси",
+    r"\bрф\b",
+    r"москв",
+    r"санкт-петербург",
+    r"новосибирск",
+    r"екатеринбург",
+    r"\bказань\b",
+    r"нижний\s+новгород",
+)
+# A required master's or doctorate is a hard gate for the owner. Anything that
+# admits an alternative (a bachelor's, "or equivalent") or softens it
+# ("preferred", "a plus") keeps the role open.
+_ADVANCED_DEGREE_PATTERN = (
+    r"\bmaster'?s?\s+(?:degree|of)\b|\bmsc\b|\bm\.sc\b|\bmba\b|\bph\.?\s?d\b|\bdoctorate\b|магистр"
+)
+_DEGREE_REQUIRED_CUE = (
+    r"\b(?:required|requires?|mandatory|must|essential|obligatory|minimum)\b|обязательн"
+)
+_DEGREE_ALTERNATIVE_CUE = (
+    r"\b(?:bachelor'?s?|bsc|b\.sc|undergraduate|equivalent|preferred|preferably|plus|advantage|"
+    r"desirable|ideally|nice\s+to\s+have|bonus|beneficial|or\s+similar)\b|бакалавр|желательн|плюсом"
+)
 # A sentence that denies sponsorship contains the word "sponsorship", so the
 # cue alone opens the very gate it should keep shut. Run 510 accepted two US
 # roles whose text read "visa sponsorship is not available" and "without the
@@ -371,6 +410,17 @@ class RoleFitDecision:
         raise KeyError(rule_id)
 
 
+def title_product_leadership_fragments(title: str) -> tuple[str, ...]:
+    """Return the product-leadership evidence ``evaluate_role_fit`` reads from a title.
+
+    Sourcing uses the same predicate to decide which titles are worth fetching
+    full text for, so the two cannot disagree about what counts as leadership.
+    """
+    if not any(term in title.lower() for term in _ROLE_SIGNAL_TERMS):
+        return ()
+    return _find_patterns(title, _PRODUCT_LEADERSHIP)
+
+
 def evaluate_role_fit(
     title: str,
     company: str,
@@ -416,11 +466,7 @@ def evaluate_role_fit(
         if has_role_signal
         else ()
     )
-    leadership_fragments = (
-        _find_patterns(title, _PRODUCT_LEADERSHIP)
-        if any(term in title.lower() for term in _ROLE_SIGNAL_TERMS)
-        else ()
-    )
+    leadership_fragments = title_product_leadership_fragments(title)
     software_signal_fragments = (
         _find_patterns(text, _SOFTWARE_SIGNALS) if has_role_signal else ()
     )
@@ -438,6 +484,9 @@ def evaluate_role_fit(
     matches.extend(_work_authorisation_matches(location, text))
     matches.extend(_industry_matches(sentences, title))
     matches.extend(_staffing_agency_matches(company, text))
+    matches.extend(_russia_location_matches(location))
+    matches.extend(_content_platform_matches(title, text))
+    matches.extend(_advanced_degree_matches(sentences))
 
     required_language_match = _language_match(sentences, owner_languages)
     if required_language_match is not None:
@@ -474,6 +523,8 @@ _HARD_REJECT_RULES = frozenset(
         "domain_expertise_required",
         "ecommerce_commercial_leadership",
         "interim_or_cover",
+        "russia_location",
+        "advanced_degree_required",
         "short_contract",
         "staffing_agency_or_aggregator",
     }
@@ -880,8 +931,8 @@ _DOMAIN_EXPERTISE_RULES = (
         "legacy_rule_id": "advertising_platform",
         "label": "adtech and advertising platforms",
         "patterns": (
-            r"\b(?:must\s+have|required|deeply?\s+speciali[sz]ed|experience|background|expertise|knowledge)\b[^.!?\n]{0,140}\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?)\b",
-            r"\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?)\b[^.!?\n]{0,140}\b(?:must\s+have|required|experience|background|expertise|knowledge)\b",
+            r"\b(?:must\s+have|required|deeply?\s+speciali[sz]ed|experience|background|expertise|knowledge|(?:strong|deep|solid)\s+understanding)\b[^.!?\n]{0,140}\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?|martech|marketing\s+technology|online\s+marketing|ad\s+impressions?)\b",
+            r"\b(?:adtech|ad\s*tech|digital\s+ads?|advertising\s+network|ads?\s+platform|ad\s+operations?|martech|marketing\s+technology|online\s+marketing|ad\s+impressions?)\b[^.!?\n]{0,140}\b(?:must\s+have|required|experience|background|expertise|knowledge)\b",
         ),
         "subject_predicate": "_is_advertising_platform",
     },
@@ -897,13 +948,25 @@ _DOMAIN_EXPERTISE_RULES = (
         ),
     },
     {
+        # Only an explicit requirement counts: an EdTech company hiring a product
+        # lead is the target, an EdTech track record demanded of the candidate
+        # is not (MindGate, release 084423Z: "Обязателен опыт в EdTech").
+        "domain": "edtech_and_online_education",
+        "legacy_rule_id": "edtech_and_online_education",
+        "label": "EdTech and online education",
+        "patterns": (
+            r"(?:\b(?:required|mandatory|must\s+have)\b|обязател\w*)[^.!?\n]{0,140}(?:\bed-?tech\b|\bonline\s+education\b|\beducation(?:al)?\s+technology\b|онлайн[- ]образовани\w*)",
+            r"(?:\bed-?tech\b|\bonline\s+education\b|\beducation(?:al)?\s+technology\b|онлайн[- ]образовани\w*)[^.!?\n]{0,80}(?:\b(?:required|mandatory|must)\b|обязател\w*)",
+        ),
+    },
+    {
         "domain": "erp_and_manufacturing_systems",
         "legacy_rule_id": "erp_and_manufacturing_systems",
         "label": "ERP and manufacturing systems",
         "patterns": (
-            r"\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b[^.!?\n]{0,160}\b(?:erp|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b",
-            r"\b(?:erp|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b[^.!?\n]{0,160}\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
-            r"\b(?:erp|enterprise\s+resource\s+planning)\b[^.!?\n]{0,120}\bmanufactur\w*\b",
+            r"\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b[^.!?\n]{0,160}\b(?:erps?|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b",
+            r"\b(?:erps?|enterprise\s+resource\s+planning|manufacturing\s+systems?)\b[^.!?\n]{0,160}\b(?:must\s+have|required|experience|background|expertise|knowledge|deep\s+understanding)\b",
+            r"\b(?:erps?|enterprise\s+resource\s+planning)\b[^.!?\n]{0,120}\bmanufactur\w*\b",
         ),
     },
 )
@@ -1065,6 +1128,67 @@ def _work_authorisation_matches(location: str, text: str) -> tuple[RuleMatch, ..
             (location,),
             "The role requires presence in the US and states no sponsorship, which is a hard gate.",
             {"location": location},
+        ),
+    )
+
+
+# A product lead whose mandate is content itself - templates, creators, content
+# partners - is expected to know the whole UGC landscape (owner, canva Content
+# Group, release 084423Z). The title must name content as the mandate and the
+# text must describe that domain; either alone is ordinary product work.
+_CONTENT_MANDATE_TITLE_PATTERN = r"\b(?:content|creators?|ugc|user[- ]generated)\b"
+_UGC_DOMAIN_PATTERN = (
+    r"\b(?:creators?|user[- ]generated|ugc|content\s+(?:library|platform|partners?|acquisitions?|review|sources?|marketplace))\b"
+)
+
+
+def _content_platform_matches(title: str, text: str) -> tuple[RuleMatch, ...]:
+    if not _find_patterns(title, _PRODUCT_LEADERSHIP):
+        return ()
+    title_fragments = _find_patterns(title, (_CONTENT_MANDATE_TITLE_PATTERN,))
+    domain_fragments = _find_patterns(text, (_UGC_DOMAIN_PATTERN,))
+    if not title_fragments or not domain_fragments:
+        return ()
+    return (
+        RuleMatch(
+            "domain_expertise_required",
+            (title, *domain_fragments),
+            "The role's mandate is a content/UGC platform, which requires deep knowledge of the UGC landscape.",
+            {"domain": "ugc_and_content_platforms", "legacy_rule_id": "ugc_and_content_platforms"},
+        ),
+    )
+
+
+def _russia_location_matches(location: str) -> tuple[RuleMatch, ...]:
+    if not _find_patterns(location, _RUSSIA_LOCATION_PATTERNS):
+        return ()
+    return (
+        RuleMatch(
+            "russia_location",
+            (location,),
+            "The role is located in Russia, which the owner excludes.",
+            {"location": location},
+        ),
+    )
+
+
+def _advanced_degree_matches(sentences: Iterable[str]) -> tuple[RuleMatch, ...]:
+    required = _compiled_pattern(_DEGREE_REQUIRED_CUE)
+    alternative = _compiled_pattern(_DEGREE_ALTERNATIVE_CUE)
+    degree = _compiled_pattern(_ADVANCED_DEGREE_PATTERN)
+    fragments = tuple(
+        sentence
+        for sentence in sentences
+        if degree.search(sentence) and required.search(sentence) and not alternative.search(sentence)
+    )
+    if not fragments:
+        return ()
+    return (
+        RuleMatch(
+            "advanced_degree_required",
+            fragments,
+            "The text makes a master's degree or doctorate a hard requirement.",
+            {},
         ),
     )
 
