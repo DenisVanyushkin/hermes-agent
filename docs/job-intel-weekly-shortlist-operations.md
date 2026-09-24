@@ -1,12 +1,26 @@
 # Weekly shortlist issue #23: deployment and acceptance
 
-Status: local implementation only. The VPS has not received these files, the
-legacy seed marker has not been written there, no shortlist cron job has been
-installed, and no live Slack or model call has been made by this implementation.
+Status on 2026-09-24: installed on the VPS at `0a8c723aa7`. The 20-key legacy
+seed is written, and all three no-agent cron jobs are enabled. The first weekly
+run is scheduled for 2026-09-28 09:10 Europe/Berlin. No weekly XLSX has yet
+been published, no owner reply imported, and issue #23 remains open pending
+the two required neighboring nonempty weekly cycles.
 
-Read-only VPS preflight on 2026-09-23 (`ssh hermes-agent`): checkout
-`/home/hermes/.hermes/hermes-agent` is on `local/customizations` at
-`367d952c10`; it contains an unrelated untracked plan file. The live database
+Deployment receipt: focused VPS gate `266 passed`; live DB no-delivery build
+`census=partition=7927`, shortlist 25, rejected sample 10, none of its rows
+boundary-rejected or unassessed. Slack bot auth, channel membership, history
+and replies were verified read-only. A paid synthetic summary canary succeeded
+after the adapter was changed to allow 1200 completion tokens and reject
+truncated responses. Gateway is active after the code publication restart.
+Cron IDs: weekly `8ad0c6bb57f4`, poll `7e8f58148fce`, report
+`34a575bcbb11`. The report job's first scheduled idle run on 2026-09-24
+06:35 Europe/Berlin recorded `ok`; the poll job's scheduler receipt is still
+pending. Backups of the pre-install `.env`, cron registry and owner labels are
+in `~/.hermes/job_intel/issue23-deploy-backup-20260924/`.
+
+Initial read-only VPS preflight on 2026-09-23 (`ssh hermes-agent`): checkout
+`/home/hermes/.hermes/hermes-agent` was on `local/customizations` at
+`367d952c10`; it contained an unrelated untracked plan file. The live database
 is `/var/lib/job-intel/state/job_intel.sqlite3` (the older
 `~/.hermes/job_intel/job_intel.sqlite3` path is absent). The 20-label source
 file, cron registry and Job Intel environment file exist. Hermes config has an
