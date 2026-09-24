@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -35,6 +36,27 @@ MAX_PER_COMPANY = 3
 
 _NORMALISE_SPLIT = re.compile(r"[^a-z0-9]+")
 _TRAILING_REQUISITION = re.compile(r"\b\d{3,}\b")
+
+
+def import_from_repo(module_name: str, repo: Path) -> Any:
+    """Import a job_intel module from `repo`, leaving sys.path as it was.
+
+    repo goes on sys.path only for the import: kept there, the live checkout
+    would win every later import in the process, which is how a test once read
+    the live blacklist file instead of its own. A module already imported from
+    another checkout is cached and would answer silently, so its location is
+    checked and a mismatch raised as ImportError.
+    """
+    saved = list(sys.path)
+    sys.path.insert(0, str(repo))
+    try:
+        module = importlib.import_module(module_name)
+    finally:
+        sys.path[:] = saved
+    loaded_from = Path(module.__file__).resolve()
+    if not loaded_from.is_relative_to(repo.resolve()):
+        raise ImportError(f"{module_name} loaded from {loaded_from}, not from {repo}")
+    return module
 
 
 def role_fit_evaluation_inputs(repo: Path) -> dict[str, Any]:
@@ -282,15 +304,12 @@ def _merge_reasons(left: list[str] | None, right: list[str] | None) -> list[str]
 
 def load_company_blacklist(db_path: Path, repo: Path) -> dict[str, dict[str, Any]]:
     """The effective blacklist, computed by the same code the scoring path uses."""
-    if str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
-    from job_intel import store
-
-    # A job_intel imported earlier from another checkout would answer with
-    # that checkout's blacklist file, silently. Refuse instead.
-    loaded_from = Path(store.__file__).resolve()
-    if not loaded_from.is_relative_to(repo.resolve()):
-        raise RuntimeError(f"job_intel.store loaded from {loaded_from}, not from {repo}")
+    try:
+        store = import_from_repo("job_intel.store", repo)
+    except ImportError as exc:
+        # Unlike the provenance record above, a release cannot be built
+        # without the blacklist: refuse rather than report.
+        raise RuntimeError(str(exc)) from exc
     return store.JobIntelStore(db_path).fetch_company_blacklist()
 
 

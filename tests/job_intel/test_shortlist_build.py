@@ -9,10 +9,6 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# Resolve job_intel from this checkout before any test puts another repository
-# on sys.path (role_fit_evaluation_inputs inserts the live one).
-import job_intel.store  # noqa: E402,F401
-
 MODULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "job_intel_shortlist_build.py"
 spec = importlib.util.spec_from_file_location("job_intel_shortlist_build", MODULE_PATH)
 assert spec and spec.loader
@@ -428,10 +424,7 @@ def test_evaluation_inputs_are_pinned_beside_the_ruleset_version() -> None:
     """Identical rules with different arguments are a different evaluation."""
     repo = Path(__file__).resolve().parents[2]
     inputs = builder.role_fit_evaluation_inputs(repo)
-    if not inputs.get("available"):
-        import pytest
-
-        pytest.skip(f"role_fit not importable here: {inputs.get('error')}")
+    assert inputs["available"] is True, inputs
     assert inputs["entrypoint"] == "scripts.job_intel_shortlist_build.build_weekly"
     assert inputs["arguments"]["owner_languages"] == ["en", "ru"]
     assert len(inputs["arguments_sha256"]) == 64
@@ -833,3 +826,30 @@ def test_a_blacklisted_company_on_any_observation_holds_the_key_back(tmp_path) -
             "company_blacklist", "company_blacklist:explicit",
         ]
         path.unlink()
+
+
+def test_importing_from_the_repository_leaves_sys_path_as_it_was(tmp_path, monkeypatch) -> None:
+    """The live repository used to stay on sys.path and win every later import.
+
+    pytest already has this checkout on sys.path, which would make the check
+    vacuous; it is removed first, as it is absent in the production call.
+    """
+    from job_intel.store import JobIntelStore
+
+    store = JobIntelStore(tmp_path / "job-intel.sqlite3")
+    store.bootstrap()
+    repo = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(sys, "path", [item for item in sys.path if Path(item or ".").resolve() != repo])
+    before = list(sys.path)
+
+    builder.role_fit_evaluation_inputs(repo)
+    builder.load_company_blacklist(store.db_path, repo)
+
+    assert sys.path == before
+
+
+def test_evaluation_inputs_from_a_foreign_checkout_are_reported_not_used(tmp_path) -> None:
+    inputs = builder.role_fit_evaluation_inputs(tmp_path)
+
+    assert inputs["available"] is False
+    assert inputs["error"]
