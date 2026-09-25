@@ -477,7 +477,7 @@ def cmd_cal_add(args):
         e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                     participants=args.with_, transport=args.transport, notes=args.notes,
                     travel_min=args.travel_min, prep_min=args.prep_min,
-                    subject_person_id=subject_id)
+                    subject_person_id=subject_id, remind=args.remind)
     except (ValueError, cal.UnknownRefError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -560,7 +560,8 @@ def _cmd_cal_add_series(args):
                        notes=args.notes, until_local=args.until,
                        prep_min=args.prep_min,
                        subject_person_id=(cal.resolve_subject(conn, args.for_person)
-                                          if args.for_person is not None else None))
+                                          if args.for_person is not None else None),
+                       remind=args.remind)
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -612,9 +613,22 @@ def cmd_cal_series_update(args):
             subject = cal.resolve_subject(conn, args.for_person)
         elif args.clear_for_person:
             subject = None
-        result = series.update_participants(
-            conn, args.id, add=args.add_person, remove=args.rm_person,
-            subject_person_id=subject)
+        remind = getattr(args, "remind", None)
+        result = None
+        if (args.add_person or args.rm_person or subject is not series._UNSET
+                or remind is None):
+            result = series.update_participants(
+                conn, args.id, add=args.add_person, remove=args.rm_person,
+                subject_person_id=subject)
+        if remind is not None:
+            remind_result = series.set_remind(conn, args.id, remind)
+            if result is None:
+                result = remind_result
+            else:
+                result["remind"] = remind_result["remind"]
+                result["updated_events"] = sorted(
+                    set(result["updated_events"])
+                    | set(remind_result["updated_events"]))
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -678,6 +692,8 @@ def cmd_cal_update(args):
         fields["subject_person_id"] = cal.resolve_subject(conn, args.for_person)
     elif args.clear_for_person:
         fields["subject_person_id"] = None
+    if getattr(args, "remind", None) is not None:
+        fields["remind"] = args.remind
     e = cal.update(conn, args.id, **fields)
     _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
@@ -3772,6 +3788,10 @@ def build_parser():
                            "overrides the default/slug reminder rules with "
                            "this event's own escalation chain (also applies "
                            "with --repeat, copied onto every occurrence)")
+    spa.add_argument("--no-remind", dest="remind", action="store_false",
+                      help="keep it on the calendar but never build a Hermes "
+                           "reminder chain for it (e.g. Taya's school club; "
+                           "with --repeat, applies to every occurrence)")
     spa.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
     spa.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
@@ -3797,6 +3817,13 @@ def build_parser():
     subject_group = spu.add_mutually_exclusive_group()
     subject_group.add_argument("--for-person", dest="for_person")
     subject_group.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
+    remind_group = spu.add_mutually_exclusive_group()
+    remind_group.add_argument("--remind", dest="remind", action="store_const",
+                              const=True, default=None,
+                              help="turn Hermes reminders back on for this event")
+    remind_group.add_argument("--no-remind", dest="remind", action="store_const",
+                              const=False,
+                              help="keep the event, drop and stop its reminders")
     spu.add_argument("--add-person", dest="add_person", action="append", default=[],
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -3829,6 +3856,16 @@ def build_parser():
     series_subject = spsu.add_mutually_exclusive_group()
     series_subject.add_argument("--for-person", dest="for_person")
     series_subject.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
+    series_remind = spsu.add_mutually_exclusive_group()
+    series_remind.add_argument("--remind", dest="remind", action="store_const",
+                               const=True, default=None,
+                               help="turn Hermes reminders back on for the series "
+                                    "and its future occurrences")
+    series_remind.add_argument("--no-remind", dest="remind", action="store_const",
+                               const=False,
+                               help="keep the series, stop reminders for it and "
+                                    "every future occurrence (never cancel the "
+                                    "series for this)")
     spsu.add_argument("--add-person", dest="add_person", action="append", default=[],
                        help="participant ref to add to the series and its future untouched occurrences (repeatable)")
     spsu.add_argument("--rm-person", dest="rm_person", action="append", default=[],

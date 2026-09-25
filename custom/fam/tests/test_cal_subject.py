@@ -16,7 +16,7 @@ def _seed(db):
 
 def test_v14_schema_and_subject_roundtrip(db):
     _, taya, _ = _seed(db)
-    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
+    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "16"
     assert "subject_person_id" in {r["name"] for r in db.execute("PRAGMA table_info(events)")}
     assert "subject_person_id" in {r["name"] for r in db.execute("PRAGMA table_info(event_series)")}
     event = cal.add(db, "Математика", "2030-01-08T10:00:00+00:00", subject_person_id=taya["id"])
@@ -91,10 +91,15 @@ def test_subject_views_and_global_export_plan_share_stored_filter(db):
 
 
 
-def test_reminders_use_participants_not_subject(db):
+def test_reminders_use_subject_and_participants(db):
+    # Amended 2026-09-25 (spec addendum, D5 revisited): the subject's slug now
+    # picks the rule like a participant does, so Taya's own event gets her lead
+    # even when she is not recorded as a participant.
     amina, taya, _ = _seed(db)
     rem.seed_default_rules(db)
     event = cal.add(db, "Тая", "2030-01-08T10:00:00+00:00", subject_person_id=taya["id"])
+    assert any(r["scope"] == "slug:taya" for r in rem.applicable_rules(db, cal.get(db, event["id"])))
+    event = cal.add(db, "Йога", "2030-01-08T12:00:00+00:00", subject_person_id=amina["id"])
     assert not any(r["scope"] == "slug:taya" for r in rem.applicable_rules(db, cal.get(db, event["id"])))
     event = cal.add(db, "Тренировка", "2030-01-08T11:00:00+00:00", subject_person_id=amina["id"], participants=["Тая"])
     assert any(r["scope"] == "slug:taya" for r in rem.applicable_rules(db, cal.get(db, event["id"])))
@@ -193,6 +198,6 @@ def test_fresh_and_v13_migrated_schema_match_and_history_stays_null(tmp_path):
     ).fetchone()[0] is None
     assert legacy.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()[0] == "15"
+    ).fetchone()[0] == "16"
     fresh.close()
     legacy.close()

@@ -234,7 +234,7 @@ def recompute_road(conn, event_id, now_utc=None):
 
 def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         transport="unknown", notes="", travel_min=None, series_id=None,
-        prep_min=None, subject_person_id=None):
+        prep_min=None, subject_person_id=None, remind=True):
     """Create an event. place/participants are text refs (id/name/alias/
     slug); an unresolvable ref raises UnknownRefError and nothing is
     inserted. Group participants expand to their members at add-time (the
@@ -246,7 +246,8 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
     this event: rem.regenerate builds its chain from
     rem.build_stages(prep_min) instead of the default/slug reminder_rules
     (event > slug > default precedence) -- None (default) leaves the
-    existing rule-based behavior unchanged.
+    existing rule-based behavior unchanged. remind=False (schema v16) keeps
+    the event out of the reminder engine altogether (see rem.regenerate).
 
     Regenerates the event's reminder chain (rem.regenerate) in the same
     transaction, after the insert.
@@ -263,9 +264,11 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
     cur = conn.execute(
         "INSERT INTO events(title, start_utc, end_utc, place_id, transport, "
         "status, notes, travel_min, series_id, prep_min, created_at, "
-        "updated_at, subject_person_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "updated_at, subject_person_id, remind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title, start, end, pl["id"] if pl else None, transport, "active",
-         notes, travel_min, series_id, prep_min, now, now, subject_person_id),
+         notes, travel_min, series_id, prep_min, now, now, subject_person_id,
+         1 if remind else 0),
     )
     event_id = cur.lastrowid
 
@@ -281,7 +284,8 @@ def add(conn, title, start_utc, end_utc=None, place=None, participants=(),
         {"id": event_id, "title": title, "start_utc": start, "end_utc": end,
          "place": place, "participants": list(participants),
          "transport": transport, "notes": notes, "travel_min": travel_min,
-         "prep_min": prep_min, "subject": subject_for_event(
+         "prep_min": prep_min, "remind": bool(remind),
+         "subject": subject_for_event(
              conn, {"subject_person_id": subject_person_id})},
     )
 
@@ -322,6 +326,7 @@ def get(conn, event_id):
 _UPDATE_FIELDS = {
     "title", "start_utc", "end_utc", "place", "transport", "notes",
     "add_person", "rm_person", "travel_min", "prep_min", "subject_person_id",
+    "remind",
 }
 
 # Fields whose change should trigger a reminder-chain regeneration
@@ -348,11 +353,18 @@ _REGEN_TRIGGER_COLUMNS = ("start_utc", "travel_min", "place_id", "prep_min")
 # update() below).
 _MAIL_TRIGGER_COLUMNS = _REGEN_TRIGGER_COLUMNS + ("end_utc", "title")
 
+# Regen-only triggers, deliberately kept out of _MAIL_TRIGGER_COLUMNS: the
+# remind flag and the subject change which chain rem.regenerate builds (the
+# subject's slug picks the Taya lead), but neither changes the calendar entry
+# Denis gets by mail.
+_REGEN_ONLY_COLUMNS = ("remind", "subject_person_id")
+
 
 def update(conn, event_id, strict_hooks=False, **fields):
     """Update mutable fields on an event. Accepts any of: title, start_utc,
     end_utc, place, transport, notes, travel_min, prep_min,
-    subject_person_id, add_person (list of refs), rm_person (list of refs).
+    subject_person_id, remind, add_person (list of refs), rm_person (list
+    of refs).
     Any other keyword raises
     ValueError
     before any write. place/add_person refs are resolved (UnknownRefError
@@ -361,8 +373,8 @@ def update(conn, event_id, strict_hooks=False, **fields):
     SQL SET clause and the audit payload below. Writes updated_at.
 
     Regenerates the event's reminder chain (rem.regenerate) in the same
-    transaction, but ONLY if start_utc, travel_min, place, or the
-    participant set actually changed (updated_at is never a regen
+    transaction, but ONLY if start_utc, travel_min, place, prep_min, remind,
+    the subject, or the participant set actually changed (updated_at is never a regen
     signal) -- e.g. update(notes=...) never touches the reminder chain.
 
     The returned dict carries one extra transient key, "_material_changed"
@@ -399,7 +411,8 @@ def update(conn, event_id, strict_hooks=False, **fields):
         )
 
     # Snapshot old regen-relevant state before any mutation.
-    old_regen_state = tuple(existing[c] for c in _REGEN_TRIGGER_COLUMNS)
+    old_regen_state = tuple(existing[c] for c in
+                            _REGEN_TRIGGER_COLUMNS + _REGEN_ONLY_COLUMNS)
     old_road_state = tuple(existing[c] for c in _ROAD_TRIGGER_COLUMNS)
     old_participant_ids = {r["person_id"] for r in conn.execute(
         "SELECT person_id FROM event_participants WHERE event_id=?",
@@ -428,6 +441,8 @@ def update(conn, event_id, strict_hooks=False, **fields):
     if "subject_person_id" in fields:
         fields["subject_person_id"] = _validate_subject_id(
             conn, fields["subject_person_id"])
+    if "remind" in fields:
+        fields["remind"] = 1 if fields["remind"] else 0
 
     set_clauses = []
     params = []
@@ -440,6 +455,7 @@ def update(conn, event_id, strict_hooks=False, **fields):
         "travel_min": "travel_min",
         "prep_min": "prep_min",
         "subject_person_id": "subject_person_id",
+        "remind": "remind",
     }
     for key, col in column_map.items():
         if key in fields:
@@ -526,7 +542,8 @@ def update(conn, event_id, strict_hooks=False, **fields):
         audit_payload["rm_person"] = list(rm_person)
     audit.log(conn, "cal.update", audit_payload)
 
-    new_regen_state = tuple(new_row[c] for c in _REGEN_TRIGGER_COLUMNS)
+    new_regen_state = tuple(new_row[c] for c in
+                            _REGEN_TRIGGER_COLUMNS + _REGEN_ONLY_COLUMNS)
     new_road_state = tuple(new_row[c] for c in _ROAD_TRIGGER_COLUMNS)
     new_participant_ids = {r["person_id"] for r in conn.execute(
         "SELECT person_id FROM event_participants WHERE event_id=?",

@@ -53,13 +53,16 @@ def _validate_hhmm(t):
 
 def add(conn, title, weekdays, start_time, end_time=None, place=None,
         participants=(), transport="unknown", notes="", until_local=None,
-        prep_min=None, subject_person_id=None):
+        prep_min=None, subject_person_id=None, remind=True):
     """Create an active event_series. Validates refs/weekdays/times before any
     insert (mirrors cal.add). Groups in participants expand to members. Does
     NOT generate occurrences -- the caller runs generate() next. prep_min
     (Task 4, phase 7), when set, is copied onto every occurrence generate()
     materializes (via cal.add's prep_min), so each one gets its reminder
     chain from rem.build_stages(prep_min) instead of the rule engine.
+    remind=False (schema v16) is inherited the same way: every occurrence,
+    including ones generate() materializes weeks later, stays out of the
+    reminder engine. Change it afterwards with set_remind().
     """
     pl = cal._resolve_place(conn, place)
     resolved = cal._resolve_participants(conn, participants)
@@ -74,10 +77,11 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
     cur = conn.execute(
         "INSERT INTO event_series(title, place_id, weekdays, start_time, "
         "end_time, transport, notes, until_local, prep_min, status, "
-        "created_at, updated_at, subject_person_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?)",
+        "created_at, updated_at, subject_person_id, remind) "
+        "VALUES (?,?,?,?,?,?,?,?,?,'active',?,?,?,?)",
         (title, pl["id"] if pl else None, wd, start_time, end_time,
-         transport, notes, until_local, prep_min, now, now, subject_person_id),
+         transport, notes, until_local, prep_min, now, now, subject_person_id,
+         1 if remind else 0),
     )
     sid = cur.lastrowid
     for m in resolved:
@@ -88,7 +92,8 @@ def add(conn, title, weekdays, start_time, end_time=None, place=None,
         "id": sid, "title": title, "weekdays": wd, "start_time": start_time,
         "end_time": end_time, "place": place,
         "participants": list(participants), "until_local": until_local,
-        "prep_min": prep_min, "subject": cal.subject_for_event(
+        "prep_min": prep_min, "remind": bool(remind),
+        "subject": cal.subject_for_event(
             conn, {"subject_person_id": subject_person_id})})
     return get(conn, sid)
 
@@ -263,7 +268,8 @@ def generate(conn, now_utc=None, horizon_weeks=HORIZON_WEEKS):
                     place=s["place_id"], participants=participants,
                     transport=s["transport"], notes=s["notes"],
                     series_id=s["id"], prep_min=s["prep_min"],
-                    subject_person_id=s["subject_person_id"])
+                    subject_person_id=s["subject_person_id"],
+                    remind=bool(s["remind"]))
             created += 1
     return created
 
@@ -309,9 +315,15 @@ def update_participants(conn, sid, add=(), remove=(), now_utc=None,
     for row in candidates:
         if cal._to_local_iso(row["start_utc"])[11:16] != s["start_time"]:
             continue
+        subject_moved = (subject_given and row["subject_person_id"] == old_subject
+                         and new_subject != old_subject)
         if subject_given and row["subject_person_id"] == old_subject:
             conn.execute("UPDATE events SET subject_person_id=?, updated_at=? WHERE id=?",
                          (new_subject, now, row["id"]))
+        if subject_moved and not (to_add or to_remove):
+            # The subject's slug picks the reminder rule (Taya lead), so a
+            # moved subject needs a fresh chain just like a participant change.
+            rem.regenerate(conn, row["id"])
         if to_add or to_remove:
             for person in to_add:
                 conn.execute(
@@ -332,3 +344,34 @@ def update_participants(conn, sid, add=(), remove=(), now_utc=None,
         "updated_events": updated_events})
     return {"series_id": sid, "updated_events": updated_events,
             "subject": cal.subject_for_event(conn, {"subject_person_id": new_subject})}
+
+
+def set_remind(conn, sid, remind, now_utc=None):
+    """Turn Hermes reminders on or off for a whole series (schema v16).
+
+    Writes the flag on the series -- so occurrences generate() materializes
+    later inherit it -- and on every active future occurrence, including ones
+    individually moved off the grid: «не напоминай про робототехнику» is about
+    the club, not about one slot. Past occurrences are history and stay as
+    they were. Each touched occurrence is regenerated, which clears its
+    pending chain (off) or rebuilds it (on).
+    """
+    s = get(conn, sid)
+    if s is None:
+        raise ValueError(f"unknown series: {sid}")
+    flag = 1 if remind else 0
+    now = _to_utc_iso(now_utc) if now_utc else _now()
+    conn.execute("UPDATE event_series SET remind=?, updated_at=? WHERE id=?",
+                 (flag, now, sid))
+    rows = conn.execute(
+        "SELECT id FROM events WHERE series_id=? AND status='active' "
+        "AND start_utc > ? ORDER BY start_utc", (sid, now)).fetchall()
+    updated = []
+    for row in rows:
+        conn.execute("UPDATE events SET remind=?, updated_at=? WHERE id=?",
+                     (flag, now, row["id"]))
+        rem.regenerate(conn, row["id"])
+        updated.append(row["id"])
+    audit.log(conn, "cal.series.remind",
+              {"id": sid, "remind": bool(flag), "updated_events": updated})
+    return {"series_id": sid, "remind": bool(flag), "updated_events": updated}

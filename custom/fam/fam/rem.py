@@ -103,8 +103,16 @@ def applicable_rules(conn, event):
     REPLACES the default rule rather than stacking with it. A slug rule
     with empty stages (an inert reserve, e.g. slug:amina) does not claim
     precedence -- the default rule still applies alongside it.
+
+    The event's subject counts like a participant: «Ортодонт Таи» recorded
+    with --for-person Тая but without --with Тая is still hers, so it gets
+    the Taya lead. Whether Hermes reminds at all is the event's `remind`
+    flag, checked in regenerate() before this runs.
     """
     slugs = {p["slug"] for p in event.get("participants", []) if p.get("slug")}
+    subject = event.get("subject")
+    if subject and subject.get("slug"):
+        slugs.add(subject["slug"])
     scopes = {"default"} | {f"slug:{s}" for s in slugs}
     placeholders = ",".join("?" for _ in scopes)
     rows = conn.execute(
@@ -173,6 +181,14 @@ def regenerate(conn, event_id, now_utc=None):
     # before a future `cal adopt`/`disown` ownership flip) is correct and
     # cheap either way; only the CREATE half below is skipped here.
     if event is not None and event.get("owner") == "iphone":
+        audit.log(conn, "rem.regenerate", {"event_id": event_id, "created": 0})
+        return 0
+    # remind=0 (schema v16): the event stays on the calendar but Hermes
+    # builds no chain for it -- e.g. Taya's school club Amina never has to
+    # drive to. Same shape as the owner guard above: the DELETE already ran,
+    # only the CREATE half is skipped, so flipping the flag off also clears
+    # whatever was pending.
+    if event is not None and event.get("remind") == 0:
         audit.log(conn, "rem.regenerate", {"event_id": event_id, "created": 0})
         return 0
 
