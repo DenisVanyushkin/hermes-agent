@@ -736,7 +736,10 @@ def overlaps(conn, start_utc, end_utc=None, exclude_id=None):
 
     status='active' only; owner is deliberately NOT filtered -- an event
     imported from her iPhone occupies the slot just as much as one Hermes
-    created. exclude_id skips one event (cal update moving itself).
+    created. A schedule-only event (remind=0, schema v16 -- e.g. Taya's
+    school club) does NOT occupy it: nobody in the household has to be
+    there, so it cannot double-book Amina. exclude_id skips one event (cal
+    update moving itself).
 
     Pure read: no writes, no audit. The decision to block lives in the CLI
     guardrail (cli._check_no_overlap), same split as --allow-past.
@@ -760,7 +763,8 @@ def overlaps(conn, start_utc, end_utc=None, exclude_id=None):
     hits = []
     for row in conn.execute(
             "SELECT id, start_utc, end_utc FROM events "
-            "WHERE status='active' AND start_utc >= ? AND start_utc < ? "
+            "WHERE status='active' AND remind=1 "
+            "AND start_utc >= ? AND start_utc < ? "
             "ORDER BY start_utc",
             (from_utc, to_utc)):
         if exclude_id is not None and row["id"] == exclude_id:

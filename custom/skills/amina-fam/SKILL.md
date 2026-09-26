@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v25 (Event reminders: a schedule-only event — Taya's school clubs — is recorded with `--no-remind`; "stop reminding about <series>" is `cal series update --no-remind`, never `cal series cancel`)._
+_Body version: v26 (schedule-only events never take a slot in the overlap check; v25 — Event reminders: a schedule-only event — Taya's school clubs — is recorded with `--no-remind`; "stop reminding about <series>" is `cal series update --no-remind`, never `cal series cancel`)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -483,7 +483,10 @@ show after cancel), make a second, separate terminal call.
     the flag exists to record her decision, not to silence the check.
     Don't confuse this with rule 20: a DUPLICATE (the same thing, already
     imported from her iPhone) must not be created at all; a CONFLICT
-    (different things at the same time) is hers to decide.
+    (different things at the same time) is hers to decide. A schedule-only
+    event (`--no-remind`, e.g. Taya's school club) never takes a slot: fam
+    does not report it as a conflict and does not check it against Amina's
+    events, so there is nothing to ask — record it as is.
 24. **Чужая таймзона: передавай её оффсет, называй оба времени.** When she
     names a timezone that isn't Almaty ("в 10 утра по Москве", "18:00 мск",
     "по Берлину"):

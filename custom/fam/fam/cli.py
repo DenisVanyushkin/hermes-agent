@@ -470,7 +470,10 @@ def cmd_cal_add(args):
     _check_start_not_past(args.start, args.allow_past)
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
-    conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
+    # A schedule-only event (--no-remind) takes nobody's slot -- see
+    # cal.overlaps -- so there is nothing to confirm with Amina.
+    conflicts = (_check_no_overlap(conn, args.start, args.end, args.allow_overlap)
+                 if args.remind else [])
     try:
         subject_id = (cal.resolve_subject(conn, args.for_person)
                       if args.for_person is not None else None)
@@ -542,7 +545,7 @@ def _cmd_cal_add_series(args):
     # Check the whole grid BEFORE anything is written: a series that
     # collides every week is exactly the case worth asking about once.
     busy = [(start, cal.overlaps(conn, start, end)) for start, end in occurrences]
-    busy = [(start, hits) for start, hits in busy if hits]
+    busy = [(start, hits) for start, hits in busy if hits and args.remind]
     if busy and not args.allow_overlap:
         first_start, first_hits = busy[0]
         first_local = datetime.fromisoformat(first_start).astimezone(
@@ -650,6 +653,9 @@ def cmd_cal_update(args):
         current = cal.get(conn, args.id)
         # current is None -> unknown id: leave it to cal.update()'s own
         # ValueError so the existing "unknown event: N" contract is intact.
+        schedule_only = (current is not None and (
+            args.remind is False
+            or (args.remind is None and current.get("remind") == 0)))
         if current is not None:
             new_start = args.start if args.start is not None else current["start_utc"]
             if (args.start is not None and args.end is None
@@ -672,8 +678,12 @@ def cmd_cal_update(args):
                 new_end = shifted_end_utc
             else:
                 new_end = args.end if args.end is not None else current["end_utc"]
-            conflicts = _check_no_overlap(conn, new_start, new_end,
-                                          args.allow_overlap, exclude_id=args.id)
+            # A schedule-only event takes nobody's slot (cal.overlaps), so
+            # moving one needs no confirmation -- the end shift above still
+            # applies to it like to any other event.
+            if not schedule_only:
+                conflicts = _check_no_overlap(conn, new_start, new_end,
+                                              args.allow_overlap, exclude_id=args.id)
     fields = {}
     if args.title is not None: fields["title"] = args.title
     if args.start is not None: fields["start_utc"] = args.start
