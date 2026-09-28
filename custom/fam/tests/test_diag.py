@@ -46,6 +46,23 @@ def test_identical_errors_collapse_into_one_finding(db):
     assert findings[0]["context"]["intake_id"] == [10]
 
 
+def test_error_finding_reports_latest_actual_occurrence(db):
+    # The nightly run time is not the time the error happened. Insert out of
+    # order so an audit id cannot accidentally stand in for occurrence time.
+    for ts in ("2026-09-26T14:01:54+00:00", "2026-09-24T06:45:13+00:00"):
+        db.execute(
+            "INSERT INTO audit_log (ts_utc, kind, payload, actor) "
+            "VALUES (?, 'tick.error', ?, 'tick')",
+            (ts, json.dumps({"where": "cal-ext", "error": "no calendar-data"})),
+        )
+    db.commit()
+
+    finding, = diag.collect_errors(db, "2026-09-23T00:00:00+00:00")
+
+    assert finding["count"] == 2
+    assert finding["last_occurred_at"] == "2026-09-26T14:01:54+00:00"
+
+
 def test_same_defect_on_several_doses_stays_one_finding(db):
     for intake in (10, 11, 12):
         audit.log(db, "tick.error",

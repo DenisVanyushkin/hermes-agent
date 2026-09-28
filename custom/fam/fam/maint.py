@@ -24,14 +24,16 @@ def _problem_lines(digest):
     """Human-readable problem lines for the emergency fallback only --
     the LLM report renders from the digest itself. Kept deliberately
     close to the pre-2026-08 format so a fallback message still reads
-    like the summary Denis is used to, plus counts and age."""
+    like the summary Denis is used to, with occurrence time and window count."""
     sections = digest["sections"]
     lines = []
+    since = digest.get("window", {}).get("since") or "неизвестного времени"
     for finding in sections.get("errors", {}).get("findings", []):
         where = finding.get("p_where") or finding.get("kind")
         example = (finding.get("examples") or [""])[0]
-        lines.append(f"{where}: {example} (×{finding['count']}, "
-                     f"{finding['status']}, {finding['age_days']} дн.)")
+        last = finding.get("last_occurred_at") or "время неизвестно"
+        lines.append(f"{where}: {example} (последний случай {last}, "
+                     f"×{finding['count']} с {since})")
     collisions = sections.get("calendar", {}).get("collisions", 0)
     if collisions:
         lines.append(f"календарь: {collisions} совпадающих записей, разобрать вручную")

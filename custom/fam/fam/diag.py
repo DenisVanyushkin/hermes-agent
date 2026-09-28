@@ -72,7 +72,7 @@ def collect_errors(conn, since):
     of breakage this digest exists to surface."""
     placeholders = ",".join("?" * len(ERROR_KINDS))
     rows = conn.execute(
-        f"SELECT kind, payload FROM audit_log WHERE ts_utc >= ? "
+        f"SELECT ts_utc, kind, payload FROM audit_log WHERE ts_utc >= ? "
         f"AND kind IN ({placeholders}) ORDER BY id",
         (since, *ERROR_KINDS)).fetchall()
     buckets = {}
@@ -95,7 +95,8 @@ def collect_errors(conn, since):
         bucket = buckets.get(signature)
         if bucket is None:
             bucket = {"signature": signature, "kind": row["kind"], "count": 0,
-                      "context": {}, "examples": []}
+                      "context": {}, "examples": [],
+                      "last_occurred_at": row["ts_utc"]}
             for field in spec["sig"]:
                 if payload.get(field) is not None:
                     # p_ prefix: payload field names share a namespace with
@@ -105,6 +106,8 @@ def collect_errors(conn, since):
                     bucket[f"p_{field}"] = payload[field]
             buckets[signature] = bucket
         bucket["count"] += 1
+        if row["ts_utc"] > bucket["last_occurred_at"]:
+            bucket["last_occurred_at"] = row["ts_utc"]
         for field in spec["ctx"]:
             value = payload.get(field)
             if value is None:

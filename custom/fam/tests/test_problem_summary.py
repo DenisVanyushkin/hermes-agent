@@ -35,6 +35,26 @@ def _confirmed_job(tmp_path, last_run_at):
 NOW = datetime(2026, 8, 2, 22, 30, tzinfo=timezone.utc)
 
 
+def test_known_error_fallback_reports_occurrence_and_window_not_streak():
+    digest = {
+        "window": {"since": "2026-09-25T22:30:00+00:00"},
+        "sections": {
+            "errors": {"findings": [{
+                "kind": "tick.error", "p_where": "cal-ext",
+                "examples": ["no calendar-data"], "count": 1,
+                "status": "known", "age_days": 13,
+                "last_occurred_at": "2026-09-26T14:01:54+00:00",
+            }]},
+        },
+    }
+
+    line, = maint._problem_lines(digest)
+
+    assert "последний случай 2026-09-26T14:01:54+00:00" in line
+    assert "×1 с 2026-09-25T22:30:00+00:00" in line
+    assert "13 дн." not in line
+
+
 def test_writes_digest_instead_of_sending(db, tmp_path, monkeypatch):
     _all_probes_ok(monkeypatch)
     monkeypatch.setattr(maint.diag, "collect_timers",
