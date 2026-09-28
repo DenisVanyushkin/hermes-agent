@@ -513,6 +513,18 @@ def init_db(conn):
         "href TEXT, etag TEXT, body_hash TEXT, synced_at TEXT)")
     conn.execute(
         "UPDATE meta SET value='15' WHERE key='schema_version'")
+    # v16: remind=0 keeps an event on the calendar but out of the reminder
+    # engine (Taya's school clubs: Amina only needs to know the schedule).
+    # It lives on the series too, so occurrences materialized later inherit
+    # it -- per-row `rem cancel` could not survive regenerate or new
+    # occurrences. Existing rows default to 1: behavior is unchanged until
+    # someone sets the flag.
+    _ensure_column(conn, "events", "remind",
+                   "remind INTEGER NOT NULL DEFAULT 1 CHECK (remind IN (0,1))")
+    _ensure_column(conn, "event_series", "remind",
+                   "remind INTEGER NOT NULL DEFAULT 1 CHECK (remind IN (0,1))")
+    conn.execute(
+        "UPDATE meta SET value='16' WHERE key='schema_version'")
     conn.commit()
 
 

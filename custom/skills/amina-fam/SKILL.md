@@ -13,7 +13,7 @@ metadata:
 
 # Amina Fam Skill
 
-_Body version: v24 (rules 23–24: a taken slot must be confirmed with `--allow-overlap`; a foreign timezone is passed as its own offset and confirmed in both times; reminder reactions and cancellation verbs are explicit)._
+_Body version: v26 (schedule-only events never take a slot in the overlap check; v25 — Event reminders: a schedule-only event — Taya's school clubs — is recorded with `--no-remind`; "stop reminding about <series>" is `cal series update --no-remind`, never `cal series cancel`)._
 
 `fam` is Amina's private family database — calendar, people, and places —
 backed by one shared SQLite file the agent and the host both read/write.
@@ -93,6 +93,15 @@ way to read or change family data.
 
 `--for-person` answers whose event it is; `--with` answers who participates.
 For «запиши Тае математику», pass `--for-person Тая` and add `--with Тая` only if she also participates. For «моя тренировка вместе с Таей», pass `--for-person Амина --with Тая`. The subject is never inferred from participants or title. After a successful write, require exit 0 and verify the returned JSON `subject` before confirming the event.
+
+## Event reminders: schedule-only events
+
+Some events Amina only needs to SEE, not be reminded about: Taya's school clubs and lessons (робототехника, карате, актёрское мастерство, any «кружок»/«занятие» at school) — Taya is already there, Amina does not drive her, nobody has to get ready. Record such an event (or series) with `--no-remind`: it stays in the calendar, the digest and «покажи календарь Таи», but Hermes never builds a reminder chain for it, including future occurrences of a series.
+- Taya's event where Amina DOES go («отвезти Таю к ортодонту», «забрать Таю») — record it normally, without `--no-remind`; `--for-person Тая` already gives it Taya's longer lead.
+- Not sure whether Amina has to go? Ask ONE question before the write: «Напоминать тебе про это или просто в расписание?»
+- «не напоминай про <кружок/занятия Таи>» about a recurring activity → `fam cal series update <id> --no-remind` (series id from `fam cal series list`). NEVER `fam cal series cancel` — that deletes the lessons from her calendar; she asked only to stop the reminders.
+- One-off event, "никогда не напоминай про это" → `fam cal update <id> --no-remind`. «напоминай про <X>» again → `--remind` on the same command.
+- Confirm only after exit 0 and JSON `"remind": 0` (event) / `"remind": false` (series).
 
 ## Rules
 
@@ -204,12 +213,15 @@ show after cancel), make a second, separate terminal call.
     memory.** "каждую неделю по понедельникам/средам/пятницам", "по будням",
     "каждый вторник" + a time ⇒ `fam cal add --title <T> --repeat weekly
     --days mon,wed,fri --start-time 10:00 [--end-time 12:00] [--place <P>]
-    [--for-person <person>] [--with <who>]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
+    [--for-person <person>] [--with <who>] [--no-remind]`. Days are the 3-letter English set mon,tue,wed,thu,fri,
     sat,sun; `--start-time`/`--end-time` are local `HH:MM` (no date). fam
     materializes the concrete occurrences itself — do NOT add each week by
     hand with separate `cal add --start` calls. To stop a whole series:
     `fam cal series cancel <id>` (list them with `fam cal series list`); to
-    drop just one week, cancel that single occurrence by its event id.
+    drop just one week, cancel that single occurrence by its event id. To
+    stop only the REMINDERS for a series and keep the lessons, it is `fam cal
+    series update <id> --no-remind` — never `series cancel` (see Event
+    reminders above).
 12. **Confirm "сохранил/записал/запомнил" ONLY after a fam call exits 0.**
     Never tell the user something is saved when you have not actually run
     the fam command that saves it (or it failed). If you cannot save it —
@@ -471,7 +483,10 @@ show after cancel), make a second, separate terminal call.
     the flag exists to record her decision, not to silence the check.
     Don't confuse this with rule 20: a DUPLICATE (the same thing, already
     imported from her iPhone) must not be created at all; a CONFLICT
-    (different things at the same time) is hers to decide.
+    (different things at the same time) is hers to decide. A schedule-only
+    event (`--no-remind`, e.g. Taya's school club) never takes a slot: fam
+    does not report it as a conflict and does not check it against Amina's
+    events, so there is nothing to ask — record it as is.
 24. **Чужая таймзона: передавай её оффсет, называй оба времени.** When she
     names a timezone that isn't Almaty ("в 10 утра по Москве", "18:00 мск",
     "по Берлину"):
@@ -484,13 +499,82 @@ show after cancel), make a second, separate terminal call.
       Москве») — nothing else remembers it, and reminders never show notes;
     - everywhere after that use Almaty time only. If she asks "а во сколько
       это по Москве?", pull the note back with `fam cal show <id>`.
+25. **Неотвеченный `clarify` не отменяет запись — пиши с дефолтом.** A
+    `clarify` result starting with `[user did not respond` means she
+    walked away mid-question, NOT "keep waiting". She is on a phone: she
+    answers when she can, and by then your turn is long over. Never end
+    such a turn with a promise in the future tense ("поставлю",
+    "запишу", "напомню") — from her side that IS the confirmation, and
+    nothing exists in the database. Instead:
+    1. Record what is already unambiguous, right now, with the default
+       you were about to recommend — the first `choices` option is
+       exactly that default. A missing time → `fam plan add "TITLE"`
+       with no `--deadline`; a missing detail on a dated thing →
+       `fam cal add` / `fam rem` with the recommended value.
+    2. Say in one line what you wrote AND what you assumed, in the past
+       tense, so she can correct it: "Записала в планы: перевыпустить
+       права. Напомню в субботу утром — скажи, если другое время."
+    3. Only when rule 3 blocks the write outright (unknown person or
+       place — fam exits 2) is there nothing to record. Then say plainly
+       that you did NOT write it and what you need: "Не записала —
+       не знаю, что за место «у Айгуль». Скажи адрес, и запишу."
+    Never invent a value the wording doesn't support: a default TIME is
+    fine (you offered it yourself), a default PLACE or PERSON is not.
+
+    Пример (реальный случай 17.09): «Поставь нам напоминания на этих
+    выходных. Перевыпустить мне права.» → она выбрала «в оба выходных»,
+    на вопрос о времени не ответила → `fam plan add "Перевыпустить
+    права"` + напоминания на оба дня на утро → «Записала: перевыпустить
+    права, напомню утром в субботу и воскресенье — скажи, если неудобно.»
+    Что было сделано вместо этого и чего делать нельзя: «Поставлю на оба
+    ближайших выходных — осталось уточнить время» и ни одной записи.
+26. **Воскресный сбор планов на неделю: у каждой задачи ОБЯЗАН быть
+    срок.** On Sunday evening the follow-up asks «Что запланируем на
+    неделю?», listing the week's load and any tails. Like every other
+    background message it is NOT in your session context — look
+    everything up fresh, never recall it.
+    - She names things to do → `fam plan add "TITLE" --deadline
+      YYYY-MM-DD` for each, with the deadline resolved per rule 1 from
+      the message timestamp. **A plan with no deadline never surfaces
+      anywhere** — `_burning_plans` only picks up dated ones, so an
+      undated plan is invisible until someone remembers it by hand. If
+      she names a thing without a day, ask which day, or put it on the
+      last day of the week and say so: "Записала на воскресенье —
+      скажи, если раньше." Never record a ritual plan with no date.
+    - The deadline belongs INSIDE the target week. A thing she wants
+      later is an ordinary plan, not part of this week's set.
+    - **Tails** (the «С прошлой недели висят» list) go one at a time:
+      «перенеси» → `fam plan due <id> <новая дата>`; «сделано» →
+      `fam plan done <id>`; «не надо» → `fam plan drop <id>`. Resolve
+      each id with `fam plan list` — the ritual message names titles,
+      not ids.
+    - She wants a reminder at a specific time ("напомни в среду в 10")
+      → that is NOT a plan: plans have no reminder chain of their own.
+      Record it as a calendar event (rule 2 and the Calendar verbs) and
+      say what you recorded.
+    - **Close the cycle when the dialog ends** → `fam weekly mark done`.
+      Without it the ritual stays in «offered» and asks again in
+      Monday's digest even though she already planned. Call it once,
+      after the plans are actually recorded (rule 12: only after the
+      `plan add` calls exited 0) — not before, and not instead.
+    - «не буду на этой неделе» / «пропустим» → `fam weekly mark
+      declined`, no plans created. That silences both the repeat and
+      any further question about this week.
+    - «не сейчас» / «потом» / no reply → do nothing at all, no fam
+      call. Monday's digest repeats the question once by itself; after
+      that the week is left alone.
+    - **Monday's repeat** («Неделю так и не спланировали — что в неё
+      добавим?») is the SAME dialog — same `plan add` calls, same
+      closing `fam weekly mark`. It is not a new kind of question.
+    - `fam weekly info --json` shows the target week and its state when
+      you need to check whether a cycle is still open.
 
 ## Quick Reference
 
 | Goal | Command |
 | --- | --- |
-| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--for-person NAME] [--with NAME]... [--notes N] [--allow-overlap]` |
-| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--for-person N] [--clear-for-person] [--add-person N] [--rm-person N] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
+| Record an event (`--start` = время начала, не выезда; `--transport` обязателен при `--place`) | `fam cal add --title T --start ISO [--end ISO] [--place P --transport car\|walk\|public] [--for-person NAME] [--with NAME]... [--notes N] [--no-remind] [--allow-overlap]` |
+| Change an event | `fam cal update <id> [--start ISO] [--end ISO] [--place P] [--for-person N] [--clear-for-person] [--add-person N] [--rm-person N] [--remind\|--no-remind] [--allow-overlap] ...` (moving with `--start` alone keeps the duration — end shifts with it; pass `--end` to change duration) |
 | Cancel an event | `fam cal cancel <id>` |
 | Mark an event done | `fam cal done <id>` |
 | Take over reminding her about an iPhone-owned event | `fam cal adopt <event_id>` |
@@ -522,6 +606,7 @@ show after cancel), make a second, separate terminal call.
 | Set/clear a person's home | `fam people update <ref> --home <place>` (empty `--home ""` clears it) |
 | Add/remove a participant | `fam cal update <id> --add-person NAME` / `--rm-person NAME` |
 | Add/remove a participant on a series | `fam cal series update <id> --add-person NAME` / `--rm-person NAME` |
+| Stop/resume reminders for a whole series (Taya's club), keep the lessons | `fam cal series update <id> --no-remind` / `--remind` |
 | Minutes needed to get ready | `--prep-min N` on `cal add`/`cal update` (also on `cal add --repeat`) |
 | See open plans | `fam plan list` (add `--all` for done/dropped too) |
 | Mark a plan done | `fam plan done <id>` |
@@ -639,7 +724,12 @@ Cancel always applies to the whole remaining chain:
     собираетесь?"
 - **"не напоминай про это" / "погаси напоминания про X" (stop nagging)**
   → `fam rem cancel EVENT_ID`. Cancel is ALWAYS whole-chain — it has no
-  `--scope` option; never pass one.
+  `--scope` option; never pass one. `rem cancel` only silences THIS
+  occurrence's current chain. If she means the activity itself, not just
+  today («не напоминай про робототехнику», «убери напоминания для занятий
+  Таи», «мне туда не ходить») → `fam cal series update <id> --no-remind` for
+  a series, `fam cal update <id> --no-remind` for a one-off (Event reminders
+  above).
 
 ### Три разных действия: это не синонимы
 
@@ -649,7 +739,8 @@ for another:
 | Фраза | Команда | Состояние события |
 | --- | --- | --- |
 | «уже выхожу», «едем» | `fam rem ack EVENT_ID` (scope по стадии) | остаётся `active` |
-| «не напоминай про это» | `fam rem cancel EVENT_ID` | остаётся `active` |
+| «не напоминай про это» (сейчас) | `fam rem cancel EVENT_ID` | остаётся `active` |
+| «не напоминай про <кружок/занятия>» вообще | `fam cal series update SERIES_ID --no-remind` | серия и все занятия остаются `active` |
 | «не пойду», «пропущу», «тренировки не будет» | `fam cal cancel EVENT_ID` | `cancelled`; каскадит отмену напоминаний и prep-планов |
 
 `fam cal cancel` применим к нативному событию Hermes (`owner='hermes'`),
@@ -704,6 +795,15 @@ protocol as rule 3 applies if `--place` is given and doesn't resolve.
      done <id>`, confirm briefly ("Отметил: куртка куплена.").
   3. Several plausible matches, or none → ask which plan they mean, or
      say there's no open plan like that — never guess an id.
+- **Moving a plan's deadline** ("перенеси на среду", "давай до пятницы",
+  "сдвинь на следующую неделю") → `fam plan due <id> YYYY-MM-DD`
+  (`fam plan due <id> --clear` removes the deadline). Found the same way
+  as done above — `fam plan list`, match by title, never guess an id.
+  The date follows the no-arithmetic rule 1: resolve "среду" from the
+  message timestamp, never count days in your head. This keeps the SAME
+  plan row — never drop-and-re-add to change a date, that loses the id
+  and its history. Confirm in one line: "Перенёс: забрать куртку — до
+  24 сентября."
 - **Dropping a plan** ("уже не надо", "отменяется", "передумали") →
   `fam plan drop <id>`, found the same way as done above.
 - **Accepting "по пути"** — the agent may mention in a reminder that an

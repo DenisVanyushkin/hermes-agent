@@ -2,7 +2,7 @@
 import argparse, json, re, sys
 from datetime import date as _date, datetime, timedelta, timezone
 from urllib.parse import urljoin
-from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, resolve, series, shopping, tick, whereami
+from fam import acks, audit, cal, db as famdb, extcal, gate, geo2gis, goals, grid, mail, maint, meds, people, places, plans, react, rem, resolve, series, shopping, tick, weekly, whereami
 
 def cmd_init(args):
     conn = famdb.connect()
@@ -470,14 +470,17 @@ def cmd_cal_add(args):
     _check_start_not_past(args.start, args.allow_past)
     _check_trip_has_transport(args.place, args.transport)
     conn = famdb.connect()
-    conflicts = _check_no_overlap(conn, args.start, args.end, args.allow_overlap)
+    # A schedule-only event (--no-remind) takes nobody's slot -- see
+    # cal.overlaps -- so there is nothing to confirm with Amina.
+    conflicts = (_check_no_overlap(conn, args.start, args.end, args.allow_overlap)
+                 if args.remind else [])
     try:
         subject_id = (cal.resolve_subject(conn, args.for_person)
                       if args.for_person is not None else None)
         e = cal.add(conn, args.title, args.start, end_utc=args.end, place=args.place,
                     participants=args.with_, transport=args.transport, notes=args.notes,
                     travel_min=args.travel_min, prep_min=args.prep_min,
-                    subject_person_id=subject_id)
+                    subject_person_id=subject_id, remind=args.remind)
     except (ValueError, cal.UnknownRefError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -542,7 +545,7 @@ def _cmd_cal_add_series(args):
     # Check the whole grid BEFORE anything is written: a series that
     # collides every week is exactly the case worth asking about once.
     busy = [(start, cal.overlaps(conn, start, end)) for start, end in occurrences]
-    busy = [(start, hits) for start, hits in busy if hits]
+    busy = [(start, hits) for start, hits in busy if hits and args.remind]
     if busy and not args.allow_overlap:
         first_start, first_hits = busy[0]
         first_local = datetime.fromisoformat(first_start).astimezone(
@@ -560,7 +563,8 @@ def _cmd_cal_add_series(args):
                        notes=args.notes, until_local=args.until,
                        prep_min=args.prep_min,
                        subject_person_id=(cal.resolve_subject(conn, args.for_person)
-                                          if args.for_person is not None else None))
+                                          if args.for_person is not None else None),
+                       remind=args.remind)
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -612,9 +616,22 @@ def cmd_cal_series_update(args):
             subject = cal.resolve_subject(conn, args.for_person)
         elif args.clear_for_person:
             subject = None
-        result = series.update_participants(
-            conn, args.id, add=args.add_person, remove=args.rm_person,
-            subject_person_id=subject)
+        remind = getattr(args, "remind", None)
+        result = None
+        if (args.add_person or args.rm_person or subject is not series._UNSET
+                or remind is None):
+            result = series.update_participants(
+                conn, args.id, add=args.add_person, remove=args.rm_person,
+                subject_person_id=subject)
+        if remind is not None:
+            remind_result = series.set_remind(conn, args.id, remind)
+            if result is None:
+                result = remind_result
+            else:
+                result["remind"] = remind_result["remind"]
+                result["updated_events"] = sorted(
+                    set(result["updated_events"])
+                    | set(remind_result["updated_events"]))
     except (ValueError, cal.UnknownRefError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -636,6 +653,9 @@ def cmd_cal_update(args):
         current = cal.get(conn, args.id)
         # current is None -> unknown id: leave it to cal.update()'s own
         # ValueError so the existing "unknown event: N" contract is intact.
+        schedule_only = (current is not None and (
+            args.remind is False
+            or (args.remind is None and current.get("remind") == 0)))
         if current is not None:
             new_start = args.start if args.start is not None else current["start_utc"]
             if (args.start is not None and args.end is None
@@ -658,8 +678,12 @@ def cmd_cal_update(args):
                 new_end = shifted_end_utc
             else:
                 new_end = args.end if args.end is not None else current["end_utc"]
-            conflicts = _check_no_overlap(conn, new_start, new_end,
-                                          args.allow_overlap, exclude_id=args.id)
+            # A schedule-only event takes nobody's slot (cal.overlaps), so
+            # moving one needs no confirmation -- the end shift above still
+            # applies to it like to any other event.
+            if not schedule_only:
+                conflicts = _check_no_overlap(conn, new_start, new_end,
+                                              args.allow_overlap, exclude_id=args.id)
     fields = {}
     if args.title is not None: fields["title"] = args.title
     if args.start is not None: fields["start_utc"] = args.start
@@ -678,6 +702,8 @@ def cmd_cal_update(args):
         fields["subject_person_id"] = cal.resolve_subject(conn, args.for_person)
     elif args.clear_for_person:
         fields["subject_person_id"] = None
+    if getattr(args, "remind", None) is not None:
+        fields["remind"] = args.remind
     e = cal.update(conn, args.id, **fields)
     _audit_overlap_ack(conn, "update", conflicts, event_id=args.id)
     conn.commit()
@@ -3086,6 +3112,44 @@ def cmd_plan_done(args):
         print(f"done plan: {p['title']} (id={p['id']})")
     return 0
 
+def cmd_weekly_info(args):
+    conn = famdb.connect()
+    info = weekly.info(conn, goals.today_almaty())
+    if args.json:
+        print(json.dumps({k: v for k, v in info.items()
+                          if k != "events"}, ensure_ascii=False))
+    else:
+        print(f"week {info['target_week']} ({info['label']}), "
+              f"state={info['state']}, events={len(info['events'])}, "
+              f"tails={len(info['tails'])}")
+    return 0
+
+
+def cmd_weekly_mark(args):
+    conn = famdb.connect()
+    week = weekly.mark(conn, goals.today_almaty(), args.status)
+    conn.commit()
+    if args.json:
+        print(json.dumps({"week": week, "status": args.status},
+                         ensure_ascii=False))
+    else:
+        print(f"weekly {week}: {args.status}")
+    return 0
+
+
+def cmd_plan_due(args):
+    conn = famdb.connect()
+    if not plans.reschedule(conn, args.id, args.deadline):
+        raise ValueError(f"unknown plan: {args.id}")
+    conn.commit()
+    p = plans.get(conn, args.id)
+    if args.json:
+        print(json.dumps(p, ensure_ascii=False))
+    else:
+        when = p["deadline"] or "без срока"
+        print(f"plan due: {p['title']} (id={p['id']}) -> {when}")
+    return 0
+
 def cmd_plan_drop(args):
     conn = famdb.connect()
     if not plans.mark(conn, args.id, "dropped"):
@@ -3734,6 +3798,10 @@ def build_parser():
                            "overrides the default/slug reminder rules with "
                            "this event's own escalation chain (also applies "
                            "with --repeat, copied onto every occurrence)")
+    spa.add_argument("--no-remind", dest="remind", action="store_false",
+                      help="keep it on the calendar but never build a Hermes "
+                           "reminder chain for it (e.g. Taya's school club; "
+                           "with --repeat, applies to every occurrence)")
     spa.add_argument("--allow-past", dest="allow_past", action="store_true",
                       help="skip the past-start guardrail (retroactive event entry)")
     spa.add_argument("--allow-overlap", dest="allow_overlap", action="store_true",
@@ -3759,6 +3827,13 @@ def build_parser():
     subject_group = spu.add_mutually_exclusive_group()
     subject_group.add_argument("--for-person", dest="for_person")
     subject_group.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
+    remind_group = spu.add_mutually_exclusive_group()
+    remind_group.add_argument("--remind", dest="remind", action="store_const",
+                              const=True, default=None,
+                              help="turn Hermes reminders back on for this event")
+    remind_group.add_argument("--no-remind", dest="remind", action="store_const",
+                              const=False,
+                              help="keep the event, drop and stop its reminders")
     spu.add_argument("--add-person", dest="add_person", action="append", default=[],
                       help="participant ref to add (repeatable)")
     spu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -3791,6 +3866,16 @@ def build_parser():
     series_subject = spsu.add_mutually_exclusive_group()
     series_subject.add_argument("--for-person", dest="for_person")
     series_subject.add_argument("--clear-for-person", dest="clear_for_person", action="store_true")
+    series_remind = spsu.add_mutually_exclusive_group()
+    series_remind.add_argument("--remind", dest="remind", action="store_const",
+                               const=True, default=None,
+                               help="turn Hermes reminders back on for the series "
+                                    "and its future occurrences")
+    series_remind.add_argument("--no-remind", dest="remind", action="store_const",
+                               const=False,
+                               help="keep the series, stop reminders for it and "
+                                    "every future occurrence (never cancel the "
+                                    "series for this)")
     spsu.add_argument("--add-person", dest="add_person", action="append", default=[],
                        help="participant ref to add to the series and its future untouched occurrences (repeatable)")
     spsu.add_argument("--rm-person", dest="rm_person", action="append", default=[],
@@ -3967,6 +4052,22 @@ def build_parser():
     spd.add_argument("id", type=int)
     spd.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
                       help="machine-readable output")
+
+    weekly_p = sub.add_parser("weekly", help="weekly planning ritual")
+    weekly_sub = weekly_p.add_subparsers(dest="weekly_cmd", required=True)
+    swi = weekly_sub.add_parser("info"); swi.set_defaults(func=cmd_weekly_info)
+    swi.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+    swm = weekly_sub.add_parser("mark"); swm.set_defaults(func=cmd_weekly_mark)
+    swm.add_argument("status", choices=("done", "declined"))
+    swm.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                      help="machine-readable output")
+
+    spdu = plan_sub.add_parser("due"); spdu.set_defaults(func=cmd_plan_due)
+    spdu.add_argument("id", type=int)
+    spdu.add_argument("deadline", help="YYYY-MM-DD local")
+    spdu.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                       help="machine-readable output")
 
     spdr = plan_sub.add_parser("drop"); spdr.set_defaults(func=cmd_plan_drop)
     spdr.add_argument("id", type=int)

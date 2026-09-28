@@ -190,6 +190,39 @@ def mark(conn, plan_id, status):
     return True
 
 
+def reschedule(conn, plan_id, deadline):
+    """Move an open plan's deadline (or clear it with None).
+
+    The weekly ritual's tails need this: before it existed, "перенеси на
+    среду" could only be done by dropping the plan and adding a new one,
+    which loses the row id every other table refers to, its created_at
+    and its audit history. Validation runs BEFORE any write, the same
+    "raise before any insert" contract as add(). Returns False on an
+    unknown plan_id (no write, no audit); True on success.
+
+    Only an OPEN plan can be moved. A done or dropped plan's deadline
+    records when it had been due, so rewriting it would quietly falsify
+    history -- and `fam plan due` on a closed plan is a mistyped id far
+    more often than an intent. Returns False there too, same as an
+    unknown id.
+
+    Deliberately does NOT touch attached_event_id or status: a deadline
+    is a date, not a lifecycle change, so none of mark()'s route
+    recomputation applies.
+    """
+    _validate_deadline(deadline)
+    existing = conn.execute(
+        "SELECT id FROM plans WHERE id=? AND status='open'",
+        (plan_id,)).fetchone()
+    if existing is None:
+        return False
+
+    conn.execute("UPDATE plans SET deadline=? WHERE id=?",
+                 (deadline, plan_id))
+    audit.log(conn, "plan.reschedule", {"id": plan_id, "deadline": deadline})
+    return True
+
+
 def attach(conn, plan_id, event_id):
     """Attach a plan to a calendar event (sets attached_event_id). Returns
     False on an unknown plan_id or an unknown event_id (no write, no
