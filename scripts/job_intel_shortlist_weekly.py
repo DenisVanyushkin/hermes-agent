@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -66,19 +68,33 @@ def _freeze_source(source_dir: Path, artifact: dict[str, Any]) -> None:
 
 def _require_fresh_shadow_collection(connection: Any, now: datetime) -> None:
     row = connection.execute(
-        """SELECT finished_at FROM runs
+        """SELECT id, finished_at FROM runs
            WHERE mode = 'daily' AND run_type = 'shadow' AND status = 'ok'
            ORDER BY id DESC LIMIT 1"""
     ).fetchone()
     finished = None
-    if row and row[0]:
+    if row and row[1]:
         try:
-            finished = datetime.fromisoformat(row[0])
+            finished = datetime.fromisoformat(row[1])
         except ValueError:
             pass
     if (finished is None or finished.tzinfo is None
             or not timedelta(0) <= now.astimezone(timezone.utc) - finished.astimezone(timezone.utc) <= MAX_SHADOW_AGE):
         raise ValueError("shadow collection is stale: no successful daily shadow run in the last 24 hours")
+    if not connection.execute(
+        "SELECT EXISTS(SELECT 1 FROM vacancy_observability WHERE run_id = ?)", (row[0],)
+    ).fetchone()[0]:
+        raise ValueError("shadow collection is stale: latest successful daily shadow run has no observations")
+
+
+def _send_stale_alert(message: str, *, command: list[str] | None = None) -> None:
+    sender = command or [
+        str(DEFAULT_REPO / "venv" / "bin" / "python"),
+        "-m", "hermes_cli.main", "send", "--to", "telegram",
+    ]
+    result = subprocess.run([*sender, message], capture_output=True, text=True, timeout=45, check=False)
+    if result.returncode:
+        raise RuntimeError(f"stale shortlist alert command failed with exit {result.returncode}")
 
 
 def run_weekly(db_path: Path, source_root: Path, release_root: Path,
@@ -86,7 +102,8 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                client: Any = None, channel: str = DEFAULT_CHANNEL,
                repo: Path = DEFAULT_REPO, commit: str | None = None,
                summarizer: Callable[[str, str], str] | None = None,
-               summary_model: str = "") -> dict[str, Any]:
+               summary_model: str = "",
+               stale_alert: Callable[[str], None] | None = None) -> dict[str, Any]:
     """Freeze the preceding Berlin week once; retry publishes its same bytes."""
     now = now or datetime.now(timezone.utc)
     release_id, week_start = _previous_week(now)
@@ -106,7 +123,20 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                 cooled = sample_cooldown_keys(release_root, week_start)
                 connection = connect_read_only(db_path)
                 try:
-                    _require_fresh_shadow_collection(connection, now)
+                    try:
+                        _require_fresh_shadow_collection(connection, now)
+                    except ValueError as error:
+                        if stale_alert is not None:
+                            message = (
+                                f"⚠️ Job Intel {release_id} не опубликован: {error}. "
+                                "После восстановления сбора повторно запустите "
+                                "job-intel-shortlist-weekly для этой недели."
+                            )
+                            try:
+                                stale_alert(message)
+                            except Exception as alert_error:  # noqa: BLE001 - preserve the stale refusal
+                                print(f"weekly stale alert failed: {alert_error}", file=sys.stderr)
+                        raise
                     artifact = build_weekly(
                         connection, week_start, commit or _head_commit(repo),
                         release_id=release_id, issued_keys=issued,
@@ -171,7 +201,8 @@ def main() -> int:
     result = run_weekly(args.db, args.source_root, args.release_root, client=client,
                         deliver=deliver, channel=args.channel, repo=args.repo,
                         summarizer=summarizer,
-                        summary_model=DEFAULT_MODEL if summarizer is not None else "")
+                        summary_model=DEFAULT_MODEL if summarizer is not None else "",
+                        stale_alert=_send_stale_alert if deliver else None)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if deliver else 2
 

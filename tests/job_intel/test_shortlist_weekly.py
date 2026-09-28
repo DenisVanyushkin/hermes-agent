@@ -64,7 +64,16 @@ def test_retry_keeps_the_first_frozen_census_after_database_changes(tmp_path: Pa
     assert second["source_sha256"] == first["source_sha256"]
 
 
-def test_new_weekly_source_refuses_stale_shadow_collection(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("finished_at", "reason"),
+    [
+        ("2026-09-23T20:00:00+00:00", "last 24 hours"),
+        ("2026-09-28T06:00:00+00:00", "no observations"),
+    ],
+)
+def test_new_weekly_source_refuses_unusable_shadow_collection(
+    tmp_path: Path, monkeypatch, finished_at: str, reason: str,
+) -> None:
     module_path = SCRIPTS / "job_intel_shortlist_weekly.py"
     spec = importlib.util.spec_from_file_location("job_intel_shortlist_weekly", module_path)
     assert spec and spec.loader
@@ -75,7 +84,7 @@ def test_new_weekly_source_refuses_stale_shadow_collection(tmp_path: Path, monke
     db = tmp_path / "jobs.sqlite3"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE runs (id INTEGER, mode TEXT, started_at TEXT, finished_at TEXT, status TEXT, run_type TEXT)")
-    conn.execute("INSERT INTO runs VALUES (1, 'daily', '2026-09-23T19:00:00+00:00', '2026-09-23T20:00:00+00:00', 'ok', 'shadow')")
+    conn.execute("INSERT INTO runs VALUES (1, 'daily', '2026-09-23T19:00:00+00:00', ?, 'ok', 'shadow')", (finished_at,))
     conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, selection_boundary_reasons_json TEXT, created_at TEXT)")
     conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
     conn.commit()
@@ -88,10 +97,31 @@ def test_new_weekly_source_refuses_stale_shadow_collection(tmp_path: Path, monke
     keys = ["historical"]
     key_sha = hashlib.sha256(json.dumps(keys, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     (release_root / "legacy-seed-v1.json").write_text(json.dumps({"schema": "job_intel_legacy_seed_v1", "keys": keys, "count": 1, "keys_sha256": key_sha}))
-    with pytest.raises(ValueError, match="shadow collection is stale"):
+    alerts: list[str] = []
+    with pytest.raises(ValueError, match=reason):
         weekly.run_weekly(
             db, source_root, release_root,
             now=datetime(2026, 9, 28, 7, 16, tzinfo=timezone.utc),
-            deliver=False, commit="test", repo=Path(__file__).resolve().parents[2],
+            deliver=True, client=object(), commit="test", repo=Path(__file__).resolve().parents[2],
+            stale_alert=alerts.append,
         )
     assert not (source_root / "shortlist-2026-W39").exists()
+    assert len(alerts) == 1
+    assert "shadow collection is stale" in alerts[0]
+    assert "shortlist-2026-W39" in alerts[0]
+
+
+def test_stale_alert_uses_the_send_command(tmp_path: Path) -> None:
+    module_path = SCRIPTS / "job_intel_shortlist_weekly.py"
+    spec = importlib.util.spec_from_file_location("job_intel_shortlist_weekly", module_path)
+    assert spec and spec.loader
+    weekly = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(weekly)
+    received = tmp_path / "received.txt"
+    sender = tmp_path / "sender.py"
+    sender.write_text(
+        "import pathlib, sys\n"
+        f"pathlib.Path({str(received)!r}).write_text(sys.argv[1])\n"
+    )
+    weekly._send_stale_alert("stale weekly release", command=[sys.executable, str(sender)])
+    assert received.read_text() == "stale weekly release"
