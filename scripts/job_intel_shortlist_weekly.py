@@ -121,9 +121,10 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                     raise ValueError("frozen weekly source identity changed")
             else:
                 cooled = sample_cooldown_keys(release_root, week_start)
-                connection = connect_read_only(db_path)
+                connection = None
                 try:
                     try:
+                        connection = connect_read_only(db_path)
                         _require_fresh_shadow_collection(connection, now)
                     except Exception as error:  # noqa: BLE001 - surface freshness failures to the operator
                         if stale_alert is not None:
@@ -149,7 +150,8 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                         ruleset_path=repo / "job_intel" / "product_search" / "role_fit.py",
                     )
                 finally:
-                    connection.close()
+                    if connection is not None:
+                        connection.close()
                 artifact = enrich_summaries(artifact, summarizer, model_id=summary_model)
                 _freeze_source(source_dir, artifact)
                 sha = digest(artifact)

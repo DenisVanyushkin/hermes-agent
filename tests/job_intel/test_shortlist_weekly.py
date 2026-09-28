@@ -128,3 +128,29 @@ def test_stale_alert_uses_the_send_command(tmp_path: Path) -> None:
     )
     weekly._send_stale_alert("stale weekly release", command=[sys.executable, str(sender)])
     assert received.read_text() == "stale weekly release"
+
+
+def test_unreadable_weekly_database_alerts_without_freezing(tmp_path: Path) -> None:
+    module_path = SCRIPTS / "job_intel_shortlist_weekly.py"
+    spec = importlib.util.spec_from_file_location("job_intel_shortlist_weekly", module_path)
+    assert spec and spec.loader
+    weekly = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(weekly)
+    release_root = tmp_path / "releases"
+    release_root.mkdir()
+    import hashlib
+    keys = ["historical"]
+    key_sha = hashlib.sha256(json.dumps(keys, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    (release_root / "legacy-seed-v1.json").write_text(json.dumps({"schema": "job_intel_legacy_seed_v1", "keys": keys, "count": 1, "keys_sha256": key_sha}))
+    source_root = tmp_path / "shortlist"
+    alerts: list[str] = []
+    with pytest.raises(sqlite3.OperationalError):
+        weekly.run_weekly(
+            tmp_path / "missing.sqlite3", source_root, release_root,
+            now=datetime(2026, 9, 28, 7, 16, tzinfo=timezone.utc),
+            deliver=True, client=object(), commit="test", repo=Path(__file__).resolve().parents[2],
+            stale_alert=alerts.append,
+        )
+    assert not (source_root / "shortlist-2026-W39").exists()
+    assert len(alerts) == 1
+    assert "shortlist-2026-W39" in alerts[0]
