@@ -26,6 +26,7 @@ from job_intel_shortlist_summaries import enrich_summaries, live_summarizer, DEF
 DEFAULT_RELEASE_ROOT = Path.home() / ".hermes" / "job_intel" / "shortlist-releases"
 DEFAULT_REPO = Path.home() / ".hermes" / "hermes-agent"
 DEFAULT_CHANNEL = "C0B4MM6D52A"
+MAX_SHADOW_AGE = timedelta(hours=24)
 
 
 def _previous_week(now: datetime) -> tuple[str, Any]:
@@ -63,6 +64,23 @@ def _freeze_source(source_dir: Path, artifact: dict[str, Any]) -> None:
         os.close(fd)
 
 
+def _require_fresh_shadow_collection(connection: Any, now: datetime) -> None:
+    row = connection.execute(
+        """SELECT finished_at FROM runs
+           WHERE mode = 'daily' AND run_type = 'shadow' AND status = 'ok'
+           ORDER BY id DESC LIMIT 1"""
+    ).fetchone()
+    finished = None
+    if row and row[0]:
+        try:
+            finished = datetime.fromisoformat(row[0])
+        except ValueError:
+            pass
+    if (finished is None or finished.tzinfo is None
+            or not timedelta(0) <= now.astimezone(timezone.utc) - finished.astimezone(timezone.utc) <= MAX_SHADOW_AGE):
+        raise ValueError("shadow collection is stale: no successful daily shadow run in the last 24 hours")
+
+
 def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                *, now: datetime | None = None, deliver: bool = False,
                client: Any = None, channel: str = DEFAULT_CHANNEL,
@@ -88,6 +106,7 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                 cooled = sample_cooldown_keys(release_root, week_start)
                 connection = connect_read_only(db_path)
                 try:
+                    _require_fresh_shadow_collection(connection, now)
                     artifact = build_weekly(
                         connection, week_start, commit or _head_commit(repo),
                         release_id=release_id, issued_keys=issued,
