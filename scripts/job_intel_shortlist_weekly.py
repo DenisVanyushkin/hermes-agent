@@ -125,10 +125,13 @@ def run_weekly(db_path: Path, source_root: Path, release_root: Path,
                 try:
                     try:
                         _require_fresh_shadow_collection(connection, now)
-                    except ValueError as error:
+                    except Exception as error:  # noqa: BLE001 - surface freshness failures to the operator
                         if stale_alert is not None:
+                            detail = str(error) if isinstance(error, ValueError) else (
+                                f"shadow collection freshness check failed ({type(error).__name__})"
+                            )
                             message = (
-                                f"⚠️ Job Intel {release_id} не опубликован: {error}. "
+                                f"⚠️ Job Intel {release_id} не опубликован: {detail}. "
                                 "После восстановления сбора повторно запустите "
                                 "job-intel-shortlist-weekly для этой недели."
                             )

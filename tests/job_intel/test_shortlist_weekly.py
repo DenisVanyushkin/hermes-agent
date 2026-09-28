@@ -65,14 +65,16 @@ def test_retry_keeps_the_first_frozen_census_after_database_changes(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("finished_at", "reason"),
+    ("finished_at", "error_type", "reason"),
     [
-        ("2026-09-23T20:00:00+00:00", "last 24 hours"),
-        ("2026-09-28T06:00:00+00:00", "no observations"),
+        ("2026-09-23T20:00:00+00:00", ValueError, "last 24 hours"),
+        ("2026-09-28T06:00:00+00:00", ValueError, "no observations"),
+        (None, sqlite3.OperationalError, "no such table: runs"),
     ],
 )
 def test_new_weekly_source_refuses_unusable_shadow_collection(
-    tmp_path: Path, monkeypatch, finished_at: str, reason: str,
+    tmp_path: Path, monkeypatch, finished_at: str | None,
+    error_type: type[Exception], reason: str,
 ) -> None:
     module_path = SCRIPTS / "job_intel_shortlist_weekly.py"
     spec = importlib.util.spec_from_file_location("job_intel_shortlist_weekly", module_path)
@@ -83,8 +85,9 @@ def test_new_weekly_source_refuses_unusable_shadow_collection(
 
     db = tmp_path / "jobs.sqlite3"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE runs (id INTEGER, mode TEXT, started_at TEXT, finished_at TEXT, status TEXT, run_type TEXT)")
-    conn.execute("INSERT INTO runs VALUES (1, 'daily', '2026-09-23T19:00:00+00:00', ?, 'ok', 'shadow')", (finished_at,))
+    if finished_at is not None:
+        conn.execute("CREATE TABLE runs (id INTEGER, mode TEXT, started_at TEXT, finished_at TEXT, status TEXT, run_type TEXT)")
+        conn.execute("INSERT INTO runs VALUES (1, 'daily', '2026-09-23T19:00:00+00:00', ?, 'ok', 'shadow')", (finished_at,))
     conn.execute("CREATE TABLE vacancy_observability (run_id INTEGER, vacancy_key TEXT, company TEXT, title TEXT, location TEXT, source TEXT, url TEXT, canonical_url TEXT, role_fit_verdict TEXT, role_fit_rules_json TEXT, selection_boundary_reasons_json TEXT, created_at TEXT)")
     conn.execute("CREATE TABLE vacancies (vacancy_key TEXT, first_seen_at TEXT, last_seen_at TEXT, posted_at TEXT, description TEXT)")
     conn.commit()
@@ -98,7 +101,7 @@ def test_new_weekly_source_refuses_unusable_shadow_collection(
     key_sha = hashlib.sha256(json.dumps(keys, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     (release_root / "legacy-seed-v1.json").write_text(json.dumps({"schema": "job_intel_legacy_seed_v1", "keys": keys, "count": 1, "keys_sha256": key_sha}))
     alerts: list[str] = []
-    with pytest.raises(ValueError, match=reason):
+    with pytest.raises(error_type, match=reason):
         weekly.run_weekly(
             db, source_root, release_root,
             now=datetime(2026, 9, 28, 7, 16, tzinfo=timezone.utc),
@@ -107,7 +110,7 @@ def test_new_weekly_source_refuses_unusable_shadow_collection(
         )
     assert not (source_root / "shortlist-2026-W39").exists()
     assert len(alerts) == 1
-    assert "shadow collection is stale" in alerts[0]
+    assert "shadow collection" in alerts[0]
     assert "shortlist-2026-W39" in alerts[0]
 
 
