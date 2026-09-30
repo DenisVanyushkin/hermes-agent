@@ -691,26 +691,36 @@ def _headhunter_max_items(configured: int | None) -> int:
 
 
 def fetch_headhunter_vacancies(
-    query: str,
+    query: str | SourceQueryPlanItem | HeadHunterQueryPlanItem,
     *,
     per_page: int = 20,
     max_items: int | None = None,
 ) -> list[Vacancy]:
     fetch_headhunter_vacancies.last_health = None  # type: ignore[attr-defined]
     fetch_headhunter_vacancies.last_trace = None  # type: ignore[attr-defined]
+    query_text = str(getattr(query, "query", query) or "")
+    area_ids = tuple(getattr(query, "area_ids", ()) or ())
+    work_format = getattr(query, "work_format", None)
     trace: dict[str, Any] = {
         "found": 0,
         "pages_fetched": 0,
         "truncated": False,
         "detail_failures": 0,
         "rate_limited": False,
+        "area_ids": list(area_ids),
+        "work_format": work_format,
     }
+    search_params: dict[str, Any] = {
+        "text": query_text,
+        "per_page": min(max(int(per_page), 1), hh_api.MAX_PER_PAGE),
+        "max_items": _headhunter_max_items(max_items),
+    }
+    if area_ids:
+        search_params["area"] = list(area_ids)
+    if work_format:
+        search_params["work_format"] = work_format
     try:
-        result = hh_api.collect_search_results(
-            text=query,
-            per_page=min(max(int(per_page), 1), hh_api.MAX_PER_PAGE),
-            max_items=_headhunter_max_items(max_items),
-        )
+        result = hh_api.collect_search_results(**search_params)
     except hh_api.HHRateLimited as exc:
         trace["rate_limited"] = True
         fetch_headhunter_vacancies.last_trace = trace  # type: ignore[attr-defined]
@@ -771,6 +781,8 @@ def fetch_headhunter_vacancies(
         "detail_failures": trace["detail_failures"],
         "successful_details": trace["successful_details"],
         "advertising_filtered": trace.get("advertising_filtered", 0),
+        "area_ids": list(area_ids),
+        "work_format": work_format,
     }  # type: ignore[attr-defined]
     return vacancies
 
@@ -875,6 +887,103 @@ ROLE_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("hybrid_executive_exploration", ("COO-adjacent digital role", "Strategy and Product leader", "Chief Commercial/Product hybrid")),
 ]
 
+HEADHUNTER_ROLE_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
+    (
+        "executive_product",
+        (
+            "CPO",
+            "Chief Product Officer",
+            "VP Product",
+            "Head of Product",
+            "директор по продукту",
+            "директор продукта",
+            "руководитель продукта",
+        ),
+    ),
+    (
+        "digital_business",
+        (
+            "Chief Digital Officer",
+            "CDO",
+            "VP Digital",
+            "Digital Business Director",
+            "директор по цифровому развитию",
+            "директор цифрового бизнеса",
+        ),
+    ),
+    (
+        "customer_growth_commercial_hybrid",
+        (
+            "Chief Growth Officer",
+            "Chief Customer Officer",
+            "Customer Experience Director",
+            "VP Customer Experience",
+            "директор по росту",
+            "директор по клиентскому опыту",
+            "директор по работе с клиентами",
+        ),
+    ),
+    (
+        "product_business_unit",
+        (
+            "Product Director",
+            "Digital Product Director",
+            "Business Unit Director",
+            "Platform Director",
+            "директор цифровых продуктов",
+            "директор бизнес-юнита",
+            "директор платформы",
+        ),
+    ),
+    (
+        "general_management",
+        (
+            "General Manager",
+            "Regional General Manager",
+            "Managing Director",
+            "CEO",
+            "генеральный директор",
+            "управляющий директор",
+            "руководитель региона",
+        ),
+    ),
+    (
+        "growth_monetization",
+        (
+            "VP of Growth",
+            "Head of Growth",
+            "Monetization Director",
+            "Lifecycle Director",
+            "директор по монетизации",
+            "руководитель направления роста",
+            "директор по развитию выручки",
+        ),
+    ),
+    (
+        "transformation_builder",
+        (
+            "Digital Transformation Director",
+            "Product Transformation Director",
+            "Chief Transformation Officer",
+            "директор по цифровой трансформации",
+            "директор по трансформации продукта",
+            "руководитель продуктовой организации",
+        ),
+    ),
+    (
+        "hybrid_executive_exploration",
+        (
+            "Chief Commercial Officer",
+            "Chief Strategy Officer",
+            "Chief Operating Officer",
+            "Director of Product Strategy",
+            "директор по стратегии и продукту",
+            "директор по коммерции и продукту",
+            "операционный директор по продукту",
+        ),
+    ),
+]
+
 CONTEXT_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("payments_fintech", ("payments", "fintech", "banking", "wallets")),
     ("platform_ecosystem", ("marketplace", "superapp", "ecosystem", "platform")),
@@ -940,6 +1049,18 @@ GEO_FAMILIES: list[tuple[str, tuple[str, ...]]] = [
     ("apac_core", ("Singapore", "Indonesia", "Malaysia", "Thailand", "APAC")),
     ("apac_plus", ("Australia", "Kazakhstan")),
 ]
+
+# HH's area directory is mutable. These IDs were observed in its official
+# /areas response on 2026-09-30; labels without an exact area node stay visible
+# as unsupported instead of being guessed or folded into area=1001.
+HEADHUNTER_AREA_FAMILIES: tuple[
+    tuple[str, tuple[str, ...], tuple[str, ...]], ...
+] = (
+    ("remote_europe", ("21", "27"), ("Europe",)),
+    ("eu_gcc", ("65", "74", "208"), ("Saudi Arabia", "GCC")),
+    ("apac_core", ("2108", "238", "233", "300"), ("APAC",)),
+    ("apac_plus", ("6", "40"), ()),
+)
 
 
 def _query_rng(source: str) -> random.Random:
@@ -1095,11 +1216,10 @@ class LinkedInQueryPlanItem:
 
 @dataclass(frozen=True)
 class SourceQueryPlanItem:
-    """One query plan item for sources whose geography is query text.
+    """One legacy query plan item for sources whose geography is query text.
 
-    HeadHunter exposes no structured Search Contract cell, so its requested
-    geography is the legacy keyword family and its resolved geography remains
-    unknown. This is deliberately different from LinkedIn's verified target.
+    HeadHunter keeps this plan as the old text-only comparison arm. Its normal
+    daily path uses ``HeadHunterQueryPlanItem`` with structured area IDs.
     """
 
     query: str
@@ -1110,6 +1230,63 @@ class SourceQueryPlanItem:
     requested_geography: str
     resolved_geography: str | None = None
     experiment_branch: str = QUERY_EXPERIMENT_BRANCH_DEFAULT
+
+
+@dataclass(frozen=True)
+class HeadHunterQueryPlanItem:
+    """One HeadHunter search with text, area IDs, and work format separated."""
+
+    query: str
+    role_family: str
+    geo_family: str
+    area_ids: tuple[str, ...]
+    unsupported_geographies: tuple[str, ...]
+    work_format: str | None = None
+    query_mode: str = QUERY_MODE_ROLE_ONLY
+    requested_geography: str = ""
+    resolved_geography: str = ""
+    experiment_branch: str = QUERY_EXPERIMENT_BRANCH_DEFAULT
+
+
+def structured_headhunter_query_plan(
+    legacy_plan: Sequence[SourceQueryPlanItem],
+) -> list[HeadHunterQueryPlanItem]:
+    """Replace legacy geography words with the approved HH area filters."""
+
+    role_terms_by_family = dict(HEADHUNTER_ROLE_FAMILIES)
+    areas_by_family = {
+        name: (area_ids, unsupported)
+        for name, area_ids, unsupported in HEADHUNTER_AREA_FAMILIES
+    }
+    plan: list[HeadHunterQueryPlanItem] = []
+    for legacy_item in legacy_plan:
+        if legacy_item.role_family not in role_terms_by_family:
+            raise ValueError(
+                f"unknown HeadHunter role family: {legacy_item.role_family}"
+            )
+        if legacy_item.geo_family not in areas_by_family:
+            raise ValueError(
+                f"unknown HeadHunter geography family: {legacy_item.geo_family}"
+            )
+        area_ids, unsupported = areas_by_family[legacy_item.geo_family]
+        plan.append(
+            HeadHunterQueryPlanItem(
+                query=f"({_join_group(role_terms_by_family[legacy_item.role_family])})",
+                role_family=legacy_item.role_family,
+                geo_family=legacy_item.geo_family,
+                area_ids=area_ids,
+                unsupported_geographies=unsupported,
+                work_format=(
+                    "REMOTE" if legacy_item.geo_family == "remote_europe" else None
+                ),
+                requested_geography=legacy_item.requested_geography,
+                resolved_geography=(
+                    "area:" + ",".join(area_ids) if area_ids else ""
+                ),
+                experiment_branch=legacy_item.experiment_branch,
+            )
+        )
+    return plan
 
 
 def linkedin_geography_coverage() -> dict[str, Any]:
@@ -1255,11 +1432,10 @@ def rotating_source_query_plan(
     rotation_slot: int | None = None,
     query_mode: str | None = None,
 ) -> list[SourceQueryPlanItem]:
-    """Build deterministic role/geography queries for text-query sources.
+    """Build legacy deterministic role/geography queries for text-query sources.
 
-    HeadHunter uses role-only by default; a role-plus-context plan is retained
-    for the bounded comparison. Other callers retain the legacy context-bearing
-    default because this M2-Q slice changes only LinkedIn and HeadHunter.
+    The HeadHunter path is retained for comparison. Normal daily HeadHunter
+    collection uses ``rotating_headhunter_query_plan`` instead.
     """
 
     if query_mode is None:
@@ -1297,6 +1473,24 @@ def rotating_source_query_plan(
             )
         )
     return plan
+
+
+def rotating_headhunter_query_plan(
+    *,
+    limit: int = 6,
+    as_of: date | None = None,
+    rotation_slot: int | None = None,
+) -> list[HeadHunterQueryPlanItem]:
+    """Build deterministic HH role queries with geography kept in API filters."""
+
+    legacy_plan = rotating_source_query_plan(
+        "headhunter",
+        limit=limit,
+        as_of=as_of,
+        rotation_slot=rotation_slot,
+        query_mode=QUERY_MODE_ROLE_ONLY,
+    )
+    return structured_headhunter_query_plan(legacy_plan)
 
 
 def _validate_experiment_limit(limit: int) -> int:

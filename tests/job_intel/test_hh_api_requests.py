@@ -45,6 +45,36 @@ def test_search_raises_when_the_server_ignored_a_parameter(monkeypatch):
     assert "area" in str(exc.value)
 
 
+def test_search_preserves_multiple_area_ids_and_remote_work_format(monkeypatch):
+    seen = {}
+
+    def _fake_get(path, params, token):
+        seen.update(params)
+        return {
+            "items": [],
+            "found": 0,
+            "arguments": [
+                {"argument": "text", "value": params["text"]},
+                {"argument": "area", "value": params["area"]},
+                {"argument": "work_format", "value": params["work_format"]},
+            ],
+        }
+
+    monkeypatch.setattr(hh_api, "_get", _fake_get)
+    monkeypatch.setattr(hh_api, "get_app_token", lambda **kw: "T")
+
+    hh_api.search_vacancies(
+        text="CPO OR директор по продукту",
+        area=["21", "27"],
+        work_format="REMOTE",
+    )
+
+    assert seen["area"] == ["21", "27"]
+    assert seen["work_format"] == "REMOTE"
+    assert seen["no_magic"] == "true"
+    assert seen["describe_arguments"] == "true"
+
+
 def test_auth_failure_is_detected_on_403_not_401(monkeypatch):
     monkeypatch.setattr(hh_api, "get_app_token", lambda **kw: "T")
 

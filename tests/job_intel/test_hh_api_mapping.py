@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+from job_intel import ats_sources
+from job_intel.ats_sources import fetch_headhunter_detail
 from job_intel.dedup import canonical_vacancy_key
 from job_intel.models import Vacancy
 from job_intel.sources import hh_item_to_vacancy, hh_item_to_vacancy_filtered
@@ -18,6 +20,33 @@ def test_uses_alternate_url_not_the_api_url():
     vacancy = hh_item_to_vacancy(_item(), None)
     assert vacancy.url.startswith("https://hh.ru/vacancy/")
     assert "api.hh.ru" not in vacancy.url
+
+
+def test_real_shaped_response_preserves_query_string_in_alternate_url():
+    item = json.loads((FIX / "hh_api_search_item_query_url.json").read_text())
+
+    vacancy = hh_item_to_vacancy(item, None)
+
+    assert vacancy.url == item["alternate_url"]
+    assert "?from=employer&hhtmFrom=vacancy_search_list" in vacancy.url
+    assert "api.hh.ru" not in vacancy.url
+
+
+def test_detail_fetch_uses_vacancy_id_from_mapped_query_url(monkeypatch):
+    item = json.loads((FIX / "hh_api_search_item_query_url.json").read_text())
+    vacancy = hh_item_to_vacancy(item, None)
+    requested_ids = []
+
+    def fetch_detail(vacancy_id):
+        requested_ids.append(vacancy_id)
+        return {"description": "<p>Product leadership role.</p>"}
+
+    monkeypatch.setattr(ats_sources.hh_api, "fetch_vacancy_detail", fetch_detail)
+
+    description = fetch_headhunter_detail(vacancy.url)
+
+    assert requested_ids == ["123456"]
+    assert description == "Product leadership role."
 
 
 def test_maps_company_title_location_salary():

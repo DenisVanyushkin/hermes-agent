@@ -96,6 +96,7 @@ from .sources import (
     rotating_source_query_plan,
     rotating_source_experiment_query_plan,
     rotating_source_queries,
+    structured_headhunter_query_plan,
     search_duckduckgo,
     search_remoteok_jobs,
     search_remotive_jobs,
@@ -224,6 +225,11 @@ def _query_attempt_event(
     experiment_branch = (
         getattr(plan_item, "experiment_branch", "default") or "default"
     )
+    area_ids = tuple(getattr(plan_item, "area_ids", ()) or ())
+    work_format = getattr(plan_item, "work_format", None)
+    unsupported_geographies = tuple(
+        getattr(plan_item, "unsupported_geographies", ()) or ()
+    )
     fields = (
         source,
         getattr(plan_item, "query", ""),
@@ -234,6 +240,12 @@ def _query_attempt_event(
         getattr(plan_item, "resolved_geography", "") or "",
         getattr(plan_item, "query_mode", "") or "",
     )
+    if area_ids or work_format or unsupported_geographies:
+        fields += (
+            ",".join(area_ids),
+            work_format or "",
+            ",".join(unsupported_geographies),
+        )
     if experiment_branch != "default":
         fields += (experiment_branch,)
     event: dict[str, Any] = {
@@ -246,6 +258,9 @@ def _query_attempt_event(
         "query_mode": getattr(plan_item, "query_mode", None),
         "requested_geography": getattr(plan_item, "requested_geography", None),
         "resolved_geography": getattr(plan_item, "resolved_geography", None),
+        "area_ids": list(area_ids),
+        "work_format": work_format,
+        "unsupported_geographies": list(unsupported_geographies),
         "experiment_branch": experiment_branch,
         "outcome": outcome,
         "found_count": max(0, int(found_count)),
@@ -356,14 +371,17 @@ def _headhunter_plan_for_collection(
     experiment: Any,
 ) -> list[Any]:
     if experiment is None:
-        # Keep the disabled path exactly on the established production builder.
-        return rotating_source_query_plan("headhunter", limit=limit)
+        return structured_headhunter_query_plan(
+            rotating_source_query_plan("headhunter", limit=limit)
+        )
     if experiment.name == "linkedin_recency_ab":
-        return rotating_source_query_plan(
-            "headhunter",
-            limit=limit,
-            as_of=experiment.as_of,
-            rotation_slot=experiment.rotation_slot,
+        return structured_headhunter_query_plan(
+            rotating_source_query_plan(
+                "headhunter",
+                limit=limit,
+                as_of=experiment.as_of,
+                rotation_slot=experiment.rotation_slot,
+            )
         )
     return rotating_source_experiment_query_plan(
         "headhunter",
@@ -1050,6 +1068,9 @@ def _collect_vacancies(
                 limit=hh_query_limit,
                 experiment=query_experiment,
             )
+            structured_area_plan = any(
+                hasattr(item, "area_ids") for item in hh_query_plan
+            )
             hh_hits = 0
             hh_errors: list[str] = []
             hh_trace: dict[str, Any] = {
@@ -1061,13 +1082,39 @@ def _collect_vacancies(
                         query_experiment, hh_query_plan
                     ),
                     "requested_geographies": sorted(
-                        {item.requested_geography for item in hh_query_plan}
+                        {
+                            getattr(item, "requested_geography", "")
+                            for item in hh_query_plan
+                            if getattr(item, "requested_geography", "")
+                        }
                     ),
-                    "resolved_geographies": {},
-                    "unsupported_cells": [],
+                    "resolved_geographies": (
+                        {
+                            item.geo_family: list(item.area_ids)
+                            for item in hh_query_plan
+                        }
+                        if structured_area_plan
+                        else {}
+                    ),
+                    "unsupported_cells": (
+                        [
+                            {
+                                "geo_family": item.geo_family,
+                                "labels": list(item.unsupported_geographies),
+                            }
+                            for item in hh_query_plan
+                            if getattr(item, "unsupported_geographies", ())
+                        ]
+                        if structured_area_plan
+                        else []
+                    ),
                     "geography_resolution": (
-                        "unknown: HeadHunter exposes legacy geography keywords, "
-                        "not verified Search Contract cells"
+                        "official HH area IDs; broad or unlisted labels remain unknown"
+                        if structured_area_plan
+                        else (
+                            "unknown: HeadHunter exposes legacy geography keywords, "
+                            "not verified Search Contract cells"
+                        )
                     ),
                 },
                 "planned_query_cells": [
@@ -1082,7 +1129,7 @@ def _collect_vacancies(
             for plan_item in hh_query_plan:
                 try:
                     results = fetch_headhunter_vacancies(
-                        plan_item.query, per_page=hh_per_page
+                        plan_item, per_page=hh_per_page
                     )
                     hh_hits += len(results)
                     vacancies.extend(results)
