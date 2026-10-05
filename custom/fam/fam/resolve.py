@@ -14,7 +14,7 @@ from typing import Any
 
 from fam import acks, audit, cal, gate, meds, rem
 
-PROMPT_VERSION = "amina-ack-resolution-s2-v2"
+PROMPT_VERSION = "amina-ack-resolution-s2-v3"
 RECEIPT_SCHEMA_VERSION = 1
 _EVENT_DISPOSITIONS = {"ack_chain_prepare", "ack_chain_all",
                        "cancel_reminders", "cancel_occurrence",
@@ -23,8 +23,16 @@ _MED_DISPOSITIONS = {"taken", "skipped", "unrelated", "ambiguous"}
 
 
 _EVENT_DISPOSITION_DESCRIPTIONS = {
-    "ack_chain_prepare": "Acknowledge the reminder and prepare for the event.",
-    "ack_chain_all": "Acknowledge the event and stop all future reminders.",
+    "ack_chain_prepare": (
+        "The user is getting ready but has not left yet (\"собираюсь\", "
+        "\"начала собираться\"). Silences only the getting-ready reminders; "
+        "the leave reminders (\"пора выходить\") still fire."
+    ),
+    "ack_chain_all": (
+        "The user has already left, is on the way, or is already at the place "
+        "(\"уже тут\", \"я на месте\", \"уже еду\", \"выехала\"), or otherwise "
+        "needs no more reminders for this event. Stops all future reminders."
+    ),
     "cancel_reminders": "Cancel future reminders but leave the event active.",
     "cancel_occurrence": "Cancel the event occurrence and its reminders.",
     "unrelated": "The user text does not refer to this event.",
@@ -292,7 +300,10 @@ def _apply(conn, candidate, disposition, request):
         if event is None or event["owner"] != "hermes":
             return False, "owner_not_hermes"
         if disposition == "ack_chain_prepare":
-            rem.ack_chain(conn, ref_id, scope="prepare")
+            if rem.ack_chain(conn, ref_id, scope="prepare") == 0 and _has_pending(conn, ref_id):
+                # Getting-ready phase is over: a prepare ack would verify
+                # vacuously while the leave reminders keep firing.
+                return False, "prepare_phase_over"
         elif disposition == "ack_chain_all":
             rem.ack_chain(conn, ref_id, scope="all")
         elif disposition == "cancel_reminders":
@@ -311,6 +322,13 @@ def _apply(conn, candidate, disposition, request):
     else:
         return False, "unknown_kind"
     return True, None
+
+
+def _has_pending(conn, event_id):
+    return conn.execute(
+        "SELECT 1 FROM reminders WHERE event_id=? AND status='pending' LIMIT 1",
+        (event_id,),
+    ).fetchone() is not None
 
 
 def _postcondition(conn, candidate, disposition):
