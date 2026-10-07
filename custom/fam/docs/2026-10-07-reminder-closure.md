@@ -59,3 +59,43 @@ tests make no provider calls or user deliveries.
 For recovery, stop the same writers, restore the verified pre-deployment
 database and the recorded pre-deployment commit together, then restart and
 verify services. Keep the original backup unchanged during rehearsal.
+
+## Deployment acceptance — 2026-10-07
+
+- Installed code: `6ad215710e63678878a49ba347cf560b5755f176` on
+  `hermes-home`, branch `local/customizations`; base
+  `d5087ad7e23afc1566990db089160bbd5f845cac`.
+- Independent review of final patch SHA256
+  `08dc43cc22b5152bf50a52e657ff242a94b0cb42b237bb30bf5acbf150f7543a`
+  found no remaining blockers. Its earlier ID-reuse finding was reproduced
+  RED, fixed, and independently rechecked.
+- Full hermetic FAM run (`-j 4`, retries disabled): 140 files,
+  2,135 passed, 3 failed, 1 skipped, exit 1. All three failures reproduced
+  on the unmodified base and came from expired August-2026 test fixtures.
+  After correcting only those fixture clocks/dates, their complete files
+  passed separately: `test_plans_attach_detour.py` 10 passed, exit 0;
+  `test_seed_apply.py` 22 passed, exit 0. Final coverage across the 140
+  files is 2,138 passed, 1 skipped; production code stayed unchanged
+  during these fixture corrections. The 19 new regression cases passed.
+- Isolated Ruff checks for the new tests and error checks for changed
+  legacy modules, formatting of the new test file, and `git diff --check`
+  passed.
+- Backup immediately before deployment:
+  `/home/denis/.hermes/backups/deploy-reminder-closure-20261007T051551Z/assistant.db`,
+  42,770,432 bytes, SHA256
+  `c4d2049db5795f3fb4947c4b9a01afb7d963e8e459380b9d578c93d0017ee36d`.
+  SQLite integrity was verified; schema migration and idempotence had
+  already been rehearsed on a separate private snapshot.
+- Live schema 17: integrity and foreign-key checks passed. Event 130
+  remains active with scope `all` and zero pending reminders; 125 pending
+  future reminders on independently open occurrences remain.
+- Deployment completed at 10:16 Asia/Almaty. Gateway PID changed from
+  `243924` to `483824`; all 9 previously active FAM timers were restored.
+  Fresh startup recorded WhatsApp and Telegram connected at 10:16:23.
+- Normal reminder tick at 10:17 completed successfully with
+  `due=0 sent=0 error=0`. This verifies deployment and the installed
+  database state; the deterministic resolver/road regression is a
+  composition test, not a new live human WhatsApp conversation.
+- `AGENTS.md` now specifies the test-first, verification, independent
+  review and authorized deployment workflow directly; the missing skill
+  is no longer a required dependency.
