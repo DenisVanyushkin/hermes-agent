@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fam import cal, people, places, plans, rem, shopping, seed
 
@@ -33,8 +33,9 @@ def test_apply_new_event_gets_reminders(db):
     _seed_db(db)
     rem.seed_default_rules(db); db.commit()  # fresh db has no reminder_rules by default
     rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    future = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d 09:00")
     f = {**rows, "События": rows["События"] + [{"id": None, "title": "Стоматолог",
-         "start": "2026-08-03 09:00", "end": None, "place": "Invictus", "transport": "walk",
+         "start": future, "end": None, "place": "Invictus", "transport": "walk",
          "participants": [], "prep_min": None, "notes": None}]}
     seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
     n = db.execute("SELECT COUNT(*) FROM reminders r JOIN events e ON e.id=r.event_id "
@@ -231,8 +232,9 @@ def test_apply_new_event_no_place_empty_transport(db):
     not crash (events.transport is NOT NULL DEFAULT 'unknown')."""
     _seed_db(db)
     rows = seed.export_rows(db); snap = seed.make_snapshot(rows)
+    future = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d 09:00")
     f = {**rows, "События": rows["События"] + [{"id": None, "title": "Звонок",
-         "start": "2026-08-05 09:00", "end": None, "place": None, "transport": None,
+         "start": future, "end": None, "place": None, "transport": None,
          "participants": [], "prep_min": None, "notes": None}]}
     seed.apply_diff(db, seed.diff(db, f, snap)); db.commit()
     row = db.execute("SELECT transport, notes FROM events WHERE title='Звонок'").fetchone()

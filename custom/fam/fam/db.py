@@ -1,5 +1,9 @@
 """SQLite core for fam: connection, pragmas, schema."""
+import json
 import os, sqlite3
+from datetime import datetime, timezone
+
+SCHEMA_VERSION = "17"
 
 HOST_DB = "/home/denis/.hermes/private/amina/assistant.db"
 SANDBOX_DB = "/root/.hermes/private/amina/assistant.db"
@@ -301,6 +305,74 @@ def migrate_resolve_receipts(conn):
         "THEN json_extract(payload, '$.idempotency_key') END)"
     )
     conn.commit()
+
+
+def _migrate_reminder_closed_scope(conn):
+    """Persist retained legacy acknowledgements once, on column creation.
+
+    The all scope dominates prepare, even if a later prepare ack was a
+    no-op. Close pending rows resurrected by an earlier regeneration too.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
+    if "reminder_closed_scope" in columns:
+        return
+    _ensure_column(conn, "events", "reminder_closed_scope",
+                   "reminder_closed_scope TEXT NOT NULL DEFAULT 'none' "
+                   "CHECK (reminder_closed_scope IN ('none','prepare','all'))")
+    created_at = {row["id"]: row["created_at"] for row in conn.execute(
+        "SELECT id, created_at FROM events")}
+    creation_seen = set()
+    closures = {}
+    for row in conn.execute(
+            "SELECT kind, ts_utc, payload FROM audit_log "
+            "WHERE kind IN ('cal.add','rem.ack','rem.cancel_chain') ORDER BY id"):
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        event_id = payload.get("id" if row["kind"] == "cal.add" else "event_id")
+        if type(event_id) is not int or event_id not in created_at:
+            continue
+        try:
+            created = datetime.fromisoformat(created_at[event_id])
+            recorded = datetime.fromisoformat(row["ts_utc"])
+        except (ValueError, TypeError):
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if recorded.tzinfo is None:
+            recorded = recorded.replace(tzinfo=timezone.utc)
+        if recorded < created:
+            continue
+        if row["kind"] == "cal.add":
+            # SQLite can reuse a deleted event ID in the same second.
+            # Audit order, not timestamp precision, identifies the new
+            # lifecycle and discards its predecessor's acknowledgement.
+            creation_seen.add(event_id)
+            closures.pop(event_id, None)
+            continue
+        if recorded == created and event_id not in creation_seen:
+            continue  # no evidence distinguishes a reused ID in this second
+        scope = "all" if row["kind"] == "rem.cancel_chain" else payload.get("scope", "all")
+        if scope not in ("all", "prepare"):
+            continue
+        if scope == "prepare":
+            count = payload.get("count")
+            if type(count) is not int or count <= 0:
+                continue  # old no-op prepare acknowledgements were unresolved
+            if closures.get(event_id, (None,))[0] == "all":
+                continue
+        status = "cancelled" if row["kind"] == "rem.cancel_chain" else "acked"
+        closures[event_id] = (scope, status)
+    for event_id, (scope, status) in closures.items():
+        conn.execute("UPDATE events SET reminder_closed_scope=? WHERE id=?", (scope, event_id))
+        conn.execute(
+            "UPDATE reminders SET status=? WHERE event_id=? AND status='pending' "
+            "AND (?='all' OR kind='prepare')", (status, event_id, scope))
+
+
 def init_db(conn):
     conn.executescript(SCHEMA)
     # schema 2b: migrate pre-2b tables that predate these columns
@@ -525,6 +597,10 @@ def init_db(conn):
                    "remind INTEGER NOT NULL DEFAULT 1 CHECK (remind IN (0,1))")
     conn.execute(
         "UPDATE meta SET value='16' WHERE key='schema_version'")
+    # v17: closure belongs to the occurrence, not to disposable reminder
+    # rows. New occurrences receive the default, never the series' state.
+    _migrate_reminder_closed_scope(conn)
+    conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (SCHEMA_VERSION,))
     conn.commit()
 
 

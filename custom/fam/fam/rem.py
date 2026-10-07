@@ -148,7 +148,9 @@ def regenerate(conn, event_id, now_utc=None):
     applicable rules. sent/acked/cancelled rows are untouched. If the
     event is missing or not active, this only performs the delete (0
     created). Only future stages (fire_at > now) are created. Returns the
-    number of reminders created. Audits rem.regenerate.
+    number of reminders created. Closed scopes on the occurrence survive
+    regeneration: all suppresses every stage, prepare only the prepare
+    stages. Audits rem.regenerate.
     """
     from fam import cal  # deferred: avoid import-time cycle with cal.py
 
@@ -193,7 +195,8 @@ def regenerate(conn, event_id, now_utc=None):
         return 0
 
     created = 0
-    if event is not None and event["status"] == "active":
+    if (event is not None and event["status"] == "active"
+            and event["reminder_closed_scope"] != "all"):
         anchors = {
             "start": _parse_utc(event["start_utc"]),
             "leave_at": _parse_utc(leave_at(conn, event)),
@@ -210,6 +213,9 @@ def regenerate(conn, event_id, now_utc=None):
             rules = applicable_rules(conn, event)
         for rule in rules:
             for stage_idx, stage in enumerate(rule["stages"]):
+                if (event["reminder_closed_scope"] == "prepare"
+                        and stage.get("kind", KIND_LEAVE) == KIND_PREPARE):
+                    continue
                 fire_dt = anchors[stage["anchor"]] + timedelta(
                     minutes=stage["offset_min"])
                 if fire_dt <= now_dt:
@@ -245,6 +251,9 @@ def ack_chain(conn, event_id, scope="all"):
     scope="prepare" гасит только стадии сборов (kind='prepare') --
     «уже собираемся» не должно отменять «пора выходить»; scope="all"
     (default, обратная совместимость) гасит всю цепочку («уже выходим»).
+    Persists closure on this occurrence in the caller's transaction;
+    an all acknowledgement also closes an empty chain, while a no-op
+    prepare acknowledgement cannot claim the prepare phase.
     """
     if scope not in ("all", "prepare"):
         raise ValueError(f"unknown ack scope: {scope}")
@@ -253,13 +262,20 @@ def ack_chain(conn, event_id, scope="all"):
     if scope == "prepare":
         sql += " AND kind='prepare'"
     cur = conn.execute(sql, params)
+    count = cur.rowcount
+    if count > 0 or scope == "all":
+        conn.execute(
+            "UPDATE events SET reminder_closed_scope=CASE "
+            "WHEN reminder_closed_scope='all' THEN 'all' ELSE ? END WHERE id=?",
+            (scope, event_id))
     audit.log(conn, "rem.ack",
-              {"event_id": event_id, "count": cur.rowcount, "scope": scope})
-    return cur.rowcount
+              {"event_id": event_id, "count": count, "scope": scope})
+    return count
 
 
 def cancel_chain(conn, event_id):
-    """Mark this event's pending reminders cancelled. Returns the count."""
+    """Close this occurrence and cancel pending reminders. Returns the count."""
+    conn.execute("UPDATE events SET reminder_closed_scope='all' WHERE id=?", (event_id,))
     return _transition_pending(conn, event_id, "cancelled", "rem.cancel_chain")
 
 

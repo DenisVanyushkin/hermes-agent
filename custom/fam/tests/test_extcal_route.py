@@ -1,5 +1,6 @@
 """S6 route planner and write-only target tests."""
 
+from fam import db as famdb
 import json
 import sqlite3
 import types
@@ -60,7 +61,7 @@ def test_v15_fresh_schema_has_same_shape_and_migration_marker(db):
     assert taya == hermes
     assert (
         db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        == "16"
+        == famdb.SCHEMA_VERSION
     )
 
 
@@ -366,7 +367,7 @@ def test_v15_migration_from_v14_creates_only_taya_journal(db):
     assert db.execute("SELECT COUNT(*) FROM ext_exports_taya").fetchone()[0] == 0
     assert (
         db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
-        == "16"
+        == famdb.SCHEMA_VERSION
     )
 
 

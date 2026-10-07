@@ -43,6 +43,9 @@ def _cfg(tmp_path, monkeypatch):
 
 def _event(db, tmp_path, monkeypatch, start="2026-08-25T09:00:00+00:00"):
     _cfg(tmp_path, monkeypatch)
+    # Event times are fixed fixtures; reminder generation must use the
+    # fixture clock too, rather than expiring as the wall clock advances.
+    monkeypatch.setattr(rem, "_now", lambda: NOW)
     places.add(db, "Клиника", lat=DEST[0], lon=DEST[1])
     db.commit()
     # Neutralize compute_travel_min for the add()-time hook only -- the

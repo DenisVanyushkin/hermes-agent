@@ -7,6 +7,7 @@ later -- the leak `fam rem cancel` could not close (live 2026-09-24: a new
 Robotics occurrence arrived with a fresh pending chain after every earlier one
 had been cancelled by hand).
 """
+from fam import db as famdb
 import json
 
 from fam import audit, cal, cli, people, rem, series
@@ -44,7 +45,7 @@ def _earliest_fire(db, event_id):
 def test_v16_schema_adds_remind_defaulting_to_on(db):
     _seed(db)
     assert db.execute(
-        "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "16"
+        "SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == famdb.SCHEMA_VERSION
     for table in ("events", "event_series"):
         cols = {r["name"]: r for r in db.execute(f"PRAGMA table_info({table})")}
         assert "remind" in cols

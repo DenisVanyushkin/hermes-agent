@@ -1,3 +1,4 @@
+from fam import db as famdb
 from datetime import datetime, timezone
 
 import pytest
@@ -16,7 +17,7 @@ def _seed(db):
 
 def test_v14_schema_and_subject_roundtrip(db):
     _, taya, _ = _seed(db)
-    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "16"
+    assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == famdb.SCHEMA_VERSION
     assert "subject_person_id" in {r["name"] for r in db.execute("PRAGMA table_info(events)")}
     assert "subject_person_id" in {r["name"] for r in db.execute("PRAGMA table_info(event_series)")}
     event = cal.add(db, "Математика", "2030-01-08T10:00:00+00:00", subject_person_id=taya["id"])
@@ -198,6 +199,6 @@ def test_fresh_and_v13_migrated_schema_match_and_history_stays_null(tmp_path):
     ).fetchone()[0] is None
     assert legacy.execute(
         "SELECT value FROM meta WHERE key='schema_version'"
-    ).fetchone()[0] == "16"
+    ).fetchone()[0] == famdb.SCHEMA_VERSION
     fresh.close()
     legacy.close()
