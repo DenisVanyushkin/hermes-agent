@@ -1176,11 +1176,15 @@ def build_turn_context(
     conversation_history = compaction.conversation_history
     current_turn_user_idx = compaction.current_turn_user_idx
 
+    from agent.local_roles import apply_turn_role  # fork: role context, role model, effort floor
+    role_user_context = apply_turn_role(agent, original_user_message)
     plugin_user_context = _collect_pre_llm_call_context(
         agent, effective_task_id=effective_task_id, turn_id=turn_id,
         original_user_message=original_user_message, messages=messages,
         conversation_history=conversation_history,
     )
+    if role_user_context:
+        plugin_user_context = "\n\n".join(p for p in (role_user_context, plugin_user_context) if p)
     # Every turn, not only on a prompt restore: a long-lived agent (CLI, TUI, Desktop) keeps its
     # prompt in memory for the whole conversation and would never re-check its skills index.
     stage_skills_index_note(agent, active_system_prompt, messages)

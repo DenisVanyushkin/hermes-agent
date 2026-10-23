@@ -2011,6 +2011,11 @@ def _reresolve_fallback_reasoning_config(agent) -> None:
         from hermes_cli.config import load_config
         from hermes_constants import resolve_reasoning_config
         agent.reasoning_config = resolve_reasoning_config(load_config() or {}, agent.model)
+        from hermes_cli.role_reasoning import apply_reasoning_floor
+        # The re-resolve above reads config only, so it drops the role
+        # policy's effort floor -- and drops it precisely on the turns where
+        # the primary model already failed. Put it back before continuing.
+        apply_reasoning_floor(agent, getattr(agent, "_reasoning_effort_floor", None))
         logger.info("Fallback %s: reasoning_config resolved: %s", agent.model, agent.reasoning_config)
     except Exception as _reasoning_err:
         logger.debug("Failed to resolve reasoning_config for fallback %s; keeping current: %s", agent.model, _reasoning_err)

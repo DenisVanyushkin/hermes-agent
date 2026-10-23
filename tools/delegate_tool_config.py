@@ -502,7 +502,11 @@ def _child_reasoning(parent_agent, delegation_cfg: dict, route_effort: Any) -> A
     thinking, not coerce to "" and inherit."""
     if isinstance(route_effort, ResolvedReasoning):
         return route_effort.config
-    child_reasoning = getattr(parent_agent, "reasoning_config", None)
+    # Fork: the parent's PRE-FLOOR value. A role policy floor belongs to the
+    # parent's turn; inheriting the raised value put every child of an
+    # engineer turn on high.
+    from hermes_cli.role_reasoning import base_reasoning_config
+    child_reasoning = base_reasoning_config(parent_agent)
     delegation_effort = route_effort
     if not (delegation_effort or delegation_effort is False):
         delegation_effort = (delegation_cfg or {}).get("reasoning_effort")

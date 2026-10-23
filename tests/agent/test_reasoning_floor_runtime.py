@@ -173,7 +173,7 @@ def test_the_log_line_separates_the_policy_demand_from_the_fact(caplog):
     что лог однажды утверждал одно, а ход шёл на другом. Усилие — тот же случай."""
     import logging
 
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
         log_model_selection(
@@ -198,7 +198,7 @@ def test_the_log_line_separates_the_policy_demand_from_the_fact(caplog):
 def test_the_log_line_names_the_session_exemption(caplog):
     import logging
 
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     with caplog.at_level(logging.INFO, logger="agent.conversation_loop"):
         log_model_selection(
@@ -284,7 +284,7 @@ def test_the_turn_loop_actually_wires_the_floor_in():
     """
     import pathlib
 
-    src = pathlib.Path("agent/conversation_loop.py").read_text()
+    src = pathlib.Path("agent/local_roles.py").read_text()
     start = src.index("_effective_model = apply_role_model(")
     block = src[start:start + 1800]
 

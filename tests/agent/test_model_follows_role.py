@@ -73,7 +73,7 @@ def test_the_cheap_research_path_works_in_russian_too():
 @pytest.fixture
 def switches(monkeypatch):
     """Record calls to switch_model instead of performing them."""
-    from agent import conversation_loop
+    from agent import local_roles as conversation_loop
 
     calls = []
 
@@ -94,7 +94,7 @@ def _agent(model="gpt-6-luna", provider="openai-codex"):
 
 
 def test_a_role_with_a_different_model_switches(switches):
-    from agent.conversation_loop import apply_role_model
+    from agent.local_roles import apply_role_model
 
     applied = apply_role_model(
         _agent(), preferred_model="gpt-5.6-terra", preferred_provider="openai-codex"
@@ -105,7 +105,7 @@ def test_a_role_with_a_different_model_switches(switches):
 
 
 def test_a_role_already_on_its_model_does_not_switch(switches):
-    from agent.conversation_loop import apply_role_model
+    from agent.local_roles import apply_role_model
 
     applied = apply_role_model(
         _agent(), preferred_model="gpt-6-luna", preferred_provider="openai-codex"
@@ -117,7 +117,7 @@ def test_a_role_already_on_its_model_does_not_switch(switches):
 
 def test_a_model_outside_the_lineup_is_refused(switches):
     """A stale or typo'd policy entry must not be able to repoint the runtime."""
-    from agent.conversation_loop import apply_role_model
+    from agent.local_roles import apply_role_model
 
     agent = _agent()
     applied = apply_role_model(
@@ -129,7 +129,7 @@ def test_a_model_outside_the_lineup_is_refused(switches):
 
 
 def test_an_empty_policy_model_is_a_no_op(switches):
-    from agent.conversation_loop import apply_role_model
+    from agent.local_roles import apply_role_model
 
     applied = apply_role_model(_agent(), preferred_model="", preferred_provider="")
     assert applied == "gpt-6-luna"
@@ -138,8 +138,8 @@ def test_an_empty_policy_model_is_a_no_op(switches):
 
 def test_a_failing_switch_leaves_the_turn_on_its_current_model(monkeypatch):
     """Model selection must never be able to break a turn."""
-    from agent import conversation_loop
-    from agent.conversation_loop import apply_role_model
+    from agent import local_roles as conversation_loop
+    from agent.local_roles import apply_role_model
 
     def _boom(*_a, **_k):
         raise RuntimeError("provider refused")
@@ -165,7 +165,7 @@ def test_a_failing_switch_leaves_the_turn_on_its_current_model(monkeypatch):
 
 
 def test_a_controlled_subagent_keeps_the_model_its_spec_pinned():
-    from agent import conversation_loop
+    from agent import local_roles as conversation_loop
 
     agent = SimpleNamespace(model="gpt-5.4-mini", provider="openai-codex")
     agent._skip_role_model_selection = True
@@ -181,7 +181,7 @@ def test_a_controlled_subagent_keeps_the_model_its_spec_pinned():
 
 
 def test_an_ordinary_agent_still_follows_its_role():
-    from agent import conversation_loop
+    from agent import local_roles as conversation_loop
 
     # Регрессия наоборот: разговорный агент обязан продолжать слушаться роли,
     # ради чего apply_role_model и заводился.
@@ -202,7 +202,7 @@ def test_an_ordinary_agent_still_follows_its_role():
 
 
 def test_the_flag_being_absent_is_treated_as_an_ordinary_agent():
-    from agent import conversation_loop
+    from agent import local_roles as conversation_loop
 
     agent = SimpleNamespace(model="gpt-6-luna", provider="openai-codex")
     switched = []

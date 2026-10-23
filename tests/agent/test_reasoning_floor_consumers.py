@@ -14,7 +14,7 @@ def test_delegation_inherits_the_pre_floor_value():
     И наоборот: delegation.reasoning_effort: low — это явная настройка оператора,
     её не имеет права перебивать автоматический пол.
     """
-    src = pathlib.Path("tools/delegate_tool.py").read_text()
+    src = pathlib.Path("tools/delegate_tool_config.py").read_text()
 
     assert "base_reasoning_config(parent_agent)" in src
     assert 'parent_reasoning = getattr(parent_agent, "reasoning_config", None)' not in src

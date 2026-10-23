@@ -5,7 +5,7 @@ import logging
 def test_model_selection_logs_effective_model(caplog, monkeypatch):
     """policy/class may be advisory, but 'model=' must equal the model used."""
     caplog.set_level(logging.INFO, logger="agent.conversation_loop")
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     log_model_selection(
         session="s1", policy="coding_high_reasoning", model_class="coding",
@@ -25,7 +25,7 @@ def test_bare_model_field_is_gone(caplog):
     gpt-5.6-luna' for the same turn. Both names must now be explicit.
     """
     caplog.set_level(logging.INFO, logger="agent.conversation_loop")
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     log_model_selection(
         session="s1", policy="general", model_class="default",
@@ -38,7 +38,7 @@ def test_bare_model_field_is_gone(caplog):
 
 def test_both_fields_present_when_they_agree(caplog):
     caplog.set_level(logging.INFO, logger="agent.conversation_loop")
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     log_model_selection(
         session="s1", policy="general", model_class="default",
@@ -53,7 +53,7 @@ def test_both_fields_present_when_they_agree(caplog):
 def test_unknown_effective_model_is_not_silently_blank(caplog):
     """A missing effective model must read as unknown, not as agreement."""
     caplog.set_level(logging.INFO, logger="agent.conversation_loop")
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     log_model_selection(
         session="s1", policy="general", model_class="default",
@@ -67,7 +67,7 @@ def test_unknown_effective_model_is_not_silently_blank(caplog):
 def test_fallback_fields_are_preserved(caplog):
     """Task 2 rewrites the line; it must not drop the fields already logged."""
     caplog.set_level(logging.INFO, logger="agent.conversation_loop")
-    from agent.conversation_loop import log_model_selection
+    from agent.local_roles import log_model_selection
 
     log_model_selection(
         session="s1", policy="general", model_class="default",
