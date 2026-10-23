@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gateway.run import GatewayRunner
+from gateway import local_gates
 
 
 def _source(platform="whatsapp", user_id="U1"):
@@ -21,7 +21,7 @@ def test_run_command_runs_doctor_and_reports():
         patch("hermes_cli.baseline_doctor_service.record_pending",
               side_effect=lambda ts, rem: recorded.update({ts: rem})),
     ):
-        ack = GatewayRunner._build_baseline_doctor_ack("почисти", _source())
+        ack = local_gates.baseline_doctor_ack("почисти", _source())
     assert ack is not None
     assert "scripts/x.py" in ack
     assert recorded  # remaining parked for a follow-up action command
@@ -38,16 +38,16 @@ def test_action_command_applies_pending():
         patch("hermes_cli.baseline_doctor_service.run_doctor",
               return_value={"clean": True, "fixed": [], "remaining": []}),
     ):
-        ack = GatewayRunner._build_baseline_doctor_ack("gitignore", _source())
+        ack = local_gates.baseline_doctor_ack("gitignore", _source())
     assert applied["action"] == "gitignore"
     assert ack is not None
 
 
 def test_action_command_without_pending_falls_through():
     with patch("hermes_cli.baseline_doctor_service.pop_pending", return_value=None):
-        assert GatewayRunner._build_baseline_doctor_ack("stash", _source()) is None
+        assert local_gates.baseline_doctor_ack("stash", _source()) is None
 
 
 def test_ordinary_message_falls_through():
-    assert GatewayRunner._build_baseline_doctor_ack("почисти базу данных", _source()) is None
-    assert GatewayRunner._build_baseline_doctor_ack("привет", _source()) is None
+    assert local_gates.baseline_doctor_ack("почисти базу данных", _source()) is None
+    assert local_gates.baseline_doctor_ack("привет", _source()) is None

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from gateway.run import GatewayRunner
+from gateway import local_gates
 from hermes_cli import commit_gate_service, ops_gate_service
 
 
@@ -67,7 +67,7 @@ def _record(repo: Path, plan: list[dict], task: str = "сделай это") -> 
 
 def test_no_pending_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
-    assert GatewayRunner._build_ops_approval_ack("выполни", _source()) is None
+    assert local_gates.ops_approval_ack("выполни", _source()) is None
 
 
 def test_ordinary_message_returns_none(tmp_path, monkeypatch):
@@ -76,7 +76,7 @@ def test_ordinary_message_returns_none(tmp_path, monkeypatch):
     _init_repo(repo)
     _record(repo, [_create_op()])
 
-    assert GatewayRunner._build_ops_approval_ack("почини баг", _source()) is None
+    assert local_gates.ops_approval_ack("почини баг", _source()) is None
     assert ops_gate_service.get_pending() is not None
     assert "ops-made-this" not in _branches(repo)
 
@@ -87,7 +87,7 @@ def test_execute_runs_the_plan_and_clears_the_marker(tmp_path, monkeypatch):
     _init_repo(repo)
     _record(repo, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert "git_branch_create" in ack
@@ -106,7 +106,7 @@ def test_plan_recorded_in_a_run_worktree_runs_in_the_main_checkout(tmp_path, mon
     _git(repo, "worktree", "add", "-q", "-b", "hermes-run/3d5f0f4d", str(worktree))
     _record(worktree, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert "refused_run_branch" not in ack
@@ -136,7 +136,7 @@ def test_operator_sees_the_directory_the_plan_actually_runs_in(tmp_path, monkeyp
 
     monkeypatch.setattr("hermes_cli.ops_executor.execute_operation", _fake_execute)
 
-    GatewayRunner._build_ops_approval_ack("выполни", _source())
+    local_gates.ops_approval_ack("выполни", _source())
 
     assert f"cwd:  {seen['cwd']}" in shown
     assert seen["cwd"] == repo
@@ -148,7 +148,7 @@ def test_cancel_clears_the_marker_without_running_anything(tmp_path, monkeypatch
     _init_repo(repo)
     _record(repo, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("отмена", _source())
+    ack = local_gates.ops_approval_ack("отмена", _source())
 
     assert ack is not None
     assert "отмен" in ack.lower()
@@ -163,7 +163,7 @@ def test_destroy_plan_is_not_run_by_a_bare_execute_and_stays_pending(tmp_path, m
     _git(repo, "branch", "doomed")
     _record(repo, [_delete_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert "подтверждаю git_branch_delete" in ack
@@ -179,7 +179,7 @@ def test_destroy_plan_runs_when_the_operation_id_is_echoed(tmp_path, monkeypatch
     _git(repo, "branch", "doomed")
     _record(repo, [_delete_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("подтверждаю git_branch_delete", _source())
+    ack = local_gates.ops_approval_ack("подтверждаю git_branch_delete", _source())
 
     assert ack is not None
     assert "git_branch_delete" in ack
@@ -194,7 +194,7 @@ def test_confirmation_of_another_operation_does_not_run_the_plan(tmp_path, monke
     _git(repo, "branch", "doomed")
     _record(repo, [_delete_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("подтверждаю git_tag_delete", _source())
+    ack = local_gates.ops_approval_ack("подтверждаю git_tag_delete", _source())
 
     # Подтверждение не этого плана -- не ответ гейту: обычный путь продолжается.
     assert ack is None
@@ -217,7 +217,7 @@ def test_execution_stops_at_the_first_non_zero_exit_and_clears_the_marker(tmp_pa
         _create_op("never-created"),
     ])
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert "first-ok" in _branches(repo)
@@ -242,7 +242,7 @@ def test_a_raising_operation_still_clears_the_marker_and_acks(tmp_path, monkeypa
         _create_op("after-the-crash"),
     ])
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert "missing_binary" in ack
@@ -264,7 +264,7 @@ def test_plan_with_two_destroy_operations_is_refused_and_disarmed(tmp_path, monk
          "description": "удалить тег", "irreversible": "тег восстанавливать вручную"},
     ])
 
-    ack = GatewayRunner._build_ops_approval_ack("подтверждаю git_branch_delete", _source())
+    ack = local_gates.ops_approval_ack("подтверждаю git_branch_delete", _source())
 
     assert ack is not None
     assert "git_tag_delete" in ack
@@ -289,7 +289,7 @@ def test_empty_repo_path_falls_back_to_the_repo_root_not_the_process_cwd(tmp_pat
 
     monkeypatch.setattr("hermes_cli.ops_executor.execute_operation", _fake_execute)
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert seen["cwd"] not in (Path(""), Path("."))
@@ -308,7 +308,7 @@ def test_unresolvable_repo_path_is_refused_and_disarmed(tmp_path, monkeypatch):
         lambda *a, **k: pytest.fail("операция не должна выполняться без рабочей директории"),
     )
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert "Не выполняю" in ack
@@ -327,7 +327,7 @@ def test_expired_marker_is_not_answerable(tmp_path, monkeypatch):
         created_at=time.time() - ops_gate_service.PENDING_TTL_SECONDS - 60,
     )
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is None
     assert "expired-plan" not in _branches(repo)
@@ -340,7 +340,7 @@ def test_slack_non_operator_reply_is_ignored(tmp_path, monkeypatch):
     _init_repo(repo)
     _record(repo, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack(
+    ack = local_gates.ops_approval_ack(
         "выполни", _source(platform="slack", user_id="U_OTHER")
     )
 
@@ -356,7 +356,7 @@ def test_slack_operator_reply_runs_the_plan(tmp_path, monkeypatch):
     _init_repo(repo)
     _record(repo, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack(
+    ack = local_gates.ops_approval_ack(
         "выполни", _source(platform="slack", user_id="U_OPERATOR")
     )
 
@@ -380,7 +380,7 @@ def test_cancel_with_both_gates_pending_clears_both(tmp_path, monkeypatch):
     )
     _record(repo, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("отмена", _source())
+    ack = local_gates.ops_approval_ack("отмена", _source())
 
     assert ack is not None
     assert ops_gate_service.get_pending() is None
@@ -403,7 +403,7 @@ def test_execute_word_leaves_the_commit_gate_alone(tmp_path, monkeypatch):
     )
     _record(repo, [_create_op()])
 
-    ack = GatewayRunner._build_ops_approval_ack("выполни", _source())
+    ack = local_gates.ops_approval_ack("выполни", _source())
 
     assert ack is not None
     assert ops_gate_service.get_pending() is None

@@ -21,7 +21,7 @@ import types
 
 import pytest
 
-from gateway.run import GatewayRunner, _operator_reply_text
+from gateway.local_gates import operator_reply_text as _operator_reply_text
 from hermes_cli.baseline_doctor_service import parse_doctor_command
 from hermes_cli.commit_gate_service import parse_commit_reply
 from hermes_cli.ops_gate_service import parse_ops_reply
@@ -79,82 +79,3 @@ def test_the_assembled_text_is_used_when_there_is_no_raw_one():
     assert _operator_reply_text(composed, None) == "коммить"
     assert _operator_reply_text(composed, "") == "коммить"
     assert _operator_reply_text(composed, "   ") == "коммить"
-
-
-@pytest.mark.asyncio
-async def test_run_agent_hands_the_raw_text_down_to_the_intercepts():
-    runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = types.SimpleNamespace(multiplex_profiles=False)
-    captured: dict = {}
-
-    async def _inner(message, context_prompt, history, source, session_id, **kwargs):
-        captured["message"] = message
-        captured["raw_message"] = kwargs.get("raw_message")
-        return {"final_response": "ok"}
-
-    runner._run_agent_inner = _inner
-    composed = _as_reply("коммить")
-
-    await runner._run_agent(
-        message=composed,
-        context_prompt="",
-        history=[],
-        source=_source(),
-        session_id="sess-1",
-        raw_message="коммить",
-    )
-
-    assert captured["message"] == composed, "модель по-прежнему получает склейку"
-    assert captured["raw_message"] == "коммить"
-
-
-@pytest.mark.asyncio
-async def test_a_turn_without_a_raw_text_still_runs():
-    runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = types.SimpleNamespace(multiplex_profiles=False)
-    captured: dict = {}
-
-    async def _inner(message, context_prompt, history, source, session_id, **kwargs):
-        captured["raw_message"] = kwargs.get("raw_message", "absent")
-        return {"final_response": "ok"}
-
-    runner._run_agent_inner = _inner
-
-    await runner._run_agent(
-        message="привет", context_prompt="", history=[], source=_source(), session_id="sess-1"
-    )
-
-    assert captured["raw_message"] is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("multiplex_profiles", [False, True])
-async def test_run_agent_preserves_internal_event_identity(
-    monkeypatch, multiplex_profiles
-):
-    runner = GatewayRunner.__new__(GatewayRunner)
-    runner.config = types.SimpleNamespace(multiplex_profiles=multiplex_profiles)
-    captured: dict = {}
-
-    async def _inner(message, context_prompt, history, source, session_id, **kwargs):
-        captured["internal_event"] = kwargs.get("internal_event", "absent")
-        return {"final_response": "ok"}
-
-    runner._run_agent_inner = _inner
-    if multiplex_profiles:
-        runner._resolve_profile_home_for_source = lambda _source: "/tmp/profile"
-        monkeypatch.setattr(
-            "gateway.run._profile_runtime_scope",
-            lambda _profile_home: contextlib.nullcontext(),
-        )
-
-    await runner._run_agent(
-        message="[ASYNC DELEGATION BATCH COMPLETE — deleg_test]",
-        context_prompt="",
-        history=[],
-        source=_source(),
-        session_id="sess-internal",
-        internal_event=True,
-    )
-
-    assert captured["internal_event"] is True

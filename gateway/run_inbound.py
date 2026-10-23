@@ -1141,6 +1141,9 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             _reply = await self._hm_clarify_reply(event, source, _quick_key)
         if _reply is None:
             _reply = await self._hm_slash_confirm_reply(event, _quick_key)
+        if _reply is None:  # fork: operator text gates (ops, commit, upstream-sync, baseline-doctor)
+            from gateway.local_gates import pending_gate_reply
+            _reply = await pending_gate_reply(self, event, source)
         return _reply
 
     async def _hm_dispatch_idle_commands(

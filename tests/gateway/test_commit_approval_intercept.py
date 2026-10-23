@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from gateway.run import GatewayRunner
+from gateway import local_gates
 from hermes_cli import commit_gate_service
 
 
@@ -43,7 +43,7 @@ def _write_pending(tmp_path, workspace, changed_files=("README.md",), commit_mes
 
 def test_no_pending_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
-    ack = GatewayRunner._build_commit_approval_ack("коммить", _source())
+    ack = local_gates.commit_approval_ack("коммить", _source())
     assert ack is None
 
 
@@ -59,7 +59,7 @@ def test_pending_plus_commit_reply_commits_and_clears(tmp_path, monkeypatch):
         commit_message="chore: update readme",
     )
 
-    ack = GatewayRunner._build_commit_approval_ack("коммить", _source())
+    ack = local_gates.commit_approval_ack("коммить", _source())
 
     assert ack is not None
     assert "Закоммичено" in ack
@@ -80,7 +80,7 @@ def test_pending_plus_discard_reply_stashes_and_clears(tmp_path, monkeypatch):
         commit_message="chore: update readme",
     )
 
-    ack = GatewayRunner._build_commit_approval_ack("отмена", _source())
+    ack = local_gates.commit_approval_ack("отмена", _source())
 
     assert ack is not None
     assert "отклонены" in ack
@@ -100,7 +100,7 @@ def test_ordinary_message_returns_none(tmp_path, monkeypatch):
         commit_message="chore: thing",
     )
 
-    ack = GatewayRunner._build_commit_approval_ack("почини баг", _source())
+    ack = local_gates.commit_approval_ack("почини баг", _source())
 
     assert ack is None
     assert commit_gate_service.get_pending() is not None
@@ -118,7 +118,7 @@ def test_slack_non_operator_returns_none(tmp_path, monkeypatch):
         commit_message="chore: thing",
     )
 
-    ack = GatewayRunner._build_commit_approval_ack("коммить", _source(platform="slack", user_id="U_OTHER"))
+    ack = local_gates.commit_approval_ack("коммить", _source(platform="slack", user_id="U_OTHER"))
 
     assert ack is None
     assert commit_gate_service.get_pending() is not None
@@ -137,7 +137,7 @@ def test_slack_operator_commits(tmp_path, monkeypatch):
         commit_message="chore: update readme",
     )
 
-    ack = GatewayRunner._build_commit_approval_ack("коммить", _source(platform="slack", user_id="U_OPERATOR"))
+    ack = local_gates.commit_approval_ack("коммить", _source(platform="slack", user_id="U_OPERATOR"))
 
     assert ack is not None
     assert "Закоммичено" in ack
