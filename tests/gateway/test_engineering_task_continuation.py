@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import gateway.local_pipelines as _lp
+from gateway.local_gates import operator_reply_text as _operator_reply_text
+
 import hashlib
 import importlib
 
@@ -164,7 +167,7 @@ def test_pre_router_resolved_plan_forces_engineering_pipeline():
     run = importlib.import_module("gateway.run")
     observe = importlib.import_module("hermes_cli.pipeline_observe")
     plan = _long_plan()
-    context = run._resolve_gateway_engineering_task_context(
+    context = _lp._resolve_gateway_engineering_task_context(
         router_decision=None,
         operator_text="выполняй",
         enriched_message="выполняй",
@@ -823,7 +826,7 @@ def test_gateway_builds_task_from_raw_operator_text_not_slack_parent_quote():
         fallback_safe=False,
     )
 
-    context = run._resolve_gateway_engineering_task_context(
+    context = _lp._resolve_gateway_engineering_task_context(
         router_decision=decision,
         operator_text=instruction,
         enriched_message=(
@@ -857,7 +860,7 @@ def test_gateway_does_not_build_engineering_context_for_other_pipeline():
         fallback_safe=False,
     )
 
-    context = run._resolve_gateway_engineering_task_context(
+    context = _lp._resolve_gateway_engineering_task_context(
         router_decision=decision,
         operator_text="оцени вакансию",
         enriched_message="оцени вакансию",
@@ -1083,7 +1086,7 @@ def test_queued_raw_operator_text_survives_slack_enrichment():
     raw = "ок, пусть инженер исполняет"
     enriched = '[Replying to: "Cronjob Response"]\n\n' + raw
 
-    assert run._operator_reply_text(enriched, raw) == raw
+    assert _operator_reply_text(enriched, raw) == raw
     assert _module().is_engineering_execution_continuation(
-        run._operator_reply_text(enriched, raw)
+        _operator_reply_text(enriched, raw)
     )

@@ -27,7 +27,8 @@ def _report(status: str, question: str | None):
 def responder():
     from gateway.run import GatewayRunner
 
-    return GatewayRunner.__dict__["_pipeline_clarification_response"]
+    from gateway.local_pipelines import _pipeline_clarification_response
+    return _pipeline_clarification_response
 
 
 def test_a_needs_clarification_turn_asks_the_question(responder):

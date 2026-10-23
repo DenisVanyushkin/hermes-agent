@@ -14,7 +14,8 @@ from __future__ import annotations
 import importlib
 
 run = importlib.import_module("gateway.run")
-_context = run._pipeline_conversation_context
+import gateway.local_pipelines as _lp
+_context = _lp._pipeline_conversation_context
 
 
 def test_a_short_message_is_passed_through_untouched():

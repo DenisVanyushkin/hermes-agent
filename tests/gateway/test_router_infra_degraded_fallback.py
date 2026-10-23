@@ -72,6 +72,19 @@ def test_classify_router_failure_contract(reason):
 # Gateway harness (mirrors tests/gateway/test_session_model_override_routing.py)
 # ---------------------------------------------------------------------------
 
+
+import gateway.local_pipelines as _lp
+
+
+def run_agent_module():
+    import sys as _sys
+    return _sys.modules["run_agent"]
+
+
+def _patch_run(monkeypatch, name, value):
+    """Old gateway.run internals the turn used before v0.22.5 may no longer exist."""
+    monkeypatch.setattr(gateway_run, name, value, raising=False)
+
 def _make_runner():
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
@@ -99,6 +112,23 @@ def _make_runner():
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
     runner.hooks.loaded_hooks = []
+
+    async def _fake_run_agent_inner(message, context_prompt, history, source, session_id, **_kwargs):
+        """v0.22.5: the router runs in routed_turn; this stands in for upstream's agent turn."""
+        from gateway import run as _gw
+        from gateway.local_pipelines import turn_toolsets
+        try:
+            _cfg = _gw._load_gateway_config()
+            _base = runner._resolve_enabled_toolsets_for_source(_cfg, source, _gw._platform_config_key(source.platform))
+        except Exception:
+            _base = ["core"]
+        _agent = run_agent_module().AIAgent(
+            enabled_toolsets=turn_toolsets(_base), ephemeral_system_prompt=context_prompt or None)
+        _result = dict(_agent.run_conversation(message, conversation_history=history))
+        _result.setdefault("history_offset", len(history))
+        return _result
+
+    runner._run_agent_inner = _fake_run_agent_inner
     return runner
 
 
@@ -229,8 +259,8 @@ def _patch_gateway(monkeypatch, *, router_reason, agent_cls):
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = agent_cls
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
-    monkeypatch.setattr(
-        gateway_run,
+    _patch_run(
+        monkeypatch,
         "_load_gateway_config",
         lambda: {
             "pipelines": {
@@ -241,9 +271,9 @@ def _patch_gateway(monkeypatch, *, router_reason, agent_cls):
             }
         },
     )
-    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        gateway_run,
+    _patch_run(monkeypatch, "load_dotenv", lambda *args, **kwargs: None)
+    _patch_run(
+        monkeypatch,
         "_resolve_runtime_agent_kwargs",
         lambda: {
             "api_key": "***",
@@ -382,7 +412,7 @@ def test_internal_delegation_completion_bypasses_specialized_pipeline(monkeypatc
             source=source,
             session_id="session-internal-completion",
             session_key="agent:main:local:dm",
-            internal_event=True,
+            persist_user_display_kind="internal_notification",
         )
     )
 
@@ -735,7 +765,7 @@ def test_resolved_external_context_cannot_fall_through_to_generic_agent(
 
 def test_notice_none_when_router_selected():
     runner = _make_runner()
-    notice = runner._pipeline_router_infra_degraded_notice(
+    notice = _lp._pipeline_router_infra_degraded_notice(runner, 
         _routing_failed_report(router_status="selected"),
         orchestrator_mode="autonomous",
         router_decision=_router_stub(AUTH_401_REASON),
@@ -745,7 +775,7 @@ def test_notice_none_when_router_selected():
 
 def test_notice_present_for_infra_failure():
     runner = _make_runner()
-    notice = runner._pipeline_router_infra_degraded_notice(
+    notice = _lp._pipeline_router_infra_degraded_notice(runner, 
         _routing_failed_report(),
         orchestrator_mode="autonomous",
         router_decision=_router_stub(AUTH_401_REASON),

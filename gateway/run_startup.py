@@ -1513,6 +1513,8 @@ class GatewayStartupMixin:
         if hook_count:
             logger.info("%s hook(s) loaded", hook_count)
         await self.hooks.emit("gateway:startup", {"platforms": [p.value for p in self.adapters]})
+        from gateway.local_pipelines import recover_lost_runs  # fork: report runs a restart killed
+        await recover_lost_runs(self)
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
         # Initial channel directory for send_message name resolution

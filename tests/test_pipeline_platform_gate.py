@@ -5,7 +5,7 @@ go straight to the default conversation agent; Telegram (Denis admin) keeps it.
 The gate is config-driven so the shared fork branch stays VPS-safe (empty/absent
 allowlist => no restriction).
 """
-import gateway.run as run
+import gateway.local_pipelines as run
 
 
 def test_no_restriction_when_key_absent():

@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from gateway.run import GatewayRunner
+import gateway.local_pipelines as _lp
 
 
 def _runner() -> GatewayRunner:
@@ -30,7 +31,7 @@ def _report(*, router_status: str = "selected", blocked_reason: str | None = "wo
 
 def test_preflight_block_terminates_turn_for_selected_pipeline() -> None:
     runner = _runner()
-    response = runner._pipeline_autonomous_preflight_block_response(
+    response = _lp._pipeline_autonomous_preflight_block_response(runner, 
         _report(),
         orchestrator_mode="autonomous",
     )
@@ -42,7 +43,7 @@ def test_preflight_block_terminates_turn_for_selected_pipeline() -> None:
 def test_preflight_guard_skips_when_execution_was_invoked() -> None:
     runner = _runner()
     assert (
-        runner._pipeline_autonomous_preflight_block_response(
+        _lp._pipeline_autonomous_preflight_block_response(runner, 
             _report(invoked=True),
             orchestrator_mode="autonomous",
         )
@@ -53,7 +54,7 @@ def test_preflight_guard_skips_when_execution_was_invoked() -> None:
 def test_preflight_guard_skips_without_blocked_reason() -> None:
     runner = _runner()
     assert (
-        runner._pipeline_autonomous_preflight_block_response(
+        _lp._pipeline_autonomous_preflight_block_response(runner, 
             _report(blocked_reason=None),
             orchestrator_mode="autonomous",
         )
@@ -64,14 +65,14 @@ def test_preflight_guard_skips_without_blocked_reason() -> None:
 def test_preflight_guard_skips_routing_failed_and_non_autonomous() -> None:
     runner = _runner()
     assert (
-        runner._pipeline_autonomous_preflight_block_response(
+        _lp._pipeline_autonomous_preflight_block_response(runner, 
             _report(router_status="routing_failed"),
             orchestrator_mode="autonomous",
         )
         is None
     )
     assert (
-        runner._pipeline_autonomous_preflight_block_response(
+        _lp._pipeline_autonomous_preflight_block_response(runner, 
             _report(),
             orchestrator_mode="controlled_manual",
         )

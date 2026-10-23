@@ -50,6 +50,16 @@ def _install_fake_agent(monkeypatch):
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
 
+
+def run_agent_module():
+    import sys as _sys
+    return _sys.modules["run_agent"]
+
+
+def _patch_run(monkeypatch, name, value):
+    """Old gateway.run internals the turn used before v0.22.5 may no longer exist."""
+    monkeypatch.setattr(gateway_run, name, value, raising=False)
+
 def _make_runner():
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
@@ -84,6 +94,23 @@ def _make_runner():
     runner._get_or_create_gateway_honcho = lambda session_key: (None, None)
     runner._is_session_run_current = lambda session_key, run_generation: True
     runner._consume_pending_native_image_paths = lambda session_key: []
+
+    async def _fake_run_agent_inner(message, context_prompt, history, source, session_id, **_kwargs):
+        """v0.22.5: the router runs in routed_turn; this stands in for upstream's agent turn."""
+        from gateway import run as _gw
+        from gateway.local_pipelines import turn_toolsets
+        try:
+            _cfg = _gw._load_gateway_config()
+            _base = runner._resolve_enabled_toolsets_for_source(_cfg, source, _gw._platform_config_key(source.platform))
+        except Exception:
+            _base = ["core"]
+        _agent = run_agent_module().AIAgent(
+            enabled_toolsets=turn_toolsets(_base), ephemeral_system_prompt=context_prompt or None)
+        _result = dict(_agent.run_conversation(message, conversation_history=history))
+        _result.setdefault("history_offset", len(history))
+        return _result
+
+    runner._run_agent_inner = _fake_run_agent_inner
     return runner
 
 
@@ -129,14 +156,14 @@ async def _run_once(monkeypatch, tmp_path, *, config, report=None, observe_exc=N
     _CapturingAgent.run_calls = []
     runner = _make_runner()
 
-    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
-    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: config)
-    monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: config)
-    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
-    monkeypatch.setattr(
-        gateway_run,
+    _patch_run(monkeypatch, "_hermes_home", tmp_path)
+    _patch_run(monkeypatch, "_env_path", tmp_path / ".env")
+    _patch_run(monkeypatch, "load_dotenv", lambda *args, **kwargs: None)
+    _patch_run(monkeypatch, "_load_gateway_config", lambda: config)
+    _patch_run(monkeypatch, "_load_gateway_runtime_config", lambda: config)
+    _patch_run(monkeypatch, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    _patch_run(
+        monkeypatch,
         "_resolve_runtime_agent_kwargs",
         lambda: {
             "provider": "openrouter",
