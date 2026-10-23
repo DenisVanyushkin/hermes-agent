@@ -1,0 +1,460 @@
+"""Regression tests for dropped tool-call recovery.
+
+Some providers (observed: claude-opus-4.8 / claude-sonnet-4.5 on GitHub
+Copilot, ~2026-07) return ``finish_reason="tool_calls"`` while the parsed
+``tool_calls`` array is empty — the model signalled it wanted to act but the
+payload shipped no call. Before the fix, the conversation loop took the
+no-tool-calls ``else`` branch, treated the turn's narration as the final
+answer, and exited with the task unstarted. On an unattended multi-step job
+(e.g. a scheduled PR reviewer) this silently did nothing.
+
+The fix keys on the provider contract violation itself
+(``finish_reason == "tool_calls"`` with zero ``tool_calls``) and re-prompts,
+bounded to 3 consecutive stalls, with the budget resetting after any
+successful tool round so it guards each stall rather than the whole run. A
+genuine ``finish_reason="stop"`` text turn is unaffected.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent.transports.types import NormalizedResponse, ToolCall
+
+
+@pytest.fixture()
+def loop_agent():
+    """AIAgent with a mocked OpenAI client (mirrors test_run_agent's fixture)
+    so we can stage a dropped-tool-call response + continuation pair on
+    ``.chat.completions.create``."""
+    from run_agent import AIAgent
+    with (
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        return agent
+
+
+def _dropped_tool_call_response(content: str):
+    """A response whose finish_reason claims a tool call, but tool_calls is
+    empty — the provider contract violation this fix recovers from."""
+    from tests.agent.test_run_agent import _mock_assistant_msg
+    return SimpleNamespace(
+        id="chatcmpl-dropped",
+        model="test/model",
+        choices=[SimpleNamespace(
+            index=0,
+            message=_mock_assistant_msg(content=content, tool_calls=None),
+            finish_reason="tool_calls",
+        )],
+        usage=None,
+    )
+
+
+def _codex_response():
+    return SimpleNamespace(
+        status="completed",
+        model="test/model",
+        usage=None,
+        output=[],
+    )
+
+
+def _malformed_normalized_response():
+    return NormalizedResponse(
+        content=None,
+        tool_calls=None,
+        finish_reason="stop",
+        provider_data={
+            "malformed_tool_intent": {
+                "tool_name": "skill_view",
+                "source_phase": "commentary",
+                "format": "codex_chatml",
+                "fingerprint": "sha256:" + "a" * 64,
+            }
+        },
+    )
+
+
+def _clean_incomplete_normalized_response():
+    return NormalizedResponse(
+        content="I am still working.",
+        tool_calls=None,
+        finish_reason="incomplete",
+    )
+
+
+class _FakeCodexTransport:
+    def __init__(self, normalized):
+        self._normalized = iter(normalized)
+
+    def normalize_response(self, response, **kwargs):
+        return next(self._normalized)
+
+    def build_kwargs(self, model, messages, tools=None, **kwargs):
+        return {"model": model, "messages": messages}
+
+    def preflight_kwargs(self, request, **kwargs):
+        return request
+
+    def validate_response(self, response):
+        return True
+
+
+class TestDroppedToolCallRecovery:
+    def test_real_codex_stream_normalization_recovery_executes_native_call_once(
+        self, loop_agent
+    ):
+        """Exercise raw Codex SSE -> runtime -> transport -> loop composition."""
+        from tests.run_agent.test_run_agent_codex_responses import _FakeCreateStream
+
+        malformed = (
+            '<|start|>assistant<|channel|>commentary '
+            'to=functions.skill_view<|constrain|>json\n'
+            '{"name":"skill_view","arguments":{}}'
+        )
+        streams = iter([
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="commentary"),
+                ),
+                SimpleNamespace(type="response.output_text.delta", delta=malformed),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    item=SimpleNamespace(
+                        type="message",
+                        phase="commentary",
+                        status="completed",
+                        content=[SimpleNamespace(type="output_text", text=malformed)],
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="function_call"),
+                ),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    item=SimpleNamespace(
+                        type="function_call",
+                        id="fc_1",
+                        call_id="call_1",
+                        name="skill_view",
+                        arguments="{}",
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+            _FakeCreateStream([
+                SimpleNamespace(
+                    type="response.output_item.added",
+                    item=SimpleNamespace(type="message", phase="final_answer"),
+                ),
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="Recovered through native call.",
+                ),
+                SimpleNamespace(
+                    type="response.output_item.done",
+                    item=SimpleNamespace(
+                        type="message",
+                        phase="final_answer",
+                        status="completed",
+                        content=[
+                            SimpleNamespace(
+                                type="output_text", text="Recovered through native call."
+                            )
+                        ],
+                    ),
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]),
+        ])
+
+        loop_agent.api_mode = "codex_responses"
+        loop_agent.provider = "openai-codex"
+        loop_agent.model = "gpt-5-codex"
+        loop_agent.valid_tool_names = {"skill_view"}
+
+        def _real_codex_call(api_kwargs):
+            stream = next(streams)
+            loop_agent.client = SimpleNamespace(
+                responses=SimpleNamespace(create=lambda **_kwargs: stream)
+            )
+            return loop_agent._run_codex_stream(api_kwargs)
+
+        loop_agent._interruptible_api_call = MagicMock(side_effect=_real_codex_call)
+        loop_agent._execute_tool_calls = MagicMock()
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("inspect the skill")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered through native call."
+        assert loop_agent._interruptible_api_call.call_count == 3
+        loop_agent._execute_tool_calls.assert_called_once()
+        visible_text = " ".join(
+            str(message.get("content") or "")
+            for message in result["messages"]
+            if isinstance(message, dict)
+        )
+        assert "to=functions.skill_view" not in visible_text
+
+    def test_malformed_text_intent_recovers_once_to_native_call(self, loop_agent):
+        native_call = ToolCall("call_1", "skill_view", "{}")
+        transport = _FakeCodexTransport([
+            _malformed_normalized_response(),
+            NormalizedResponse(None, [native_call], "tool_calls"),
+            NormalizedResponse("Recovered answer.", None, "stop"),
+        ])
+        loop_agent.api_mode = "codex_responses"
+        loop_agent.provider = "openai-codex"
+        loop_agent.valid_tool_names = {"skill_view"}
+        loop_agent._interruptible_api_call = MagicMock(
+            side_effect=[_codex_response(), _codex_response(), _codex_response()]
+        )
+        loop_agent._get_transport = MagicMock(return_value=transport)
+        loop_agent._execute_tool_calls = MagicMock()
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("inspect the skill")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered answer."
+        assert loop_agent._interruptible_api_call.call_count == 3
+        assert "expressed a tool request as assistant text" in str(
+            loop_agent._interruptible_api_call.call_args_list[1]
+        )
+        loop_agent._execute_tool_calls.assert_called_once()
+        assert all(
+            "to=functions.skill_view" not in str(message)
+            for message in result["messages"]
+        )
+
+    def test_repeated_malformed_text_intent_fails_without_execution(self, loop_agent):
+        transport = _FakeCodexTransport([
+            _malformed_normalized_response(),
+            _malformed_normalized_response(),
+        ])
+        loop_agent.api_mode = "codex_responses"
+        loop_agent.provider = "openai-codex"
+        loop_agent.valid_tool_names = {"skill_view"}
+        loop_agent._interruptible_api_call = MagicMock(
+            side_effect=[_codex_response(), _codex_response()]
+        )
+        loop_agent._get_transport = MagicMock(return_value=transport)
+        loop_agent._execute_tool_calls = MagicMock()
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("inspect the skill")
+
+        assert loop_agent._interruptible_api_call.call_count == 2
+        loop_agent._execute_tool_calls.assert_not_called()
+        assert result["completed"] is False
+        assert result["error"] == "MALFORMED_TOOL_INTENT_REPEATED"
+        assert "tool request as text" in result["final_response"]
+        assert any(
+            message.get("malformed_tool_intent")
+            for message in result["messages"]
+            if isinstance(message, dict)
+        )
+
+    def test_malformed_recovery_budget_survives_clean_incomplete(self, loop_agent):
+        """An ordinary incomplete continuation cannot reopen the 1/1 window."""
+        transport = _FakeCodexTransport([
+            _malformed_normalized_response(),
+            _clean_incomplete_normalized_response(),
+            _malformed_normalized_response(),
+            NormalizedResponse("Bug reopened recovery.", None, "stop"),
+        ])
+        loop_agent.api_mode = "codex_responses"
+        loop_agent.provider = "openai-codex"
+        loop_agent.valid_tool_names = {"skill_view"}
+        loop_agent._interruptible_api_call = MagicMock(
+            side_effect=[
+                _codex_response(),
+                _codex_response(),
+                _codex_response(),
+                _codex_response(),
+            ]
+        )
+        loop_agent._get_transport = MagicMock(return_value=transport)
+        loop_agent._execute_tool_calls = MagicMock()
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("inspect the skill")
+
+        assert loop_agent._interruptible_api_call.call_count == 3
+        loop_agent._execute_tool_calls.assert_not_called()
+        assert result["completed"] is False
+        assert result["error"] == "MALFORMED_TOOL_INTENT_REPEATED"
+
+    def test_dropped_tool_call_reprompts_instead_of_exiting(self, loop_agent):
+        """finish_reason=tool_calls with an empty tool_calls array must
+        re-prompt the model to emit the call rather than exiting the loop
+        with the narration as the final answer."""
+        from tests.agent.test_run_agent import _mock_response
+
+        loop_agent.client.chat.completions.create.side_effect = [
+            _dropped_tool_call_response("Let me verify the PR and gather evidence."),
+            _mock_response(content="All checks pass. Approved.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("review the PR")
+
+        assert loop_agent.client.chat.completions.create.call_count == 2, (
+            "A dropped tool call must trigger a re-prompt (second API call), "
+            "not exit the loop after one call."
+        )
+
+        # The loop must have injected a nudge user-message telling the model to
+        # issue the actual tool call.
+        second_call = loop_agent.client.chat.completions.create.call_args_list[1]
+        msgs = second_call.kwargs.get("messages") or second_call.args[0].get("messages")
+        last_user = next(
+            (m for m in reversed(msgs) if m.get("role") == "user"), None,
+        )
+        assert last_user is not None
+        assert "tool call" in (last_user.get("content") or "").lower(), (
+            "The nudge must explicitly ask the model to issue the tool call."
+        )
+        assert "All checks pass" in result["final_response"]
+
+
+    def test_clean_stop_text_turn_is_unaffected(self, loop_agent):
+        """A genuine finish_reason=stop text response must exit normally — the
+        recovery path must not fire on ordinary final answers."""
+        from tests.agent.test_run_agent import _mock_response
+
+        loop_agent.client.chat.completions.create.side_effect = [
+            _mock_response(content="Here is your answer.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("hello")
+
+        assert loop_agent.client.chat.completions.create.call_count == 1, (
+            "A clean finish_reason=stop turn must not trigger a re-prompt."
+        )
+        assert "Here is your answer." in result["final_response"]
+
+    def test_persistent_dropped_tool_calls_are_bounded(self, loop_agent):
+        """If the model never emits a call, the recovery must give up after a
+        bounded number of consecutive stalls instead of looping forever."""
+        from tests.agent.test_run_agent import _mock_response
+
+        # Stage plenty of dropped-tool-call responses followed by a clean stop,
+        # so that if the bound is respected the loop exits on its own well
+        # before exhausting the staged responses (no StopIteration).
+        loop_agent.client.chat.completions.create.side_effect = [
+            _dropped_tool_call_response("Let me check.") for _ in range(9)
+        ] + [_mock_response(content="done", finish_reason="stop")]
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("review the PR")
+
+        # 1 initial call + at most 3 bounded re-prompts = 4 total before the
+        # guard stops firing. It must NOT consume all 9 staged stalls.
+        assert loop_agent.client.chat.completions.create.call_count <= 4, (
+            "Consecutive dropped tool calls must be bounded (no infinite loop)."
+        )
+        assert result is not None
+
+    def test_nudge_pair_is_ephemeral_scaffolding(self, loop_agent):
+        """The re-prompt pair (interim assistant turn + synthetic user nudge)
+        must be flagged as ephemeral scaffolding so persistence never writes
+        it to the durable transcript — a resumed session must not replay the
+        internal "issue the actual tool call now" instruction as user-authored
+        context (#69630 review follow-up)."""
+        from agent.session_persistence import _is_ephemeral_scaffolding
+        from tests.agent.test_run_agent import _mock_response
+
+        loop_agent.client.chat.completions.create.side_effect = [
+            _dropped_tool_call_response("Let me verify the PR."),
+            _mock_response(content="All checks pass. Approved.", finish_reason="stop"),
+        ]
+
+        with (
+            patch.object(loop_agent, "_persist_session"),
+            patch.object(loop_agent, "_save_trajectory"),
+            patch.object(loop_agent, "_cleanup_task_resources"),
+        ):
+            result = loop_agent.run_conversation("review the PR")
+
+        assert result["completed"] is True
+        # The finalization pop strips the answered pair from the live list —
+        # no flagged scaffolding may survive into the returned transcript.
+        leftover = [
+            m for m in result["messages"]
+            if isinstance(m, dict) and m.get("_dropped_toolcall_nudge")
+        ]
+        assert not leftover, (
+            "The re-prompt pair must be stripped at finalization, not kept "
+            "in the returned transcript."
+        )
+        # And the persistence filter must classify the flag as ephemeral so a
+        # mid-turn flush can never write the pair to the durable store either.
+        assert _is_ephemeral_scaffolding(
+            {"role": "user", "content": "nudge", "_dropped_toolcall_nudge": True}
+        ), (
+            "_dropped_toolcall_nudge messages must be classified as "
+            "ephemeral scaffolding so they are never persisted."
+        )

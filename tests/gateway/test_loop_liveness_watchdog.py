@@ -3,26 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from gateway.shutdown_watchdog import (
-    _arm_loop_floor_timer,
-    _reset_blocking_wait_for_tests,
-    blocking_wait_active,
-    note_blocking_wait,
+    loop_heartbeat_forever,
     start_loop_liveness_watchdog,
 )
-
-
-def _immediate_loop() -> MagicMock:
-    loop = MagicMock(spec=asyncio.AbstractEventLoop)
-    loop.call_soon_threadsafe.side_effect = lambda callback: callback()
-    return loop
-
 
 def test_loop_liveness_watchdog_stop_during_dump_disarms_hard_exit():
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
@@ -52,8 +41,32 @@ def test_loop_liveness_watchdog_stop_during_dump_disarms_hard_exit():
 
     assert not handle.is_alive()
     critical.assert_called_once()
-    dump.assert_called_once_with(all_threads=True)
+    dump.assert_called()  # dump-file copy first, then stderr (#120356)
     assert exit_codes == []
+
+
+def test_loop_liveness_death_leaves_its_stacks_in_the_dump_file(tmp_path, monkeypatch):
+    # A console-less launcher discards stderr; the file is the only copy that survives (#120356).
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    exit_codes, ref, handle_ready = [], {}, threading.Event()
+
+    def exit_and_stop(code: int) -> None:  # a patched exit returns, so stop the loop like a real one
+        assert handle_ready.wait(timeout=2.0)
+        exit_codes.append(code)
+        ref["handle"].stop()
+
+    with patch("gateway.shutdown_watchdog._hard_exit", side_effect=exit_and_stop), \
+            patch("gateway.shutdown_watchdog._mark_exited_quietly"):
+        ref["handle"] = handle = start_loop_liveness_watchdog(
+            MagicMock(spec=asyncio.AbstractEventLoop), probe_interval=0.01, probe_timeout=0.01,
+            max_strikes=1)
+        handle_ready.set()
+        handle.join(timeout=5.0)
+    from gateway.shutdown_watchdog import get_shutdown_watchdog_dump_path
+    dump = get_shutdown_watchdog_dump_path(tmp_path).read_text(encoding="utf-8-sig")
+    assert '"event": "loop_liveness_watchdog_fired"' in dump
+    assert "most recent call first" in dump
+    assert exit_codes == [75]
 
 
 def test_loop_liveness_watchdog_stop_during_final_miss_disarms_hard_exit():
@@ -105,7 +118,6 @@ def test_loop_liveness_watchdog_stop_during_final_miss_disarms_hard_exit():
     critical.assert_not_called()
     dump.assert_not_called()
 
-
 def test_loop_liveness_watchdog_stop_after_first_recheck_skips_final_actions():
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     probe_scheduled = threading.Event()
@@ -152,7 +164,6 @@ def test_loop_liveness_watchdog_stop_after_first_recheck_skips_final_actions():
     dump.assert_not_called()
     hard_exit.assert_not_called()
 
-
 def test_gateway_config_loop_watchdog_round_trip():
     """loop_watchdog is a config.yaml knob: default on, nested-gateway form honored."""
     from gateway.config import GatewayConfig
@@ -168,129 +179,114 @@ def test_gateway_config_loop_watchdog_round_trip():
     config = GatewayConfig.from_dict({"loop_watchdog": False})
     assert config.to_dict()["loop_watchdog"] is False
 
+def test_gateway_config_loop_watchdog_tuning_round_trip():
+    """Watchdog tolerance knobs parse, serialize, and clamp malformed values."""
+    from gateway.config import GatewayConfig
 
-def test_gateway_runner_liveness_guards_start_and_stop():
-    from gateway.run import GatewayRunner
+    # Defaults
+    default = GatewayConfig.from_dict({})
+    assert default.loop_watchdog is True
+    assert default.loop_watchdog_probe_interval_s == 30.0
+    assert default.loop_watchdog_probe_timeout_s == 10.0
+    assert default.loop_watchdog_max_strikes == 3
 
-    runner = object.__new__(GatewayRunner)
-    runner._loop_floor_timer_handle = None
-    runner._loop_liveness_watchdog = None
-    loop = MagicMock(spec=asyncio.AbstractEventLoop)
-    floor_timer = MagicMock()
-    watchdog = MagicMock()
-    watchdog.is_alive.return_value = True
+    # Explicit values round-trip
+    cfg = GatewayConfig.from_dict(
+        {
+            "loop_watchdog_probe_interval_s": 45,
+            "loop_watchdog_probe_timeout_s": 15,
+            "loop_watchdog_max_strikes": 12,
+        }
+    )
+    assert cfg.loop_watchdog_probe_interval_s == 45.0
+    assert cfg.loop_watchdog_probe_timeout_s == 15.0
+    assert cfg.loop_watchdog_max_strikes == 12
+    d = cfg.to_dict()
+    assert d["loop_watchdog_probe_interval_s"] == 45.0
+    assert d["loop_watchdog_probe_timeout_s"] == 15.0
+    assert d["loop_watchdog_max_strikes"] == 12
 
-    with (
-        patch(
-            "gateway.run._arm_loop_floor_timer", return_value=floor_timer
-        ) as arm_floor,
-        patch(
-            "gateway.run.start_loop_liveness_watchdog", return_value=watchdog
-        ) as start_watchdog,
-    ):
-        runner._start_loop_liveness_guards(loop)
+    # Nested gateway.* form honored
+    nested = GatewayConfig.from_dict(
+        {
+            "gateway": {
+                "loop_watchdog_probe_interval_s": 60,
+                "loop_watchdog_probe_timeout_s": 20,
+                "loop_watchdog_max_strikes": 20,
+            }
+        }
+    )
+    assert nested.loop_watchdog_probe_interval_s == 60.0
+    assert nested.loop_watchdog_probe_timeout_s == 20.0
+    assert nested.loop_watchdog_max_strikes == 20
 
-    arm_floor.assert_called_once_with(loop)
-    start_watchdog.assert_called_once_with(loop)
-    assert runner._loop_floor_timer_handle is floor_timer
-    assert runner._loop_liveness_watchdog is watchdog
+    # Malformed / degenerate values fall back to safe defaults
+    clamped = GatewayConfig.from_dict(
+        {
+            "loop_watchdog_probe_interval_s": 0,
+            "loop_watchdog_probe_timeout_s": -5,
+            "loop_watchdog_max_strikes": 0,
+        }
+    )
+    assert clamped.loop_watchdog_probe_interval_s == 30.0
+    assert clamped.loop_watchdog_probe_timeout_s == 10.0
+    assert clamped.loop_watchdog_max_strikes == 3
 
-    runner._stop_loop_liveness_guards()
+def test_gateway_config_loop_watchdog_nonfinite_values_degrade():
+    """NaN/Inf tuning values fall back to defaults instead of reaching the
+    watchdog's Event.wait loop (or aborting config load via int(inf))."""
+    from gateway.config import GatewayConfig
 
-    watchdog.stop.assert_called_once_with()
-    floor_timer.cancel.assert_called_once_with()
-    assert runner._loop_liveness_watchdog is None
-    assert runner._loop_floor_timer_handle is None
+    cfg = GatewayConfig.from_dict(
+        {
+            "loop_watchdog_probe_interval_s": float("inf"),
+            "loop_watchdog_probe_timeout_s": float("nan"),
+            "loop_watchdog_max_strikes": float("inf"),  # int() would raise
+        }
+    )
+    assert cfg.loop_watchdog_probe_interval_s == 30.0
+    assert cfg.loop_watchdog_probe_timeout_s == 10.0
+    assert cfg.loop_watchdog_max_strikes == 3
 
+    # Oversized-but-finite values also clamp to defaults.
+    big = GatewayConfig.from_dict(
+        {
+            "loop_watchdog_probe_interval_s": 86400,
+            "loop_watchdog_probe_timeout_s": 7200,
+            "loop_watchdog_max_strikes": 10**9,
+        }
+    )
+    assert big.loop_watchdog_probe_interval_s == 30.0
+    assert big.loop_watchdog_probe_timeout_s == 10.0
+    assert big.loop_watchdog_max_strikes == 3
 
-# --- Известное блокирующее ожидание (2026-07-29) -----------------------------
-#
-# 07:21:06 пришло «почини проблемы»; ход ушёл в инженерный пайплайн, который
-# синхронен целиком и выполняется прямо на цикле событий. Цикл не получал
-# управления 107 секунд, сторож насчитал три пропущенные пробы и убил процесс
-# (exit 75), а systemd на уборке cgroup снёс браузерный стек. Цикл при этом не
-# завис: он был занят понятной работой, и опрашивающий её код это знает.
-#
-# Отметка, а не флаг «я занят»: если опрос прекратился (поток умер, код упал),
-# отметка протухает сама и сторож возвращается к работе без чьей-либо помощи.
+def test_load_gateway_config_bridges_loop_watchdog_keys(tmp_path, monkeypatch):
+    """The real startup loader must honor gateway.loop_watchdog* from
+    config.yaml — from_dict's nested fallback never sees the yaml gateway
+    section because load_gateway_config builds gw_data flat."""
+    from gateway.config import load_gateway_config
 
+    (tmp_path / "config.yaml").write_text(
+        "gateway:\n"
+        "  loop_watchdog: false\n"
+        "  loop_watchdog_probe_interval_s: 45\n"
+        "  loop_watchdog_probe_timeout_s: 15\n"
+        "  loop_watchdog_max_strikes: 12\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("gateway.config.get_hermes_home", lambda: tmp_path)
 
-def test_fresh_note_marks_the_wait_as_active():
-    note_blocking_wait(ttl=5.0)
-    assert blocking_wait_active() is True
+    cfg = load_gateway_config()
+    assert cfg.loop_watchdog is False
+    assert cfg.loop_watchdog_probe_interval_s == 45.0
+    assert cfg.loop_watchdog_probe_timeout_s == 15.0
+    assert cfg.loop_watchdog_max_strikes == 12
 
+def test_loop_liveness_watchdog_marks_runtime_degraded_before_restart():
+    """The terminal watchdog observation must be visible before ``os._exit``."""
+    from gateway.status import read_runtime_status, write_runtime_status
 
-def test_a_stale_note_stops_suppressing():
-    note_blocking_wait(ttl=0.05)
-    time.sleep(0.12)
-    assert blocking_wait_active() is False
-
-
-def test_no_note_at_all_is_not_active():
-    _reset_blocking_wait_for_tests()
-    assert blocking_wait_active() is False
-
-
-def test_a_wait_that_outlives_the_ceiling_stops_suppressing():
-    # Потолок обязателен: настоящий зависон ВНУТРИ ожидания не должен навсегда
-    # отключать сторожа, который заведён ровно ради таких случаев.
-    _reset_blocking_wait_for_tests()
-    for _ in range(4):
-        note_blocking_wait(ttl=5.0, max_total=0.05)
-        time.sleep(0.03)
-
-    assert blocking_wait_active() is False
-
-
-def test_the_ceiling_restarts_after_a_gap():
-    _reset_blocking_wait_for_tests()
-    note_blocking_wait(ttl=0.05, max_total=10.0)
-    time.sleep(0.12)  # отметка протухла -- ожидание закончилось
-    note_blocking_wait(ttl=5.0, max_total=10.0)
-
-    assert blocking_wait_active() is True
-
-
-def test_missed_probes_do_not_strike_while_the_wait_is_noted():
-    _reset_blocking_wait_for_tests()
-    loop = MagicMock(spec=asyncio.AbstractEventLoop)  # пробы никогда не отвечают
-    exit_codes = []
-    stop_noting = threading.Event()
-
-    def _noter() -> None:
-        while not stop_noting.wait(timeout=0.01):
-            note_blocking_wait(ttl=5.0, max_total=60.0)
-
-    noter = threading.Thread(target=_noter, daemon=True)
-    noter.start()
-    try:
-        with (
-            patch("gateway.shutdown_watchdog.faulthandler.dump_traceback") as dump,
-            patch("gateway.shutdown_watchdog.os._exit", side_effect=exit_codes.append),
-        ):
-            handle = start_loop_liveness_watchdog(
-                loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=2
-            )
-            assert handle is not None
-            deadline = time.monotonic() + 2.0
-            while loop.call_soon_threadsafe.call_count < 6 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            handle.stop()
-            handle.join(timeout=1.0)
-    finally:
-        stop_noting.set()
-        noter.join(timeout=1.0)
-
-    assert loop.call_soon_threadsafe.call_count >= 6, "сторож обязан продолжать пробы"
-    dump.assert_not_called()
-    assert exit_codes == []
-
-
-def test_strikes_resume_once_the_notes_stop():
-    _reset_blocking_wait_for_tests()
-    note_blocking_wait(ttl=0.05)
-    time.sleep(0.12)
-
+    write_runtime_status(gateway_state="running", exit_reason=None)
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     fired = threading.Event()
     exit_codes = []
@@ -307,8 +303,60 @@ def test_strikes_resume_once_the_notes_stop():
             loop, probe_interval=0.01, probe_timeout=0.01, max_strikes=2
         )
         assert handle is not None
-        assert fired.wait(timeout=3.0), "без свежих отметок засечки обязаны копиться"
+        assert fired.wait(timeout=2.0), "watchdog did not reach its restart exit"
         handle.stop()
         handle.join(timeout=1.0)
 
-    assert exit_codes and exit_codes[0] != 0
+    record = read_runtime_status()
+    assert exit_codes == [75]
+    assert record["gateway_state"] == "degraded"
+    assert record["exit_reason"] == "loop_liveness_watchdog"
+    assert record["restart_requested"] is True
+
+def test_heartbeat_write_does_not_block_the_loop_it_monitors():
+    """The heartbeat write must not freeze the loop the watchdog is watching.
+
+    ``write_loop_heartbeat`` ends in ``atomic_json_write`` -> ``os.fsync``, and on
+    a stalling filesystem that fsync blocks whichever thread runs it. Run inline,
+    that thread was the gateway loop — so the loop-liveness watchdog would time
+    out its probe (10s, 3 strikes, a ~90-120s budget) and kill the loop for being
+    unresponsive at the moment it was blocked inside the watchdog's own write. A
+    WSL2 VHDX under io pressure was measured stalling a trivial stat-and-fsync
+    probe at p99 31s, max 112s — longer than the whole budget.
+
+    Bounded by a fixed sleep rather than an Event handshake on purpose: if the
+    write ever goes back on-loop this fails on the tick count instead of hanging.
+    """
+    block_s = 0.30
+
+    def slow_write(**_kwargs):
+        time.sleep(block_s)
+        return pathlib.Path("/dev/null")
+
+    async def scenario() -> int:
+        ticks = 0
+
+        async def ticker() -> None:
+            nonlocal ticks
+            deadline = time.monotonic() + block_s
+            while time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        with patch(
+            "gateway.shutdown_watchdog.write_loop_heartbeat", slow_write
+        ):
+            # should_continue False -> exactly one write, then return.
+            hb = asyncio.create_task(
+                loop_heartbeat_forever(interval_s=60.0, should_continue=lambda: False)
+            )
+            await ticker()
+            await asyncio.wait_for(hb, timeout=5.0)
+        return ticks
+
+    ticks = asyncio.run(scenario())
+    # Off-loop, the ticker gets roughly block_s / 0.02 ticks. Inline it gets at
+    # most one, because the loop cannot run anything while fsync blocks it.
+    assert ticks >= 5, (
+        f'the loop made only {ticks:d} tick(s) while the heartbeat was writing — the write is blocking the loop again'
+    )

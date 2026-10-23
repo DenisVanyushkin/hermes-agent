@@ -12,9 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.event import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource, build_session_key
-from gateway.session_context import get_session_env
 
 
 def _make_source() -> SessionSource:
@@ -179,18 +178,18 @@ async def test_underscored_alias_for_hyphenated_builtin_not_flagged(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_command_hook_can_rewrite_to_plugin_command(monkeypatch):
-    """A command hook may rewrite /status into a plugin command."""
+async def test_command_hook_rewrite_routes_to_plugin(monkeypatch):
+    """A rewrite decision should re-resolve the command and route to the new one."""
     import gateway.run as gateway_run
 
     runner = _make_runner()
     runner._run_agent = AsyncMock(
-        side_effect=AssertionError("rewritten slash command leaked to the agent")
+        side_effect=AssertionError("rewritten command leaked to the agent")
     )
 
     call_log = []
 
-    async def _emit_collect(event_type, payload):
+    async def _emit_collect(event_type, ctx):
         call_log.append(event_type)
         if event_type == "command:status":
             return [
@@ -229,41 +228,35 @@ async def test_command_hook_can_rewrite_to_plugin_command(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_plugin_command_dispatch_sets_gateway_session_context(monkeypatch):
-    """Plugin slash handlers should see the current gateway session context."""
+async def test_sync_plugin_command_runs_off_loop_thread(monkeypatch):
+    """A sync plugin handler doing blocking I/O must run off the gateway loop thread,
+    else the loop stops answering shutdown_watchdog probes and is killed with exit 75."""
+    import threading
+    import time
+
     import gateway.run as gateway_run
+    from hermes_cli import plugins as _plugins_mod
 
     runner = _make_runner()
-    runner._run_agent = AsyncMock(
-        side_effect=AssertionError("plugin slash command leaked to the agent")
-    )
+    seen_threads = []
 
-    monkeypatch.setattr(
-        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
-    )
-    from hermes_cli import plugins as _plugins_mod
+    def _blocking_handler(args: str) -> str:
+        seen_threads.append(threading.current_thread().name)
+        time.sleep(0.15)
+        return f"sync {args}"
 
     monkeypatch.setattr(
         _plugins_mod,
         "get_plugin_command_handler",
-        lambda name: (
-            lambda args: "|".join(
-                [
-                    args,
-                    get_session_env("HERMES_SESSION_PLATFORM", ""),
-                    get_session_env("HERMES_SESSION_USER_ID", ""),
-                    get_session_env("HERMES_SESSION_USER_NAME", ""),
-                    get_session_env("HERMES_SESSION_CHAT_ID", ""),
-                ]
-            )
-        )
-        if name == "metricas"
-        else None,
+        lambda name: _blocking_handler if name == "slow-api" else None,
+    )
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
     )
 
-    result = await runner._handle_message(_make_event("/metricas dias:7"))
+    result = await runner._handle_message(_make_event("/slow-api arg"))
 
-    assert result == "dias:7|telegram|u1|tester|c1"
-    assert get_session_env("HERMES_SESSION_PLATFORM", "") == ""
-    assert get_session_env("HERMES_SESSION_USER_ID", "") == ""
-    runner._run_agent.assert_not_called()
+    assert result == "sync arg"
+    assert seen_threads, "handler must have run"
+    # pytest-asyncio runs the loop on the main thread; the blocking handler must not.
+    assert seen_threads[0] != threading.main_thread().name

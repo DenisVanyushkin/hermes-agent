@@ -50,13 +50,15 @@ class TestImapResponseGuard(unittest.TestCase):
             if command == "search":
                 return ("OK", [uids])
             if command == "fetch":
+                if "BODY.PEEK" in args[1]:
+                    return ("OK", [(args[0], _raw_email())])
                 return next(fetch_iter)
             return ("NO", [])
 
         mock_imap = MagicMock()
         mock_imap.uid.side_effect = uid_handler
         with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            return adapter._fetch_new_messages()
+            return adapter._fetch_new_messages(lambda _c: True)
 
     def test_normal_response_parses(self):
         results = self._fetch_with([("OK", [(b"1 (RFC822 {123}", _raw_email())])])
@@ -68,63 +70,40 @@ class TestImapResponseGuard(unittest.TestCase):
         self.assertEqual(results, [])
 
 
-class TestImapConnectionCleanup(unittest.TestCase):
-    """Every IMAP connection is torn down on ALL exit paths.
-
-    A graceful ``logout()`` on a timed-out/half-open socket can fail without
-    ever shutting the TCP session down, leaving the server holding an idle
-    connection until ITS timeout. Poll cycles every ~15s stack these up into
-    ``[ALERT] Too many simultaneous connections``. Guarantee a hard socket
-    close so the server-side session is released immediately.
-    """
-
-    def test_fetch_forces_shutdown_when_logout_fails(self):
-        adapter = _make_adapter()
-        mock_imap = MagicMock()
-        mock_imap.uid.return_value = ("OK", [b""])  # no unseen messages
-        mock_imap.logout.side_effect = OSError("broken pipe")
-        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            adapter._fetch_new_messages()  # must not raise
-        # logout() failed, so the socket must be force-closed instead of leaked
-        mock_imap.shutdown.assert_called_once()
-
-    def test_fetch_timeout_closes_connection(self):
-        adapter = _make_adapter()
-        mock_imap = MagicMock()
-        mock_imap.login.side_effect = TimeoutError("read operation timed out")
-        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            adapter._fetch_new_messages()  # must not raise
-        # The connection was created but login timed out — it MUST be torn down.
-        self.assertTrue(
-            mock_imap.logout.called or mock_imap.shutdown.called,
-            "timed-out IMAP connection was not closed (session leak)",
-        )
-
-    def test_connect_closes_socket_on_login_failure(self):
-        import asyncio
-
-        adapter = _make_adapter()
-        mock_imap = MagicMock()
-        mock_imap.login.side_effect = OSError(
-            "b'[ALERT] Too many simultaneous connections. (Failure)'"
-        )
-        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
-            ok = asyncio.run(adapter.connect())
-        self.assertFalse(ok)
-        # connect() opened a socket then login failed — it MUST NOT leak it.
-        self.assertTrue(
-            mock_imap.logout.called or mock_imap.shutdown.called,
-            "connect() leaked the IMAP socket on login failure",
-        )
 
 
-class TestMessageIdDomain(unittest.TestCase):
-    """Message-ID generation tolerates EMAIL_ADDRESS without '@'."""
+class TestTransportSecurity(unittest.TestCase):
+    """platforms.email.extra.imap_security / smtp_security select the transport (#99641)."""
 
+    def _adapter(self, **extra):
+        from gateway.config import PlatformConfig
 
-    def test_address_without_at(self):
-        adapter = _make_adapter("not-an-email")
-        self.assertEqual(adapter._message_id_domain(), "localhost")
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": "hermes@test.com", "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "127.0.0.1", "EMAIL_IMAP_PORT": "1143",
+            "EMAIL_SMTP_HOST": "127.0.0.1", "EMAIL_SMTP_PORT": "1025",
+        }, clear=True):
+            from plugins.platforms.email.adapter import EmailAdapter
+
+            return EmailAdapter(PlatformConfig(enabled=True, extra=extra))
+
+    def test_starttls_builds_plain_imap_then_upgrades(self):
+        adapter = self._adapter(imap_security="starttls", imap_tls_verify=False)
+        imap = MagicMock()
+        with patch("imaplib.IMAP4", return_value=imap) as imap_cls, \
+             patch("imaplib.IMAP4_SSL") as imap_ssl_cls:
+            self.assertIs(adapter._connect_imap(), imap)
+        imap_cls.assert_called_once_with("127.0.0.1", 1143, timeout=30)
+        imap_ssl_cls.assert_not_called()
+        imap.starttls.assert_called_once()
+
+    def test_unknown_mode_falls_back_to_secure_default(self):
+        adapter = self._adapter(imap_security="bogus", smtp_security="bogus")
+        self.assertEqual(adapter._imap_security, "tls")
+        self.assertEqual(adapter._smtp_security, "starttls")  # port 1025 != 465
+        # verification stays ON unless explicitly opted out
+        self.assertTrue(adapter._imap_tls_verify)
+        self.assertTrue(adapter._smtp_tls_verify)
 
 
 if __name__ == "__main__":

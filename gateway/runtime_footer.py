@@ -1,56 +1,25 @@
-"""Gateway runtime-metadata footer.
-
-Renders a compact footer showing runtime state (model, context %, cwd) and
-appends it to the FINAL message of an agent turn when enabled. Off by default
-to keep replies minimal.
-
-Config (``~/.hermes/config.yaml``)::
-
-    display:
-      runtime_footer:
-        enabled: true                        # off by default
-        fields: [model, context_pct, cwd]    # order shown; drop any to hide
-        account_usage: true                  # optional provider quota line
-
-Available fields:
-    model        — bare model id, vendor prefix dropped (``gpt-5.4``)
-    context_pct  — last-call context occupancy as a percent (``5%``)
-    latency      — wall-clock duration of the turn (``22s``, ``1m05s``)
-    cwd          — home-relative working dir (``~``)
-
-``latency`` is opt-in: it is NOT in the default field set, so a footer whose
-``fields`` are unset renders exactly as before.
-
-Per-platform overrides live under ``display.platforms.<platform>.runtime_footer``.
-Users can toggle the global setting with ``/footer on|off`` from both the CLI
-and any gateway platform.
-
-The footer is appended to the final response text in ``gateway/run.py`` right
-before returning the response to the adapter send path — so it only lands on
-the final message a user sees, not on tool-progress updates or streaming
-partials. When streaming is on and the final text has already been delivered
-piecemeal, the footer is sent as a separate trailing message via
-``send_trailing_footer()``.
-"""
+"""Gateway runtime-metadata footer (model · context % · cwd), off by default to keep replies
+minimal. Config: ``display.runtime_footer: {enabled: bool, fields: [model, context_pct, cwd]}``
+(order shown; drop any to hide), per-platform override ``display.platforms.<p>.runtime_footer``,
+toggled by ``/footer on|off``. Fields: ``model`` (vendor prefix dropped), ``context_pct`` (last-call
+occupancy), ``latency`` (turn wall-clock, opt-in — NOT in the default set so an unset ``fields``
+renders exactly as before), ``served_model`` (opt-in, ``alias → served``: the deployment a routing
+proxy reported via ``x-litellm-model-id`` / ``x-litellm-model-api-base``, or Hermes' own fallback
+route; skipped when the served model is the requested one), ``cwd`` (home-relative). ``gateway/run.py`` appends the footer to the
+final response only (never to tool-progress or streaming partials); when streaming already
+delivered the text, it goes out as a trailing message via ``send_trailing_footer()``."""
 
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime
 from typing import Any, Iterable, Optional
-from zoneinfo import ZoneInfo
-
-from agent.account_usage import AccountUsageSnapshot, fetch_account_usage
 
 _DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")
 _SEP = " · "
-_USAGE_CACHE_TTL_SECONDS = 60.0
-_USAGE_CACHE: dict[tuple[str, str, str], tuple[float, Any]] = {}
 
 
 def _home_relative_cwd(cwd: str) -> str:
-    """Return *cwd* with ``$HOME`` collapsed to ``~``. Empty string if unset."""
+    """Return *cwd* with ``$HOME`` collapsed to ``~``.  Empty string if unset."""
     if not cwd:
         return ""
     try:
@@ -64,222 +33,88 @@ def _home_relative_cwd(cwd: str) -> str:
 
 
 def _model_short(model: Optional[str]) -> str:
-    """Drop ``vendor/`` prefix for readability (``openai/gpt-5.4`` → ``gpt-5.4``)."""
-    if not model:
-        return ""
-    return model.rsplit("/", 1)[-1]
+    """Drop ``vendor/`` prefix (``openai/gpt-5.4`` → ``gpt-5.4``)."""
+    return model.rsplit("/", 1)[-1] if model else ""
 
 
-def resolve_footer_config(
-    user_config: dict[str, Any] | None,
-    platform_key: str | None = None,
-) -> dict[str, Any]:
-    """Resolve effective runtime-footer config for *platform_key*.
+def _env_cwd() -> str:
+    try:
+        from tools.terminal_scope import terminal_env
+    except ImportError:
+        return os.environ.get("TERMINAL_CWD", "")
+    return terminal_env("TERMINAL_CWD", "")
 
-    Merge order (later wins):
-        1. Built-in defaults (enabled=False)
-        2. ``display.runtime_footer``
-        3. ``display.platforms.<platform_key>.runtime_footer``
-    """
-    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS), "account_usage": False}
+
+def resolve_footer_config(user_config: dict[str, Any] | None, platform_key: str | None = None) -> dict[str, Any]:
+    """Resolve effective footer config: defaults (enabled=False) <
+    ``display.runtime_footer`` < ``display.platforms.<platform_key>.runtime_footer``."""
+    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS)}
     cfg = (user_config or {}).get("display") or {}
-
-    global_cfg = cfg.get("runtime_footer")
-    if isinstance(global_cfg, dict):
-        if "enabled" in global_cfg:
-            resolved["enabled"] = bool(global_cfg.get("enabled"))
-        if isinstance(global_cfg.get("fields"), list):
-            resolved["fields"] = [str(f) for f in global_cfg["fields"]]
-        if "account_usage" in global_cfg:
-            resolved["account_usage"] = bool(global_cfg.get("account_usage"))
-
-    if platform_key:
-        platforms = cfg.get("platforms") or {}
-        plat_cfg = platforms.get(platform_key)
-        if isinstance(plat_cfg, dict):
-            plat_footer = plat_cfg.get("runtime_footer")
-            if isinstance(plat_footer, dict):
-                if "enabled" in plat_footer:
-                    resolved["enabled"] = bool(plat_footer.get("enabled"))
-                if isinstance(plat_footer.get("fields"), list):
-                    resolved["fields"] = [str(f) for f in plat_footer["fields"]]
-                if "account_usage" in plat_footer:
-                    resolved["account_usage"] = bool(plat_footer.get("account_usage"))
-
+    plat_cfg = (cfg.get("platforms") or {}).get(platform_key) if platform_key else None
+    sections = [cfg.get("runtime_footer"), plat_cfg.get("runtime_footer") if isinstance(plat_cfg, dict) else None]
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if "enabled" in section:
+            resolved["enabled"] = bool(section.get("enabled"))
+        if isinstance(section.get("fields"), list) and section["fields"]:
+            resolved["fields"] = [str(f) for f in section["fields"]]
     return resolved
 
 
-def _format_model_pair(requested_model: Optional[str], effective_model: Optional[str]) -> str:
-    """Render requested/effective model names for the footer."""
-    requested_raw = str(requested_model or "").strip()
-    effective_raw = str(effective_model or "").strip()
-    requested = _model_short(requested_raw)
-    effective = _model_short(effective_raw)
-    if requested_raw and effective_raw and requested_raw != effective_raw:
-        return f"{requested or requested_raw} → {effective or effective_raw}"
-    return effective or requested
 def _format_latency(seconds: float) -> str:
     """Humanize a turn duration: ``<1s``, ``22s``, ``1m05s``."""
     if seconds < 1:
         return "<1s"
-    total = int(round(seconds))
+    total = round(seconds)
     if total < 60:
         return f"{total}s"
     m, sec = divmod(total, 60)
     return f"{m}m{sec:02d}s"
 
 
-def format_runtime_footer(
-    *,
-    model: Optional[str],
-    context_tokens: int,
-    context_length: Optional[int],
-    cwd: Optional[str] = None,
-    turn_seconds: Optional[float] = None,
-    fields: Iterable[str] = _DEFAULT_FIELDS,
-    requested_model: Optional[str] = None,
-) -> str:
-    """Render the footer line, or return "" if no fields have data.
-
-    Fields are skipped silently when their underlying data is missing — a
-    partially-populated footer is better than a line with ``?%`` or empty slots.
-    """
-    requested_fields = tuple(str(field) for field in fields)
-    parts: list[str] = []
-    emitted_fields: list[str] = []
-    for field in requested_fields:
-        if field == "model":
-            m = _format_model_pair(requested_model, model)
-            if m:
-                parts.append(m)
-                emitted_fields.append(field)
-        elif field == "context_pct":
-            if context_length and context_length > 0 and context_tokens >= 0:
-                pct = max(0, min(100, round((context_tokens / context_length) * 100)))
-                parts.append(f"ctx {pct}%")
-                emitted_fields.append(field)
-        elif field == "latency":
-            # Wall-clock turn duration. Skipped when the caller supplied no
-            # timing (call sites that don't measure) or the value is negative.
-            if turn_seconds is not None and turn_seconds >= 0:
-                parts.append(_format_latency(turn_seconds))
-                emitted_fields.append(field)
-        elif field == "cwd":
-            rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
-            if rel:
-                parts.append(rel)
-                emitted_fields.append(field)
-        # Unknown field names are silently ignored.
-
-    if not parts:
+def format_runtime_footer(*, model: Optional[str], context_tokens: int,
+                          context_length: Optional[int], cwd: Optional[str] = None,
+                          turn_seconds: Optional[float] = None,
+                          requested_model: Optional[str] = None, served_model: Optional[str] = None,
+                          fields: Iterable[str] = _DEFAULT_FIELDS) -> str:
+    """Render the footer line, or "" if no fields have data. Fields whose data is missing (and
+    unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots."""
+    def context_pct() -> str:
+        if context_length and context_length > 0 and context_tokens >= 0:
+            return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
         return ""
-    if (
-        emitted_fields == ["cwd"]
-        and "model" in requested_fields
-        and len(requested_fields) > 1
-    ):
+
+    def served() -> str:
+        requested = requested_model or model
+        alias = _model_short(requested)
+        if served_model and served_model not in (alias, requested):
+            return f"{alias} → {served_model}"
         return ""
-    return _SEP.join(parts)
+
+    renderers = {
+        "model": lambda: _model_short(model),
+        "served_model": served,
+        "context_pct": context_pct,
+        # Skipped when the caller did not measure (None) or the value is negative.
+        "latency": lambda: _format_latency(turn_seconds) if turn_seconds is not None and turn_seconds >= 0 else "",
+        "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
+    }
+    return _SEP.join(v for field in fields if (render := renderers.get(field)) and (v := render()))
 
 
-def _format_reset_timestamp(dt: Optional[datetime]) -> str:
-    if not dt:
-        return "unknown"
-    try:
-        return dt.astimezone(ZoneInfo("Asia/Almaty")).strftime("%Y-%m-%d %H:%M %Z")
-    except Exception:
-        return str(dt)
-
-
-def _usage_cache_key(provider: Optional[str], base_url: Optional[str], api_key: Optional[str]) -> tuple[str, str, str]:
-    return (
-        str(provider or "").strip().lower(),
-        str(base_url or "").strip(),
-        "present" if str(api_key or "").strip() else "",
-    )
-
-
-def _get_account_usage_snapshot(
-    *,
-    provider: Optional[str],
-    base_url: Optional[str],
-    api_key: Optional[str],
-) -> Optional[AccountUsageSnapshot]:
-    key = _usage_cache_key(provider, base_url, api_key)
-    now = time.time()
-    cached = _USAGE_CACHE.get(key)
-    if cached and (now - cached[0]) < _USAGE_CACHE_TTL_SECONDS:
-        return cached[1]
-    snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key)
-    _USAGE_CACHE[key] = (now, snapshot)
-    return snapshot
-
-
-def format_account_usage_footer(snapshot: Optional[AccountUsageSnapshot]) -> str:
-    if not snapshot or not snapshot.available or not snapshot.windows:
-        return ""
-    parts: list[str] = []
-    for window in snapshot.windows:
-        if window.used_percent is None:
-            continue
-        remaining = max(0, round(100 - float(window.used_percent)))
-        piece = f"{window.label}: {remaining}% left"
-        if window.reset_at:
-            piece += f" until {_format_reset_timestamp(window.reset_at)}"
-        elif window.detail:
-            piece += f" ({window.detail})"
-        parts.append(piece)
-    if not parts:
-        return ""
-    return "Quota: " + _SEP.join(parts)
-
-
-def build_footer_line(
-    *,
-    user_config: dict[str, Any] | None,
-    platform_key: str | None,
-    model: Optional[str],
-    context_tokens: int,
-    context_length: Optional[int],
-    cwd: Optional[str] = None,
-    requested_model: Optional[str] = None,
-    turn_seconds: Optional[float] = None,
-) -> str:
-    """Top-level entry point used by gateway/run.py.
-
-    Returns the footer text (empty string when disabled or no data). Callers
-    append this to the final response themselves, preserving a single blank
-    line of separation.
-
-    ``turn_seconds`` is the wall-clock duration of the agent run, measured by
-    the caller with ``time.monotonic()``.  Callers that don't measure it leave
-    it ``None`` and the ``latency`` field is skipped.
-    """
+def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str | None,
+                      model: Optional[str], context_tokens: int, context_length: Optional[int],
+                      cwd: Optional[str] = None, turn_seconds: Optional[float] = None,
+                      requested_model: Optional[str] = None, served_model: Optional[str] = None) -> str:
+    """Entry point for gateway/run.py: footer text, or "" when disabled / no data. Callers append it
+    to the final response themselves, preserving a single blank line of separation.
+    ``turn_seconds`` is the caller-measured (``time.monotonic()``) run duration; ``None`` skips the
+    ``latency`` field."""
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
-
-    runtime_footer = format_runtime_footer(
-        model=model,
-        requested_model=requested_model,
-        context_tokens=context_tokens,
-        context_length=context_length,
-        cwd=cwd,
-        turn_seconds=turn_seconds,
-        fields=cfg.get("fields", _DEFAULT_FIELDS),
-    )
-
-    quota_footer = ""
-    if cfg.get("account_usage"):
-        model_cfg = user_config or {}
-        provider = (model_cfg.get("model") or {}).get("provider")
-        base_url = (model_cfg.get("model") or {}).get("base_url")
-        api_key = (model_cfg.get("model") or {}).get("api_key")
-        snapshot = _get_account_usage_snapshot(provider=provider, base_url=base_url, api_key=api_key)
-        quota_footer = format_account_usage_footer(snapshot)
-
-    if runtime_footer and quota_footer:
-        return f"{runtime_footer}\n{quota_footer}"
-    if quota_footer:
-        return quota_footer
-    return runtime_footer
+    return format_runtime_footer(model=model, context_tokens=context_tokens,
+                                 context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
+                                 requested_model=requested_model, served_model=served_model,
+                                 fields=cfg.get("fields") or _DEFAULT_FIELDS)
