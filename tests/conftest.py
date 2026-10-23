@@ -365,6 +365,14 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
         monkeypatch.setattr(
             _pae, "AUTONOMOUS_WORKSPACE_ROOT", tmp_path / "autonomous-runs", raising=False
         )
+    # Controlled-execution reports default to the absolute production path
+    # /home/hermes/.hermes/controlled-runs; orchestrator binds it at import.
+    for _mod_name in ("hermes_cli.pipeline_report_artifacts", "hermes_cli.orchestrator"):
+        try:
+            _mod = importlib.import_module(_mod_name)
+        except Exception:  # pragma: no cover - module unavailable in trimmed envs
+            continue
+        monkeypatch.setattr(_mod, "DEFAULT_DURABLE_ROOT", tmp_path / "controlled-runs", raising=False)
 
     # 3c. hermes_state computes ``DEFAULT_DB_PATH = get_hermes_home() / "state.db"``
     #     at import time. When the module is first imported at collection (any
