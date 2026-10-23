@@ -58,6 +58,7 @@ def observe_gateway_turn(
     conversation_context: str | None = None,
     engineering_task_context: dict[str, Any] | None = None,
     db: SessionDB | None = None,
+    on_execution_start: Callable[[str | None], None] | None = None,
 ) -> OrchestratorObserveReport | None:
     del selected_provider, selected_model
 
@@ -168,6 +169,7 @@ def observe_gateway_turn(
         allow_test_execution=allow_test_execution,
         allow_registered_helper_selection=allow_registered_helper_selection,
         helper_execution_context=helper_execution_context,
+        on_execution_start=on_execution_start,
     )
     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
     execution_report = ExecutionReport(

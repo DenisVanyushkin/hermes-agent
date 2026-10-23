@@ -76,6 +76,7 @@ def evaluate_pipeline_execution_controller(
     allow_test_execution: bool = False,
     allow_registered_helper_selection: bool = False,
     helper_execution_context: Mapping[str, Any] | None = None,
+    on_execution_start: Callable[[str | None], None] | None = None,
 ) -> PipelineExecutionControllerResult:
     pipeline_id = getattr(state_snapshot, "pipeline_id", None)
     execution_mode = _execution_mode(config)
@@ -143,6 +144,7 @@ def evaluate_pipeline_execution_controller(
             execution_helper=execution_helper,
             allow_registered_helper_selection=allow_registered_helper_selection,
             helper_execution_context=helper_execution_context,
+            on_execution_start=on_execution_start,
         )
 
     engineer_fuse = evaluate_pipeline_execution_fuse(
@@ -184,6 +186,7 @@ def evaluate_pipeline_execution_controller(
         execution_helper=execution_helper,
         allow_registered_helper_selection=allow_registered_helper_selection,
         helper_execution_context=helper_execution_context,
+        on_execution_start=on_execution_start,
     )
 
 
@@ -199,6 +202,7 @@ def _invoke_resolved_helper(
     execution_helper: Callable[..., Any] | None,
     allow_registered_helper_selection: bool,
     helper_execution_context: Mapping[str, Any] | None,
+    on_execution_start: Callable[[str | None], None] | None = None,
 ) -> PipelineExecutionControllerResult:
     helper_resolution = pipeline_execution_helpers.resolve_pipeline_execution_helper(
         pipeline_id=pipeline_id,
@@ -224,6 +228,12 @@ def _invoke_resolved_helper(
             blocked_reason="helper_execution_context_missing",
             resolved_helper_name=helper_resolution.helper_name,
         )
+
+    # The helper is the long part of a turn (an engineering or recruiter run).
+    # Outside the try below: the gateway raises here to refuse a second run in
+    # a chat, and that must not read as a helper failure.
+    if on_execution_start is not None:
+        on_execution_start(getattr(session, "pipeline_session_id", None))
 
     try:
         helper_result = helper_resolution.helper(
