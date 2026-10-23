@@ -13,7 +13,7 @@ import model_tools
 import run_agent
 from hermes_cli.pipeline_mutations import MAX_CONTENT_BYTES, apply_controlled_mutations
 from hermes_cli.runtime_factory import RuntimeFactory
-from agent.chat_completion_helpers import _normalize_base_url_family
+from agent.base_url_family import _normalize_base_url_family
 from hermes_cli.pipeline_test_runner import run_controlled_tests
 
 

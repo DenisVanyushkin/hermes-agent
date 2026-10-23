@@ -2427,7 +2427,7 @@ def test_mismatch_diagnostic_includes_provider_and_family_not_api_key(tmp_path: 
 
 def test_normalize_base_url_family_codex_variants() -> None:
     """All chatgpt.com URL variants must normalize to 'codex'."""
-    from agent.chat_completion_helpers import _normalize_base_url_family
+    from agent.base_url_family import _normalize_base_url_family
 
     codex_urls = [
         "https://chatgpt.com/backend-api/codex",
@@ -2442,7 +2442,7 @@ def test_normalize_base_url_family_codex_variants() -> None:
 
 def test_normalize_base_url_family_openrouter_variants() -> None:
     """All openrouter.ai URL variants must normalize to 'openrouter'."""
-    from agent.chat_completion_helpers import _normalize_base_url_family
+    from agent.base_url_family import _normalize_base_url_family
 
     openrouter_urls = [
         "https://openrouter.ai/api/v1",
@@ -2456,7 +2456,7 @@ def test_normalize_base_url_family_openrouter_variants() -> None:
 
 def test_normalize_base_url_family_unknown_does_not_match_known() -> None:
     """An unknown base URL must normalize to 'unknown' and not match codex or openrouter."""
-    from agent.chat_completion_helpers import _normalize_base_url_family
+    from agent.base_url_family import _normalize_base_url_family
 
     result = _normalize_base_url_family(None, None, "https://some-proxy.example.com/api/v1")
     assert result == "unknown"
@@ -2466,7 +2466,7 @@ def test_normalize_base_url_family_unknown_does_not_match_known() -> None:
 
 def test_normalize_base_url_family_provider_fallback_when_no_url() -> None:
     """Without a base URL, provider string must determine the family."""
-    from agent.chat_completion_helpers import _normalize_base_url_family
+    from agent.base_url_family import _normalize_base_url_family
 
     assert _normalize_base_url_family("openai-codex", None, None) == "codex"
     assert _normalize_base_url_family("openai-codex", None, "") == "codex"
@@ -2481,7 +2481,7 @@ def test_normalize_base_url_family_provider_fallback_when_no_url() -> None:
 
 def test_normalize_codex_happy_path_urlparse() -> None:
     """All valid Codex base URL variants must normalize to 'codex'."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for url in [
         "https://chatgpt.com/backend-api/codex",
@@ -2495,7 +2495,7 @@ def test_normalize_codex_happy_path_urlparse() -> None:
 
 def test_normalize_openrouter_happy_path_urlparse() -> None:
     """All valid OpenRouter base URL variants must normalize to 'openrouter'."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for url in [
         "https://openrouter.ai/api/v1",
@@ -2508,7 +2508,7 @@ def test_normalize_openrouter_happy_path_urlparse() -> None:
 
 def test_normalize_non_codex_chatgpt_paths_are_unknown() -> None:
     """chatgpt.com URLs with wrong paths must normalize to 'unknown', not 'codex'."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for url in [
         "https://chatgpt.com/",
@@ -2522,7 +2522,7 @@ def test_normalize_non_codex_chatgpt_paths_are_unknown() -> None:
 
 def test_normalize_non_v1_openrouter_paths_are_unknown() -> None:
     """openrouter.ai URLs with wrong paths must normalize to 'unknown'."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for url in [
         "https://openrouter.ai/",
@@ -2535,7 +2535,7 @@ def test_normalize_non_v1_openrouter_paths_are_unknown() -> None:
 
 def test_normalize_proxy_and_substring_attacks_are_unknown() -> None:
     """URLs that embed a known domain in query/path must NOT be classified as known."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for url in [
         "https://example.com/proxy?target=https://chatgpt.com/backend-api/codex",
@@ -2548,7 +2548,7 @@ def test_normalize_proxy_and_substring_attacks_are_unknown() -> None:
 
 def test_normalize_hostname_boundary_attacks_are_unknown() -> None:
     """Domains that merely contain known hostnames as substrings must be rejected."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for url in [
         "https://evil-chatgpt.com/backend-api/codex",
@@ -2564,7 +2564,7 @@ def test_normalize_hostname_boundary_attacks_are_unknown() -> None:
 def test_normalize_present_bad_url_does_not_fall_back_to_provider() -> None:
     """When base_url is present but unrecognized, provider and api_mode must NOT be
     used as fallback — result must be 'unknown' regardless of provider/api_mode."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     bad_urls = [
         "https://chatgpt.com/some-other-path",
@@ -2587,7 +2587,7 @@ def test_normalize_present_bad_url_does_not_fall_back_to_provider() -> None:
 
 def test_normalize_empty_url_falls_back_to_provider() -> None:
     """When base_url is absent or empty, derive family from provider then api_mode."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     assert f("openai-codex", "codex_responses", None) == "codex"
     assert f("openai-codex", "codex_responses", "") == "codex"
@@ -2599,7 +2599,7 @@ def test_normalize_empty_url_falls_back_to_provider() -> None:
 
 def test_normalize_not_a_url_is_unknown() -> None:
     """Non-URL strings must normalize to 'unknown', not silently match a family."""
-    from agent.chat_completion_helpers import _normalize_base_url_family as f
+    from agent.base_url_family import _normalize_base_url_family as f
 
     for s in ["not-a-url", "codex", "openrouter", "gpt-5.5", "localhost", "::1"]:
         result = f(None, None, s)
