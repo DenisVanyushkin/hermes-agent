@@ -24,7 +24,6 @@ import importlib
 import os
 import shutil
 import sqlite3
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -46,27 +45,6 @@ _version_info._cached_version_info = _version_info.VersionInfo(
     "unknown", "git.0000000", None, "0" * 40, "main", "git")
 
 
-# ── Import-time HERMES_HOME guard ───────────────────────────────────────────
-# pytest imports this conftest BEFORE any test module, and that window is the
-# only one that matters here. ``cli.py`` calls ``setup_logging()`` at *module*
-# scope, so the first test module that transitively imports it attaches
-# RotatingFileHandlers to the root logger, resolved via ``get_hermes_home()``
-# right then. The per-test ``_hermetic_environment`` fixture below runs far too
-# late to prevent that, and ``setup_logging()`` latches on
-# ``_logging_initialized`` — so those handlers stick for the entire session and
-# every later test logs into the operator's REAL ~/.hermes/logs/errors.log.
-#
-# Not hypothetical: on 2026-07-16 fixture noise (`poison`, `RuntimeError: boom`,
-# `Too late`, `exfil`, `../../../etc/passwd`, MagicMock thread ids) reached the
-# production errors.log, where the nightly diagnostics collector ingested it and
-# the morning report presented it as real incidents.
-#
-# Setting the env var here means import-time side effects land in a throwaway
-# dir. ``_hermetic_environment`` still re-points HERMES_HOME per test for
-# storage isolation; this only covers what happens before it can run.
-_IMPORT_TIME_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-import-home-")
-os.environ["HERMES_HOME"] = _IMPORT_TIME_HERMES_HOME
-atexit.register(shutil.rmtree, _IMPORT_TIME_HERMES_HOME, True)
 # ── Sandbox HERMES_HOME before ANY test module is imported ──────────────────
 # `hermes_cli/main.py` calls `setup_logging()` at MODULE level, which resolves
 # `get_hermes_home()` and attaches rotating file handlers to the ROOT logger.
