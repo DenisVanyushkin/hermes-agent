@@ -144,6 +144,9 @@ dependencies = [
   # Fork: custom/fam (Amina) — StarLine car integration and RRULE expansion.
   "starline==0.1.5; python_version >= '3.14'",
   "python-dateutil==2.9.0.post0; python_version >= '3.14'",
+  # Fork: job_intel, role/review/pipeline modules and runtime scripts parse
+  # YAML with PyYAML; upstream moved to ruamel.yaml and no longer pulls it.
+  "pyyaml==6.0.3; python_version >= '3.14'",
   "fastapi>=0.104.0,<1; python_version >= '3.14'",
   # CIDR-aware forwarded_allow_ips requires uvicorn >=0.31.0.
   # uvicorn's [standard] extra bundles uvloop, httptools, and watchfiles.
