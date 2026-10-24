@@ -599,12 +599,12 @@ class TestHomePrefixFoldGuard:
         "C:/Users/alice",
     ])
     def test_real_home_is_foldable(self, path):
-        assert approval_module._home_prefix_fold_regex(path) is not None
+        assert approval_detection._home_prefix_fold_regex(path) is not None
 
     @pytest.mark.parametrize("path", ["", "/", "//", "C:\\", "C:/"])
     def test_degenerate_home_is_not_foldable(self, path):
         """An unset home or a bare filesystem/drive root must never fold."""
-        assert approval_module._home_prefix_fold_regex(path) is None
+        assert approval_detection._home_prefix_fold_regex(path) is None
 
 
 class TestSingleSegmentHomeSensitivePaths:
@@ -2041,9 +2041,9 @@ class TestApprovalPromptRedaction:
         assert seen["command"] == "rm -rf /var/data"
 
     def test_execute_code_no_notifier_fallback_redacts_script(self):
-        """check_execute_code_guard's no-notifier fallback denies definitively
-        (nothing consumes a pending approval headlessly) while still masking an
-        embedded secret in the returned message and command echo."""
+        """check_execute_code_guard's no-notifier gateway fallback (upstream: a
+        pending approval the user can answer later) masks an embedded secret in
+        the returned message and command echo."""
         from unittest.mock import patch as _patch
 
         from tools.approval import check_execute_code_guard
@@ -2059,13 +2059,9 @@ class TestApprovalPromptRedaction:
                         return_value=True):
                 with _patch("tools.approval_context._get_approval_mode",
                             return_value="manual"):
-                    # No gateway notify callback registered -> definitive deny.
                     result = check_execute_code_guard(code, "local")
 
         assert result["approved"] is False
-        assert result.get("status") != "pending_approval"
-        assert result.get("approval_pending") is not True
-        assert "do not retry" in result["message"].lower()
         # The script's credential must not appear in the user-facing message.
         assert "sk-proj-abc123xyz4567890abcdef" not in result["message"]
         assert "sk-proj-abc123xyz4567890abcdef" not in result["command"]

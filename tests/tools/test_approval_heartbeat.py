@@ -25,6 +25,7 @@ the smart reviewer and LLM config for no extra signal.  One end-to-end case
 is kept to prove the real terminal-guard path still reaches the loop.
 """
 
+from tools import approval_context, approval_gateway_wait
 import os
 import re
 import sys
@@ -144,7 +145,7 @@ class TestApprovalHeartbeat:
         # Force a long timeout so the wait can only end via our resolve, never
         # by the deadline elapsing (and so a sibling suite that leaks
         # _get_approval_config can't shorten it under us).
-        monkeypatch.setattr(mod, "_get_approval_timeout", lambda: 300)
+        monkeypatch.setattr(approval_context, "_get_approval_timeout", lambda: 300)
 
         calls: list[tuple[str, dict]] = []
         second_heartbeat = threading.Event()
@@ -165,7 +166,7 @@ class TestApprovalHeartbeat:
             try:
                 with patch("tools.environments.base.touch_activity_if_due",
                            _fake_touch):
-                    result_holder["result"] = mod._await_gateway_decision(
+                    result_holder["result"] = approval_gateway_wait._await_gateway_decision(
                         self.SESSION_KEY,
                         lambda _payload: notified.set(),
                         _approval_data(),
@@ -223,7 +224,7 @@ class TestApprovalHeartbeat:
         from tools import approval as mod
         from tools.environments import base as env_base
 
-        monkeypatch.setattr(mod, "_get_approval_timeout", lambda: 300)
+        monkeypatch.setattr(approval_context, "_get_approval_timeout", lambda: 300)
 
         pings: list[str] = []
         ping_seen = threading.Event()
@@ -246,7 +247,7 @@ class TestApprovalHeartbeat:
             try:
                 with patch("tools.environments.base.touch_activity_if_due",
                            _fast_touch):
-                    mod._await_gateway_decision(
+                    approval_gateway_wait._await_gateway_decision(
                         self.SESSION_KEY,
                         lambda _payload: notified.set(),
                         _approval_data(),
@@ -273,13 +274,13 @@ class TestApprovalHeartbeat:
         """Polling slices don't delay responsiveness — resolve is near-instant."""
         from tools import approval as mod
 
-        monkeypatch.setattr(mod, "_get_approval_timeout", lambda: 300)
+        monkeypatch.setattr(approval_context, "_get_approval_timeout", lambda: 300)
 
         result_holder: dict = {}
         notified = threading.Event()
 
         def _run_wait():
-            result_holder["result"] = mod._await_gateway_decision(
+            result_holder["result"] = approval_gateway_wait._await_gateway_decision(
                 self.SESSION_KEY,
                 lambda _payload: notified.set(),
                 _approval_data("rm -rf /tmp/nonexistent-fast-target"),
@@ -315,7 +316,7 @@ class TestApprovalHeartbeat:
         """
         from tools import approval as mod
 
-        monkeypatch.setattr(mod, "_get_approval_timeout", lambda: 300)
+        monkeypatch.setattr(approval_context, "_get_approval_timeout", lambda: 300)
 
         result_holder: dict = {}
         notified = threading.Event()
@@ -324,7 +325,7 @@ class TestApprovalHeartbeat:
             try:
                 with patch.dict(sys.modules,
                                 {"tools.environments.base": None}):
-                    result_holder["result"] = mod._await_gateway_decision(
+                    result_holder["result"] = approval_gateway_wait._await_gateway_decision(
                         self.SESSION_KEY,
                         lambda _payload: notified.set(),
                         _approval_data("rm -rf /tmp/nonexistent-import-fail-target"),

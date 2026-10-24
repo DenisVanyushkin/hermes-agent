@@ -3,8 +3,8 @@
 # format. Counts are "since the last agent.log rotation", not lifetime — a
 # rotation resets them to 0, which Prometheus handles as a normal counter reset.
 set -euo pipefail
-LOG=/home/hermes/.hermes/logs/agent.log
-OUT=/var/lib/hermes-metrics/smart_approval.prom
+LOG=${SMART_APPROVAL_LOG:-/home/hermes/.hermes/logs/agent.log}
+OUT=${SMART_APPROVAL_PROM:-/var/lib/hermes-metrics/smart_approval.prom}
 # Same directory as $OUT so the final mv is a same-filesystem atomic rename —
 # node_exporter must never read a half-written file.
 TMP=$(mktemp "${OUT}.XXXXXX")
@@ -18,7 +18,9 @@ trap 'rm -f "$TMP"' EXIT
   done
   echo '# HELP hermes_smart_approval_reviewer_failures_total Auxiliary reviewer calls that failed and fell back to ESCALATE (blocks)'
   echo '# TYPE hermes_smart_approval_reviewer_failures_total counter'
-  c=$(grep -c "Smart approval: reviewer call failed" "$LOG" || true)
+  # The fork's reviewer logged the first form; upstream v0.22.5's _smart_approve logs the
+  # other two (a failed call, and an empty 200 that escalates the same way).
+  c=$(grep -cE "Smart approval: reviewer call failed|Smart approvals: LLM call failed|Smart approvals: guardian returned an empty answer" "$LOG" || true)
   echo "hermes_smart_approval_reviewer_failures_total ${c}"
 } > "$TMP"
 chmod 644 "$TMP"

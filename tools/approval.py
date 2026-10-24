@@ -667,6 +667,9 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if is_dangerous and not _is_permanently_approved(pattern_key):
+        from tools.approval_cron_smart import smart_cron_allows  # fork: approvals.cron_mode: smart
+        if ctx.name == "cron" and smart_cron_allows("terminal", command, description):
+            return None
         result = block(f"Command flagged as dangerous ({description})")
         if ctx.name == "single_query":
             result.update(pattern_key=pattern_key, description=description)
@@ -1003,6 +1006,9 @@ def _run_approval_gate(
         }
         for ctx in _unattended_contexts():
             if ctx.mode() == "deny":
+                from tools.approval_cron_smart import smart_cron_allows  # fork: approvals.cron_mode: smart
+                if ctx.name == "cron" and smart_cron_allows("approval_gate", subject or display_target, description):
+                    return _approved()
                 message = deny_messages[ctx.name]
                 if not message and ctx.name == "unattended":
                     # Platform contexts keep the generic wording (historical shape).
@@ -1246,6 +1252,10 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     # sessions: the first active context resolves instantly from its mode.
     for ctx in _unattended_contexts():
         if ctx.mode() == "deny":
+            from tools.approval_cron_smart import smart_cron_allows  # fork: approvals.cron_mode: smart
+            if ctx.name == "cron" and smart_cron_allows(
+                    "execute_code", f"execute_code <<'PY'\n{code}\nPY", description):
+                return _approved()
             return _denied(
                 "BLOCKED: execute_code runs arbitrary local Python (including "
                 "subprocess calls that bypass shell-string approval checks). " + ctx.exec_tail,

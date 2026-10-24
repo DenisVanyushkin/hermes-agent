@@ -563,7 +563,11 @@ def _home_prefix_fold_regex(path: str):
     bare home is never folded. Returns ``None`` for an unset/degenerate path (fewer than two
     components: ``/``, ``C:\\``, ``""``) so a stray HOME cannot rewrite unrelated prefixes."""
     components = [c for c in re.split(r"[/\\]+", path) if c] if path else []
-    if len(components) < 2:
+    # Fork: a lone POSIX component (/root — the home sandbox containers and root
+    # cron sessions run with) is a real home and must fold; requiring two
+    # components left every /root/.ssh/authorized_keys write undetected. A lone
+    # Windows drive root (C:) is a root, not a home, and stays rejected.
+    if not components or (len(components) == 1 and re.match(r"^[A-Za-z]:$", components[0])):
         return None
     # Optional leading root separator; a Windows drive letter is a component.
     return re.compile(r"[/\\]*" + r"[/\\]+".join(re.escape(c) for c in components) + _PATH_TAIL)

@@ -127,29 +127,6 @@ class TestRequestToolApproval:
         assert persisted["key"] == "plugin_rule:ssh-writes"
         assert persisted["saved"] is True
 
-    def test_gateway_path_without_notifier_denies_definitively(self, monkeypatch):
-        """Gateway context but no notify callback → resolve, never defer.
-
-        This branch used to ``submit_pending`` and answer
-        ``status: approval_required``, which was a dead end: the ``_pending``
-        queue had no consumer and nothing reads that status, so the agent was
-        told a request had been sent that could never be delivered or
-        answered (the 2026-07-12 weather-cron thrash). It now goes through
-        ``_resolve_headless_gateway_approval`` like the terminal and
-        execute_code guards; queue and submitter are both deleted, so the
-        guard is asserted on the status instead of on a never-called mock.
-        """
-        monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
-        monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
-        res = request_tool_approval("browser_navigate", "external URL",
-                                    rule_key="ext-nav")
-        assert res["approved"] is False
-        assert res["status"] == "denied_no_approver"
-        assert res["status"] not in ("approval_required", "pending_approval")
-        assert res.get("approval_pending") is not True
-        assert res["pattern_key"] == "plugin_rule:ext-nav"
-        assert "do not retry" in res["message"].lower()
-
     def test_cron_deny_mode_blocks(self, monkeypatch):
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)

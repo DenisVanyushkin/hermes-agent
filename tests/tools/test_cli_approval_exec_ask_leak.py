@@ -46,9 +46,7 @@ def _clean_approval_env(monkeypatch):
     )
     approval_module._session_approved.clear()
     approval_module._permanent_approved.clear()
-    # Headless approvals are resolved deterministically now; legacy pending
-    # state is absent on the merged local policy.
-    getattr(approval_module, "_pending", {}).clear()
+    approval_module._pending.clear()
     # The consecutive-denial breaker is process-global; a tally left behind by
     # another test would leak its escalated addendum into these assertions.
     approval_module._denial_tally.clear()
@@ -77,8 +75,8 @@ class TestCliApprovalSurvivesExecAskLeak:
         assert result.get("approved") is True
         assert result.get("user_approved") is True
 
-    def test_headless_approval_is_resolved_without_cli_callback(self, monkeypatch):
-        """Headless ask-mode never leaves an approval nobody can answer."""
+    def test_pending_approval_still_used_without_cli_callback(self, monkeypatch):
+        """Headless ask-mode without a CLI callback keeps the pending fallback."""
         monkeypatch.setenv("HERMES_EXEC_ASK", "1")
         monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
         set_approval_callback(None)
@@ -86,8 +84,8 @@ class TestCliApprovalSurvivesExecAskLeak:
         result = check_all_command_guards("rm -rf /tmp/testdir", "local")
 
         assert result.get("approved") is False
-        assert result.get("status") == "denied_no_approver"
-        assert result.get("approval_pending") is not True
+        assert result.get("status") == "pending_approval"
+        assert result.get("approval_pending") is True
 
 
 class TestExecuteCodeGuardCliApprovalSurvivesExecAskLeak:
