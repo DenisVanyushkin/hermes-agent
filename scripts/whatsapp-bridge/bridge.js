@@ -51,6 +51,10 @@ import {
   normalizeWhatsAppId,
   pollCreationMessageFromPayload,
   pollUpdateForAggregation,
+  // Fork: reactions on our own messages (see reactionQueue).
+  reactionTargetText,
+  reactionDedupeKey,
+  normalizeReactionTimestampMs,
   writeJsonLine,
 } from './bridge_helpers.js';
 
@@ -267,6 +271,55 @@ const MAX_QUEUE_SIZE = 100;
 const recentlySentIds = createOutboundIdTracker(512);
 const recentlyProcessedPollUpdates = createOutboundIdTracker(512);
 const messageStore = createBoundedMessageStore(512);
+
+// Fork: emoji reactions on our own outbound messages, drained by GET /reactions.
+// Deliberately separate from messageQueue: every reaction is offered to the
+// deterministic ack hook (fam react-hook) first, and only one the hook does not
+// consume can become an agent turn (when reaction_dialogue is enabled).
+const reactionQueue = [];
+// WhatsApp redelivers reaction events (app-state resync, reconnect), and an ack
+// must not be applied twice -- fam/react.py is idempotent, but deduping here keeps
+// the redelivered noise out of the queue entirely.
+const recentlyProcessedReactions = createOutboundIdTracker(512);
+
+function enqueueReactionEvent(event) {
+  const dedupeId = reactionDedupeKey(event);
+  if (recentlyProcessedReactions.has(dedupeId)) return;
+  recentlyProcessedReactions.remember(dedupeId);
+  reactionQueue.push(event);
+  if (reactionQueue.length > MAX_QUEUE_SIZE) {
+    reactionQueue.shift();
+  }
+  try {
+    console.log(JSON.stringify({
+      event: 'reaction',
+      targetMessageId: event.targetMessageId,
+      emoji: event.emoji,
+      removal: event.removal,
+      chatId: redactWhatsAppId(event.chatId),
+    }));
+  } catch {}
+}
+
+// Fork: whatsapp.profile_photo_path, applied by the adapter on connect.
+function updateOwnProfilePhoto(filePath) {
+  if (!sock || connectionState !== 'connected') {
+    throw new Error('Not connected to WhatsApp');
+  }
+  const normalizedPath = String(filePath || '').trim();
+  if (!normalizedPath) {
+    throw new Error('filePath is required');
+  }
+  if (!existsSync(normalizedPath)) {
+    throw new Error(`File not found: ${normalizedPath}`);
+  }
+  const targetJid = normalizeWhatsAppId(sock.user?.id);
+  if (!targetJid) {
+    throw new Error('Unable to determine current WhatsApp account JID');
+  }
+  return sock.updateProfilePicture(targetJid, { url: normalizedPath })
+    .then(() => ({ success: true, jid: targetJid }));
+}
 // Bounded cache of already-downloaded inbound media, so a later reply to an
 // uncaptioned photo/video/document/voice note can still surface the original
 // file — see createQuotedMediaCache's doc comment in bridge_helpers.js.
@@ -667,6 +720,34 @@ async function startSocket() {
       }
 
       const messageContent = getMessageContent(msg);
+
+      // Fork: a reaction on a message WE sent goes to reactionQueue -- the ack hook
+      // gets first look, ahead of any LLM turn -- instead of becoming an ordinary
+      // "[Reaction: ...]" message. A reaction on someone else's message is a
+      // private gesture the gateway has no business seeing.
+      if (messageContent.reactionMessage) {
+        const reaction = messageContent.reactionMessage;
+        const target = reaction.key || {};
+        if (target.fromMe && target.id) {
+          enqueueReactionEvent({
+            targetMessageId: target.id,
+            targetText: reactionTargetText(messageStore, target.id),
+            emoji: reaction.text || '',
+            removal: !reaction.text,
+            chatId,
+            senderId,
+            timestamp: Math.floor(Date.now() / 1000),
+            senderTimestampMs: normalizeReactionTimestampMs(reaction.senderTimestampMs),
+          });
+        } else {
+          emitDebugEvent({
+            stage: 'ignored',
+            reason: 'reaction_on_foreign_message',
+            chatId: redactWhatsAppId(chatId),
+          });
+        }
+        continue;
+      }
       if (messageContent.pollUpdateMessage) {
         const pollUpdateMessage = messageContent.pollUpdateMessage;
         const pollKey = pollUpdateMessage.pollCreationMessageKey || {
@@ -838,6 +919,56 @@ app.get('/messages', (req, res) => {
 });
 
 // Send a message
+// Fork: poll for emoji reactions on our own messages (see reactionQueue).
+app.get('/reactions', (req, res) => {
+  res.json(reactionQueue.splice(0, reactionQueue.length));
+});
+
+// Fork: put (or remove) a reaction on a message we sent -- the ✅ Hermes shows once a
+// reaction ack landed. An empty `emoji` removes.
+app.post('/send-reaction', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const { chatId, messageId, emoji } = req.body;
+  const remoteJid = String(chatId || '').trim();
+  if (!remoteJid || !messageId) {
+    return res.status(400).json({ error: 'chatId and messageId are required' });
+  }
+  try {
+    // fromMe: the adapter only ever reacts to our own outbound reminders.
+    const sent = await sendWithTimeout(remoteJid, {
+      react: { text: emoji || '', key: { remoteJid, fromMe: true, id: messageId } },
+    });
+    trackSentMessageId(sent);
+    res.json({ success: true, messageId: sent?.key?.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fork: update the connected account's own profile photo.
+app.post('/profile-photo', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+  const normalizedPath = String(req.body?.filePath || '').trim();
+  if (!normalizedPath) {
+    return res.status(400).json({ error: 'filePath is required' });
+  }
+  if (!path.isAbsolute(normalizedPath)) {
+    return res.status(400).json({ error: 'filePath must be an absolute path' });
+  }
+  if (!existsSync(normalizedPath)) {
+    return res.status(404).json({ error: `File not found: ${normalizedPath}` });
+  }
+  try {
+    res.json(await updateOwnProfilePhoto(normalizedPath));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/send', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });

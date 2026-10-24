@@ -223,7 +223,8 @@ def test_reaction_becomes_a_text_turn_quoting_the_target():
     assert event.reply_to_message_id == "M1"
     assert event.reply_to_text == "Купила молоко?"
     assert event.reply_to_is_own_message is True
-    assert event.metadata["whatsapp_reaction"] == "👍"
+    # upstream's session envelope refuses metadata keys outside its WhatsApp contract
+    assert not event.metadata
 
 
 def test_emoji_in_turn_text_is_normalised():
@@ -265,38 +266,34 @@ def test_buffered_text_is_flushed_before_the_reaction_turn():
     assert key not in adapter._pending_text_batches
 
 
-def test_force_flush_cancels_the_pending_timer_task():
-    """Assert the cancellation INSIDE the running loop. asyncio.run() cancels
-    any leftover task at loop shutdown, so checking timer.cancelled() only
-    after the loop has closed would pass even with no cancel() call at all --
-    that false-positive shape is why this test previously asserted nothing
-    (review finding #2, 2026-07-29)."""
+def test_flush_now_leaves_nothing_for_the_pending_timer_to_dispatch():
+    """The flush pops the batch, so the timer still pending for it wakes up to an
+    empty slot: the text is dispatched exactly once, by the flush. Exercised on the
+    real enqueue/timer machinery inside a running loop."""
     adapter = _make_adapter(reaction_dialogue=True)
+    adapter._text_batch_delay_seconds = 0.05
+    adapter.handle_message = AsyncMock()
 
     async def scenario():
         pending = _pending_text_event(adapter, "текст")
+        adapter._enqueue_text_event(pending)
         key = adapter._text_batch_key(pending)
-        adapter.handle_message = AsyncMock()
-        adapter._pending_text_batches[key] = pending
-        timer = asyncio.create_task(asyncio.sleep(30))
-        adapter._pending_text_batch_tasks[key] = timer
-        await adapter._force_flush_text_batch(key)
-        # Give the cancellation a chance to land while the loop is still
-        # running, before asyncio.run()'s own shutdown sweep could mask it.
-        await asyncio.sleep(0)
-        assert timer.cancelled()
+        timer = adapter._pending_text_batch_tasks[key]
+        await adapter._flush_text_batch_now(key)
+        await asyncio.wait_for(timer, timeout=2)
+        assert adapter.handle_message.await_count == 1
 
     asyncio.run(scenario())
 
 
-def test_force_flush_on_empty_buffer_is_a_no_op():
+def test_flush_now_on_empty_buffer_is_a_no_op():
     adapter = _make_adapter(reaction_dialogue=True)
     adapter.handle_message = AsyncMock()
-    asyncio.run(adapter._force_flush_text_batch("nothing-here"))
+    asyncio.run(adapter._flush_text_batch_now("nothing-here"))
     adapter.handle_message.assert_not_awaited()
 
 
-def test_force_flush_does_not_lose_text_whose_timer_already_started_delivering_it():
+def test_flush_now_does_not_lose_text_whose_timer_already_started_delivering_it():
     """Review finding #1 (critical): if the real debounce timer
     (_enqueue_text_event / _flush_text_batch) already popped the pending
     event out of _pending_text_batches and is suspended inside
@@ -326,7 +323,7 @@ def test_force_flush_does_not_lose_text_whose_timer_already_started_delivering_i
         # inside handle_message before the reaction's force-flush runs.
         await started.wait()
 
-        await adapter._force_flush_text_batch(key)
+        await adapter._flush_text_batch_now(key)
         release.set()
         await timer
 
@@ -538,7 +535,7 @@ def test_orphaned_grandchild_hook_never_tree_kills_a_recycled_pid():
     adapter = _make_adapter(
         reaction_dialogue=True,
         reaction_hook_cmd=["/bin/sh", "-c", "sleep 2 &"])
-    with patch("plugins.platforms.whatsapp.adapter._REACTION_HOOK_TIMEOUT_S", 0.3), \
+    with patch("plugins.platforms.whatsapp.local_whatsapp._REACTION_HOOK_TIMEOUT_S", 0.3), \
          patch("plugins.platforms.whatsapp.adapter._terminate_bridge_process") as terminate_mock:
         dispatch = _apply(adapter, _reaction())
     dispatch.assert_awaited_once()

@@ -56,7 +56,7 @@ def test_non_operator_checkmark_is_noop():
     adapter._get_client = lambda ch: client
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.commit_gate_service.get_pending", return_value={"changed_files": ["a.py"]}),
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.get_pending", return_value={"changed_files": ["a.py"]}),
     ):
         event = _gate_event("white_check_mark", user="UINTRUDER")
         asyncio.run(adapter._maybe_apply_commit_approval(event))
@@ -72,7 +72,7 @@ def test_no_pending_marker_is_noop():
     adapter._get_client = lambda ch: client
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.commit_gate_service.get_pending", return_value=None),
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.get_pending", return_value=None),
     ):
         event = _gate_event("white_check_mark")
         asyncio.run(adapter._maybe_apply_commit_approval(event))
@@ -90,9 +90,9 @@ def test_non_gate_message_is_noop_and_pending_intact():
     adapter._get_client = lambda ch: client
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.commit_gate_service.get_pending", return_value={"changed_files": ["a.py"]}),
-        patch("plugins.platforms.slack.adapter.commit_gate_service.clear_pending") as clear_mock,
-        patch("plugins.platforms.slack.adapter.commit_gate_service.apply_commit") as commit_mock,
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.get_pending", return_value={"changed_files": ["a.py"]}),
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.clear_pending") as clear_mock,
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.apply_commit") as commit_mock,
     ):
         event = _gate_event("white_check_mark")
         asyncio.run(adapter._maybe_apply_commit_approval(event))
@@ -209,3 +209,29 @@ def test_checkmark_commits_when_history_fetch_empty(tmp_path):
 
     log = _git(repo, "log", "--oneline", "-1")
     assert "feat: add feature" in log.stdout
+
+
+def test_checkmark_refused_by_open_review_posts_the_refusal_and_commits_nothing():
+    """An unresolved changes_requested blocks the commit -- and the operator is told.
+    The pre-port handler returned the refusal text instead of posting it: silence."""
+    from types import SimpleNamespace
+
+    adapter = _adapter()
+    client = MagicMock()
+    client.conversations_history = AsyncMock(return_value={"messages": [{"text": GATE_TEXT}]})
+    client.chat_postMessage = AsyncMock()
+    adapter._get_client = lambda ch: client
+    refused = SimpleNamespace(allow_commit=False, approved_for_landing=False, detail="changes_requested: 2 findings")
+    with (
+        patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.get_pending",
+              return_value={"changed_files": ["a.py"], "workspace_path": "/tmp/nowhere"}),
+        patch("plugins.platforms.slack.local_slack.commit_gate_service.apply_commit") as apply_commit,
+        patch("hermes_cli.pipeline_autonomous_execution.commit_gate_authorization", return_value=refused),
+    ):
+        asyncio.run(adapter._maybe_apply_commit_approval(_gate_event("white_check_mark")))
+
+    apply_commit.assert_not_called()
+    client.chat_postMessage.assert_awaited_once()
+    posted = client.chat_postMessage.await_args.kwargs["text"]
+    assert "Не коммичу" in posted and "changes_requested" in posted

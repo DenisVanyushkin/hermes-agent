@@ -95,6 +95,19 @@ def _connect_patches(mock_proc, mock_fh):
 # data variable initialization
 # ---------------------------------------------------------------------------
 
+
+class _AsyncCM:
+    """Minimal async context manager returning a fixed value."""
+
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *exc):
+        return False
+
 class TestDataInitialized:
     """Verify an unparseable health response cannot leave polling state unbound."""
 

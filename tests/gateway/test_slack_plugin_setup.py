@@ -29,6 +29,11 @@ class _EventRegistry:
 
         return register
 
+    def __getattr__(self, _registration):
+        # Upstream's _register_bolt_handlers also wires commands, actions, views...;
+        # only events matter here, every other registration is a no-op decorator.
+        return lambda *_a, **_kw: (lambda handler: handler)
+
 
 def _patch_setup_io(monkeypatch, prompts, saved, removed, existing):
     """Wire interactive_setup's lazy-imported CLI helpers to test doubles."""
@@ -71,28 +76,33 @@ def test_interactive_setup_saves_home_channel(monkeypatch, tmp_path):
 
 
 def test_reaction_handlers_are_registered_once_per_logical_pipeline():
-    """Each Slack reaction event must reach each intended pipeline exactly once."""
-    adapter = SlackAdapter.__new__(SlackAdapter)
+    """Each Slack reaction event must reach each intended pipeline exactly once:
+    upstream's one listener per event type carries the fork pipeline too."""
+    from gateway.config import PlatformConfig
+
+    # A real adapter: upstream's _register_bolt_handlers wires every listener and
+    # reads adapter state on the way; only the Bolt app is a stand-in.
+    adapter = SlackAdapter(PlatformConfig(enabled=True, token="xoxb-fake"))
     adapter._app = _EventRegistry()
     adapter._handle_reaction_event = AsyncMock()
     adapter._handle_slack_reaction = AsyncMock()
 
-    adapter._register_reaction_handlers()
+    adapter._register_bolt_handlers()
 
-    assert len(adapter._app.handlers["reaction_added"]) == 2
-    assert len(adapter._app.handlers["reaction_removed"]) == 2
+    assert len(adapter._app.handlers["reaction_added"]) == 1
+    assert len(adapter._app.handlers["reaction_removed"]) == 1
 
     added = {"type": "reaction_added", "reaction": "+1"}
     for handler in adapter._app.handlers["reaction_added"]:
-        asyncio.run(handler(added, None))
+        asyncio.run(handler(added, None, None))
     adapter._handle_reaction_event.assert_awaited_once_with(added)
-    adapter._handle_slack_reaction.assert_awaited_once_with(added)
+    adapter._handle_slack_reaction.assert_awaited_once_with(added, removed=False)
 
     adapter._handle_reaction_event.reset_mock()
     adapter._handle_slack_reaction.reset_mock()
     removed = {"type": "reaction_removed", "reaction": "+1"}
     for handler in adapter._app.handlers["reaction_removed"]:
-        asyncio.run(handler(removed, None))
+        asyncio.run(handler(removed, None, None))
     adapter._handle_reaction_event.assert_awaited_once_with(removed)
     adapter._handle_slack_reaction.assert_awaited_once_with(removed, removed=True)
 

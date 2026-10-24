@@ -186,7 +186,7 @@ class TestEditMessageBlocks:
         assert "Reply truncated" in second["text"]
 
     @pytest.mark.asyncio
-    async def test_msg_too_long_finalize_edit_retries_without_blocks_and_preserves_marker(self):
+    async def test_msg_too_long_finalize_edit_drops_blocks_before_shortening(self):
         adapter, client = _make_adapter({"rich_blocks": True})
         original = "# Final answer\n\n" + ("details " * 200)
         client.chat_update = AsyncMock(
@@ -200,15 +200,32 @@ class TestEditMessageBlocks:
         first, second = [call.kwargs for call in client.chat_update.await_args_list]
         assert first["blocks"]
         assert second.get("blocks") in (None, [])
-        assert len(second["text"]) < len(first["text"])
-        assert "Reply truncated" in second["text"]
+        assert second["text"] == first["text"]
+        assert "Reply truncated" not in second["text"]
+
+    @pytest.mark.asyncio
+    async def test_msg_too_long_without_blocks_too_retries_shortened_with_marker(self):
+        adapter, client = _make_adapter({"rich_blocks": True})
+        original = "# Final answer\n\n" + ("details " * 200)
+        client.chat_update = AsyncMock(
+            side_effect=[_slack_msg_too_long(), _slack_msg_too_long(), {"ts": "111.222"}]
+        )
+
+        result = await adapter.edit_message("C1", "111.222", original, finalize=True)
+
+        assert result.success is True
+        assert client.chat_update.await_count == 3
+        first, _, third = [call.kwargs for call in client.chat_update.await_args_list]
+        assert third.get("blocks") in (None, [])
+        assert len(third["text"]) < len(first["text"])
+        assert "Reply truncated" in third["text"]
 
     @pytest.mark.asyncio
     async def test_msg_too_long_fallback_failure_is_safe_and_non_retryable(self):
         adapter, client = _make_adapter({"rich_blocks": True})
         original = "secret final answer " * 200
         client.chat_update = AsyncMock(
-            side_effect=[_slack_msg_too_long(), _slack_msg_too_long()]
+            side_effect=[_slack_msg_too_long(), _slack_msg_too_long(), _slack_msg_too_long()]
         )
 
         result = await adapter.edit_message("C1", "111.222", original, finalize=True)

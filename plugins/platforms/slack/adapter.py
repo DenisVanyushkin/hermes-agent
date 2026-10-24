@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 
 # User-Agent prefix (``HermesAgent/<version>``) for platform-partner attribution of API calls.
 from hermes_cli.version_info import get_version_info
+from plugins.platforms.slack.local_slack import SlackForkMixin  # fork: reactions, feedback, msg_too_long
 
 _HERMES_SLACK_USER_AGENT_PREFIX = f"HermesAgent/{get_version_info().base_version}"
 
@@ -1009,7 +1010,7 @@ def _extra_or_env_channel_set_getter(
     return getter
 
 
-class SlackAdapter(BasePlatformAdapter):
+class SlackAdapter(SlackForkMixin, BasePlatformAdapter):
     """Slack bot adapter (Socket Mode).
     Needs SLACK_BOT_TOKEN (xoxb-, API calls) and SLACK_APP_TOKEN (xapp-, Socket Mode). DMs +
     mention-gated channels, threads, attachments, slash commands, status text."""
@@ -1057,6 +1058,8 @@ class SlackAdapter(BasePlatformAdapter):
         self._team_clients: dict[str, Any] = {}
         self._team_bot_user_ids: dict[str, str] = {}
         self._team_bot_names: dict[str, str] = {}
+        # Fork: workspace domain (<domain>.slack.com) → team_id, from authenticated auth.test.
+        self._workspace_team_ids: dict[str, str] = {}
         # User/channel IDs are workspace-local: name/is_bot caches key by (team_id, id) so
         # multi-workspace processes never reuse another tenant's names (is_bot catches peer-agent
         # posts lacking bot_id/bot_message markers; DM channel IDs are per-user, hence bounded).
@@ -1625,6 +1628,9 @@ class SlackAdapter(BasePlatformAdapter):
 
         def _reaction(removed: bool):
             async def _handler(event, body):
+                # Fork: job-intel feedback, idea capture, vacancy triggers, baseline doctor
+                # and the commit gate -- registered once, inside upstream's one listener.
+                await self._handle_reaction_event(event)
                 await self._handle_slack_reaction(event, removed=removed)
 
             return _handler
@@ -1771,6 +1777,7 @@ class SlackAdapter(BasePlatformAdapter):
         self._team_clients[team_id] = client
         self._team_bot_user_ids[team_id] = bot_user_id
         self._team_bot_names[team_id] = bot_name
+        self._remember_workspace_domain(auth_response, team_id)  # fork
         if self._bot_user_id is None:
             self._bot_user_id = bot_user_id
         if self._bot_display_name is None:
@@ -1821,6 +1828,7 @@ class SlackAdapter(BasePlatformAdapter):
             # Reset so a reconnect with dropped/rotated tokens carries no stale identities.
             self._bot_user_id = self._bot_display_name = None
             self._team_clients, self._team_bot_user_ids, self._team_bot_names = {}, {}, {}
+            self._workspace_team_ids = {}  # fork
             self._app = AsyncApp(
                 token=bot_tokens[0], client=self._new_web_client(bot_tokens[0], proxy_url),
                 before_authorize=_slack_per_request_proxy_middleware(proxy_url))
@@ -1922,6 +1930,7 @@ class SlackAdapter(BasePlatformAdapter):
         await self._close_workspace_clients()
         self._app = self._app_token = self._proxy_url = self._bot_user_id = None
         self._team_clients, self._team_bot_user_ids = {}, {}
+        self._workspace_team_ids = {}  # fork
         self._channel_team, self._dm_conversation_cache = {}, {}
         self._release_platform_lock()
         logger.info("[Slack] Disconnected")
@@ -2413,8 +2422,19 @@ class SlackAdapter(BasePlatformAdapter):
                 blocks = self._maybe_blocks(content)
                 if blocks:
                     update_kwargs["blocks"] = blocks
-            await self._call_with_block_fallback(
-                lambda: self._client_for(chat_id, metadata), "chat_update", update_kwargs, "edit")
+            try:
+                await self._call_with_block_fallback(
+                    lambda: self._client_for(chat_id, metadata), "chat_update", update_kwargs, "edit")
+            except Exception as e:
+                # Fork: Slack can still say msg_too_long after the truncation above (it
+                # counts differently); one shorter plain-text edit with a visible marker.
+                if self._slack_provider_error_code(e) != "msg_too_long":
+                    raise
+                too_long = await self._retry_too_long_edit(
+                    lambda: self._client_for(chat_id, metadata), chat_id, message_id, formatted,
+                    update_kwargs, finalize=finalize, metadata=metadata)
+                if too_long is not None:
+                    return too_long
             if finalize:
                 await self._clear_thread_status_quietly(chat_id, metadata)
             return SendResult(success=True, message_id=message_id)
@@ -4581,6 +4601,8 @@ class SlackAdapter(BasePlatformAdapter):
         if accepted is None:
             return
         event, dedup_team_id, channel_id = accepted
+        if self._consume_feedback_thread_reply(event):  # fork: job-intel feedback replies
+            return
         original_text = event.get("text", "")
         # Slack rejects slash commands inside threads, so a leading ``!`` is rewritten to ``/``
         # — only for known gateway commands, so "!nice work" passes through.
@@ -4677,9 +4699,10 @@ class SlackAdapter(BasePlatformAdapter):
             reply_expected=self._slack_reply_expected(
                 routing_text, bot_uid, channel_id=channel_id, opens_own_session=thread_ts == ts,
                 addressed=is_one_to_one_dm or is_mentioned or is_command_text or force_process))
-        # React only when directly addressed; MPIMs are shared, so they need a
-        # mention like any channel.
-        if (is_one_to_one_dm or is_mentioned) and self._reactions_enabled():
+        # Fork: ack every message that got this far -- everything here will be processed
+        # and answered, so the in-progress reaction is an ack, not noise; messages the
+        # gating above ignores returned earlier.
+        if self._reactions_enabled():
             self._track_reacting_message(team_id, ts)
         # App-context is per-turn UI state: in the user message, not SessionSource (would rebuild
         # the agent per view switch and leak stale context). Inert label, never a channel body.

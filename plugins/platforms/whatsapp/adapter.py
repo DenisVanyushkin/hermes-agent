@@ -216,6 +216,9 @@ from gateway.platforms.base import (
     BasePlatformAdapter, SendResult, SUPPORTED_DOCUMENT_TYPES, cache_image_from_url, cache_audio_from_url,
 )
 from gateway.platforms.helpers import cancel_task
+from plugins.platforms.whatsapp.local_whatsapp import (  # fork: reactions, profile photo, log rotation
+    _REACTION_HOOK_TIMEOUT_S, WhatsAppForkMixin, _rotate_bridge_log_if_large,
+)
 from gateway.platforms.event import MessageEvent, MessageType
 from utils import env_int
 
@@ -344,7 +347,7 @@ def _needs_bridge(method):
     return _guarded
 
 
-class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
+class WhatsAppAdapter(WhatsAppForkMixin, WhatsAppBehaviorMixin, BasePlatformAdapter):
     """Transport over a local Node.js (Baileys) HTTP bridge; behavior lives in ``WhatsAppBehaviorMixin``. config.extra: bridge_script /
     bridge_port (3000) / session_path, dm_policy / group_policy (open|allowlist|disabled|pairing), allow_from / group_allow_from, send_read_receipts."""
 
@@ -374,6 +377,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._bridge_script: str = extra.get("bridge_script", str(self._DEFAULT_BRIDGE_DIR / "bridge.js"))
         self._session_path = _session_dir(extra)
         self._reply_prefix: Optional[str] = extra.get("reply_prefix")
+        self._init_fork_whatsapp(extra)  # fork
         self._dm_policy = str(_extra_or_secret(extra, "dm_policy", "WHATSAPP_DM_POLICY", "pairing")).strip().lower()
         self._allow_from = self._coerce_allow_list(self._select_dm_allowlist(extra, ("WHATSAPP_ALLOWED_USERS",), _wenv))
         self._group_policy = str(_extra_or_secret(extra, "group_policy", "WHATSAPP_GROUP_POLICY", "pairing")).strip().lower()
@@ -458,6 +462,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._bridge_process = managed_process
         self._http_session = aiohttp.ClientSession()
         self._poll_task = asyncio.create_task(self._poll_messages())
+        self._start_fork_bridge_tasks()  # fork: reaction poll, profile photo
 
     async def _reuse_running_bridge(self, bridge_path: Path) -> bool:
         """Adopt a connected bridge serving the on-disk bridge.js + same read-receipt config; else say why it restarts."""
@@ -683,6 +688,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 await asyncio.sleep(1)
             # Bridge output goes to a log file so QR codes, errors, and reconnection messages survive for troubleshooting.
             self._bridge_log = self._session_path.parent / "bridge.log"
+            _rotate_bridge_log_if_large(self._bridge_log)  # fork: bounded bridge.log
             self._bridge_log_fh = bridge_log_fh = open(self._bridge_log, "a", encoding="utf-8")  # noqa: ASYNC230 -- long-lived log handle handed to the bridge subprocess
             node = find_node_executable("node")
             if node is None:
@@ -758,6 +764,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         if self._bridge_process or not getattr(self, "_runtime_status_platform_key", ""):
             _unlink_quietly(self._session_path / "bridge.pid")
         await cancel_task(self._poll_task)
+        await self._stop_reaction_polling()  # fork
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
         self._poll_task = self._http_session = self._bridge_process = None

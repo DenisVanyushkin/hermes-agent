@@ -754,3 +754,52 @@ export function installConsoleStamps(target = console) {
 export function writeJsonLine(payload, stream = process.stdout) {
   stream.write(`${JSON.stringify(payload)}\n`);
 }
+
+// ── Fork: reactions on our own messages ─────────────────────────────────
+
+/** Text of a stored message's content; the quoted-message reader under its general name. */
+export function textFromMessageContent(content) {
+  return textFromQuotedMessage(content);
+}
+
+/**
+ * Text of one of our own outbound messages, for correlating an emoji
+ * reaction back to what it reacts to.
+ *
+ * The store is in-memory: after a bridge restart every pre-restart id
+ * misses and this returns null. That is deliberate -- a reaction is about
+ * something recent, and waking the agent with no context is worse than
+ * dropping the event (spec: reactions-dialogue, 2026-07-29).
+ */
+export function reactionTargetText(messageStore, targetId, maxLen = 500) {
+  if (!messageStore || !targetId) return null;
+  const stored = messageStore.get(targetId);
+  if (!stored) return null;
+  const text = String(textFromMessageContent(stored.message) || '').trim();
+  if (!text) return null;
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
+}
+
+/**
+ * senderTimestampMs on IReactionMessage may arrive as a protobuf Long, a
+ * plain number, or be absent -- normalise to a decimal string so the dedupe
+ * key never has to care which shape it got. undefined when absent.
+ */
+export function normalizeReactionTimestampMs(value) {
+  if (value === undefined || value === null) return undefined;
+  // String() already calls .toString() on an object (a protobuf Long included).
+  return String(value);
+}
+
+/**
+ * Identity of one reaction event for the dedupe tracker. WhatsApp redelivers
+ * reactions on resync/reconnect with the same senderTimestampMs, so including
+ * it lets a genuine remove-then-reapply of the same emoji (new timestamp)
+ * through while a true redelivery still dedupes. Without the field the key is
+ * the pre-existing one exactly.
+ */
+export function reactionDedupeKey(event) {
+  const base = `react:${event.targetMessageId}:${event.senderId}:${event.emoji}`;
+  const ts = normalizeReactionTimestampMs(event.senderTimestampMs);
+  return ts === undefined ? base : `${base}:${ts}`;
+}

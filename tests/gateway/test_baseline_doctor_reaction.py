@@ -32,8 +32,8 @@ def test_broom_by_operator_runs_doctor():
         {"path": "scripts/x.py", "category": "untracked", "hint": "script"}]}
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.run_baseline_doctor", return_value=doctor_result),
-        patch("plugins.platforms.slack.adapter.record_pending",
+        patch("plugins.platforms.slack.local_slack.run_baseline_doctor", return_value=doctor_result),
+        patch("plugins.platforms.slack.local_slack.record_pending",
               side_effect=lambda ts, rem: recorded.update({ts: rem})),
     ):
         event = {"type": "reaction_added", "reaction": "broom", "user": "UOP",
@@ -70,10 +70,10 @@ def test_action_reaction_applies_and_rechecks():
 
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.pop_pending",
+        patch("plugins.platforms.slack.local_slack.pop_pending",
               return_value=[{"path": "scripts/x.py", "category": "untracked"}]),
-        patch("plugins.platforms.slack.adapter._apply_action", side_effect=fake_apply),
-        patch("plugins.platforms.slack.adapter.run_baseline_doctor",
+        patch("plugins.platforms.slack.local_slack._apply_action", side_effect=fake_apply),
+        patch("plugins.platforms.slack.local_slack.run_baseline_doctor",
               return_value={"clean": True, "fixed": [], "remaining": []}),
     ):
         event = {"type": "reaction_added", "reaction": "see_no_evil", "user": "UOP",
@@ -91,7 +91,7 @@ def test_action_reaction_unknown_ts_ignored():
     adapter._get_client = lambda ch: client
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.pop_pending", return_value=None),
+        patch("plugins.platforms.slack.local_slack.pop_pending", return_value=None),
     ):
         event = {"type": "reaction_added", "reaction": "package", "user": "UOP",
                  "item": {"channel": "C1", "ts": "unknown"}}
@@ -112,7 +112,7 @@ def test_alternative_free_reaction_also_runs_doctor():
 
     with (
         patch.dict(os.environ, {"HERMES_OPERATOR_SLACK_UID": "UOP"}),
-        patch("plugins.platforms.slack.adapter.run_baseline_doctor",
+        patch("plugins.platforms.slack.local_slack.run_baseline_doctor",
               return_value={"clean": True, "fixed": [], "remaining": []}),
     ):
         event = {"type": "reaction_added", "reaction": "recycle", "user": "UOP",
