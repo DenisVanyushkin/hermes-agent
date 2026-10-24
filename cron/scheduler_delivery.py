@@ -536,7 +536,9 @@ def cron_delivery_targets() -> list[dict]:
         connected |= _relay_fronted_delivery_platforms(connected)
     except Exception:
         logger.debug("cron_delivery_targets: gateway config unavailable", exc_info=True)
-        connected = set()
+        # Fork: a gateway failure is a delivery-safety failure. Expose no target at all --
+        # not even local Bot Chat ones -- while the inventory is incomplete.
+        return targets
 
     for name in _iter_home_target_platforms():
         if name not in connected or not _is_known_delivery_platform(name):
@@ -1222,8 +1224,10 @@ def _live_route_metadata(t: _TargetDelivery) -> tuple[Optional[str], dict, dict]
     ``thread_id`` rides in ``route_metadata`` to bypass the router's private-chat anchor rule."""
     from gateway.config import Platform
     from gateway.delivery import _looks_like_int, looks_like_telegram_private_chat_id
+    from cron.local_cron import NAMED_TOPIC_MEDIA_KEY, named_telegram_private_topic  # fork
     job = t.job
     thread_id = t.thread_id
+    named_topic = named_telegram_private_topic(t.platform, t.chat_id, thread_id)
     is_ambiguous_telegram_topic = (
         t.platform == Platform.TELEGRAM
         and thread_id is not None
@@ -1240,6 +1244,13 @@ def _live_route_metadata(t: _TargetDelivery) -> tuple[Optional[str], dict, dict]
             "notify": t.notify_delivery,
         }
         media_metadata = {"direct_messages_topic_id": str(thread_id), "notify": t.notify_delivery}
+    elif named_topic:
+        # Fork: a named private topic keeps its NAME on the target only. The DeliveryRouter
+        # creates/reuses the forum topic and refreshes a stale mapping, but only when no
+        # thread routing key is in the metadata -- a bare thread_id would send to General.
+        route_thread_id = named_topic
+        route_metadata = {"job_id": job["id"], "notify": t.notify_delivery}
+        media_metadata = {"notify": t.notify_delivery, NAMED_TOPIC_MEDIA_KEY: named_topic}
     else:
         # Forum-style topic or non-topic target: message_thread_id.
         # Put thread_id in *route_metadata* (not just the DeliveryTarget) deliberately — the
@@ -1369,6 +1380,19 @@ def _live_send_media(
     t: _TargetDelivery, media_metadata: dict, media_files: list, delivery_errors: list) -> None:
     """Send extracted media as native attachments with the same routing as the text send."""
     routed_media_metadata = dict(media_metadata or {})
+    from cron.local_cron import NAMED_TOPIC_MEDIA_KEY, resolve_named_telegram_dm_topic_id  # fork
+    named_topic = routed_media_metadata.pop(NAMED_TOPIC_MEDIA_KEY, None)
+    if named_topic:
+        # Media bypasses the router: resolve the topic the text send just used.
+        topic_id = resolve_named_telegram_dm_topic_id(
+            t.runtime_adapter, t.chat_id, named_topic, t.loop, t.job["id"])
+        if not topic_id:
+            msg = (f"media not delivered to {t.where}: named Telegram DM topic "
+                   f"{named_topic!r} could not be resolved")
+            logger.warning("Job '%s': %s", t.job["id"], msg)
+            delivery_errors.append(msg)
+            return
+        routed_media_metadata["thread_id"] = topic_id
     if t.is_relay:
         routed_media_metadata["_relay_logical_platform"] = t.platform.value
         logical_home = t.config.get_home_channel(t.platform)
@@ -1646,7 +1670,9 @@ def _prepare_target_delivery(
 
     origin = _resolve_origin(job) or {}
     origin_thread = origin.get("thread_id")
-    if origin_thread and not thread_id:
+    from cron.local_cron import thread_id_dropped_for_origin_conversation  # fork
+    # Only the origin conversation can lose a thread; fan-out elsewhere never had one.
+    if thread_id_dropped_for_origin_conversation(origin, target):
         logger.warning(
             "Job '%s': origin has thread_id=%s but delivery target lost it (deliver=%s, target=%s)",
             job["id"], origin_thread, job.get("deliver", "local"), target)
@@ -1763,7 +1789,8 @@ def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
 
 
 def _deliver_result(
-    job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
+    job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False,
+    wrap: Optional[bool] = None,
 ) -> Optional[str]:
     """Deliver job output to the configured target(s). With ``adapters``/``loop`` (gateway
     running) the live adapter is tried first (E2EE rooms can't use the standalone HTTP path), then
@@ -1806,6 +1833,10 @@ def _deliver_result(
     with contextlib.suppress(Exception):
         user_cfg = _sched.load_config()
         wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+    if wrap is not None:
+        # Fork: a synthetic, non-job delivery (the cron operator alert) decides for itself --
+        # its "Cronjob Response: <name>" header would name a job that does not exist.
+        wrap_response = wrap
     # Mark live sends FINAL so the platform pushes them (Telegram "important" mode mutes otherwise).
     notify_delivery = _cron_delivery_notify_enabled(user_cfg)
     # Targets acked with NO evidence (bare SendResult(success=True) — Slack/Matrix/Mattermost);

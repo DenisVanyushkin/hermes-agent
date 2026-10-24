@@ -182,7 +182,9 @@ def test_no_alert_channel_configured_is_a_silent_no_op(monkeypatch, caplog) -> N
         scheduler._send_cron_operator_alert("⚠️ Cron 'x' failed", cfg={})
 
     assert sent == []
-    assert not caplog.records, [r.getMessage() for r in caplog.records]
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("operator alert failed" in m for m in messages), messages
+    assert any("error_alerts.channel is not configured" in m for m in messages), messages
 
 
 def test_alert_delivery_failure_never_raises(monkeypatch) -> None:

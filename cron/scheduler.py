@@ -267,6 +267,10 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     job_id = job.get("id") or job_name
     text = (error or "unknown error").strip()
     lower = text.lower()
+    from cron.local_cron import redact_technical_detail, review_gate_block_notice  # fork
+    review_notice = review_gate_block_notice(job_name, text)
+    if review_notice is not None:
+        return review_notice
 
     # Script runner contract ("Script timed out after {n}s: {path}") — also for agent jobs with a
     # context script. Must precede provider classification so it never claims a model failure.
@@ -291,9 +295,9 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
         if notice is not None:
             return notice
 
-    # Strip exception wrappers; bound input first so a multi-KB blob can't slow the regexes.
-    cleaned = re.sub(r"^(RuntimeError|Exception|ValueError|HTTPStatusError):\s*", "", text[:2000])
-    cleaned = re.sub(r"\s+", " ", cleaned).strip().rstrip(".")
+    # Strip exception wrappers, traceback frames and filesystem paths (fork: a chat delivery
+    # never discloses Python internals or install layout); bound the input first.
+    cleaned = redact_technical_detail(text[:2000]).rstrip(".") or "no diagnostic detail available"
     if len(cleaned) > 180:
         cleaned = cleaned[:177].rstrip() + "..."
     message = generic_failure_notice(job_name, job_id, cleaned)
@@ -2609,6 +2613,10 @@ def run_job(
         if scope.workdir:
             logger.info("Job '%s': using task-scoped workdir %s", job_id, scope.workdir)
         _reload_dotenv_and_publish_delivery_target(job)
+        # Fork: mark the turn with who reads its result, before the agent's worker thread
+        # copies the context; the finalizer drops engineering footers for end users.
+        from cron.local_cron import bind_cron_audience_context
+        bind_cron_audience_context(job)
 
         jc = _load_cron_job_config(job, job_id, job_name)
         _cfg = jc.cfg
@@ -2683,6 +2691,8 @@ def run_job(
             _worker_state.get("future"), _session_db, agent, job_id, job_name, _cron_session_id,
             workdir=scope.workdir)
         scope.exit()
+        from cron.local_cron import clear_cron_audience_context  # fork: never leaks to the next job
+        clear_cron_audience_context()
         if _session_db and not _worker_teardown_deferred:
             _finalize_cron_session(_session_db, agent, job_id, job_name, _cron_session_id,
                                    workdir=scope.workdir)
@@ -3127,6 +3137,14 @@ def _save_compose_deliver(
 
     if not d.should_deliver:
         return
+    # Fork: an end-user job's technical failure is withheld from its chat and goes to the
+    # operator alert channel -- decided here, where the notice would actually be sent.
+    deliver_content, _operator_alert = _route_failure_for_audience(
+        job, success=d.success, deliver_content=deliver_content, error=d.error)
+    if _operator_alert is not None:
+        _send_cron_operator_alert(_operator_alert, adapters=adapters, loop=loop)
+        d.should_deliver = False
+        return
     d.unresolved_origin = (
         _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)) == "origin"
         and not _resolve_delivery_targets(job, for_failure=not d.success)
@@ -3181,6 +3199,12 @@ def _deliver_crash_failure(
     incident_acked, failure_incident_id = _upsert_incident_for_failure(job, err_text)
     if incident_acked:
         return None, "suppressed_acked"
+    _, _operator_alert = _route_failure_for_audience(  # fork: audience policy
+        job, success=False, error=err_text,
+        deliver_content=_summarize_cron_failure_for_delivery(job, err_text))
+    if _operator_alert is not None:
+        _send_cron_operator_alert(_operator_alert, adapters=adapters, loop=loop)
+        return None, "suppressed"
     delivery_error = None
     try:
         delivery_error = _deliver_result(
@@ -4402,6 +4426,19 @@ from cron.scheduler_prompt import (
 from cron.scheduler_preflight import (
     BLOCKED_CONFIG_MARKER, BLOCKED_CONFIG_SILENT_MARKER, _cron_preflight_enabled,
     _empty_requested_mcp_toolsets, _is_transient_provider_resolve_error, _preflight_job_config,
+)
+
+
+# Fork (cron/local_cron.py): names the fork's callers and tests import from the facade.
+from cron.local_cron import (  # noqa: E402
+    CRON_AUDIENCE_CONTEXT_VAR, bind_cron_audience_context, clear_cron_audience_context,
+    plan_cron_failure_delivery, resolve_cron_audience,
+)
+from cron.local_cron import route_failure_for_audience as _route_failure_for_audience  # noqa: E402
+from cron.local_cron import send_cron_operator_alert as _send_cron_operator_alert  # noqa: E402
+from cron.local_cron import redact_technical_detail as _redact_technical_detail  # noqa: E402
+from cron.local_cron import (  # noqa: E402
+    thread_id_dropped_for_origin_conversation as _thread_id_dropped_for_origin_conversation,
 )
 
 

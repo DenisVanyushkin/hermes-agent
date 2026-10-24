@@ -34,12 +34,19 @@ def parse_telegram_username_target(target_ref: Any) -> str | None:
 
 
 _SEND_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
+# Fork: a private DM topic by NAME (``79564752:Погода Алматы``) -- cron jobs persist this form
+# so the router can create/reuse the Bot API topic. Positive private chat ids only; numeric
+# topic ids keep matching the regex above first.
+_NAMED_TOPIC_TARGET_RE = re.compile(r"^\s*(\d+):\s*(\S(?:.*\S)?)\s*$")
 
 
 def parse_send_target(ref):
     """``target_ref_syntax_fn`` for the Telegram ``PlatformEntry``."""
     # "<chat_id>[:<topic_id>]" or an @username (usernames must not be force-int'd).
     parsed = regex_groups_parser(_SEND_TARGET_RE)(ref)
+    if parsed:
+        return parsed
+    parsed = regex_groups_parser(_NAMED_TOPIC_TARGET_RE)(ref)  # fork: named private topic
     if parsed:
         return parsed
     return parse_nonempty(parse_telegram_username_target(ref) or "")

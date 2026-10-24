@@ -50,7 +50,7 @@ def test_stack_frame_lines_are_dropped() -> None:
         '      state = load_state(path)\n'
         "OSError: disk quota exceeded"
     )
-    message = _summarize_cron_failure_for_delivery(JOB, error)
+    message = _summarize_cron_failure_for_delivery({**JOB, "no_agent": True}, error)
 
     assert "File \"" not in message
     assert "line 3599" not in message
@@ -189,7 +189,7 @@ def test_lowercase_exception_name_is_stripped() -> None:
     # conventionally lowercase and were slipping through the
     # capitalized-only alternation.
     message = _summarize_cron_failure_for_delivery(
-        JOB, "gaierror: [Errno -2] Name or service not known"
+        {**JOB, "no_agent": True}, "gaierror: [Errno -2] Name or service not known"
     )
 
     assert "gaierror" not in message

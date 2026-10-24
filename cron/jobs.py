@@ -1737,6 +1737,11 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     return text
 
 
+# Fork (cron/local_cron.py): the role pin and audience fields.
+from cron.local_cron import (  # noqa: E402
+    CRON_AUDIENCES, normalize_audience, normalize_job_role as _normalize_job_role,
+)
+
 # Normalizers for create_job (all fields) / update_job (present fields). Invalid values raise BEFORE
 # storing.
 _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
@@ -1752,6 +1757,8 @@ _CREATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "context_from": _normalize_context_from,
     "failure_deliver": _normalize_failure_deliver,
     "interpreter": _normalize_job_optional_text,
+    "role": _normalize_job_role,  # fork: [ROLE PIN] for this job
+    "audience": normalize_audience,  # fork: who reads this job's deliveries
 }
 _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     # [] is an explicit zero-tool allowlist and must survive the update path as [] too (#82010).
@@ -1761,6 +1768,8 @@ _UPDATE_FIELD_NORMALIZERS: dict[str, Callable[[Any], Any]] = {
     "monitor_url": _normalize_job_optional_text,
     "interpreter": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    "role": lambda v: _normalize_job_role(v or None),  # fork: "" clears the pin
+    "audience": normalize_audience,  # fork
 }
 
 
@@ -1811,6 +1820,8 @@ def create_job(
     paused_reason: Optional[str] = None,
     pinned: bool = False,
     interpreter: Optional[str] = None,
+    role: Optional[str] = None,
+    audience: Optional[str] = None,
 ) -> dict[str, Any]:
     """Create a new cron job and return the stored record.
 
@@ -1909,6 +1920,7 @@ def create_job(
     for key, value in (
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
+        ("role", f["role"]), ("audience", f["audience"]),  # fork
     ):
         if value is not None:
             job[key] = value

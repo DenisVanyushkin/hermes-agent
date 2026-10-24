@@ -60,12 +60,16 @@ _SESSION_HISTORY_DELIVERY = ContextVar("HERMES_SESSION_HISTORY_DELIVERY", defaul
 _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
 _CRON_AUTO_DELIVER_CHAT_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
+# Fork: who reads THIS job's delivery, "operator" or "end_user" (cron/local_cron.py). A cron
+# turn runs on no platform while its result goes to ``deliver:``; end-of-turn display
+# decisions about the reader (engineering footers) follow this var, set per job in run_job().
+_CRON_AUDIENCE = ContextVar("HERMES_CRON_AUDIENCE", default=_UNSET)
 
 # Legacy env-var name -> ContextVar for get_session_env (_SESSION_ASYNC_DELIVERY deliberately
 # absent: it is a bool capability, read via async_delivery_supported).
 _VAR_MAP = {var.name: var for var in (
     *_SESSION_VARS, _CRON_AUTO_DELIVER_PLATFORM, _CRON_AUTO_DELIVER_CHAT_ID,
-    _CRON_AUTO_DELIVER_THREAD_ID,
+    _CRON_AUTO_DELIVER_THREAD_ID, _CRON_AUDIENCE,
 )}
 
 

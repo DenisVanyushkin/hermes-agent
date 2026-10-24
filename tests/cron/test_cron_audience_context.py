@@ -79,10 +79,10 @@ def test_the_mark_is_dropped_on_the_way_out():
 def test_a_broken_resolver_marks_nothing(monkeypatch):
     """Отказ везде означает «не подавлять»: сломанная политика аудитории обязана
     оставить оператору лишние подробности, а не тихо выключить анти-оверклейм."""
-    import cron.scheduler as sched
+    import cron.local_cron as local_cron
 
     monkeypatch.setattr(
-        sched, "resolve_cron_audience", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom"))
+        local_cron, "resolve_cron_audience", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom"))
     )
 
     assert bind_cron_audience_context(END_USER_JOB, CFG) == ""
@@ -97,10 +97,10 @@ def test_run_job_binds_and_clears_the_audience_around_the_agent():
     import cron.scheduler as sched
 
     source = inspect.getsource(sched.run_job)
-    assert "bind_cron_audience_context(job, _cfg)" in source
+    assert "bind_cron_audience_context(job)" in source
     assert "clear_cron_audience_context()" in source
     # clear обязан стоять после bind и в finally — иначе признак живёт дольше
     # задания.
-    assert source.index("bind_cron_audience_context(job, _cfg)") < source.index(
+    assert source.index("bind_cron_audience_context(job)") < source.index(
         "clear_cron_audience_context()"
     )

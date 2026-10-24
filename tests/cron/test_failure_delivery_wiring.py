@@ -40,8 +40,16 @@ def _patch_pipeline(monkeypatch, *, success=True, final="final response", error=
     monkeypatch.setattr(s, "load_config", lambda: {} if cfg is None else cfg)
     monkeypatch.setattr(
         s, "_deliver_result",
-        lambda job, content, adapters=None, loop=None: delivered.append((job["id"], content)),
+        lambda job, content, adapters=None, loop=None, **_kw: delivered.append((job["id"], content)),
     )
+    # v0.22.5 hands an agent job's notice to the durable delivery queue (the
+    # gateway performs the send); capture that lane too, or "delivered" would
+    # stay empty for every agent job and the withholding tests would pass vacuously.
+    def fake_enqueue(execution_id, job, content, for_failure=False):
+        delivered.append((job["id"], content))
+        return {"status": "queued"}
+
+    monkeypatch.setattr("cron.delivery_queue.enqueue", fake_enqueue)
     monkeypatch.setattr(
         s, "_send_cron_operator_alert",
         lambda text, cfg=None, adapters=None, loop=None: alerted.append(text),
@@ -57,7 +65,7 @@ def test_run_one_job_failed_end_user_job_delivers_nothing_and_alerts_once(monkey
         monkeypatch, success=False, final="", error="ImportError: boom"
     )
 
-    s.run_one_job({"id": "j1", "name": "t", "audience": "end_user"})
+    s.run_one_job({"id": "j1", "name": "t", "audience": "end_user", "deliver": "telegram:123"})
 
     assert delivered == []
     assert len(alerted) == 1
@@ -72,7 +80,7 @@ def test_run_one_job_failed_operator_job_still_delivers_and_no_alert(monkeypatch
         monkeypatch, success=False, final="", error="ImportError: boom"
     )
 
-    s.run_one_job({"id": "j2", "name": "t"})
+    s.run_one_job({"id": "j2", "name": "t", "deliver": "telegram:123"})
 
     assert len(delivered) == 1
     assert delivered[0][0] == "j2"
@@ -86,7 +94,7 @@ def test_run_one_job_successful_end_user_job_still_delivers(monkeypatch):
         monkeypatch, success=True, final="• завтра: солнечно, без осадков"
     )
 
-    s.run_one_job({"id": "j3", "name": "t", "audience": "end_user"})
+    s.run_one_job({"id": "j3", "name": "t", "audience": "end_user", "deliver": "telegram:123"})
 
     assert len(delivered) == 1
     assert delivered[0][0] == "j3"
@@ -133,7 +141,7 @@ def test_run_one_job_malformed_cfg_falls_back_to_delivering_operator_summary(mon
         cfg={"cron": "not-a-dict"},
     )
 
-    s.run_one_job({"id": "j5", "name": "t"})  # default/operator audience
+    s.run_one_job({"id": "j5", "name": "t", "deliver": "telegram:123"})  # default/operator audience
 
     assert len(delivered) == 1
     assert delivered[0][0] == "j5"

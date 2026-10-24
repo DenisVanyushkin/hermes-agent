@@ -46,7 +46,8 @@ def test_plain_timeout_error_still_labeled_provider_timeout() -> None:
         JOB, "ReadTimeout: HTTPSConnectionPool timed out"
     )
 
-    assert "provider timeout" in message
+    assert "did not respond in time" in message
+    assert "review gate" not in message
 
 
 def test_review_gate_block_without_approval_line() -> None:

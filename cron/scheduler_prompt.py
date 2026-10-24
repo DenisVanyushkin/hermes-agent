@@ -324,6 +324,8 @@ def _build_job_prompt(
         has_injected_data = True
 
     prompt, _ctx_injected = _inject_context_from(job, prompt)
+    from cron.local_cron import prefix_job_metadata, prefix_role_pin  # fork: title, role pin
+    prompt = prefix_job_metadata(job, prompt)
     has_injected_data = has_injected_data or _ctx_injected
 
     # Durable per-job notepad; empty renders as "" so unused → byte-identical prompt.
@@ -333,7 +335,7 @@ def _build_job_prompt(
         prompt = f"{notepad_section}{prompt}"
         has_injected_data = True
 
-    prompt = _CRON_HINT + prompt
+    prompt = _CRON_HINT + prefix_role_pin(job, prompt)
     skill_names = _job_skill_names(job)
     if not skill_names:
         return _scan_assembled_cron_prompt(

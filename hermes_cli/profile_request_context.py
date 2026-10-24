@@ -6,7 +6,11 @@ import re
 
 
 _CRON_ROLE_ROUTING_BANNER_RE = re.compile(
-    r'^\[important:\s+you are running as a scheduled cron job\..*?nothing more\.\]\s*',
+    # Both endings: the pre-v0.22.5 banner closed on "nothing more.]", v0.22.5's closes on
+    # "...schedule another job.]". An unstripped banner is classified as the task itself
+    # ("create or update a cron job", "FAILURE") and sent weather jobs to engineer.
+    r'^\[important:\s+you are running as a scheduled cron job\..*?'
+    r'(?:nothing more\.|schedule another job\.)\]\s*',
     re.IGNORECASE | re.DOTALL,
 )
 
