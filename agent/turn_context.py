@@ -1176,6 +1176,8 @@ def build_turn_context(
     conversation_history = compaction.conversation_history
     current_turn_user_idx = compaction.current_turn_user_idx
 
+    from agent.local_finalizer import snapshot_dirty_baseline  # fork: review-gate baseline
+    snapshot_dirty_baseline(agent)
     from agent.local_roles import apply_turn_role  # fork: role context, role model, effort floor
     role_user_context = apply_turn_role(agent, original_user_message)
     plugin_user_context = _collect_pre_llm_call_context(

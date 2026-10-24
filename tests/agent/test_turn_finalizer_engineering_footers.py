@@ -73,6 +73,9 @@ class _FooterAgent:
     def _file_mutation_verifier_enabled(self):
         return True
 
+    def _file_mutations_still_failed(self, failed):
+        return failed
+
     def _format_file_mutation_failure_footer(self, _failed):
         return "⚠️ Some files were not written: /workspace/live-hermes/x.py"
 
@@ -83,7 +86,7 @@ class _FooterAgent:
     # frozen signature raises TypeError inside the explainer's `except
     # Exception`, so the explanation silently becomes empty instead of failing
     # loudly — the tests below would then assert against a blank string.
-    def _format_turn_completion_explanation(self, reason, *_args):
+    def _format_turn_completion_explanation(self, reason, *_args, **_kwargs):
         if str(reason).startswith("text_response"):
             return ""
         return "⚠️ No reply: switch model/provider or send `continue`."

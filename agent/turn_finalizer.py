@@ -406,7 +406,8 @@ def _append_file_mutation_footer(agent, final_response, logger):
     return final_response
 
 
-def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger):
+def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,
+                           notice=None):
     """Turn-completion explainer: on abnormal exits, surface one explanation from
     ``_turn_exit_reason``. Only acts when no usable reply exists (empty, "(empty)",
     or a short unpunctuated fragment); ``text_response(...)`` exits stay silent."""
@@ -430,6 +431,8 @@ def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_v
                 db_path=getattr(getattr(agent, "_session_db", None), "db_path", None),
                 model=str(getattr(agent, "model", "") or ""),
             )
+            if _explanation and notice:  # fork: end-user channels get a plain notice
+                _explanation = notice
             if _explanation:
                 # Replace the bare sentinel; keep a partial fragment and append why.
                 final_response = _explanation if _is_empty_terminal else _stripped + "\n\n" + _explanation
@@ -618,7 +621,7 @@ def finalize_turn(
     # the fallible tail-shaping / override / micro-compaction / persist calls — so a
     # raise in any of them can't drop text the user already saw (#95514, #8049).
     def _persist_step():
-        nonlocal final_response
+        nonlocal final_response, completed
         _drop_transcript_scaffolding(agent, messages)
         final_response, _recovered_from_stream = _recover_final_from_stream(
             agent, final_response, interrupted, failed
@@ -630,6 +633,14 @@ def finalize_turn(
         if final_response and not interrupted:
             final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
         _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
+        if final_response and not interrupted:
+            from agent.local_finalizer import review_turn  # fork: review gate
+            final_response, _review_blocked = review_turn(
+                agent, final_response=final_response, messages=messages,
+                user_message=user_message, original_user_message=original_user_message,
+            )
+            if _review_blocked:
+                completed = False
         if not interrupted and not failed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
         agent._persist_session(messages, conversation_history)
@@ -644,11 +655,15 @@ def finalize_turn(
     _log_turn_exit(agent, messages, final_response, api_call_count, _turn_exit_reason, interrupted, logger)
 
     # Response transforms apply only to real, uninterrupted responses.
-    if final_response and not interrupted:
+    from agent.local_finalizer import append_execution_locus, footer_policy  # fork: footers by audience
+    _suppress_eng_footers, _explainer_notice = footer_policy(agent)
+    if final_response and not interrupted and not _suppress_eng_footers:
         final_response = _append_file_mutation_footer(agent, final_response, logger)
+        final_response = append_execution_locus(final_response, messages)
     if not interrupted:
         final_response = _explain_abnormal_exit(
             agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,
+            notice=_explainer_notice,
         )
 
     _platform = getattr(agent, "platform", None) or ""
