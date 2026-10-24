@@ -170,8 +170,9 @@ def test_engineer_package_activation_keeps_builtin_coding_model_resolution():
     assert result.package_name == "hermes-engineer-core"
     assert decision.primary_profile == "engineer"
     assert decision.route_chain[0].model_tier == "coding"
-    assert decision.route_chain[0].provider == "openrouter"
-    assert decision.route_chain[0].model == "xiaomi/mimo-v2.5-pro"
+    # The coding tier follows config/hermes-model-policy.yaml (GPT-6 lineup since 2026-09-23).
+    assert decision.route_chain[0].provider == "openai-codex"
+    assert decision.route_chain[0].model == "gpt-5.6-terra"
 
 
 class TestActivatePackageForRole:

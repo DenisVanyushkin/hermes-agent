@@ -31,6 +31,60 @@ def _aux(timeout, *, reasoning_effort=True, **extra):
 
 
 DEFAULT_CONFIG = {
+    # Fork: defaults for the review gate, pipelines and role packages.
+    "review_gate": {
+        "mode": "observe",
+        "reviewer_tier": "code_review",
+    },
+    # "Full" engineering execution uses the autonomous runtime. Each run is
+    # isolated in a worktree and commit, push, and restart remain separately
+    # approval-gated by the engineering pipeline contract.
+    "pipelines": {
+        "enabled": True,
+        "orchestrator": {
+            "mode": "autonomous",
+        },
+        "router": {
+            "mode": "autonomous",
+            "strategy": "llm",
+            "llm": {
+                # Source-of-truth default: route through the dedicated router
+                # model and fail closed unless an operator explicitly chooses
+                # a deterministic fallback policy.
+                "provider": "openai-codex",
+                "model": "gpt-6-luna",
+                "timeout_seconds": 10,
+                "fallback_strategy": "fail_closed",
+                "min_confidence": 0.70,
+            },
+        },
+        "execution": {
+            "mode": "autonomous",
+            "enable_gateway_execution_controller": True,
+            "allow_real_provider_execution": True,
+            "allow_pipelines": ["engineering_review_pipeline", "recruiter_decision_support_pipeline"],
+            "allowed_subagents": ["hermes_engineer_core", "hermes_code_reviewer"],
+            "allow_actual_subagent_invocation": True,
+            "allow_actual_reviewer_invocation": True,
+            "allow_actual_rework_loop": True,
+            "min_router_confidence": 0.90,
+        },
+    },
+    "role_packages": {
+        # Selected-role package context activation.
+        # When enabled, after built-in routing selects a role, the corresponding
+        # package manifest is loaded from package_path and its context replaces
+        # the built-in role context block.
+        # Built-in routing is NOT replaced; it remains authoritative.
+        # Default: disabled. Set enabled: true in config.yaml to activate.
+        "routing": {
+            "enabled": False,
+            "activation_mode": "selected_roles",
+            "active_roles": [],
+            "package_path": None,
+            "fallback_to_builtin": True,
+        }
+    },
     "model": "",
     "providers": {},
     "fallback_providers": [],
