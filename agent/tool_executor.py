@@ -1718,7 +1718,9 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
         import model_tools
 
         with model_tools.suppress_post_tool_call_hook():
-            return model_tools.handle_function_call(
+            # Fork: a controlled pipeline subagent's calls go to its bridge (agent/tool_dispatch_context.py).
+            from agent.tool_dispatch_context import dispatch_function_call
+            return dispatch_function_call(
                 function_name,
                 next_args,
                 effective_task_id,

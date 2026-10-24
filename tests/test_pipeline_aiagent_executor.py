@@ -2744,25 +2744,25 @@ def test_bridge_write_file_keeps_size_limit(tmp_path: Path) -> None:
 def test_bridge_dispatch_is_context_local_and_leaves_globals_untouched(tmp_path: Path) -> None:
     import threading
 
-    import run_agent
+    import model_tools
     from agent.tool_dispatch_context import dispatch_function_call
 
     repo_root, _runtime_result = _build_runtime_result(tmp_path)
     git_repo = _init_git_repo(tmp_path)
     bridge = AIAgentSubagentExecutorBridge(workspace_root=git_repo, repo_root=repo_root, agent_factory=_FakeAgent)
 
-    original_handle = run_agent.handle_function_call
+    original_handle = model_tools.handle_function_call
     calls: list[str] = []
 
     def _fake_handle(function_name, function_args, *args, **kwargs):
         calls.append(function_name)
         return "original_dispatch"
 
-    run_agent.handle_function_call = _fake_handle
+    model_tools.handle_function_call = _fake_handle
     try:
         with bridge.patched_tool_dispatch():
             # Global dispatch must stay untouched while the bridge is active.
-            assert run_agent.handle_function_call is _fake_handle
+            assert model_tools.handle_function_call is _fake_handle
 
             # Same context: routed into the restricted bridge executor.
             payload = json.loads(dispatch_function_call("git_status", {}))
@@ -2782,7 +2782,7 @@ def test_bridge_dispatch_is_context_local_and_leaves_globals_untouched(tmp_path:
         # After the bridge exits, the same context reaches the original again.
         assert dispatch_function_call("read_file", {"path": "x"}) == "original_dispatch"
     finally:
-        run_agent.handle_function_call = original_handle
+        model_tools.handle_function_call = original_handle
 
 
 def test_propose_ops_validates_and_records_the_plan(tmp_path: Path) -> None:

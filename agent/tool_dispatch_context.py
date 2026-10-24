@@ -37,6 +37,8 @@ def dispatch_function_call(function_name: str, function_args: Any, *args: Any, *
     bridge = get_bridge_dispatch()
     if bridge is not None:
         return bridge(function_name, function_args)
-    import run_agent
+    # Resolved at call time: run_agent no longer re-exports it in v0.22.5, and a
+    # test or plugin that patches model_tools must be the one dispatched to.
+    import model_tools
 
-    return run_agent.handle_function_call(function_name, function_args, *args, **kwargs)
+    return model_tools.handle_function_call(function_name, function_args, *args, **kwargs)

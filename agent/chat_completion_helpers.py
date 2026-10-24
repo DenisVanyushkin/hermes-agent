@@ -1510,7 +1510,9 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     anthropic_messages). No-op for every other provider.
     """
     from agent.opencode_affinity import merge_session_affinity_headers
+    from agent.controlled_identity import check_controlled_request_identity  # fork: pinned subagents
 
+    check_controlled_request_identity(agent)
     kwargs = _build_api_kwargs_for_mode(agent, api_messages, tools_for_api)
     return merge_session_affinity_headers(
         kwargs,
