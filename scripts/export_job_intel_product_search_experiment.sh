@@ -17,9 +17,12 @@ mkdir -p "$destination/runtime" "$destination/python-runtime" "$destination/raw-
 git -C "$repo" archive "$commit" | tar -x -C "$destination/runtime"
 
 python_prefix="$("$python_source" -c 'import sys; print(sys.prefix)')"
+# The interpreter's own versioned name (python3.14 since the v0.22.5 port): the lock only resolves
+# for the version it was built for, so the copy must be exactly the source interpreter.
+python_name="$("$python_source" -c 'import sys; print("python%d.%d" % sys.version_info[:2])')"
 cp -a "$python_prefix" "$destination/python-runtime/cpython"
-copied_python="$(find "$destination/python-runtime/cpython/bin" -maxdepth 1 -type f -name 'python3.12' -print -quit)"
-[[ -n "$copied_python" ]] || { echo "copied Python 3.12 interpreter not found" >&2; exit 64; }
+copied_python="$(find "$destination/python-runtime/cpython/bin" -maxdepth 1 -type f -name "$python_name" -print -quit)"
+[[ -n "$copied_python" ]] || { echo "copied $python_name interpreter not found" >&2; exit 64; }
 uv venv "$destination/python-runtime/venv" --python "$copied_python"
 UV_PROJECT_ENVIRONMENT="$destination/python-runtime/venv" uv sync \
   --project "$destination/runtime" --frozen --no-install-project --no-dev \
