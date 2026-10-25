@@ -332,7 +332,7 @@ def test_format_footer_latency_in_field_order(monkeypatch, tmp_path):
         turn_seconds=65.0,
         fields=("model", "context_pct", "latency", "cwd"),
     )
-    assert out == "gpt-5.4 · 68% · 1m05s · ~"
+    assert out == "gpt-5.4 · ctx 68% · 1m05s · ~"
 
 
 def test_build_footer_line_threads_turn_seconds(monkeypatch):
@@ -379,7 +379,7 @@ def test_default_build_footer_line_ignores_turn_seconds(monkeypatch):
     )
     baseline = build_footer_line(**common)
     with_timing = build_footer_line(**common, turn_seconds=125.0)
-    assert baseline == "gpt-5.4 · 5% · /var/data"
+    assert baseline == "gpt-5.4 · ctx 5% · /var/data"
     assert with_timing == baseline
 
 

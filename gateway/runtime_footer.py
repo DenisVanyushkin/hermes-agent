@@ -17,6 +17,12 @@ from typing import Any, Iterable, Optional
 _DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")
 _SEP = " · "
 
+# Fork (gateway/local_footer.py): requested → effective model, "ctx N%", no cwd-only footer,
+# the optional account-usage quota line.
+from gateway.local_footer import (  # noqa: E402
+    format_context_pct, format_model_pair, is_cwd_only, quota_footer_line,
+)
+
 
 def _home_relative_cwd(cwd: str) -> str:
     """Return *cwd* with ``$HOME`` collapsed to ``~``.  Empty string if unset."""
@@ -48,7 +54,7 @@ def _env_cwd() -> str:
 def resolve_footer_config(user_config: dict[str, Any] | None, platform_key: str | None = None) -> dict[str, Any]:
     """Resolve effective footer config: defaults (enabled=False) <
     ``display.runtime_footer`` < ``display.platforms.<platform_key>.runtime_footer``."""
-    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS)}
+    resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS), "account_usage": False}  # fork
     cfg = (user_config or {}).get("display") or {}
     plat_cfg = (cfg.get("platforms") or {}).get(platform_key) if platform_key else None
     sections = [cfg.get("runtime_footer"), plat_cfg.get("runtime_footer") if isinstance(plat_cfg, dict) else None]
@@ -59,6 +65,8 @@ def resolve_footer_config(user_config: dict[str, Any] | None, platform_key: str 
             resolved["enabled"] = bool(section.get("enabled"))
         if isinstance(section.get("fields"), list) and section["fields"]:
             resolved["fields"] = [str(f) for f in section["fields"]]
+        if "account_usage" in section:  # fork
+            resolved["account_usage"] = bool(section.get("account_usage"))
     return resolved
 
 
@@ -82,7 +90,7 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
     unknown field names) are skipped silently — a partial footer beats ``?%`` or empty slots."""
     def context_pct() -> str:
         if context_length and context_length > 0 and context_tokens >= 0:
-            return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
+            return format_context_pct(max(0, min(100, round((context_tokens / context_length) * 100))))  # fork
         return ""
 
     def served() -> str:
@@ -93,14 +101,18 @@ def format_runtime_footer(*, model: Optional[str], context_tokens: int,
         return ""
 
     renderers = {
-        "model": lambda: _model_short(model),
+        "model": lambda: format_model_pair(requested_model, model),  # fork: requested → effective
         "served_model": served,
         "context_pct": context_pct,
         # Skipped when the caller did not measure (None) or the value is negative.
         "latency": lambda: _format_latency(turn_seconds) if turn_seconds is not None and turn_seconds >= 0 else "",
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
     }
-    return _SEP.join(v for field in fields if (render := renderers.get(field)) and (v := render()))
+    fields = list(fields)
+    rendered = [(field, v) for field in fields if (render := renderers.get(field)) and (v := render())]
+    if is_cwd_only([field for field, _ in rendered], fields):  # fork: a lone cwd is noise
+        return ""
+    return _SEP.join(v for _, v in rendered)
 
 
 def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str | None,
@@ -114,7 +126,10 @@ def build_footer_line(*, user_config: dict[str, Any] | None, platform_key: str |
     cfg = resolve_footer_config(user_config, platform_key)
     if not cfg.get("enabled"):
         return ""
-    return format_runtime_footer(model=model, context_tokens=context_tokens,
+    line = format_runtime_footer(model=model, context_tokens=context_tokens,
                                  context_length=context_length, cwd=cwd, turn_seconds=turn_seconds,
                                  requested_model=requested_model, served_model=served_model,
                                  fields=cfg.get("fields") or _DEFAULT_FIELDS)
+    # Fork: the provider quota line, when display.runtime_footer.account_usage is on.
+    quota = quota_footer_line(user_config) if cfg.get("account_usage") else ""
+    return "\n".join(part for part in (line, quota) if part)
