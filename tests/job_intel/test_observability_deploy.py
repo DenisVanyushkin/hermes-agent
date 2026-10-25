@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import sqlite3
 
@@ -130,3 +131,60 @@ def test_observability_dashboards_reference_key_metrics() -> None:
     for dashboard in (overview, sources, rejections, company, health):
         assert "${DS_PROMETHEUS}" not in json.dumps(dashboard)
         assert any(panel.get("datasource") == "Prometheus" for panel in dashboard["panels"] if isinstance(panel, dict))
+
+
+# What the exporter container imports at startup, i.e. what the image must
+# ship. The repo is bind-mounted at runtime, so a new third-party import in
+# any job_intel module on this path crash-loops the container while every
+# host-side test stays green (2026-09-15: store.py gained `import yaml`).
+_EXPORTER_IMPORT_PROBE = """
+import importlib.metadata, json, sys, sysconfig
+import job_intel.observability, job_intel.runtime, job_intel.store
+purelib = sysconfig.get_paths()["purelib"]
+tops = {
+    name.split(".")[0]
+    for name, module in list(sys.modules.items())
+    if (getattr(module, "__file__", None) or "").startswith(purelib)
+    and not name.startswith("_")  # venv bootstrap hooks, not app imports
+}
+dists = importlib.metadata.packages_distributions()
+print(json.dumps(sorted({d for top in tops for d in dists.get(top, [])})))
+"""
+
+
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_job_intel_exporter_image_installs_every_third_party_import() -> None:
+    import importlib.metadata
+    import subprocess
+    import sys
+
+    probe = subprocess.run(
+        [sys.executable, "-c", _EXPORTER_IMPORT_PROBE],
+        cwd=ROOT,
+        env={"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    loaded = {_canonical(d) for d in json.loads(probe.stdout)}
+    # The repo's own editable install, and pysqlite3, which the image builds
+    # from source into /wheels rather than installing by name.
+    loaded -= {"hermes-agent", "pysqlite3"}
+    # Only distributions nothing else loaded pulls in: pip resolves the rest.
+    transitive = {
+        _canonical(re.split(r"[\s;<>=!~\[(]", req, maxsplit=1)[0])
+        for dist in loaded
+        for req in importlib.metadata.requires(dist) or []
+    }
+    roots = loaded - transitive
+
+    installed = " ".join(
+        line for line in DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        if "pip install" in line and "/wheels/*.whl" in line
+    )
+    named = {_canonical(m) for m in re.findall(r"'([A-Za-z0-9_.-]+)[<>=!~]", installed)}
+    assert roots, "probe found no third-party imports; the probe itself is broken"
+    assert roots <= named, f"exporter image is missing {sorted(roots - named)}"

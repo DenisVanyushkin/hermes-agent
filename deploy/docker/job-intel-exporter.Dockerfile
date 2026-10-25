@@ -66,7 +66,11 @@ WORKDIR /workspace/live-hermes
 ENV PYTHONPATH=/workspace/live-hermes
 
 COPY --from=sqlite_build /wheels /wheels
-RUN pip install --no-cache-dir 'pydantic>=2,<3' /wheels/*.whl && rm -rf /wheels
+# Every third-party module job_intel imports on the exporter path, pinned to
+# pyproject.toml. The code itself is bind-mounted, so a missing one only shows
+# up as a crash loop at runtime; tests/job_intel/test_observability_deploy.py
+# checks this line against the real import closure.
+RUN pip install --no-cache-dir 'pydantic>=2,<3' 'pyyaml==6.0.3' /wheels/*.whl && rm -rf /wheels
 
 # Aliases sqlite3 -> pysqlite3 at interpreter start, before any app import.
 COPY deploy/docker/00-pysqlite3-shim.pth /usr/local/lib/python3.11/site-packages/00-pysqlite3-shim.pth
