@@ -62,7 +62,8 @@ async def test_created_session_snapshot_carries_inventory_for_frozen_toolsets(tm
         # The frozen policy's toolsets, grouped by toolset as main grouped ``agent.tools`` (deferrable
         # tools sit behind the tool_search bridge in both, under ``other``).
         assert 'read_file' in tools.get('file', []), tools
-        assert tools.get('terminal') == ['terminal'], tools
+        # Fork: host_inspect rides the terminal toolset (the sandboxed terminal cannot see the host).
+        assert tools.get('terminal') == ['host_inspect', 'terminal'], tools
         assert not ({'web', 'browser', 'image_gen'} & set(tools)), tools
         assert info['skills'].get('research') == ['arxiv'], info['skills']
         assert info['mcp_servers'] == []
