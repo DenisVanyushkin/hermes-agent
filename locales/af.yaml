@@ -42,6 +42,12 @@ approval:
     second_one: "{count} sekonde"
     second_other: "{count} sekondes"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ `{path}` is binne die sandput geskep en is nie vir die gasheer sigbaar nie, daarom kon dit nie aangeheg word nie. Vra die agent om dit na 'n gedeelde gids te skryf en weer te stuur."
+  media_delivery_failed_missing: "⚠️ `{path}` bestaan nie, daarom kon dit nie aangeheg word nie."
+  media_delivery_failed_blocked: "⚠️ Die lêerafleweringsbeleid het geweier om `{path}` aan te heg."
+  media_delivery_failed_invalid: "⚠️ 'n Lêer is belowe, maar die pad daarheen is onbruikbaar, daarom kon niks aangeheg word nie."
+
   approval_expired: "⚠️ Goedkeuring het verval (die agent wag nie meer nie). Vra die agent om weer te probeer."
   draining: "⏳ Wag vir {count} aktiewe agent(e) voor herbegin..."
   goal_cleared: "✓ Doelwit verwyder."

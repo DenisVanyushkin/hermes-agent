@@ -174,7 +174,9 @@ class TestPartitionReportsRejections:
         _docker(monkeypatch, [])
         with caplog.at_level(logging.WARNING, logger="gateway.platforms.base"):
             BasePlatformAdapter.filter_media_delivery_paths([("/root/ghost.md", False)])
-        assert "sandbox_only" in caplog.text
+        # Upstream v0.22.5 names the reason itself ("not found on this host"), not "unsafe".
+        assert "not found on this host" in caplog.text
+        assert "unsafe" not in caplog.text
         assert "/root/ghost.md" in caplog.text
 
 

@@ -1063,7 +1063,8 @@ def _warn_unresolved_docker_media(candidate: Path, session_key: str, reason: str
                    f", session_key={session_key}" if session_key else "")
 
 
-def _translate_docker_container_media_path(candidate: Path, session_key: str = "", *, quiet: bool = False) -> Optional[Path]:
+def _translate_docker_container_media_path(candidate: Path, session_key: str = "", *, quiet: bool = False,
+                                           chat_delivery: bool = False) -> Optional[Path]:
     """Container-absolute path -> host path via longest-prefix match over ``docker_volumes``, the
     auto-mounted cache dirs (``/root/.hermes/...``), persistent ``/workspace`` and ``/root``."""
     if not candidate.as_posix().startswith("/"):  # POSIX even on Windows gateways (not is_absolute)
@@ -1073,7 +1074,13 @@ def _translate_docker_container_media_path(candidate: Path, session_key: str = "
     with contextlib.suppress(Exception):
         from tools.terminal_tool import _ensure_terminal_env_bridged
         _ensure_terminal_env_bridged()
-    mounts = [*_parse_docker_volume_mounts(), *_cache_dir_container_mounts()]
+    # Fork: for delivery INTO A CHAT only the writable /output, /outputs exports translate --
+    # every other mount (read-only ones included) would make host files such as the agent
+    # repo's .env deliverable (gateway/platforms/local_base.py; owner decision 2026-10-25).
+    # The dashboard's file reads keep upstream's full mount list.
+    from gateway.platforms.local_base import media_export_mounts
+    volume_mounts = media_export_mounts() if chat_delivery else _parse_docker_volume_mounts()
+    mounts = [*volume_mounts, *_cache_dir_container_mounts()]
     mounted = {c.as_posix() for _, c in mounts}
     # Synthetic /workspace mounts: profile-scoped layout first, then legacy per-session.
     if "/workspace" not in mounted:
@@ -1121,7 +1128,7 @@ def validate_media_delivery_path(path: str, session_key: str = "") -> Optional[s
     if not expanded.is_absolute():
         return None
     # Docker agents emit MEDIA:/workspace/... — map container paths to host paths first.
-    resolved = _translate_docker_container_media_path(expanded, session_key=session_key)
+    resolved = _translate_docker_container_media_path(expanded, session_key=session_key, chat_delivery=True)
     if resolved is None:
         resolved = _resolve_path(expanded, strict=True)
     if resolved is None or not resolved.is_file():
@@ -1739,6 +1746,9 @@ class EphemeralReply(str):
         return str.__str__(self)
 
 
+from gateway.platforms.local_base import merge_reply_quote as _merge_reply_quote  # noqa: E402  fork
+
+
 def merge_pending_message_event(pending_messages: dict[str, MessageEvent], session_key: str,
                                 event: MessageEvent, *, merge_text: bool = False) -> None:
     """Store or merge a pending event: photo bursts/albums merge into the queued event so the next
@@ -1769,6 +1779,7 @@ def merge_pending_message_event(pending_messages: dict[str, MessageEvent], sessi
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
             existing.absorb_reply_expected(event)
+            _merge_reply_quote(existing, event)  # fork: whole quote group from one event
             if existing_is_photo or incoming_is_photo:
                 existing.message_type = MessageType.PHOTO
             elif existing_type == MessageType.TEXT and event.message_type != MessageType.TEXT:
@@ -1784,6 +1795,7 @@ def merge_pending_message_event(pending_messages: dict[str, MessageEvent], sessi
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
             existing.absorb_reply_expected(event)
+            _merge_reply_quote(existing, event)  # fork
             return
     pending_messages[session_key] = event
 
@@ -3216,6 +3228,12 @@ class BasePlatformAdapter(ABC):
             if (safe_path := _validated_delivery_path(media_path, session_key, "MEDIA directive path", dropped))]
 
     @staticmethod
+    def partition_media_delivery_paths(media_files, session_key: str = ""):
+        """Fork: ``(accepted, [(raw_path, reason)])`` -- see gateway/platforms/local_base.py."""
+        from gateway.platforms.local_base import partition_media_delivery_paths
+        return partition_media_delivery_paths(media_files, session_key)
+
+    @staticmethod
     def filter_local_delivery_paths(file_paths, session_key: str = "") -> list[str]:
         """Drop unsafe bare local file paths and normalize accepted paths."""
         safe_paths = (_validated_delivery_path(p, session_key, "local file path") for p in file_paths or [])
@@ -3820,11 +3838,12 @@ class BasePlatformAdapter(ABC):
                 state.event.text = _append_text(state.event.text, event.text)
             state.event.absorb_reply_expected(event)
             latest_message_id = getattr(event, "message_id", None)
-            latest_anchor = latest_message_id or getattr(event, "reply_to_message_id", None)
             if latest_message_id is not None:
                 state.event.message_id = str(latest_message_id)
-            if latest_anchor is not None and hasattr(state.event, "reply_to_message_id"):
-                state.event.reply_to_message_id = str(latest_anchor)
+            # Fork: reply anchoring rides on message_id; reply_to_* is quote context and is
+            # merged by the same rule as a pending event -- never derived from message_id,
+            # which produced a real id beside a foreign quote.
+            _merge_reply_quote(state.event, event)
             state.last_ts = now
         state.cancel_timer()
         delay = self._text_debounce_delay(session_key)
@@ -4455,7 +4474,9 @@ class BasePlatformAdapter(ABC):
         # bare-path validator infer the sandbox from the ACTIVE profile (#109024).
         with self._media_delivery_scope(event.source):
             media_files, response = self.extract_media(response)
-            media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
+            _dropped_media: list[dict] = []  # fork: told to the user if nothing else remains
+            media_files = self.filter_media_delivery_paths(
+                media_files, session_key=session_key, dropped=_dropped_media)
             images, text_content = self.extract_images(response)
             # Strip any remaining internal directives from message body (fixes #1561). _strip_media_directives
             # shares MEDIA_TAG_CLEANUP_RE, so a MEDIA: tag with an unknown extension is intentionally left in
@@ -4488,6 +4509,14 @@ class BasePlatformAdapter(ABC):
                                "no attachment; delivering recovered original to %s", self.name,
                                len(pre_extract), event.source.chat_id)
                 text_content = _recovered
+        if not (text_content or images or local_files or media_files) and _dropped_media:
+            # Fork: the reply was only a MEDIA tag pointing at a file the host cannot
+            # deliver; an empty message taught the user nothing -- say what happened.
+            from gateway.platforms.local_base import notice_for_dropped_media
+            logger.warning("[%s] media_delivery_failed: %d attachment(s) dropped and no text "
+                           "remained for %s; sending failure notice", self.name,
+                           len(_dropped_media), event.source.chat_id)
+            text_content = notice_for_dropped_media(_dropped_media)
         return _ExtractedResponse(
             text_content=text_content, images=images, media_files=media_files,
             local_files=local_files, force_document_attachments=force_document, pre_extract=pre_extract)
@@ -4900,3 +4929,8 @@ class BasePlatformAdapter(ABC):
         if len(chunks) > 1:
             chunks = [f"{chunk} ({i + 1}/{len(chunks)})" for i, chunk in enumerate(chunks)]
         return chunks
+
+# Fork (gateway/platforms/local_base.py): media rejection reasons and the user notice.
+from gateway.platforms.local_base import (  # noqa: E402
+    classify_media_delivery_rejection, format_media_delivery_failure_notice,
+)

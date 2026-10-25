@@ -42,6 +42,12 @@ approval:
     second_one: "{count} saniye"
     second_other: "{count} saniye"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ `{path}` yalıtılmış ortamda oluşturuldu ve ana makineden görünmüyor, bu yüzden eklenemedi. Aracıdan dosyayı paylaşılan bir dizine yazıp yeniden göndermesini isteyin."
+  media_delivery_failed_missing: "⚠️ `{path}` mevcut değil, bu yüzden eklenemedi."
+  media_delivery_failed_blocked: "⚠️ `{path}` dosyasının eklenmesi dosya teslim politikası tarafından reddedildi."
+  media_delivery_failed_invalid: "⚠️ Bir dosya vaat edildi ancak yolu kullanılamaz durumda, bu yüzden eklenecek bir şey yok."
+
   approval_expired: "⚠️ Onay süresi doldu (ajan artık beklemiyor). Ajanın tekrar denemesini isteyin."
   draining: "⏳ Yeniden başlatmadan önce {count} aktif ajan bekleniyor..."
   goal_cleared: "✓ Hedef temizlendi."

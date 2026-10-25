@@ -42,6 +42,12 @@ approval:
     second_one: "{count} 秒"
     second_other: "{count} 秒"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ `{path}` 是在沙箱内创建的，主机无法看到，因此无法作为附件发送。请让智能体把它写入共享目录后重新发送。"
+  media_delivery_failed_missing: "⚠️ `{path}` 不存在，因此无法作为附件发送。"
+  media_delivery_failed_blocked: "⚠️ 文件投递策略拒绝发送 `{path}`。"
+  media_delivery_failed_invalid: "⚠️ 承诺了一个文件，但其路径不可用，因此没有任何内容可以附加。"
+
   approval_expired: "⚠️ 批准已过期（代理不再等待）。请让代理重试。"
   draining: "⏳ 正在等待 {count} 个活跃代理结束后重启..."
   goal_cleared: "✓ 目标已清除。"

@@ -42,6 +42,12 @@ approval:
     second_one: "{count} soicind"
     second_other: "{count} soicind"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ Cruthaíodh `{path}` laistigh den bhosca gainimh agus níl sé le feiceáil ag an óstríomhaire, mar sin níorbh fhéidir é a cheangal. Iarr ar an ngníomhaire é a scríobh chuig comhadlann roinnte agus é a sheoladh arís."
+  media_delivery_failed_missing: "⚠️ Níl `{path}` ann, mar sin níorbh fhéidir é a cheangal."
+  media_delivery_failed_blocked: "⚠️ Dhiúltaigh an polasaí seachadta comhad `{path}` a cheangal."
+  media_delivery_failed_invalid: "⚠️ Gealladh comhad, ach ní raibh an chonair inúsáidte, mar sin ní raibh aon rud le ceangal."
+
   approval_expired: "⚠️ Tá an cead imithe in éag (níl an gníomhaire ag fanacht níos mó). Iarr ar an ngníomhaire iarracht eile a dhéanamh."
   draining: "⏳ Ag fanacht le {count} gníomhaire(í) gníomhach roimh atosú..."
   goal_cleared: "✓ Sprioc glanta."

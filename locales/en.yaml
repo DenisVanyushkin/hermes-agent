@@ -45,6 +45,12 @@ approval:
     second_other: "{count} seconds"
 
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ `{path}` was created inside the sandbox and is not visible to the host, so it could not be attached. Ask the agent to write it to a shared directory and send it again."
+  media_delivery_failed_missing: "⚠️ `{path}` does not exist, so it could not be attached."
+  media_delivery_failed_blocked: "⚠️ Attaching `{path}` was refused by the file delivery policy."
+  media_delivery_failed_invalid: "⚠️ A file was promised but its path was unusable, so nothing could be attached."
+
   approval_expired: "⚠️ Approval expired (agent is no longer waiting). Ask the agent to try again."
   draining: "⏳ Draining {count} active agent(s) before restart..."
   goal_cleared: "✓ Goal cleared."

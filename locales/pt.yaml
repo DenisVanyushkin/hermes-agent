@@ -42,6 +42,12 @@ approval:
     second_one: "{count} segundo"
     second_other: "{count} segundos"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ `{path}` foi criado dentro do sandbox e não é visível para o host, portanto não foi possível anexá-lo. Peça ao agente que o grave em um diretório compartilhado e envie novamente."
+  media_delivery_failed_missing: "⚠️ `{path}` não existe, portanto não foi possível anexá-lo."
+  media_delivery_failed_blocked: "⚠️ A política de entrega de arquivos recusou anexar `{path}`."
+  media_delivery_failed_invalid: "⚠️ Um arquivo foi prometido, mas seu caminho era inutilizável, então nada pôde ser anexado."
+
   approval_expired: "⚠️ A aprovação expirou (o agente já não está à espera). Peça ao agente para tentar novamente."
   draining: "⏳ A aguardar que {count} agente(s) ativo(s) terminem antes de reiniciar..."
   goal_cleared: "✓ Objetivo removido."

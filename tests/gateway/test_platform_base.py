@@ -903,7 +903,10 @@ def test_windows_drive_letter_host_mount_parses_on_windows(monkeypatch):
 class TestDockerContainerMediaPathTranslation:
     """MEDIA:/workspace (and configured mounts) must resolve to host paths."""
 
-    def test_configured_workspace_mount_translates(self, tmp_path, monkeypatch):
+    def test_configured_workspace_mount_is_not_a_chat_delivery_channel(self, tmp_path, monkeypatch):
+        """Fork policy: a configured /workspace volume may be the host cwd (an agent repo with
+        its .env), so it does not translate for chat delivery; the agent's own sandbox roots
+        and the /output exports do."""
         import json
 
         host_ws = tmp_path / "host-ws"
@@ -914,11 +917,10 @@ class TestDockerContainerMediaPathTranslation:
             "TERMINAL_DOCKER_VOLUMES",
             json.dumps([f"{host_ws}:/workspace"]),
         )
-        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(tmp_path / "no-sandboxes"))
 
-        assert BasePlatformAdapter.validate_media_delivery_path(
-            "/workspace/shot.png"
-        ) == str(media.resolve())
+        assert BasePlatformAdapter.validate_media_delivery_path("/workspace/shot.png") is None
 
     def test_configured_output_mount_translates(self, tmp_path, monkeypatch):
         import json
@@ -931,6 +933,7 @@ class TestDockerContainerMediaPathTranslation:
             "TERMINAL_DOCKER_VOLUMES",
             json.dumps([f"{host_out}:/output"]),
         )
+        monkeypatch.setenv("TERMINAL_ENV", "docker")  # fork: container paths exist only in a sandbox
 
         assert BasePlatformAdapter.validate_media_delivery_path(
             "/output/report.pdf"
@@ -953,9 +956,17 @@ class TestDockerContainerMediaPathTranslation:
             ]),
         )
 
-        assert BasePlatformAdapter.validate_media_delivery_path(
-            "/data/nested/file.png"
-        ) == str(nested.resolve())
+        # Exercised on the dashboard's translation, which keeps upstream's full mount list;
+        # chat delivery does not translate /data at all (fork policy).
+        from pathlib import Path as _P
+
+        from gateway.platforms.base import _translate_docker_container_media_path
+
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        assert _translate_docker_container_media_path(
+            _P("/data/nested/file.png"), quiet=True
+        ) == nested.resolve()
+        assert BasePlatformAdapter.validate_media_delivery_path("/data/nested/file.png") is None
 
     def test_default_persistent_workspace_fallback(self, tmp_path, monkeypatch):
         sandbox = tmp_path / "sandboxes"

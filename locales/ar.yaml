@@ -42,6 +42,12 @@ approval:
     second_one: "{count} ثانية"
     second_other: "{count} ثوانٍ"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ تم إنشاء `{path}` داخل البيئة المعزولة وهو غير مرئي للمضيف، لذا تعذّر إرفاقه. اطلب من الوكيل كتابته في دليل مشترك وإرساله مرة أخرى."
+  media_delivery_failed_missing: "⚠️ الملف `{path}` غير موجود، لذا تعذّر إرفاقه."
+  media_delivery_failed_blocked: "⚠️ رفضت سياسة تسليم الملفات إرفاق `{path}`."
+  media_delivery_failed_invalid: "⚠️ تم الوعد بملف لكن مساره غير صالح، لذا لا يوجد ما يمكن إرفاقه."
+
   approval_expired: "⚠️ انتهت صلاحية الموافقة (لم يعد الوكيل ينتظر). اطلب من الوكيل المحاولة مرة أخرى."
   draining: "⏳ جارٍ إنهاء {count} وكيل نشط قبل إعادة التشغيل..."
   goal_cleared: "✓ تم مسح الهدف."

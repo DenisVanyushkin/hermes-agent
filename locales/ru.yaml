@@ -42,6 +42,12 @@ approval:
     second_one: "{count} секунда"
     second_other: "{count} сек"
 gateway:
+  # Fork: an attachment could not be delivered (gateway/platforms/local_base.py).
+  media_delivery_failed_sandbox: "⚠️ Файл `{path}` создан внутри песочницы и не виден хосту, поэтому его не удалось приложить. Попросите агента записать его в общий каталог и отправить снова."
+  media_delivery_failed_missing: "⚠️ Файла `{path}` не существует, поэтому приложить его не удалось."
+  media_delivery_failed_blocked: "⚠️ Отправка файла `{path}` запрещена политикой доставки файлов."
+  media_delivery_failed_invalid: "⚠️ Файл был обещан, но путь к нему непригоден — приложить нечего."
+
   approval_expired: "⚠️ Срок одобрения истёк (агент больше не ожидает). Попросите агента повторить попытку."
   draining: "⏳ Ожидание завершения {count} активных агент(ов) перед перезапуском..."
   goal_cleared: "✓ Цель очищена."

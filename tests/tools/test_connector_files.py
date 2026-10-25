@@ -302,7 +302,7 @@ def test_dispatch_resolves_a_relative_path_in_the_calling_task_s_directory(tmp_p
     assert [put["data"] for put in storage.requests] == [b"from the task directory"]
 
 
-def test_a_docker_path_is_read_through_its_volume_mount(tmp_path, monkeypatch):
+def test_a_docker_path_outside_the_export_mount_is_refused(tmp_path, monkeypatch):
     host = tmp_path / "shared"
     _pdf(host / "report.pdf", b"from the container mount")
     monkeypatch.setenv("TERMINAL_ENV", "docker")
@@ -310,6 +310,20 @@ def test_a_docker_path_is_read_through_its_volume_mount(tmp_path, monkeypatch):
     gateway, storage = Gateway(), Storage()
 
     entry = _execute(gateway, storage, {"attachment": "/data/report.pdf"})
+
+    # Untranslated, the container path names no host file -- nothing is uploaded.
+    assert entry["error"]["code"] == "FILE_NOT_FOUND"
+    assert storage.requests == []
+
+
+def test_a_docker_path_is_read_through_its_export_mount(tmp_path, monkeypatch):
+    host = tmp_path / "shared"
+    _pdf(host / "report.pdf", b"from the container mount")
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", json.dumps([f"{host}:/output"]))
+    gateway, storage = Gateway(), Storage()
+
+    entry = _execute(gateway, storage, {"attachment": "/output/report.pdf"})
 
     assert entry["response"] == {"sent": True}
     assert gateway.requests[1]["json"]["filename"] == "report.pdf"
