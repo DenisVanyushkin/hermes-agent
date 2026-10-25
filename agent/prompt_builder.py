@@ -1033,6 +1033,8 @@ def build_environment_hints() -> str:
     # open windows on the gateway host), and a sandbox-placed one is the sandbox probe's business.
     if not is_remote_backend:
         hints.append(_bot_screen_hint())
+    # Fork: where the sandbox and the host filesystem meet (agent/local_delivery_hint.py).
+    hints.append(build_media_delivery_hint(backend))
     hints += [WSL_ENVIRONMENT_HINT] if is_wsl() else []
     return "\n\n".join(h for h in (*hints, _embedder_environment_hint()) if h)
 
@@ -1776,3 +1778,9 @@ def build_context_files_prompt(
         return ""
     return ("# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n"
             + "\n".join(sections))
+
+# Fork (agent/local_delivery_hint.py): names callers and tests import from here.
+from agent.local_delivery_hint import (  # noqa: E402
+    _UNDELIVERABLE_HOST_PREFIXES, build_media_delivery_hint, preferred_delivery_target,
+    writable_delivery_mounts,
+)
