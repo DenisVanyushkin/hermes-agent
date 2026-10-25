@@ -52,6 +52,8 @@ class ConversationState:
     last_resolved_model: str = ""  # last successfully-resolved non-empty model
     queued_events: list[Any] = field(default_factory=list)  # /queue overflow FIFO (head in adapter)
     sidecar_notes: list[str] = field(default_factory=list)  # one-shot must-deliver notes
+    # Fork: candidate/window keys already given one pending-ack residual (gateway/local_pending_acks.py).
+    pending_ack_residuals: dict[str, str] = field(default_factory=dict)
     ephemeral_pin: Optional[tuple[Any, ...]] = None  # pinned session-context (change_key, text, redact_pii)
     # (channel_prompt, parent_chat_id) of the last non-internal turn; internal events reuse it
     channel_pin: Optional[tuple[Optional[str], Optional[str]]] = None

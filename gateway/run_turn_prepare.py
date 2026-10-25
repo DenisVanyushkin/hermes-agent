@@ -628,6 +628,7 @@ class GatewayTurnPrepareMixin:
         persistence_session_id: Optional[str] = None
         persistence_owner: Optional[str] = None
         title_user_message: Optional[str] = None
+        pending_ack_residual: Any = None  # fork: gateway/local_pending_acks.py
 
     async def _hmwa_prepare_turn(self, event, source, session_entry, session_key, _quick_key, run_generation):
         """Everything between session resolution and the agent run: session open, task-local env,
@@ -705,6 +706,11 @@ class GatewayTurnPrepareMixin:
         if _vc_note:
             turn_sidecar_notes.append(_vc_note)
 
+        # Fork: open questions fam already asked ride the user message; the prepass applies what
+        # the reply answered (gateway/local_pending_acks.py; off without pending_acks_file).
+        from gateway.local_pending_acks import prepare_turn_notes
+        _pending_ack_residual = await prepare_turn_notes(event, source, turn_sidecar_notes)
+
         # Auto-analyze user images so the model gets a description plus the local path.
         message_text = await self._prepare_profile_scoped_inbound_message_text(
             event=event, source=source, history=history, session_key=session_key,
@@ -735,5 +741,5 @@ class GatewayTurnPrepareMixin:
         return self._PreparedTurn(
             history, context_prompt, message_text, persist_user_message, persist_user_timestamp,
             persist_user_display_kind, session_entry.session_id, owner,
-            title_user_message=title_user_message,
+            title_user_message=title_user_message, pending_ack_residual=_pending_ack_residual,
         ), _session_env_tokens

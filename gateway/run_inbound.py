@@ -217,7 +217,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             return None
         source = event.source
 
-        if not self._is_user_authorized_for_source(source):
+        # Fork: a pre_gateway_dispatch policy plugin vouched for this sender (bypass_auth).
+        if not getattr(event, "_hook_bypass_auth", False) and not self._is_user_authorized_for_source(source):
             if source.user_id is None:
                 # No user identity (Telegram service messages, channel forwards, anonymous admin
                 # posts, sender_chat): can't be paired but may be authorized via a chat allowlist.

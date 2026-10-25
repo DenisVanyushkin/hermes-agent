@@ -88,10 +88,12 @@ class GatewayInboundHooksMixin:
             logger.warning("pre_gateway_dispatch invocation failed: %s", _hook_exc)
             _hook_results = []
 
+        _hook_bypass_auth = False  # fork: a policy plugin may admit a sender auth would refuse
         for _result in _hook_results:
             if not isinstance(_result, dict):
                 continue
             _action = _result.get("action")
+            _hook_bypass_auth = _hook_bypass_auth or bool(_result.get("bypass_auth"))
             if _action == "skip":
                 logger.info(
                     "pre_gateway_dispatch skip: reason=%s platform=%s chat=%s",
@@ -109,6 +111,15 @@ class GatewayInboundHooksMixin:
                 break
             if _action == "allow":
                 break
+        if _hook_bypass_auth:
+            # Fork: admitted into the agent flow only. allow_gateway_control=False is upstream's own
+            # "no slash-command surface" bit (built-ins, quick, plugin and skill commands), and as a
+            # field it survives every later rebuild of the event; the text stays intact for the agent.
+            from gateway.session_ingress_context import carry_callback
+            admitted = dataclasses.replace(event, allow_gateway_control=False)
+            carry_callback(event, admitted)
+            event = admitted
+            event._hook_bypass_auth = True
         return event
 
     def _hm_quick_commands(self) -> dict:

@@ -308,6 +308,9 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 reply_expected=event.reply_expected,
             )
+            # Fork: clarification markers out, the unresolved pending-ack residual after MAIN.
+            from gateway.local_pending_acks import finish_response as _pa_finish
+            response = await _pa_finish(self, source, session_key, prepared.pending_ack_residual, response)
             if not _intentional_silence:
                 # Fork: turn-error alert to the admin channel (no-op without gateway.error_alerts). After
                 # normalize/sanitize, so detection sees the exact stub the user receives. Never raises.

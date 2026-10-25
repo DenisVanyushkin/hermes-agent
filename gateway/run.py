@@ -5283,3 +5283,40 @@ from gateway.local_turn_hygiene import (  # noqa: E402
     is_internal_clarify_activity_text as _is_internal_clarify_activity_text,
     looks_like_internal_clarify_summary as _looks_like_internal_clarify_summary,
 )
+
+# Fork (gateway/local_pending_acks.py): names callers and tests use from the facade.
+from gateway.local_pending_acks import (  # noqa: E402,F401
+    _PENDING_ACKS_MAX_AGE_MINUTES,
+    _PENDING_ACK_CLARIFICATION_MARKER_RE,
+    _PENDING_ACK_DISPOSITIONS,
+    _PENDING_ACK_RECEIPT_SCHEMA_VERSION,
+    _PENDING_ACK_RECEIPT_STATUSES,
+    _PENDING_ACK_RESIDUAL,
+    _PENDING_ACK_RESOLVE_TIMEOUT_SECONDS,
+    _filter_pending_ack_residual_plan,
+    _fresh_pending_ack_snapshot_for_source,
+    _pending_ack_actionable_refs,
+    _pending_ack_candidate_key,
+    _pending_ack_candidates,
+    _pending_ack_clarification_keys,
+    _pending_ack_clarification_marker,
+    _pending_ack_residual_plan,
+    _pending_ack_unresolved_refs,
+    _pending_acks_note,
+    _read_pending_acks,
+    _resolve_pending_ack_turn,
+    _run_pending_ack_process,
+    _strip_pending_ack_clarification_markers,
+    _terminate_pending_ack_process_group,
+    _validate_pending_ack_receipt,
+)
+from gateway.local_pending_acks import defer_residual_after_delivery as _defer_pending_ack_residual  # noqa: E402,F401
+import subprocess  # noqa: E402,F401  (tests patch gateway.run.subprocess.Popen for the fam CLI)
+
+
+async def _gr_defer_pending_ack_residual(self, source, session_key, plan):
+    """Fork: schedule one aggregated pending-ack residual after MAIN (gateway/local_pending_acks.py)."""
+    return await _defer_pending_ack_residual(self, source, session_key, plan)
+
+
+GatewayRunner._defer_pending_ack_residual_after_delivery = _gr_defer_pending_ack_residual  # fork
