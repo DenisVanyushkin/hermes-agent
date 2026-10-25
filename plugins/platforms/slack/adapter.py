@@ -6925,6 +6925,10 @@ _YAML_BRIDGE = (  # (yaml key, env var, kind) for apply_yaml_bridge
     ("require_mention_channels", "SLACK_REQUIRE_MENTION_CHANNELS", "csv"),
     ("reaction_triggers", "SLACK_REACTION_TRIGGERS", "csv"), ("reaction_trigger_target", "SLACK_REACTION_TRIGGER_TARGET", "str"),
     ("allowed_channels", "SLACK_ALLOWED_CHANNELS", "csv"), ("ignored_channels", "SLACK_IGNORED_CHANNELS", "csv"),
+    # Fork: 👍 idea capture (plugins/platforms/slack/local_slack.py) reads these from env.
+    ("idea_reaction_doc_id", "SLACK_IDEA_DOC_ID", "str"),
+    ("idea_reaction_channels", "SLACK_IDEA_REACTION_CHANNELS", "csv"),
+    ("idea_reaction_emojis", "SLACK_IDEA_REACTION_EMOJIS", "csv"),
 )
 
 

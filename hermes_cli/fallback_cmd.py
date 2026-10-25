@@ -235,13 +235,31 @@ def cmd_fallback_clear(args) -> None:
     print("\n  Fallback chain cleared.\n")
 
 
+def cmd_fallback_refresh(args) -> None:
+    """Fork: refresh sanitized fallback availability metadata without mutating live config."""
+    from hermes_cli.model_fallback_refresh import (
+        DEFAULT_STATE_PATH, format_refresh_report, refresh_model_fallbacks, write_fallback_state)
+    output_path = getattr(args, "output", None) or DEFAULT_STATE_PATH
+    timeout_s = float(getattr(args, "timeout", 1.5) or 1.5)
+    state = refresh_model_fallbacks(output_path=output_path, timeout_s=timeout_s)
+    if getattr(args, "dry_run", False):
+        print(f"  Dry run - state was not written: {output_path}")
+    else:
+        print(f"  Wrote fallback refresh state: {write_fallback_state(state, output_path=output_path)}")
+    print(f"  Schema version: {state['schema_version']}")
+    print(f"  Config hash:    {state['config_hash']}")
+    for line in format_refresh_report(state).splitlines():
+        print(f"  {line}")
+    print("  Safe mode: no config/auth mutation, no gateway restart, no deploy.")
+
+
 def cmd_fallback(args) -> None:
     """Top-level dispatcher for ``hermes fallback [subcommand]``."""
     sub = getattr(args, "fallback_command", None)
     handler = _SUBCOMMANDS.get(sub)
     if handler is None:
         print(f"Unknown fallback subcommand: {sub}")
-        print("Use one of: list, add, remove, clear")
+        print("Use one of: list, add, remove, clear, refresh")
         raise SystemExit(2)
     handler(args)
 
@@ -249,4 +267,5 @@ def cmd_fallback(args) -> None:
 _SUBCOMMANDS = {
     **dict.fromkeys((None, "", "list", "ls"), cmd_fallback_list), "add": cmd_fallback_add,
     **dict.fromkeys(("remove", "rm"), cmd_fallback_remove), "clear": cmd_fallback_clear,
+    "refresh": cmd_fallback_refresh,  # fork
 }

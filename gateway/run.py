@@ -2510,7 +2510,12 @@ def _event_media_is_audio(event, index: int) -> bool:
 def _event_media_is_stt_input(event, index: int) -> bool:
     """True when an audio attachment should enter the automatic STT pipeline."""
     message_type = getattr(event, "message_type", None)
-    if message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
+    if message_type == MessageType.AUDIO:
+        # Fork: a FORWARDED voice note loses WhatsApp's ptt flag and arrives as AUDIO; its
+        # Opus/OGG MIME is the only sign left that it is speech (gateway/local_inbound.py).
+        from gateway.local_inbound import is_forwarded_voice_note
+        return is_forwarded_voice_note(event, index, _event_media_type_at(event, index))
+    if message_type == MessageType.DOCUMENT:
         return False
     return message_type == MessageType.VOICE or _event_media_type_at(event, index).startswith("audio/")
 
@@ -5241,3 +5246,6 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
 
 if __name__ == "__main__":
     main()
+
+# Fork (gateway/local_inbound.py): names tests import from the facade.
+from gateway.local_inbound import VOICE_NOTE_STT_MAX_BYTES, is_forwarded_voice_note  # noqa: E402,F401

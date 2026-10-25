@@ -11,6 +11,9 @@ from typing import Dict, List, Any, Set, Optional, Tuple
 _HERMES_CORE_TOOLS = [
     "web_search", "web_extract",
     "terminal", "process_manage",
+    # Fork: the truth about the host -- the terminal runs in a sandbox, so its observations
+    # do not describe the server; host_inspect asks the host itself.
+    "host_inspect",
     "read_file", "write_file", "patch", "search_files",
     "vision_analyze", "image_generate",
     "skills_list", "skill_view", "skill_manage",
@@ -21,6 +24,8 @@ _HERMES_CORE_TOOLS = [
     "browser_vault",  # rides with the browser; deferred by default (tools.tool_search.defer)
     "browser_exec",  # replaces the other browser tools when browser.backend is "browser-use"
     "text_to_speech",
+    # Fork: speech-to-text, so the model never reaches for whisper/ffmpeg in the terminal.
+    "transcribe_audio",
     "todo_list", "memory",
     "session_search",
     "clarify",
@@ -125,6 +130,9 @@ TOOLSETS = {
         ["read_file", "write_file", "patch", "search_files"],
     ),
     "tts": _ts("Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI", ["text_to_speech"]),
+    # Fork: a static entry, not just registry.register(toolset="stt") -- the platform gate resolves
+    # toolsets statically, so without it transcribe_audio never reaches a chat platform.
+    "stt": _ts("Speech-to-text: transcribe an audio file with the configured STT provider", ["transcribe_audio"]),
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),

@@ -237,6 +237,15 @@ def _read_frontmatter_name(skill_md: Path) -> Optional[str]:
     return None
 
 
+def _is_package_skill_path(skill_path: "Path") -> bool:
+    """Fork: True when skill_path lives inside an installed role package. False on any error."""
+    try:
+        from hermes_cli.role_packages import get_package_for_skill_path
+        return get_package_for_skill_path(skill_path) is not None
+    except Exception:
+        return False
+
+
 def _find_skill(name: str) -> Optional[dict[str, Any]]:
     """Find a skill (local skills dir, then skills.external_dirs) -> ``{"path": Path}`` | None.
 
@@ -784,6 +793,13 @@ def skill_manage(
                 absorbed_into=absorbed_into)
     if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
         return gate_result
+    # Fork: a skill owned by an installed role package is managed by `hermes package install`;
+    # the agent must not edit it in place.
+    if action != "create" and (skill_info := _find_skill(name)) is not None:
+        if _is_package_skill_path(skill_info["path"]):
+            return tool_error(
+                f"Skill '{name}' is owned by an installed role package and cannot be modified "
+                "directly. Use 'hermes package install' to update it.", success=False)
     if (shape_err := _op_shape_error(action, args)) is not None:
         return tool_error(shape_err, success=False)
     # Validate before the lock is keyed on the name, so a rejected name never touches .locks/

@@ -2779,7 +2779,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         # Plugin commands missing from top-level --help is an accepted trade-off.
         "help",
     }
-)
+) | __import__("hermes_cli.local_cli", fromlist=["FORK_SUBCOMMANDS"]).FORK_SUBCOMMANDS  # fork
 
 
 def _first_positional_argv() -> str | None:
@@ -3351,6 +3351,9 @@ def _build_cli_parser():
     build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)
     build_dump_parser(subparsers, cmd_dump=cmd_dump)
     build_debug_parser(subparsers, cmd_debug=cmd_debug)
+    # Fork: controlled-report, role and the recruiter entry points (hermes_cli/local_cli.py).
+    from hermes_cli.local_cli import register_fork_subcommands
+    register_fork_subcommands(subparsers)
     build_backup_parser(subparsers, cmd_backup=cmd_backup)
     build_checkpoints_parser(subparsers)
     build_import_cmd_parser(subparsers, cmd_import=cmd_import)

@@ -711,6 +711,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             "modalities": ["image", "text"],
             "messages": [{"role": "user", "content": content}],
             "image_config": {"aspect_ratio": _ASPECT_RATIOS.get(aspect, "1:1")},
+            # Fork: ask OpenRouter for the request cost inline, shown next to the image.
+            "usage": {"include": True},
         }
         result, failure = post_json(
             f"{base_url}/chat/completions", headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT,
@@ -744,8 +746,12 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                 saved_path = save_url_image(first, prefix=f"{self._name}_gen")
         except Exception as exc:
             return fail(f"Could not save generated image: {exc}", "io_error"), None
+        usage = result.get("usage") if isinstance(result, dict) else None
+        cost = usage.get("cost") if isinstance(usage, dict) else None
         return success_response(
             image=str(saved_path), model=model_id, prompt=prompt, aspect_ratio=aspect, provider=self._name,
+            # Fork: the request cost OpenRouter reported, when it did.
+            extra={"cost_usd": round(float(cost), 6)} if isinstance(cost, (int, float)) else None,
         ), None
 
     def generate(

@@ -416,6 +416,12 @@ def get_skill_search_roots(local: Optional[Path] = None, *, include_project: boo
     if create_dir is not None and create_dir.is_dir():
         roots.append((TIER_CREATE_DIR, create_dir))
     roots += [(TIER_EXTERNAL, d) for d in get_external_skills_dirs()]
+    # Fork: installed role packages contribute their skills/ dirs, after the external ones.
+    try:
+        from hermes_cli.role_packages import get_package_skill_dirs  # noqa: PLC0415
+        roots += [(TIER_EXTERNAL, d) for d in get_package_skill_dirs()]
+    except Exception:
+        logger.debug("Could not load package skill dirs", exc_info=True)
     seen: set[Path] = set()
     return [(t, d) for t, d in roots if not (d in seen or seen.add(d))]
 

@@ -446,7 +446,8 @@ def _skill_linked_files(skill_dir: Optional[Path]) -> dict:
     return files
 
 
-def _skill_readiness(frontmatter: dict[str, Any], skill_name: str) -> tuple[dict, dict]:
+def _skill_readiness(frontmatter: dict[str, Any], skill_name: str,
+                     skill_md: Optional[Path] = None) -> tuple[dict, dict]:
     """Resolve required env vars / credential files (prompting for secrets where the surface
     allows) and register what's available for sandboxes. Returns ``(fields, extras)``: fields go
     before the readiness extras in the skill_view result — key order is tool output."""
@@ -469,7 +470,22 @@ def _skill_readiness(frontmatter: dict[str, Any], skill_name: str) -> tuple[dict
     if available_env_names := [e["name"] for e in required_env_vars if e["name"] not in remaining]:
         try:
             from tools.env_passthrough import register_env_passthrough
-            register_env_passthrough(available_env_names)
+            # Fork: a role-package skill passes through only its package's allowlisted env
+            # (None = not a package skill: unchanged; empty = nothing passes).
+            try:
+                from hermes_cli.role_packages import cap_env_passthrough_for_skill
+                capped = cap_env_passthrough_for_skill(
+                    skill_path=skill_md, skill_env_names=set(available_env_names))
+            except Exception:
+                logger.debug("cap_env_passthrough_for_skill unavailable for skill %s", skill_name,
+                             exc_info=True)
+                capped = None
+            if capped is None:
+                register_env_passthrough(available_env_names)
+            elif capped:
+                register_env_passthrough(capped)
+            else:
+                logger.debug("Env passthrough fully capped for package skill %s", skill_name)
         except Exception:
             logger.debug("Could not register env passthrough for skill %s", skill_name, exc_info=True)
     # Credential files for remote sandboxes: existing host files are registered,
@@ -644,7 +660,7 @@ def skill_view(
         except ValueError:  # external skill — relative to its own parent dir
             rel_path = str(skill_md.relative_to(skill_md.parent.parent)) if skill_md.parent.parent else skill_md.name
         skill_name = frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)
-        readiness, readiness_extras = _skill_readiness(frontmatter, skill_name)
+        readiness, readiness_extras = _skill_readiness(frontmatter, skill_name, skill_md)  # fork: env cap
         rendered_content = content if not preprocess else _preprocess_skill(
             content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name)
         # ── pm tool deps (`deps: [ffmpeg]` frontmatter) ──────────────

@@ -1422,7 +1422,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             if _event_media_is_image(event, i):
                 image_paths.append(path)
             if _event_media_is_audio(event, i):
-                if event.message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
+                if (event.message_type in {MessageType.AUDIO, MessageType.DOCUMENT}
+                        and not _event_media_is_stt_input(event, i)):  # fork: forwarded voice note
                     audio_file_paths.append(path)
                 elif not pending_stt_prepared and _event_media_is_stt_input(event, i):
                     audio_paths.append(path)
