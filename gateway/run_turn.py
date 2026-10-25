@@ -511,6 +511,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
             max_iterations = _current_max_iterations()
             reasoning_config = self._resolve_session_reasoning_config(source=source, model=model)
             self._reasoning_config = reasoning_config
+            _session_override = reasoning_config if self._session_reasoning_override_active(
+                source=source) else None  # fork: see run_turn_runner
             self._service_tier = self._resolve_session_service_tier(source=source)
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
@@ -555,6 +557,8 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                     # See #60955.
                     fallback_model=self._refresh_fallback_model(),
                 )
+                # Fork: the session's explicit /reasoning stands the role policy's effort floor down here too.
+                agent._reasoning_session_override = _session_override
                 try:
                     return agent.run_conversation(user_message=enriched_prompt, task_id=task_id)
                 finally:

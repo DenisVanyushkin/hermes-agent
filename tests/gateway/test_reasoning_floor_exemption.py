@@ -70,7 +70,7 @@ def test_every_agent_the_gateway_hands_out_gets_the_session_override():
     """Признак бесполезен, если он не доехал до объекта агента."""
     import pathlib
 
-    src = pathlib.Path("gateway/run.py").read_text()
+    src = "".join(pathlib.Path(f).read_text() for f in ("gateway/run_turn_runner.py", "gateway/run_turn.py"))
 
     # Два места раздачи агента: TurnRunner.run_sync (обычный ход гейтвея) и
     # _run_background_task_inner. Раньше их было три — третье присвоение
@@ -85,7 +85,8 @@ def test_the_override_is_never_shared_state_on_the_gateway():
     вычислением признака и штампом есть точки await."""
     import pathlib
 
-    src = pathlib.Path("gateway/run.py").read_text()
+    src = "".join(pathlib.Path(f).read_text() for f in (
+        "gateway/run.py", "gateway/run_turn_runner.py", "gateway/run_turn.py"))
 
     assert "self._reasoning_session_override" not in src
     # Признак считается локально на каждом из двух путей. В TurnRunner

@@ -194,6 +194,24 @@ class GatewayConfigLoadersMixin:
             return policy.current_reasoning_config(self, resolved_session_key)
         return self._load_reasoning_config(model)
 
+    def _session_reasoning_override_active(self, *, source=None, session_key: Optional[str] = None) -> bool:
+        """Fork: whether this session carries an explicit ``/reasoning`` override.
+
+        The role policy's effort floor (agent/local_roles.py) must never raise a level a human set by
+        hand for this session. By the time a turn reaches the floor the two are indistinguishable -- a
+        session override and a configured value are both ``{"enabled": True, "effort": ...}`` -- so
+        the fact travels as its own attribute on the agent (``_reasoning_session_override``). A key that
+        cannot be derived is not an exemption.
+        """
+        resolved_session_key = session_key
+        if not resolved_session_key and source is not None:
+            try:
+                resolved_session_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_session_key = None
+        overrides = getattr(self, "_session_reasoning_overrides", {}) or {}
+        return bool(resolved_session_key and resolved_session_key in overrides)
+
     def _set_session_reasoning_override(self, session_key: str, reasoning_config: Optional[dict]) -> None:
         """Set or clear the session-scoped reasoning override."""
         if not session_key:

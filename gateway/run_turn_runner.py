@@ -1302,6 +1302,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
+        # Fork: an explicit session /reasoning stands the role policy's effort floor down. Computed here,
+        # per turn, and stamped on this turn's agent -- never shared state on the one gateway runner.
+        _session_override = reasoning_config if self._runner._session_reasoning_override_active(
+            session_key=ctx.session_key) else None
+        agent._reasoning_session_override = _session_override
         from gateway.run_turn_progress import local_viewer_turn
         local_sinks = None
         if local_viewer_turn(self) and not ctx.mute_notification_reply:
