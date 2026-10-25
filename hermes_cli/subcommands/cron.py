@@ -77,6 +77,12 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "medium, high, xhigh, max, or ultra. Overrides agent.reasoning_effort "
             "and agent.reasoning_overrides for this job; unsupported levels are "
             "clamped by the provider at request time. Omit to follow config.")
+    # Fork: per-job role pin.
+    cron_create.add_argument("--role",
+        help="Pin the agent role for this job (e.g. scribe, engineer). Injected as a "
+            "[ROLE PIN: ...] directive that deterministically overrides LLM/keyword role "
+            "routing -- recommended for --script jobs whose injected output could "
+            "otherwise poison role selection.")
     cron_create.add_argument("--interpreter",
         help="Absolute or ~ path to a Python in your own venv (e.g. ~/venvs/report/bin/python) "
             "for a .py --script / --monitor-script, so it can import packages Hermes does not "
@@ -148,6 +154,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Pin this job's reasoning (thinking) effort: none, minimal, low, "
             "medium, high, xhigh, max, or ultra. Pass empty string to clear "
             "the pin and follow config resolution.")
+    # Fork: per-job role pin.
+    cron_edit.add_argument("--role",
+        help="Pin the agent role for this job (e.g. scribe, engineer). "
+            "Pass empty string to clear the pin.")
     cron_edit.add_argument("--interpreter",
         help="Absolute or ~ path to a Python for a .py script / monitor script. "
             "Pass empty string to clear (back to Hermes' Python).")
