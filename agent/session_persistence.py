@@ -30,6 +30,9 @@ from agent.transcript_repair import sync_flushed_message_markers
 
 
 logger = logging.getLogger("run_agent")  # origin module's name: log records / caplog filters unchanged
+# Fork (agent/local_persistence_alert.py): imported at module load on purpose -- a lazy import
+# would read the alerter from disk at the moment of failure, possibly a newer version.
+from agent.local_persistence_alert import note_flush_failure, note_flush_success  # noqa: E402
 
 # Flags marking ephemeral recovery scaffolding the loop pops before appending the real response.
 # Persistence must skip them or a resumed session replays synthetic turns / breaks prefix-cache reuse.
@@ -307,6 +310,7 @@ def _db_flush_write(agent, batch_rows: list[dict[str, Any]], batch_msgs: list[di
         turn_lease_ttl_seconds=getattr(agent, "_active_session_turn_lease_ttl_seconds", 300.0) or 300.0,
     )
     sync_flushed_message_markers(batch_msgs, batch_rows)
+    note_flush_success(agent)  # fork: a successful flush ends the failure streak
     if _newest_checkpoint_carrier(batch_msgs, "codex_reasoning_items") >= 0:
         # The insert already rewrote the older rows (SessionDB._drop_shadowed_checkpoint_rows); mirror it on
         # the live transcript so forks/compaction built from memory carry one checkpoint too. Markers stay:
@@ -414,13 +418,16 @@ def _db_flush_failed(agent, e: Exception, batch_rows: list[dict[str, Any]], adop
         if adoption_budget > 0 and _db_flush_adopt_compression_tip(agent):
             return "adopted"
         agent._compression_adoption_failed = True  # lets the turn explanation name rotation, not full-disk advice
-    logger.warning("Session DB append_message failed: %s", e)
+    # Fork: a second consecutive failure is deterministic -- error + one operator alert.
+    note_flush_failure(agent, e)
     return None
 
 
 
 class SessionPersistenceMixin:
     """Session DB flush and trajectory persistence (see module docstring)."""
+
+    _consecutive_flush_failures = 0  # fork: flush-failure streak (agent/local_persistence_alert.py)
 
     def _apply_persist_user_message_override(self, messages: list[dict]) -> None:
         """Rewrite the current-turn user message in place: some paths send an API-only variant that must not

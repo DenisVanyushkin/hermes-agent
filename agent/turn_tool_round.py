@@ -180,8 +180,17 @@ def run_tool_round(
         decision = agent._tool_guardrail_halt_decision
         _turn_exit_reason = "guardrail_halt"
         final_response = agent._toolguard_controlled_halt_response(decision)
+        # Fork: a loop cap (max web searches...) stopped a turn that HAS results -- summarize
+        # them with the one toolless call upstream uses at max iterations, instead of a stub.
+        summary_appended = False
+        if str(getattr(decision, "code", "")).startswith("loop_"):
+            with suppress(Exception):
+                agent._handle_max_iterations(messages, api_call_count)
+            if messages and messages[-1].get("role") == "assistant" and messages[-1].get("content"):
+                final_response, summary_appended = messages[-1]["content"], True
         agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
-        append_message(messages, {"role": "assistant", "content": final_response})
+        if not summary_appended:
+            append_message(messages, {"role": "assistant", "content": final_response})
         # Emit the halt so it isn't mistaken for a crash; the stream callback is still
         # alive, so SSE/TUI clients see the explanation.
         if final_response:

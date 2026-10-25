@@ -136,7 +136,7 @@ def test_fresh_agent_starts_at_zero():
 
 def _capture_alerts(monkeypatch, channel="telegram:79564752"):
     """Подменить конфиг и отправку; вернуть список отправленных текстов."""
-    import run_agent
+    import agent.local_persistence_alert as run_agent  # the alerter moved here from run_agent
 
     sent = []
     monkeypatch.setattr(
@@ -183,7 +183,7 @@ def test_second_failure_sends_one_alert(monkeypatch):
 
 def test_no_alert_when_channel_not_configured(monkeypatch):
     from hermes_state import SessionDB
-    import run_agent
+    import agent.local_persistence_alert as run_agent  # the alerter moved here from run_agent
 
     sent = []
     monkeypatch.setattr(run_agent, "get_alert_config", lambda cfg: None)
@@ -208,7 +208,7 @@ def test_no_alert_when_channel_not_configured(monkeypatch):
 
 def test_alert_crash_does_not_break_the_flush(monkeypatch, caplog):
     from hermes_state import SessionDB
-    import run_agent
+    import agent.local_persistence_alert as run_agent  # the alerter moved here from run_agent
 
     def _explode(cfg):
         raise RuntimeError("alert machinery is broken")
@@ -239,7 +239,7 @@ def test_alert_crash_does_not_break_the_flush(monkeypatch, caplog):
 
 def test_dedup_suppresses_repeat_alerts(monkeypatch):
     from hermes_state import SessionDB
-    import run_agent
+    import agent.local_persistence_alert as run_agent  # the alerter moved here from run_agent
 
     sent = []
     monkeypatch.setattr(

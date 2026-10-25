@@ -517,7 +517,7 @@ def test_loop_cap_uses_one_summary_assistant_message():
     responses.append(_mock_response(content="Summary from gathered results", finish_reason="stop", tool_calls=None))
     agent.client.chat.completions.create.side_effect = responses
     agent._disable_streaming = True
-    with (patch("run_agent.handle_function_call", return_value=json.dumps({"ok": True})), patch.object(agent, "_persist_session"), patch.object(agent, "_save_trajectory"), patch.object(agent, "_cleanup_task_resources")):
+    with (patch("model_tools.handle_function_call", return_value=json.dumps({"ok": True})), patch.object(agent, "_persist_session"), patch.object(agent, "_save_trajectory"), patch.object(agent, "_cleanup_task_resources")):
         result = agent.run_conversation("search")
     assert result["turn_exit_reason"] == "guardrail_halt"
     assert result["final_response"] == "Summary from gathered results"
