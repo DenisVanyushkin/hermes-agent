@@ -113,7 +113,9 @@ def _clarify_send_then_wait(fut, *, clarify_id: str, session_key: str, clarify_m
     if response == clarify_mod.CANCELLED:
         return response, False
     if response is None or response == "":
-        return f"[user did not respond within {int(timeout / 60)}m]", False
+        # Fork: the prose says what to do, not only that nobody answered (gateway/local_turn_hygiene.py).
+        from gateway.local_turn_hygiene import clarify_timeout_text
+        return clarify_timeout_text(timeout), False
     return response, True
 
 

@@ -890,6 +890,9 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
         _unclean_exit = _best_effort(_lifecycle_record_startup, "Lifecycle ledger startup record failed: %s")
         _best_effort(_start_keepalive, "Nous auth keepalive did not start: %s")
+        # Fork: the periodic [MEMORY] rss= line (gateway/local_startup.py).
+        from gateway.local_startup import start_memory_monitor
+        start_memory_monitor()
         _ensure_windows_gateway_venv_imports()
 
         _early_verdict = await _start_gateway_run_runner(runner, _signal_initiated_shutdown)
@@ -942,5 +945,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 _planned_stop_watcher_stop.set()
             if _control_server is not None:
                 await _control_server.stop()
+            # Fork: final "[MEMORY] shutdown rss=" line (gateway/local_startup.py).
+            from gateway.local_startup import stop_memory_monitor
+            stop_memory_monitor()
             remove_pid_file()
             release_gateway_runtime_lock()

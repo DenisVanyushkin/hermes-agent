@@ -1246,6 +1246,13 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
         """Handle an incoming message from any platform: auth → command check → running-agent
         interrupt → get/create session → build context → run agent → return response."""
         from gateway.run import _AGENT_PENDING_SENTINEL
+        # Fork: the news-source group is ingest-only -- no agent, no router (gateway/local_turn_hygiene.py).
+        from gateway.local_turn_hygiene import classify_news_ingest_only_source
+        _ingest_policy = classify_news_ingest_only_source(getattr(event, "source", None))
+        if _ingest_policy["ingest_only"]:
+            import json as _json
+            logger.info("telegram news ingest-only skip %s", _json.dumps(_ingest_policy, ensure_ascii=False, sort_keys=True))
+            return None
         _admitted = await self._hm_admit_event(event)
         if _admitted is None:
             return None

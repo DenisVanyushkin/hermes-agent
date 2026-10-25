@@ -154,7 +154,9 @@ def run_tool_round(
 
     # A UI must never observe an assistant/tool-call row that is only an in-memory
     # projection: emit interim commentary after the DB append.
-    if not duplicate_previous_interim:
+    # Fork: a turn that calls clarify shows the clarify card, not its commentary.
+    from gateway.local_turn_hygiene import assistant_turn_has_tool_call_named
+    if not duplicate_previous_interim and not assistant_turn_has_tool_call_named(assistant_msg, "clarify"):
         agent._emit_interim_assistant_message(assistant_msg)
 
     # Flush open streaming boxes before tools so early content doesn't wrap tool feed

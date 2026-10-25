@@ -7,6 +7,8 @@ leaks show up as a time series in agent.log / gateway.log.
 
 from __future__ import annotations
 
+import logging
+import time
 
 import pytest
 
@@ -87,11 +89,12 @@ class TestGatewayWiring:
     def _run_py_source(self) -> str:
         from pathlib import Path
 
-        run_py = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
+        # v0.22.5 split start_gateway out of gateway/run.py.
+        run_py = Path(__file__).resolve().parents[2] / "gateway" / "run_bootstrap.py"
         return run_py.read_text(encoding="utf-8")
 
     def test_start_gateway_starts_monitor(self) -> None:
-        assert "start_memory_monitoring(" in self._run_py_source()
+        assert "start_memory_monitor()" in self._run_py_source()
 
     def test_start_gateway_stops_monitor_on_shutdown(self) -> None:
-        assert "stop_memory_monitoring(" in self._run_py_source()
+        assert "stop_memory_monitor()" in self._run_py_source()

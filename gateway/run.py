@@ -727,6 +727,10 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = str(message or "").strip()
     if not text:
         return None
+    # Fork: clarify-internal status labels never reach a chat (gateway/local_turn_hygiene.py).
+    from gateway.local_turn_hygiene import is_internal_clarify_activity_text
+    if is_internal_clarify_activity_text(text):
+        return None
     if _gateway_surface_passes_raw_text(platform):
         return text
 
@@ -5267,3 +5271,11 @@ def _gr_stale_guard_is_idle(self, idle_timeout_seconds: float) -> bool:
 
 
 GatewayRunner._stale_guard_is_idle = _gr_stale_guard_is_idle  # fork
+
+# Fork (gateway/local_turn_hygiene.py): names callers and tests import from the facade.
+from gateway.local_turn_hygiene import (  # noqa: E402
+    NEWS_INGEST_ONLY_TELEGRAM_CHAT_IDS as _NEWS_INGEST_ONLY_TELEGRAM_CHAT_IDS,
+    classify_news_ingest_only_source as _classify_news_ingest_only_source,
+    is_internal_clarify_activity_text as _is_internal_clarify_activity_text,
+    looks_like_internal_clarify_summary as _looks_like_internal_clarify_summary,
+)

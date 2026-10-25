@@ -1781,8 +1781,16 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
             _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
         )
+        # Fork: a first response that is only the model's clarify summary is not sent.
+        from gateway.local_turn_hygiene import looks_like_internal_clarify_summary
+        if first_response and looks_like_internal_clarify_summary(first_response):
+            logger.info(
+                "Queued follow-up for session %s: suppressing internal clarify summary before continuing.",
+                session_key or "?",
+            )
+            first_response = ""
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
-        if self._is_intentional_silence(_delivery_result, first_response):
+        elif self._is_intentional_silence(_delivery_result, first_response):
             if silence_allowed(turn_ctx.persist_user_display_kind, turn_ctx.reply_expected):
                 logger.info(
                     "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",
@@ -2252,6 +2260,11 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 disp.resolve_display_setting(disp.user_config, disp.platform_key, "busy_ack_detail", True)
             )
             _a = self._agent_activity_summary(agent_holder[0])
+            # Fork: no "working" heartbeat while the agent only waits for a clarify answer.
+            from gateway.local_turn_hygiene import is_internal_clarify_activity_text
+            if _a and is_internal_clarify_activity_text(_a.get("current_tool") or _a.get("last_activity_desc")):
+                logger.debug("Suppressing clarify long-running heartbeat for session %s", session_key or "?")
+                continue
             with suppress(Exception):
                 if _a:
                     _parts = []

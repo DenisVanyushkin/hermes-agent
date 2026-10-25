@@ -927,6 +927,9 @@ class GatewayStartupMixin:
         self._start_log_systemd_timing_alignment()
         self._start_log_retired_session_reset()
         self._log_agent_budget()
+        # Fork: effective review-gate config, one line (gateway/local_startup.py).
+        from gateway.local_startup import log_review_gate_config
+        log_review_gate_config()
         # Warn prominently when redaction is opted out; the redactor snapshots its state at import time,
         # so this line is the source of truth for the process lifetime.
         with suppress(Exception):

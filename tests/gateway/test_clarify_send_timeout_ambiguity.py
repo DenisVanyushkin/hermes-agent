@@ -135,11 +135,10 @@ def test_no_response_returns_timeout_sentinel():
     clarify_mod.get_clarify_timeout.return_value = 600
     clarify_mod.wait_for_response.return_value = None
 
-    assert (
-        _clarify_send_then_wait(
-            fut, clarify_id="cid123", session_key="sk", clarify_mod=clarify_mod
-        )
-        == ("[user did not respond within 10m]", False)
+    text, answered = _clarify_send_then_wait(
+        fut, clarify_id="cid123", session_key="sk", clarify_mod=clarify_mod
     )
+    assert answered is False
+    assert text.startswith("[user did not respond within 10m]")
 
 # --- Definitive failures keep their diagnostic detail in the log ----------

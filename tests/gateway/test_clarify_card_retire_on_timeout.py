@@ -119,6 +119,10 @@ def test_real_answer_starting_with_a_bracket_is_not_mistaken_for_a_sentinel():
 # --- Batches: one card per question, stop at the first unanswered one -----
 
 
+# The timeout prose says what to do, not only that nobody answered (gateway/local_turn_hygiene.py).
+from gateway.local_turn_hygiene import clarify_timeout_text  # noqa: E402
+_TIMEOUT_NOTICE = clarify_timeout_text(0)
+
 _THREE_QUESTIONS = [{"qid": f"q{i}", "question": q, "choices": ["a", "b"], "multi_select": False}
                     for i, q in enumerate(("One?", "Two?", "Three?"))]
 
@@ -126,10 +130,10 @@ _THREE_QUESTIONS = [{"qid": f"q{i}", "question": q, "choices": ["a", "b"], "mult
 @pytest.mark.parametrize("answers,asked,payload,resumed", [
     # Nobody answers question 1: the batch ends there instead of re-asking — every further
     # question used to cost another full clarify_timeout — and reports the walk-away.
-    ((), ["One?"], {"answers": {}, "outcome": "timed_out", "notice": "[user did not respond within 0m]"}, 0),
+    ((), ["One?"], {"answers": {}, "outcome": "timed_out", "notice": _TIMEOUT_NOTICE}, 0),
     # Answers already given survive; the unanswered question is not invented.
     (("use postgres",), ["One?", "Two?"],
-     {"answers": {"q0": "use postgres"}, "outcome": "timed_out", "notice": "[user did not respond within 0m]"}, 0),
+     {"answers": {"q0": "use postgres"}, "outcome": "timed_out", "notice": _TIMEOUT_NOTICE}, 0),
     # A fully answered batch re-arms typing once, at the end: between two cards the re-arm
     # would only open a bubble the next question's boundary finalizes.
     (("one", "two", "three"), ["One?", "Two?", "Three?"],
@@ -154,7 +158,7 @@ class _UndeliverableAdapter(_CardAdapter):
 
 
 @pytest.mark.parametrize("adapter_cls,outcome,notice", [
-    (_CardAdapter, "timed_out", "[user did not respond within 0m]"),
+    (_CardAdapter, "timed_out", _TIMEOUT_NOTICE),
     # #112684: an undelivered card must not read as user inactivity — the outcome says
     # undelivered and the delivery notice rides along.
     (_UndeliverableAdapter, "undelivered", "[clarify prompt could not be delivered]"),

@@ -296,6 +296,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         def interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
                 return
+            # Fork: the model's "clarify: ..." summary is machinery, not commentary.
+            from gateway.local_turn_hygiene import looks_like_internal_clarify_summary
+            if looks_like_internal_clarify_summary(text):
+                logger.debug("Suppressing internal clarify interim commentary: %s", str(text or "")[:160])
+                return
             unseen = False
             if local_viewer_route and not already_streamed and str(text or "").strip():
                 # LocalSessionAdapter.send publishes nothing, so unstreamed commentary handed to the
