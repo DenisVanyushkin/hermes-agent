@@ -4502,7 +4502,7 @@ def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
 
 def _start_gateway_housekeeping(
     stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, cron_provider=None, runner=None,
-    cron_thread=None,
+    cron_thread=None, stale_guard_cfg=None, stale_guard_boot_label=None,
 ):
     """Background thread for gateway-only periodic chores (NOT cron). Separate from the cron trigger
     so chores run under any ``CronScheduler`` provider (external scale-to-zero has no 60s loop).
@@ -4551,6 +4551,10 @@ def _start_gateway_housekeeping(
         # Last: a real prune can hold this thread for a while; every other chore of the tick runs first.
         (1, "Checkpoint prune tick", _housekeeping_checkpoint_prune)]
 
+    # Fork: stale-code guard (gateway/local_stale_guard.py), armed at startup when configured.
+    from gateway.local_stale_guard import stale_guard_chore
+    if (_guard := stale_guard_chore(runner, loop, stale_guard_cfg, stale_guard_boot_label)) is not None:
+        chores.append(_guard)
     # Between ticks the queue file is watched so a worker's send goes out when it is queued,
     # not up to ``interval`` later (#117307); the tick's drain above remains the fallback.
     queue_watch = None
@@ -5249,3 +5253,17 @@ if __name__ == "__main__":
 
 # Fork (gateway/local_inbound.py): names tests import from the facade.
 from gateway.local_inbound import VOICE_NOTE_STT_MAX_BYTES, is_forwarded_voice_note  # noqa: E402,F401
+
+# Fork (gateway/local_stale_guard.py): names callers and tests import from the facade.
+from gateway.local_stale_guard import (  # noqa: E402
+    _stale_guard_arm, _stale_guard_tick, preload_turn_path_modules,
+)
+
+
+def _gr_stale_guard_is_idle(self, idle_timeout_seconds: float) -> bool:
+    """Fork: the stale-code guard's idle predicate, counting cron and API work too."""
+    from gateway.local_stale_guard import stale_guard_is_idle
+    return stale_guard_is_idle(self, idle_timeout_seconds)
+
+
+GatewayRunner._stale_guard_is_idle = _gr_stale_guard_is_idle  # fork

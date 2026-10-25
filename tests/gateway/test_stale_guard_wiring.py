@@ -42,7 +42,7 @@ def gw_loop():
 @pytest.fixture
 def wiring(monkeypatch, tmp_path):
     """Общая обвязка: детектор, алерты и HERMES_HOME подменены."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     sent = []
     monkeypatch.setattr(gateway_run, "send_operator_alert", lambda ch, text: sent.append(text))
@@ -74,7 +74,7 @@ def _wait(predicate, timeout=5.0):
 
 
 def test_skew_plus_idle_triggers_exactly_one_restart(monkeypatch, wiring, gw_loop):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["hermes_state.py"])
     runner = _FakeRunner(idle=True)
@@ -93,7 +93,7 @@ def test_skew_plus_idle_triggers_exactly_one_restart(monkeypatch, wiring, gw_loo
 
 def test_first_alert_pass_defers_the_restart(monkeypatch, wiring, gw_loop):
     """Алерт уходит демон-потоком: рестарт в том же проходе убил бы его."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     runner = _FakeRunner(idle=True)
@@ -107,7 +107,7 @@ def test_first_alert_pass_defers_the_restart(monkeypatch, wiring, gw_loop):
 
 
 def test_skew_without_idle_alerts_but_does_not_restart(monkeypatch, wiring, gw_loop):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["run_agent.py"])
     runner = _FakeRunner(idle=False)
@@ -122,7 +122,7 @@ def test_skew_without_idle_alerts_but_does_not_restart(monkeypatch, wiring, gw_l
 
 
 def test_no_skew_does_nothing(monkeypatch, wiring, gw_loop):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: [])
     runner = _FakeRunner(idle=True)
@@ -136,7 +136,7 @@ def test_no_skew_does_nothing(monkeypatch, wiring, gw_loop):
 
 def test_alert_is_sent_once_per_episode(monkeypatch, wiring, gw_loop):
     """Скос живёт до рестарта — повторять алерт на каждом тике нельзя."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     runner = _FakeRunner(idle=False)
@@ -150,7 +150,7 @@ def test_alert_is_sent_once_per_episode(monkeypatch, wiring, gw_loop):
 
 
 def test_exhausted_budget_blocks_restart_and_alerts_once(monkeypatch, wiring, gw_loop):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
     from gateway.stale_guard import record_auto_restart
 
     assert record_auto_restart(wiring["home"], 1_000_000.0) is True
@@ -172,7 +172,7 @@ def test_exhausted_budget_blocks_restart_and_alerts_once(monkeypatch, wiring, gw
 
 def test_exhausted_budget_latches_off_for_the_process(monkeypatch, wiring, gw_loop):
     """Через час скользящее окно опустеет — сторож всё равно не оживает (I4)."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
     from gateway.stale_guard import record_auto_restart
 
     record_auto_restart(wiring["home"], 1_000_000.0)
@@ -198,7 +198,7 @@ def test_exhausted_budget_latches_off_for_the_process(monkeypatch, wiring, gw_lo
 
 def test_unwritable_budget_blocks_the_restart(monkeypatch, wiring, gw_loop):
     """Бюджет — единственная защита от петли: не пишется → не рестартуем (I3)."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     monkeypatch.setattr(gateway_run, "budget_writable", lambda home: False)
@@ -224,7 +224,7 @@ def test_failed_budget_mark_after_scheduling_alerts_that_the_guard_is_off(
     что остаётся, это выключить автоматику и СКАЗАТЬ об этом, а не оставить
     строчку в логе.
     """
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     monkeypatch.setattr(gateway_run, "budget_writable", lambda home: True)
@@ -244,7 +244,7 @@ def test_failed_budget_mark_after_scheduling_alerts_that_the_guard_is_off(
 
 def test_failed_budget_mark_alert_failure_does_not_propagate(monkeypatch, wiring, gw_loop):
     """Падение отправки алерта не имеет права ронять тик."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     def _boom(channel, text):
         raise RuntimeError("telegram down")
@@ -263,7 +263,7 @@ def test_failed_budget_mark_alert_failure_does_not_propagate(monkeypatch, wiring
 
 
 def test_detector_failure_does_not_propagate(monkeypatch, wiring, gw_loop):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     def _boom(root):
         raise RuntimeError("detector exploded")
@@ -278,7 +278,7 @@ def test_detector_failure_does_not_propagate(monkeypatch, wiring, gw_loop):
 
 def test_boot_label_from_snapshot_time_is_used_in_the_alert(monkeypatch, wiring, gw_loop):
     """M6: человеку показывается момент СНИМКА, а не старта housekeeping."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     runner = _FakeRunner(idle=False)
@@ -310,7 +310,7 @@ def _real_runner(monkeypatch):
 
 def test_real_request_restart_is_scheduled_onto_the_loop(monkeypatch, wiring, gw_loop):
     """Настоящий request_restart зовёт asyncio.create_task — только на loop."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     runner, stop_calls = _real_runner(monkeypatch)
@@ -327,7 +327,7 @@ def test_real_request_restart_is_scheduled_onto_the_loop(monkeypatch, wiring, gw
 
 def test_offloop_tick_without_loop_does_not_latch_restart_flag(monkeypatch, wiring):
     """Без loop рестарт не планируется и НЕ выжигает _restart_task_started."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     monkeypatch.setattr(gateway_run, "detect_module_skew", lambda root: ["a.py"])
     runner, _ = _real_runner(monkeypatch)
@@ -368,7 +368,7 @@ def test_idle_predicate_counts_running_cron_jobs(monkeypatch):
 
 @pytest.fixture
 def arming(monkeypatch, tmp_path):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     taken = []
 
@@ -384,7 +384,7 @@ def arming(monkeypatch, tmp_path):
 def _no_supervisor(monkeypatch):
     import gateway.restart as gateway_restart
     from gateway.restart import EXTERNAL_GATEWAY_SUPERVISOR_ENV
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     for var in ("INVOCATION_ID", "HERMES_S6_SUPERVISED_CHILD", "XPC_SERVICE_NAME",
                 EXTERNAL_GATEWAY_SUPERVISOR_ENV):
@@ -409,7 +409,7 @@ _ENABLED = {"gateway": {"stale_code_guard": {"enabled": True}}}
 
 def test_no_config_block_takes_no_snapshot(monkeypatch, arming):
     """M8: без блока в конфиге не происходит НИЧЕГО — снимок не снимается."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     _with_supervisor(monkeypatch)
 
@@ -423,7 +423,7 @@ def test_no_config_block_takes_no_snapshot(monkeypatch, arming):
 
 def test_without_supervisor_the_guard_refuses_to_arm(monkeypatch, arming):
     """I6: exit 75 без супервизора — это просто смерть гейтвея."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     _no_supervisor(monkeypatch)
 
@@ -432,7 +432,7 @@ def test_without_supervisor_the_guard_refuses_to_arm(monkeypatch, arming):
 
 
 def test_with_supervisor_the_guard_arms_and_snapshots(monkeypatch, arming):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     _with_supervisor(monkeypatch)
 
@@ -445,7 +445,7 @@ def test_with_supervisor_the_guard_arms_and_snapshots(monkeypatch, arming):
 
 def test_unwritable_budget_refuses_to_arm(monkeypatch, arming):
     """I3: без рабочего бюджета вооружаться нельзя."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     _with_supervisor(monkeypatch)
     monkeypatch.setattr(gateway_run, "budget_writable", lambda home: False)
@@ -456,7 +456,7 @@ def test_unwritable_budget_refuses_to_arm(monkeypatch, arming):
 
 def test_unwritable_budget_at_arming_alerts_that_the_guard_is_off(monkeypatch, arming):
     """Остаток 2a: отказ вооружиться — не только строчка в логе."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     sent = []
     _with_supervisor(monkeypatch)
@@ -475,7 +475,7 @@ def test_unwritable_budget_at_arming_alerts_that_the_guard_is_off(monkeypatch, a
 
 def test_unwritable_budget_at_arming_is_silent_without_an_alert_channel(monkeypatch, arming):
     """На хостах без gateway.error_alerts.channel фича молчит, а не падает."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     sent = []
     _with_supervisor(monkeypatch)
@@ -489,7 +489,7 @@ def test_unwritable_budget_at_arming_is_silent_without_an_alert_channel(monkeypa
 
 def test_arming_alert_failure_does_not_propagate(monkeypatch, arming):
     """Сбой доставки алерта не имеет права уронить старт гейтвея."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     def _boom(channel, text):
         raise RuntimeError("telegram down")
@@ -510,7 +510,7 @@ def test_unreadable_config_leaves_the_guard_off_and_the_gateway_booting(monkeypa
     Раньше конфиг читался как АРГУМЕНТ ``_stale_guard_arm(...)``, то есть вне
     его try/except — правка YAML руками означала «гейтвей не стартует».
     """
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     def _boom():
         raise ValueError("config.yaml is malformed")
@@ -524,7 +524,7 @@ def test_unreadable_config_leaves_the_guard_off_and_the_gateway_booting(monkeypa
 
 def test_arming_without_an_argument_reads_the_config_itself(monkeypatch, arming):
     """Boot-путь зовёт ``_stale_guard_arm()`` без аргумента."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     _with_supervisor(monkeypatch)
     monkeypatch.setattr(gateway_run, "_stale_guard_load_config", lambda: _ENABLED)
@@ -537,7 +537,7 @@ def test_arming_without_an_argument_reads_the_config_itself(monkeypatch, arming)
 
 
 def test_arming_never_raises(monkeypatch, arming):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     def _boom(cfg):
         raise RuntimeError("config exploded")
@@ -570,7 +570,7 @@ class _FiniteStop:
 
 def test_housekeeping_does_no_guard_work_when_disabled(monkeypatch):
     """M8: фича выключена → тик сторожа не зовётся ни разу."""
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     calls = []
     monkeypatch.setattr(
@@ -580,7 +580,9 @@ def test_housekeeping_does_no_guard_work_when_disabled(monkeypatch):
         gateway_run, "_stale_guard_load_config", lambda: pytest.fail("config read")
     )
 
-    gateway_run._start_gateway_housekeeping(
+    from gateway import run as _gr  # housekeeping stays in gateway/run.py
+
+    _gr._start_gateway_housekeeping(
         _FiniteStop(20), adapters=None, loop=None, interval=0,
         runner=object(), stale_guard_cfg=None,
     )
@@ -589,14 +591,16 @@ def test_housekeeping_does_no_guard_work_when_disabled(monkeypatch):
 
 
 def test_housekeeping_ticks_the_guard_on_its_cadence(monkeypatch):
-    from gateway import run as gateway_run
+    from gateway import local_stale_guard as gateway_run  # moved out of gateway/run.py
 
     calls = []
     monkeypatch.setattr(
         gateway_run, "_stale_guard_tick", lambda *a, **kw: calls.append(kw)
     )
 
-    gateway_run._start_gateway_housekeeping(
+    from gateway import run as _gr  # housekeeping stays in gateway/run.py
+
+    _gr._start_gateway_housekeeping(
         _FiniteStop(20), adapters=None, loop="LOOP", interval=0,
         runner=object(), stale_guard_cfg=_cfg(), stale_guard_boot_label="01:02:03",
     )

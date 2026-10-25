@@ -130,7 +130,19 @@ def normalize_reasoning_effort(effort: Optional[str]) -> Optional[str]:
     raise ValueError(f"reasoning_effort must be one of {allowed}, got {effort!r}")
 
 
-KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
+# Fork: computed on first use, not at import -- the gateway's turn-path preload can import
+# this before discover_plugins() registers plugin toolsets, and a snapshot taken then would
+# miss them for the life of the process.
+_known_toolset_names_cache: frozenset | None = None
+
+
+def _known_toolset_names() -> frozenset:
+    global _known_toolset_names_cache
+    if _known_toolset_names_cache is None:
+        _known_toolset_names_cache = frozenset(name.casefold() for name in get_toolset_names())
+    return _known_toolset_names_cache
+
+
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024  # one cap for dashboard, tools and CLI
 
@@ -1133,7 +1145,7 @@ def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str
                 f"skill name cannot contain comma: {name!r} "
                 f"(pass a list of separate names instead of a comma-joined string)"
             )
-        if name.casefold() in KNOWN_TOOLSET_NAMES:
+        if name.casefold() in _known_toolset_names():
             toolset_typos.append(name)
             continue
         if name in seen:

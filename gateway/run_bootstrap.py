@@ -450,7 +450,10 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping, args=(cron_stop,),
         kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(),
-                "cron_provider": cron_provider, "runner": runner, "cron_thread": cron_thread},
+                "cron_provider": cron_provider, "runner": runner, "cron_thread": cron_thread,
+                # Fork: the stale-code guard armed before runner.start().
+                "stale_guard_cfg": getattr(runner, "_hm_stale_guard", (None, None))[0],
+                "stale_guard_boot_label": getattr(runner, "_hm_stale_guard", (None, None))[1]},
         daemon=True, name="gateway-housekeeping")
     process_ownership.start_writer(housekeeping_thread)
     return cron_stop, cron_provider, cron_thread, housekeeping_thread
@@ -679,6 +682,12 @@ async def _start_gateway_run_runner(runner, _signal_initiated_shutdown: list) ->
         await _discover_gateway_mcp_tools(runner.config)
     except Exception:
         logger.debug("MCP tool discovery failed (non-fatal)", exc_info=True)
+
+    # Fork: preload the lazily-imported turn path, then fingerprint for the stale-code guard
+    # HERE -- sys.modules still matches the disk (gateway/local_stale_guard.py).
+    from gateway.run import _stale_guard_arm, preload_turn_path_modules  # facade names (tests patch them)
+    logger.info("Turn-path preload: %s", ", ".join(preload_turn_path_modules()) or "none")
+    runner._hm_stale_guard = _stale_guard_arm()
 
     try:
         success = await runner.start()
