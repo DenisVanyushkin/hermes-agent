@@ -863,8 +863,13 @@ class _CodexResponseAssembler:
     # terminal_status defaults to "completed", so settlement needs an explicitly observed response.completed frame.
     saw_response_completed = False
 
-    def __init__(self, *, model, on_text_delta, on_reasoning_delta, on_commentary_message, on_first_delta):
+    def __init__(self, *, model, on_text_delta, on_reasoning_delta, on_commentary_message, on_first_delta,
+                 valid_tool_names=None):
         self.model, self.on_text_delta, self.on_reasoning_delta = model, on_text_delta, on_reasoning_delta
+        # Fork: text-bound tool envelopes in commentary/analysis are held, then suppressed or
+        # released unchanged (agent/local_codex_protocol.py).
+        from agent.local_codex_protocol import ProtocolStreamGuard
+        self.protocol_guard = ProtocolStreamGuard(valid_tool_names)
         self.on_commentary_message, self.on_first_delta = on_commentary_message, on_first_delta
         self.output_items: list[Any] = []
         # output_index / first-observed sequence per output item, in lockstep, so settled pending calls merge
@@ -883,6 +888,7 @@ class _CodexResponseAssembler:
         item = _event_field(event, "item")
         item_type = _event_field(item, "type", "")
         self.active_message_phase = _message_phase(item) if item_type == "message" else None
+        self.protocol_guard.start_message(self.active_message_phase)  # fork
         if self.active_message_phase == "commentary":
             self.commentary_text_deltas = []
         # Record first-observed ordering for EVERY announced item; .done must reuse it or a mixed
@@ -906,13 +912,10 @@ class _CodexResponseAssembler:
             return
         # Harmony commentary/analysis text is mid-turn narration, never the final answer: route to the
         # reasoning callback, keep only the item for replay.
-        if self.active_message_phase == "commentary":
-            self.commentary_text_deltas.append(delta_text)
-            # Legacy fallback when no first-class commentary consumer is installed.
-            if self.on_commentary_message is None:
-                self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
-        elif self.active_message_phase == "analysis":
-            self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
+        if self.active_message_phase in ("commentary", "analysis"):
+            # Fork: only text known not to be a tool envelope reaches the channel handling.
+            for piece in self.protocol_guard.feed(delta_text) or ():
+                self._on_channel_text(self.active_message_phase, piece)
         else:
             self.text_deltas.append(delta_text)
             if self.has_tool_calls:
@@ -921,6 +924,16 @@ class _CodexResponseAssembler:
                 self.first_delta_fired = True
                 self._safe(self.on_first_delta, "on_first_delta")
             self._safe(self.on_text_delta, "on_text_delta", delta_text)
+
+    def _on_channel_text(self, phase: str, delta_text: str) -> None:
+        """Upstream's commentary/analysis delta handling, for text the fork's guard released."""
+        if phase == "commentary":
+            self.commentary_text_deltas.append(delta_text)
+            # Legacy fallback when no first-class commentary consumer is installed.
+            if self.on_commentary_message is None:
+                self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
+        else:
+            self._safe(self.on_reasoning_delta, "on_reasoning_delta", delta_text)
 
     def _on_refusal_delta(self, event: Any, event_type: str) -> None:
         # ``response.refusal.delta``: the model declined and streams its explanation on the refusal
@@ -1009,6 +1022,15 @@ class _CodexResponseAssembler:
         # The done payload is authoritative for every pending alias of this call.
         for pending_key in pending_keys:
             self.pending_function_calls.pop(pending_key, None)
+        if _message_phase(done_item) in ("commentary", "analysis"):
+            # Fork: a text-bound tool envelope is never surfaced; a harmless prefix still held
+            # at the end is released now.
+            suppress, release = self.protocol_guard.finish_message(_output_text_of(done_item))
+            if suppress:
+                self.commentary_text_deltas = []
+                return
+            for piece in release:
+                self._on_channel_text(_message_phase(done_item), piece)
         if _message_phase(done_item) == "commentary" and self.on_commentary_message is not None:
             commentary_text = "".join(self.commentary_text_deltas).strip() or _output_text_of(done_item)
             if commentary_text:
@@ -1086,12 +1108,13 @@ class _CodexResponseAssembler:
         return SimpleNamespace(
             output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
             id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
-            error=self.terminal_error, service_tier=self.terminal_service_tier)
+            error=self.terminal_error, service_tier=self.terminal_service_tier,
+            _hermes_malformed_tool_intent=self.protocol_guard.malformed_tool_intent)  # fork
 
 
 def _consume_codex_event_stream(
     event_iter: Any, *, model: str, on_text_delta=None, on_reasoning_delta=None, on_commentary_message=None,
-    on_first_delta=None, on_event=None, interrupt_check=None,
+    on_first_delta=None, on_event=None, interrupt_check=None, valid_tool_names=None,
 ) -> SimpleNamespace:
     """Consume a Codex Responses SSE stream into a Response-shaped ``SimpleNamespace`` (see
     :class:`_CodexResponseAssembler`; ``status`` is ``completed`` when the stream ended with content but no
@@ -1104,7 +1127,8 @@ def _consume_codex_event_stream(
     True breaks the loop and may raise ``TimeoutError`` / ``InterruptedError`` for request retirement that
     must not become a partial final response."""
     assembler = _CodexResponseAssembler(model=model, on_text_delta=on_text_delta, on_reasoning_delta=on_reasoning_delta,
-                                        on_commentary_message=on_commentary_message, on_first_delta=on_first_delta)
+                                        on_commentary_message=on_commentary_message, on_first_delta=on_first_delta,
+                                        valid_tool_names=valid_tool_names)
     for event in event_iter:
         if on_event is not None:
             try:
@@ -1364,7 +1388,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     dict(api_kwargs), _open_codex_stream,
                     session_id=str(getattr(agent, "session_id", "") or ""),
                     name=str(getattr(agent, "provider", "") or "codex"), model_name=str(model or ""),
-                    finalizer=lambda: _consume_codex_event_stream(list(intercepted_events), model=model),
+                    finalizer=lambda: _consume_codex_event_stream(
+                        list(intercepted_events), model=model,
+                        valid_tool_names=getattr(agent, "valid_tool_names", ())),
                     on_stream_created=_codex_stream_created, on_chunk=intercepted_events.append,
                     chunk_adapter=lambda chunk: chunk,
                     completed_response_predicate=lambda r: bool(hasattr(r, "output") and not hasattr(r, "__iter__")),
@@ -1377,6 +1403,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     on_reasoning_delta=_live(agent._fire_reasoning_delta), on_commentary_message=on_commentary_message,
                     on_first_delta=_live(on_first_delta) if on_first_delta is not None else None,
                     on_event=_fenced(_on_event), interrupt_check=_interrupt_or_superseded,
+                    valid_tool_names=getattr(agent, "valid_tool_names", ()),
                 )
             except transport_errors as exc:
                 if attempt >= max_stream_retries:

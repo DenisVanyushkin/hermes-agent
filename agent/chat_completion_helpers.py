@@ -1703,6 +1703,11 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # (reconstruction reorders signed blocks -> HTTP 400); codex_* items are
     # the encrypted reasoning / exact message items Responses prefix caching
     # needs.
+    # Fork: a text-bound tool envelope is audit evidence, never an executable call or an answer;
+    # keep only the bounded classifier metadata (raw text stays in codex_message_items for RCA).
+    if getattr(assistant_message, "malformed_tool_intent", None) is not None:
+        from agent.local_codex_protocol import bounded_intent
+        msg["malformed_tool_intent"] = bounded_intent(assistant_message.malformed_tool_intent)
     for attr in ("anthropic_content_blocks", "bedrock_content_blocks", "codex_reasoning_items", "codex_message_items"):
         value = getattr(assistant_message, attr, None)
         if value:

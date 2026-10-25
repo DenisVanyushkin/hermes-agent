@@ -271,6 +271,10 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         """Bind values for ``_INSERT_MESSAGE_SQL`` from one message dict (*tool_calls* already parsed;
         *keep_reasoning* False NULLs every reasoning column). ``platform_message_id`` falls back to
         ``message_id`` (yuanbao's message-dict convention)."""
+        # Fork: an invalid assistant carrier (text-bound tool intent) is stored blanked, with
+        # bounded evidence only -- every write path serializes through here.
+        from agent.local_codex_protocol import project_protocol_invalid_persistence
+        msg = project_protocol_invalid_persistence(msg)
         _str_or_none = lambda v: _scrub_surrogates(v) if isinstance(v, str) else None
         _reasoning = lambda key: msg.get(key) if keep_reasoning else None
         encoded_content = self._encode_content(msg.get("content"))

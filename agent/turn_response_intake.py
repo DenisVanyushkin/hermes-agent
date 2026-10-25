@@ -176,6 +176,15 @@ def normalize_model_response(
         ))
     agent._incomplete_scratchpad_retries = 0
 
+    # Fork: a text-bound tool intent is re-asked once per user turn, then fails the turn
+    # (agent/local_codex_protocol.py) -- ahead of the ordinary incomplete continuation.
+    from agent.local_codex_protocol import handle_malformed_tool_intent
+    _intent_outcome = handle_malformed_tool_intent(
+        agent, assistant_message, messages, conversation_history, api_call_count)
+    if _intent_outcome == "continue":
+        return _verdict("continue")
+    if isinstance(_intent_outcome, dict):
+        return _verdict("return", _intent_outcome)
     if agent.api_mode == "codex_responses" and finish_reason == "incomplete":
         _codex_result = continue_codex_incomplete(
             agent, assistant_message, finish_reason, messages=messages,

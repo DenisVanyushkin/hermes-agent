@@ -1289,6 +1289,8 @@ def _normalize_codex_response(
         codex_reasoning_items=scan.reasoning_items_raw or None,
         # Leaked text must not be replayed as a completed assistant message on the continuation.
         codex_message_items=None if leaked_tool_call_text else (scan.message_items_raw or None),
+        # Fork: bounded evidence of a text-bound tool envelope the stream guard suppressed.
+        malformed_tool_intent=getattr(response, "_hermes_malformed_tool_intent", None),
     )
     # Reasoning-only: for Codex/xAI/GitHub, status=completed means "still thinking" → incomplete so the continuation
     # retries. Other backends trust response.status — forcing incomplete there stalls for minutes on a final state.

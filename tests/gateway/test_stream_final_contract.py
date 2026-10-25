@@ -330,7 +330,7 @@ async def test_gateway_runner_uses_real_codex_recovery_composition(monkeypatch, 
     from gateway.config import Platform
     from gateway.session import SessionSource
     from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _make_runner
-    from tests.run_agent.test_run_agent_codex_responses import _FakeCreateStream
+    from tests.agent.test_run_agent_codex_responses import _FakeCreateStream
 
     tool_definition = {
         "type": "function",
@@ -341,12 +341,11 @@ async def test_gateway_runner_uses_real_codex_recovery_composition(monkeypatch, 
         },
     }
     monkeypatch.setattr(
-        run_agent_module,
-        "get_tool_definitions",
+        "model_tools.get_tool_definitions",
         lambda **_kwargs: [tool_definition],
     )
-    monkeypatch.setattr(run_agent_module, "check_toolset_requirements", lambda: {})
-    monkeypatch.setattr(run_agent_module, "OpenAI", MagicMock())
+    monkeypatch.setattr("model_tools.check_toolset_requirements", dict)
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", MagicMock())
 
     malformed = (
         '<|start|>assistant<|channel|>commentary '

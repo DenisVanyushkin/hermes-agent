@@ -123,7 +123,7 @@ class TestDroppedToolCallRecovery:
         self, loop_agent
     ):
         """Exercise raw Codex SSE -> runtime -> transport -> loop composition."""
-        from tests.run_agent.test_run_agent_codex_responses import _FakeCreateStream
+        from tests.agent.test_run_agent_codex_responses import _FakeCreateStream
 
         malformed = (
             '<|start|>assistant<|channel|>commentary '

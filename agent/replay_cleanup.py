@@ -16,6 +16,10 @@ from typing import Any, Dict, List, Optional
 from agent.tool_dispatch_helpers import make_tool_result_message
 from agent.tool_result_classification import tool_may_have_side_effect
 from agent.turn_context import drop_stale_api_content
+from agent.local_codex_protocol import (  # noqa: F401  fork: re-exported for callers
+    is_protocol_invalid_assistant_record, project_protocol_invalid_persistence,
+    strip_protocol_invalid_assistant_records,
+)
 from hermes_cli.timefmt import coerce_epoch
 
 logger = logging.getLogger(__name__)
@@ -148,7 +152,9 @@ def sanitize_replay_history(agent_history: list[dict[str, Any]]) -> list[dict[st
     """Both strippers in canonical order (interrupted blocks, then dangling tail); same list object when nothing strips."""
     if not agent_history:
         return agent_history
-    return strip_dangling_tool_call_tail(strip_interrupted_tool_tails(agent_history))
+    # Fork: provider-invalid assistant carriers are never replayed as answers.
+    return strip_dangling_tool_call_tail(
+        strip_protocol_invalid_assistant_records(strip_interrupted_tool_tails(agent_history)))
 
 
 def canonicalize_replay_history(

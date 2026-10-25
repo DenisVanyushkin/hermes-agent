@@ -923,6 +923,9 @@ class ResponsesApiTransport(ProviderTransport):
             for key in ("codex_reasoning_items", "codex_message_items", "reasoning_details")
             if msg and getattr(msg, key, None)
         }
+        if msg is not None and getattr(msg, "malformed_tool_intent", None) is not None:
+            from agent.local_codex_protocol import bounded_intent  # fork: never arguments or raw text
+            provider_data["malformed_tool_intent"] = bounded_intent(msg.malformed_tool_intent)
         return NormalizedResponse(
             content=msg.content if msg else None, tool_calls=tool_calls, finish_reason=finish_reason or "stop",
             reasoning=getattr(msg, "reasoning", None) if msg else None,
