@@ -39,6 +39,8 @@ def is_forwarded_voice_note(event: Any, index: int, media_type: str) -> bool:
     media_urls = getattr(event, "media_urls", None) or []
     if index >= len(media_urls):
         return False
+    if "://" in str(media_urls[index]):  # not materialised locally: STT cannot read it
+        return False
     try:
         return os.path.getsize(media_urls[index]) <= VOICE_NOTE_STT_MAX_BYTES
     except OSError:

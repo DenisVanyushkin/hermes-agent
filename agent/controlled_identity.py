@@ -29,14 +29,14 @@ def check_controlled_request_identity(agent) -> None:
         runtime_session_id = runtime_request.get("session_id") or getattr(agent, "session_id", None)
         runtime_is_anthropic_oauth = runtime_request.get("is_anthropic_oauth")
     else:
-        runtime_api_mode = agent.api_mode
-        runtime_provider = agent.provider
-        runtime_model = agent.model
-        runtime_base_url = agent.base_url
-        runtime_reasoning_config = agent.reasoning_config
-        runtime_request_overrides = agent.request_overrides
+        runtime_api_mode = getattr(agent, "api_mode", None)
+        runtime_provider = getattr(agent, "provider", None)
+        runtime_model = getattr(agent, "model", None)
+        runtime_base_url = getattr(agent, "base_url", None)
+        runtime_reasoning_config = getattr(agent, "reasoning_config", None)
+        runtime_request_overrides = getattr(agent, "request_overrides", None)
         runtime_session_id = getattr(agent, "session_id", None)
-        runtime_is_anthropic_oauth = agent._is_anthropic_oauth
+        runtime_is_anthropic_oauth = getattr(agent, "_is_anthropic_oauth", False)
 
     if getattr(agent, '_skip_role_model_selection', False):
         # Validate outbound (provider, model, api_mode, base_url_family) against the

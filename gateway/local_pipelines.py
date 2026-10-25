@@ -1018,7 +1018,7 @@ def _write(record: dict) -> None:
     path = runs_dir() / f"{record['run_id']}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=1))
+    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -1026,7 +1026,7 @@ def _read_all() -> List[dict]:
     out = []
     for path in sorted(runs_dir().glob("*.json")) if runs_dir().is_dir() else []:
         try:
-            out.append(json.loads(path.read_text()))
+            out.append(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             logger.warning("pipeline run record unreadable: %s", path)
     return out

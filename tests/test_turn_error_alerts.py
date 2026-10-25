@@ -271,7 +271,7 @@ def test_run_py_hook_wired():
     # run.py содержит вызов и все обязательные kwargs — дешёвая защита от
     # рассинхрона сигнатуры при будущих правках гигантского run.py
     import inspect
-    import gateway.run as run
+    import gateway.run_turn as run  # the turn tail moved out of gateway/run.py in v0.22.5
     src = inspect.getsource(run)
     assert "maybe_alert_turn_error(" in src
     tail = src.split("maybe_alert_turn_error(", 1)[1][:600]

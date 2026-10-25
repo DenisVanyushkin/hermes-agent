@@ -308,6 +308,15 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 reply_expected=event.reply_expected,
             )
+            if not _intentional_silence:
+                # Fork: turn-error alert to the admin channel (no-op without gateway.error_alerts). After
+                # normalize/sanitize, so detection sees the exact stub the user receives. Never raises.
+                from gateway.run import _load_gateway_config
+                from gateway.turn_error_alerts import maybe_alert_turn_error
+                maybe_alert_turn_error(
+                    _load_gateway_config(), platform=_platform_name, chat_id=source.chat_id,
+                    user_message=event.text, agent_result=agent_result, final_response=response,
+                )
             response = self._usage_window_chat_wording(agent_result, self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence))
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             # Streaming already delivered the body: the footer goes out as a trailing send instead.

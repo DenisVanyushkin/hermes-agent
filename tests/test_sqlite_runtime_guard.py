@@ -19,7 +19,7 @@ import re
 import sqlite3
 import subprocess
 
-from hermes_state import is_sqlite_wal_reset_vulnerable
+from hermes_state_wal import is_sqlite_wal_reset_vulnerable  # v0.22.5 split hermes_state
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 

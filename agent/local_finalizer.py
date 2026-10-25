@@ -201,6 +201,22 @@ def footer_policy(agent: Any) -> tuple[bool, str | None]:
         return False, None
 
 
+# Surfaces whose replies are read by a program or the operator's own terminal, not a chat audience.
+_NO_LOCUS_PLATFORMS = frozenset({"", "cli", "local", "tui", "api_server", "acp", "kanban", "desktop"})
+
+
+def locus_wanted(agent: Any, final_response: str) -> bool:
+    """The locus block is for a person reading a chat or a cron report. A delegated child's answer is
+    read by its parent, a kanban/API/CLI turn by a program or the operator's terminal, and a
+    ``[SILENT]`` reply must stay exactly that."""
+    if getattr(agent, "_delegate_depth", 0) or 0:
+        return False
+    if str(getattr(agent, "platform", "") or "").strip().lower() in _NO_LOCUS_PLATFORMS:
+        return False
+    first = (final_response or "").strip().splitlines()[:1]
+    return not (first and first[0].strip().upper() == "[SILENT]")
+
+
 def append_execution_locus(final_response: str, messages: list) -> str:
     """Say where this turn's checks ran.
 

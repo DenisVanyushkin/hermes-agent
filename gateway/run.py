@@ -733,6 +733,10 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
         return None
     if _gateway_surface_passes_raw_text(platform):
         return text
+    # Fork: infra chatter (fallback switches, provider errors) dropped on listed platforms.
+    from gateway.local_turn_hygiene import is_suppressed_infra_status
+    if is_suppressed_infra_status(platform, text, _load_gateway_config, _looks_like_gateway_provider_error):
+        return None
 
     text = _redact_gateway_user_facing_secrets(text)
     # Opt-in `compression.progress_notices` lets ROUTINE (template-derived) progress through; other noise stays.

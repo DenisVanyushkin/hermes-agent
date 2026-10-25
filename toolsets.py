@@ -133,6 +133,13 @@ TOOLSETS = {
     # Fork: a static entry, not just registry.register(toolset="stt") -- the platform gate resolves
     # toolsets statically, so without it transcribe_audio never reaches a chat platform.
     "stt": _ts("Speech-to-text: transcribe an audio file with the configured STT provider", ["transcribe_audio"]),
+    # Fork: static entries for the registry-registered fork toolsets, like stt above.
+    "legal_research": _ts("Kazakhstan legal acts research via adilet.zan.kz", [
+        "search_acts", "get_act_text", "get_act_info", "get_act_history", "get_act_links",
+        "get_act_downloads", "healthcheck_source", "legal_answer_review"]),
+    "fitness_booking": _ts("Invictus: group class schedule, booking, auto-booking rules", [
+        "fitness_schedule", "fitness_my_bookings", "fitness_book", "fitness_cancel", "fitness_watch_add",
+        "fitness_watch_list", "fitness_watch_remove", "fitness_login_request", "fitness_login_confirm"]),
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),
@@ -179,7 +186,10 @@ TOOLSETS = {
     "feishu_drive": _ts("Feishu/Lark document comment operations (list, reply, add)", _FEISHU_TOOLS[1:]),
 
     # Scenario-specific toolsets
-    "debugging": _ts("Debugging and troubleshooting toolkit", ["terminal", "process_manage"], includes=["web", "file"]),
+    # Fork: host_inspect and gmail_host ride the terminal toolset, so disabling debugging must take them too.
+    "debugging": _ts("Debugging and troubleshooting toolkit", ["terminal", "process_manage", "host_inspect",
+                                                                   "gmail_host"],
+                     includes=["web", "file"]),
     "safe": _ts("Safe toolkit without terminal access", [], includes=["web", "vision", "image_gen"]),
 
     # Coding posture, auto-selected in a code workspace (agent/coding_context.py).

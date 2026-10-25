@@ -22,7 +22,8 @@ upstream call sites are marked.
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Callable
 
 NEWS_INGEST_ONLY_TELEGRAM_CHAT_IDS = frozenset({"-1003989016070"})
 
@@ -89,3 +90,33 @@ def classify_news_ingest_only_source(source: Any) -> dict[str, Any]:
         "model_invoked": False,
         "pipeline_routing_skipped_reason": "news_ingest_only" if ingest_only else None,
     }
+
+
+# Fallback switches and auth-refresh statuses. Dropped only on the platforms listed in
+# gateway.suppress_infra_status_platforms (spec 2026-07-16 §8a): the user gets the single final
+# degraded reply, the operator gets the detail through turn-error alerts. Absent list = no change.
+INFRA_STATUS_RE = re.compile(
+    r"switching\s+to\s+fallback"
+    r"|authentication\s+failed\s+and\s+could\s+not\s+be\s+refreshed"
+    r"|primary\s+model\s+failed"
+    r"|primary\s+auth\s+failed",
+    re.IGNORECASE,
+)
+
+
+def suppress_infra_status_platform(platform: Any, config: Any) -> bool:
+    try:
+        allowed = ((config or {}).get("gateway") or {}).get("suppress_infra_status_platforms")
+        if not allowed:
+            return False
+        key = str(getattr(platform, "value", platform) or "").strip().lower()
+        return key in {str(p).strip().lower() for p in allowed}
+    except Exception:
+        return False
+
+
+def is_suppressed_infra_status(platform: Any, text: str, load_config: Callable[[], Any],
+                               looks_like_provider_error: Callable[[str], bool]) -> bool:
+    if not suppress_infra_status_platform(platform, load_config()):
+        return False
+    return bool(INFRA_STATUS_RE.search(text) or looks_like_provider_error(text))

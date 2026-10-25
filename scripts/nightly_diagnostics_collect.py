@@ -590,14 +590,17 @@ def collect_sqlite_health(hermes_home: Path) -> dict:
     # detector_error is its own attention trigger: it is the one condition
     # where nobody can vouch for vulnerability status, and a bare "not
     # vulnerable" boolean check would silently pass right through it.
+    # Since the v0.22.5 port the gateway runs CPython 3.14 with a fixed SQLite and no shim: the shim
+    # and its updater matter only while a shim is in use or the interpreter's own SQLite is vulnerable.
+    shim_era = info["shim_active"] or info["wal_reset_vulnerable"] is not False
     info["needs_attention"] = bool(
         info["wal_reset_vulnerable"]
         or info.get("detector_error")
-        or not info["shim_active"]
-        or report.get("action")
-        in {"failed", "rejected", "rolled_back", "never_ran", "unreadable"}
+        or (shim_era and (
+            not info["shim_active"]
+            or report.get("action") in {"failed", "rejected", "rolled_back", "never_ran", "unreadable"}
+            or _autoupdate_ts_stale(report)))
         or info["exporter"].get("needs_attention")
-        or _autoupdate_ts_stale(report)
     )
     # Informational only: "the shim is now retirable" is good news, not an
     # alarm — kept out of needs_attention so it doesn't latch the digest's

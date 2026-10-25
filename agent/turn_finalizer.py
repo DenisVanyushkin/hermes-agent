@@ -655,11 +655,12 @@ def finalize_turn(
     _log_turn_exit(agent, messages, final_response, api_call_count, _turn_exit_reason, interrupted, logger)
 
     # Response transforms apply only to real, uninterrupted responses.
-    from agent.local_finalizer import append_execution_locus, footer_policy  # fork: footers by audience
+    from agent.local_finalizer import append_execution_locus, footer_policy, locus_wanted  # fork: footers by audience
     _suppress_eng_footers, _explainer_notice = footer_policy(agent)
     if final_response and not interrupted and not _suppress_eng_footers:
         final_response = _append_file_mutation_footer(agent, final_response, logger)
-        final_response = append_execution_locus(final_response, messages)
+        if locus_wanted(agent, final_response):
+            final_response = append_execution_locus(final_response, messages)
     if not interrupted:
         final_response = _explain_abnormal_exit(
             agent, final_response, _turn_exit_reason, preserved_verification_fallback, logger,
