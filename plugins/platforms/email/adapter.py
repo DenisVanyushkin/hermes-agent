@@ -46,6 +46,8 @@ _AUTOMATED_HEADERS = {"Auto-Submitted": lambda v: v.lower() != "no",
                       "X-Auto-Response-Suppress": lambda v: bool(v), "List-Unsubscribe": lambda v: bool(v)}
 MAX_MESSAGE_LENGTH = 50_000  # Gmail-safe max length per email body
 SMTP_CONNECT_TIMEOUT = 30
+# Fork: IMAP connect/read timeout, EMAIL_IMAP_TIMEOUT overrides. 30 s timed out chronically.
+DEFAULT_IMAP_TIMEOUT = 60
 _TRUTHY = {"true", "1", "yes"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 # Charset labels seen in the wild that Python's codec registry doesn't know: "unknown-8bit"/"x-unknown" are
@@ -472,6 +474,7 @@ class EmailAdapter(BasePlatformAdapter):
         self._password = _get_secret("EMAIL_PASSWORD", "")
         self._imap_host = setting("EMAIL_IMAP_HOST", "imap_host").strip()
         self._imap_port = _esecret_int("EMAIL_IMAP_PORT", 993)
+        self._imap_timeout = _esecret_int("EMAIL_IMAP_TIMEOUT", DEFAULT_IMAP_TIMEOUT)  # fork
         self._imap_security = _normalize_security(setting("EMAIL_IMAP_SECURITY", "imap_security"))
         self._imap_tls_verify = tls_verify("EMAIL_IMAP_TLS_VERIFY", "imap_tls_verify")
         self._smtp_host = setting("EMAIL_SMTP_HOST", "smtp_host").strip()
@@ -513,8 +516,8 @@ class EmailAdapter(BasePlatformAdapter):
     def _connect_imap(self) -> imaplib.IMAP4:
         """Create an IMAP connection using implicit TLS, STARTTLS, or plaintext."""
         if self._imap_security == "tls":
-            return imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30, ssl_context=_tls_context(self._imap_tls_verify, self._imap_host))
-        imap = imaplib.IMAP4(self._imap_host, self._imap_port, timeout=30)
+            return imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=self._imap_timeout, ssl_context=_tls_context(self._imap_tls_verify, self._imap_host))
+        imap = imaplib.IMAP4(self._imap_host, self._imap_port, timeout=self._imap_timeout)
         if self._imap_security == "starttls":
             try:
                 imap.starttls(ssl_context=_tls_context(self._imap_tls_verify, self._imap_host))

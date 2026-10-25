@@ -1296,7 +1296,7 @@ class TestConnectionConfigResolution(unittest.TestCase):
 
         self.assertTrue(result)
         mock_imap_ssl.assert_called_once_with(
-            "imap.test.com", 993, timeout=DEFAULT_IMAP_TIMEOUT
+            "imap.test.com", 993, timeout=DEFAULT_IMAP_TIMEOUT, ssl_context=ANY
         )
         adapter._running = False
         if adapter._poll_task:
@@ -1318,9 +1318,9 @@ class TestConnectionConfigResolution(unittest.TestCase):
         self.assertEqual(adapter._imap_timeout, 90)
 
         with patch("imaplib.IMAP4_SSL", return_value=MagicMock()) as mock_imap_ssl:
-            adapter._fetch_new_messages()
+            adapter._fetch_new_messages(lambda _headers: True)
 
-        mock_imap_ssl.assert_called_once_with("imap.test.com", 993, timeout=90)
+        mock_imap_ssl.assert_called_once_with("imap.test.com", 993, timeout=90, ssl_context=ANY)
 
     def test_host_and_address_whitespace_stripped(self):
         """A stray space/newline must not reach IMAP4_SSL as part of the host.
